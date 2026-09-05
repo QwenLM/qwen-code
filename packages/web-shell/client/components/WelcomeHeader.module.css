@@ -2,10 +2,29 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 12px 0 16px;
+  gap: 10px;
+  padding: 24px 0 20px;
   font-family: var(--font-sans, system-ui, sans-serif);
   text-align: center;
+  animation: welcomeFadeIn 400ms ease-out;
+}
+
+@keyframes welcomeFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header {
+    animation: none;
+  }
 }
 
 .titleRow {
@@ -15,9 +34,10 @@
   justify-content: center;
   gap: 0.35em;
   color: var(--foreground);
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 600;
-  line-height: 36px;
+  line-height: 40px;
+  letter-spacing: -0.02em;
 }
 
 .title {
@@ -29,15 +49,19 @@
 }
 
 .subtitle {
-  color: var(--muted-foreground);
-  font-size: 16px;
+  color: color-mix(in srgb, var(--muted-foreground) 85%, transparent);
+  font-size: 15px;
   font-weight: 400;
-  line-height: 24px;
+  line-height: 22px;
 }
 
 @media (max-width: 760px) {
+  .header {
+    padding: 16px 0 14px;
+  }
+
   .titleRow {
-    font-size: 24px;
-    line-height: 32px;
+    font-size: 26px;
+    line-height: 34px;
   }
 }

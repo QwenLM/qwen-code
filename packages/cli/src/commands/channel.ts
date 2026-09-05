@@ -13,7 +13,7 @@ import { configureWeixinCommand } from './channel/configure.js';
 
 const pairingCommand: CommandModule = {
   command: 'pairing',
-  describe: 'Manage DM pairing requests',
+  describe: 'Manage DM and group pairing requests',
   builder: (yargs: Argv) =>
     yargs
       .command(pairingListCommand)

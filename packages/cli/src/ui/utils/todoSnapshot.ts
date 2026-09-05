@@ -62,6 +62,9 @@ function extractTodosFromResultDisplay(
       candidate['type'] === 'todo_list' &&
       Array.isArray(candidate['todos'])
     ) {
+      if (candidate['unchanged'] === true) {
+        return null;
+      }
       return candidate['todos'] as TodoItem[];
     }
   }

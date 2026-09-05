@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import { collectSessionData } from './collect.js';
 import type { ExportConfig } from './types.js';
@@ -15,6 +16,83 @@ describe('collectSessionData', () => {
       getTool: vi.fn().mockReturnValue(null),
     }),
   } as unknown as Config;
+
+  it('keeps oversized canonical tool results lossless in offline export', async () => {
+    const source = `head-${'x'.repeat(499_999)}-tail`;
+    const records: ChatRecord[] = [
+      {
+        uuid: 'assistant-large',
+        parentUuid: null,
+        sessionId: 'session-large',
+        timestamp: '2026-08-03T00:00:00.000Z',
+        type: 'assistant',
+        cwd: '/workspace',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-large',
+                name: 'read_file',
+                args: { path: '/workspace/large.txt' },
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'tool-large',
+        parentUuid: 'assistant-large',
+        sessionId: 'session-large',
+        timestamp: '2026-08-03T00:00:01.000Z',
+        type: 'tool_result',
+        cwd: '/workspace',
+        version: '1.0.0',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-large',
+                name: 'read_file',
+                response: { output: source },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-large',
+          responseParts: [],
+          resultDisplay: source,
+        },
+      },
+    ];
+
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-large',
+        startTime: '2026-08-03T00:00:00.000Z',
+        messages: records,
+      },
+      config,
+    );
+    const toolCall = data.messages.find(
+      (message) => message.type === 'tool_call',
+    );
+    const exportedText = (
+      toolCall?.toolCall?.content?.[0] as
+        | { content?: { text?: string } }
+        | undefined
+    )?.content?.text;
+
+    expect(exportedText?.length).toBe(source.length);
+    expect(
+      createHash('sha256')
+        .update(exportedText ?? '')
+        .digest('hex'),
+    ).toBe(createHash('sha256').update(source).digest('hex'));
+  });
 
   it('skips line-count fallback for truncated saved-session previews', async () => {
     const records: ChatRecord[] = [

@@ -4,18 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import { useStdout, type ReadonlyFrame } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { SelectionState } from './selection-state.js';
+import {
+  SelectionState,
+  type NormalizedSelection,
+  type SelectionMode,
+} from './selection-state.js';
 import { getSelectedText } from './selection-text.js';
-import { wordSpanAt, lineSpanAt } from './selection-span.js';
+import { spanAtForMode } from './selection-span.js';
 import {
   terminalToGrid,
+  snapWideChar,
   pointInViewport,
   clampToViewport,
   type ViewportRect,
@@ -61,17 +66,44 @@ const sameViewportRect = (
   previous.width === current.width &&
   previous.height === current.height;
 
+/**
+ * Read-only view of the controller's live selection, for consumers that must
+ * not own the state (the context-menu "Copy Selection" item). The ref is
+ * populated on mount and cleared on unmount; `null` while no controller is
+ * mounted.
+ */
+export interface SelectionQuery {
+  /** Reading-order range of the current selection, or null when none. */
+  getRange: () => NormalizedSelection | null;
+}
+
 export interface TextSelectionControllerProps {
   /** Selection is only handled while active (VP mode, no dialog, focused). */
   isActive: boolean;
+  /**
+   * Temporarily ignore mouse events WITHOUT clearing the current selection.
+   * Used while the context menu owns the pointer: the existing selection must
+   * survive (the menu's "Copy Selection" offers it), but new presses must not
+   * start or extend a selection underneath the menu. Deactivation
+   * (`isActive`) still clears; pausing does not.
+   */
+  eventsPaused?: boolean;
   /** Reads from the history viewport; called at event time (may be null early). */
   getViewportRect: () => ViewportRect | null;
+  /** Additional selectable regions outside the history viewport. */
+  getAdditionalSelectableRects?: () => readonly ViewportRect[];
   getScrollState: () => ScrollState;
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
+  /** Optional sink exposing the live selection range to other components. */
+  selectionQueryRef?: MutableRefObject<SelectionQuery | null>;
 }
 
-/** Max gap between clicks (ms) to count as a double/triple click. */
-const MULTI_CLICK_MS = 400;
+/**
+ * Max gap between clicks (ms) to count as a double/triple click. Shared with
+ * ContentMouseController, whose delayed link-open window must match this
+ * value so a second press always lands inside it and cancels the open.
+ */
+export const MULTI_CLICK_MS = 400;
 const debugLogger = createDebugLogger('TEXT_SELECTION');
 
 interface ClickRecord {
@@ -82,12 +114,13 @@ interface ClickRecord {
 }
 
 /**
- * Headless controller that turns mouse press/drag/release in the VP history
- * viewport into a text selection: it maps terminal coordinates to the
+ * Headless controller that turns mouse press/drag/release in selectable VP
+ * regions into a text selection: it maps terminal coordinates to the
  * composited frame, drives the {@link SelectionState}, highlights the range
  * through the frame controller, and copies on release. Double/triple click
- * select a word/line. B1 scope: visible-region only, cleared on any scroll,
- * resize, or streaming content change.
+ * select a word/line. B1 scope: visible-region only; history selections clear
+ * on scroll, while every selection clears when its owning content or layout
+ * changes.
  */
 export function TextSelectionController(
   props: TextSelectionControllerProps,
@@ -98,8 +131,18 @@ export function TextSelectionController(
   const baselineScrollTopRef = useRef<number>(0);
   const baselineScrollHeightRef = useRef<number>(0);
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
-  const baselineViewportRectRef = useRef<ViewportRect | null>(null);
+  const baselineRectRef = useRef<ViewportRect | null>(null);
+  const activeRectIndexRef = useRef<number | null>(null);
+  const selectionGenerationRef = useRef(0);
+  // Generation of a queued frame-invalidation that has not run yet; a release
+  // in the same generation must not copy content the repaint already replaced.
+  const pendingInvalidationGenRef = useRef<number | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
+  // Anchor span and mode of an active word/line drag; null for char drags.
+  const anchorSpanRef = useRef<{
+    span: NormalizedSelection;
+    mode: Exclude<SelectionMode, 'char'>;
+  } | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -112,7 +155,10 @@ export function TextSelectionController(
   }, [stdout]);
 
   const clearSelection = useCallback(() => {
+    selectionGenerationRef.current += 1;
+    activeRectIndexRef.current = null;
     const selection = selectionRef.current;
+    anchorSpanRef.current = null;
     if (selection.isEmpty) {
       return;
     }
@@ -123,20 +169,36 @@ export function TextSelectionController(
   const applyHighlight = useCallback(() => {
     const selection = selectionRef.current;
     const normalized = selection.normalized();
-    // Highlight whenever there is a real range; a word/line span of a single
-    // cell still highlights, but a bare char-mode click (collapsed) does not.
-    const shouldHighlight =
-      normalized && (!selection.isCollapsed || selection.mode !== 'char');
-    getBuffer()?.setSelection(shouldHighlight ? normalized : null);
+    getBuffer()?.setSelection(
+      normalized && !selection.isBareClick ? normalized : null,
+    );
   }, [getBuffer]);
 
-  const recordBaseline = useCallback(() => {
-    const scrollState = propsRef.current.getScrollState();
-    baselineScrollTopRef.current = scrollState.scrollTop;
-    baselineScrollHeightRef.current = scrollState.scrollHeight;
-    baselineFrameRef.current = getBuffer()?.frame ?? null;
-    baselineViewportRectRef.current = propsRef.current.getViewportRect();
-  }, [getBuffer]);
+  const getSelectableRects = useCallback((): readonly ViewportRect[] => {
+    const viewportRect = propsRef.current.getViewportRect();
+    if (!viewportRect) {
+      return [];
+    }
+    const additionalRects =
+      propsRef.current.getAdditionalSelectableRects?.() ?? [];
+    return [viewportRect, ...additionalRects];
+  }, []);
+
+  const getActiveRect = useCallback((): ViewportRect | null => {
+    const index = activeRectIndexRef.current;
+    return index === null ? null : (getSelectableRects()[index] ?? null);
+  }, [getSelectableRects]);
+
+  const recordBaseline = useCallback(
+    (rect: ViewportRect) => {
+      const scrollState = propsRef.current.getScrollState();
+      baselineScrollTopRef.current = scrollState.scrollTop;
+      baselineScrollHeightRef.current = scrollState.scrollHeight;
+      baselineFrameRef.current = getBuffer()?.frame ?? null;
+      baselineRectRef.current = rect;
+    },
+    [getBuffer],
+  );
 
   const copySelection = useCallback(() => {
     const normalized = selectionRef.current.normalized();
@@ -151,15 +213,9 @@ export function TextSelectionController(
   }, [getBuffer]);
 
   const mapEvent = useCallback(
-    (
-      event: MouseEvent,
-    ): {
-      point: ReturnType<typeof terminalToGrid>;
-      rect: ViewportRect;
-    } | null => {
+    (event: MouseEvent): ReturnType<typeof terminalToGrid> | null => {
       const buffer = getBuffer();
-      const rect = propsRef.current.getViewportRect();
-      if (!buffer || !rect) {
+      if (!buffer) {
         return null;
       }
       const frameHeight = buffer.dimensions.height;
@@ -171,41 +227,96 @@ export function TextSelectionController(
         terminalHeight,
         frameHeight,
       );
-      const row = buffer.frame?.cells[point.y];
-      const snappedPoint =
-        point.x > 0 &&
-        row?.[point.x]?.value === '' &&
-        row[point.x - 1]?.fullWidth
-          ? { ...point, x: point.x - 1 }
-          : point;
-      return { point: snappedPoint, rect };
+      return snapWideChar(buffer.frame, point);
     },
     [getBuffer, stdout],
+  );
+
+  // Extend an active word/line drag so the range spans from the original
+  // multi-click span to the word/line boundary at the current point (issue
+  // #8738). Falls back to a single cell when the cursor is over whitespace.
+  const extendSpanDrag = useCallback(
+    (point: { x: number; y: number }) => {
+      const anchor = anchorSpanRef.current;
+      if (!anchor) return;
+      const { span, mode } = anchor;
+      const selection = selectionRef.current;
+      const frame = getBuffer()?.frame ?? null;
+      const current = spanAtForMode(frame, mode, point) ?? {
+        sx: point.x,
+        sy: point.y,
+        ex: point.x,
+        ey: point.y,
+      };
+      const cursorAfter =
+        point.y > span.ey || (point.y === span.ey && point.x >= span.ex);
+      selection.anchor = cursorAfter
+        ? { x: span.sx, y: span.sy }
+        : { x: span.ex, y: span.ey };
+      selection.focus = cursorAfter
+        ? { x: current.ex, y: current.ey }
+        : { x: current.sx, y: current.sy };
+    },
+    [getBuffer],
+  );
+
+  const extendActiveDrag = useCallback(
+    (point: { x: number; y: number }) => {
+      if (anchorSpanRef.current) {
+        extendSpanDrag(point);
+      } else {
+        selectionRef.current.extend(point);
+      }
+    },
+    [extendSpanDrag],
   );
 
   const handleMouse = useCallback(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
 
-      // Any scroll drops the selection (B1: visible-region only).
+      // While paused (context menu owns the pointer) ignore press/move/release
+      // so they can't start or extend a selection under the menu — but do NOT
+      // clear: the existing selection is what the menu's Copy Selection
+      // offers. Nothing can scroll the viewport while paused, so wheel ticks
+      // are dropped here too (before the scroll-clear branch). A left-release
+      // must still finish a drag that was in flight when the menu opened, or
+      // the stale dragging state misroutes the next press/release pair.
+      if (propsRef.current.eventsPaused) {
+        if (event.name === 'left-release') {
+          selection.finish();
+        }
+        return;
+      }
+
+      // History scrolls invalidate history-owned selection coordinates. Footer
+      // selections live outside the scrollable viewport and remain valid.
       if (event.name.startsWith('scroll-')) {
-        clearSelection();
+        if (activeRectIndexRef.current === 0) {
+          clearSelection();
+        }
         return;
       }
 
       if (event.name === 'left-press') {
+        selectionGenerationRef.current += 1;
         if (
           propsRef.current.hitTestScrollbar({ col: event.col, row: event.row })
         ) {
           clearSelection();
           return;
         }
-        const mapped = mapEvent(event);
-        if (!mapped || !pointInViewport(mapped.point, mapped.rect)) {
+        const point = mapEvent(event);
+        const rects = getSelectableRects();
+        const rectIndex = point
+          ? rects.findIndex((rect) => pointInViewport(point, rect))
+          : -1;
+        if (!point || rectIndex < 0) {
           clearSelection();
           return;
         }
-        const { point } = mapped;
+        const rect = rects[rectIndex];
+        activeRectIndexRef.current = rectIndex;
 
         // Multi-click detection (double = word, triple = line).
         const now = Date.now();
@@ -220,22 +331,30 @@ export function TextSelectionController(
 
         if (count >= 2) {
           const frame = getBuffer()?.frame ?? null;
-          const span =
-            count === 2
-              ? wordSpanAt(frame, point.x, point.y)
-              : lineSpanAt(frame, point.y);
+          const mode = count === 2 ? 'word' : 'line';
+          const span = spanAtForMode(frame, mode, point);
           if (span) {
-            selection.selectSpan(span, count === 2 ? 'word' : 'line');
-            recordBaseline();
+            // Enter a drag-capable word/line selection so a held double/triple
+            // click can extend by word/line on move (issue #8738). Copy at
+            // press too: a streaming repaint before release clears the
+            // selection, skipping the release copy. Release copies again when
+            // the drag grew the range.
+            selection.start({ x: span.sx, y: span.sy }, mode);
+            selection.extend({ x: span.ex, y: span.ey });
+            anchorSpanRef.current = { span, mode };
+            dragScrollTopRef.current =
+              propsRef.current.getScrollState().scrollTop;
+            recordBaseline(rect);
             applyHighlight();
             copySelection();
             return;
           }
         }
 
+        anchorSpanRef.current = null;
         selection.start(point);
         dragScrollTopRef.current = propsRef.current.getScrollState().scrollTop;
-        recordBaseline();
+        recordBaseline(rect);
         applyHighlight();
         return;
       }
@@ -244,35 +363,53 @@ export function TextSelectionController(
         if (!selection.dragging) {
           return;
         }
-        lastClickRef.current = null;
-        // A scroll under the drag invalidates coordinates in B1.
+        // A held multi-click keeps its click record so pointer drift cannot
+        // break a triple-click; char drags still break the chain.
+        if (!anchorSpanRef.current) {
+          lastClickRef.current = null;
+        }
+        // A scroll under a history drag invalidates its viewport coordinates.
         if (
+          activeRectIndexRef.current === 0 &&
           propsRef.current.getScrollState().scrollTop !==
-          dragScrollTopRef.current
+            dragScrollTopRef.current
         ) {
           clearSelection();
           return;
         }
-        const mapped = mapEvent(event);
-        if (!mapped) {
+        const point = mapEvent(event);
+        const rect = getActiveRect();
+        if (!point || !rect) {
+          clearSelection();
           return;
         }
-        selection.extend(clampToViewport(mapped.point, mapped.rect));
+        extendActiveDrag(clampToViewport(point, rect));
         applyHighlight();
         return;
       }
 
       if (event.name === 'left-release') {
-        // Word/line click-selects are not drags; leave them intact.
         if (!selection.dragging) {
           return;
         }
-        const mapped = mapEvent(event);
-        if (mapped) {
-          selection.extend(clampToViewport(mapped.point, mapped.rect));
+        // A repaint invalidated this selection but the deferred clear has not
+        // run yet; drop it without extending or copying the stale content.
+        if (
+          pendingInvalidationGenRef.current === selectionGenerationRef.current
+        ) {
+          clearSelection();
+          return;
         }
+        const point = mapEvent(event);
+        const rect = getActiveRect();
+        if (point && rect) {
+          extendActiveDrag(clampToViewport(point, rect));
+        }
+        // Clear the span drag only after extending, so the release cell still
+        // applies to a word/line drag when no move covered it.
+        anchorSpanRef.current = null;
         selection.finish();
-        if (selection.isCollapsed || selection.isEmpty) {
+        if (selection.isEmpty || selection.isBareClick) {
           clearSelection();
           return;
         }
@@ -288,6 +425,9 @@ export function TextSelectionController(
       recordBaseline,
       mapEvent,
       getBuffer,
+      getSelectableRects,
+      getActiveRect,
+      extendActiveDrag,
     ],
   );
 
@@ -313,23 +453,58 @@ export function TextSelectionController(
         return;
       }
       const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
-      const viewportRect = propsRef.current.getViewportRect();
+      const activeRect = getActiveRect();
+      const isViewportSelection = activeRectIndexRef.current === 0;
       if (
-        scrollTop !== baselineScrollTopRef.current ||
-        scrollHeight !== baselineScrollHeightRef.current ||
-        !sameViewportRect(baselineViewportRectRef.current, viewportRect) ||
-        !sameViewportContent(baselineFrameRef.current, frame, viewportRect)
+        (isViewportSelection &&
+          (scrollTop !== baselineScrollTopRef.current ||
+            scrollHeight !== baselineScrollHeightRef.current)) ||
+        !sameViewportRect(baselineRectRef.current, activeRect) ||
+        !sameViewportContent(baselineFrameRef.current, frame, activeRect)
       ) {
-        clearSelection();
+        const invalidatedGeneration = selectionGenerationRef.current;
+        pendingInvalidationGenRef.current = invalidatedGeneration;
+        queueMicrotask(() => {
+          pendingInvalidationGenRef.current = null;
+          if (selectionGenerationRef.current === invalidatedGeneration) {
+            clearSelection();
+          }
+        });
       }
     });
-  }, [getBuffer, clearSelection]);
+  }, [getBuffer, getActiveRect, clearSelection]);
 
   useEffect(() => {
     if (!props.isActive) {
       clearSelection();
     }
   }, [props.isActive, clearSelection]);
+
+  // Expose the live selection to an external query ref (context menu "Copy
+  // Selection"). A collapsed char-mode selection is a bare click (cleared on
+  // release anyway) and carries no text; a collapsed word/line span still
+  // holds its cell(s), so it stays offerable.
+  const selectionQueryRef = props.selectionQueryRef;
+  useEffect(() => {
+    if (!selectionQueryRef) {
+      return;
+    }
+    selectionQueryRef.current = {
+      getRange: () => {
+        const selection = selectionRef.current;
+        if (
+          selection.isEmpty ||
+          (selection.isCollapsed && selection.mode === 'char')
+        ) {
+          return null;
+        }
+        return selection.normalized();
+      },
+    };
+    return () => {
+      selectionQueryRef.current = null;
+    };
+  }, [selectionQueryRef]);
 
   return null;
 }

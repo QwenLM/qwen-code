@@ -13,6 +13,7 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
 } from '@qwen-code/sdk/daemon';
 
@@ -27,6 +28,22 @@ const PENDING: DaemonChannelPairingRequestsSnapshot = {
       senderId: 'user-42',
       senderName: 'Ada',
       code: 'ABCD1234',
+      createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
+    },
+  ],
+};
+
+const GROUP_PENDING: DaemonChannelPairingRequestsSnapshot = {
+  requests: [
+    {
+      senderId: 'user-42',
+      senderName: 'Ada',
+      subject: {
+        type: 'group',
+        id: 'group-7',
+        name: 'Release Team',
+      },
+      code: 'GROUP123',
       createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
     },
   ],
@@ -55,7 +72,7 @@ async function renderRequests({
   ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
   revokeApproval?: (
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
   staticAllowedUsers?: readonly string[];
   language?: 'en' | 'zh-CN';
@@ -111,6 +128,45 @@ describe('ChannelPairingRequests', () => {
     expect(approve?.getAttribute('aria-label')).toBe(
       'Approve Ada, code ABCD1234',
     );
+  });
+
+  it('identifies the group and requesting member for a group pairing request', async () => {
+    const approval: DaemonChannelPairingApprovalResult = {
+      approved: GROUP_PENDING.requests[0],
+      requests: [],
+    };
+    const approve = vi.fn().mockResolvedValue(approval);
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValueOnce({ senderIds: [], groupIds: [] })
+      .mockResolvedValueOnce({ senderIds: [], groupIds: ['group-7'] });
+    await renderRequests({
+      list: vi.fn().mockResolvedValue(GROUP_PENDING),
+      approve,
+      listApprovals,
+    });
+
+    expect(container.textContent).toContain('Group: Release Team');
+    expect(container.textContent).toContain('group-7');
+    expect(container.textContent).toContain('Requested by Ada');
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Approve Group: Release Team, code GROUP123"]',
+    );
+
+    await act(async () => {
+      button?.click();
+    });
+
+    expect(approve).toHaveBeenCalledWith('release-bot', 'GROUP123');
+    expect(container.textContent).toContain(
+      'Group: Release Team can now use this Channel.',
+    );
+    expect(container.textContent).toContain('No pending requests');
+    expect(container.textContent).not.toContain('GROUP123');
+    expect(container.textContent).not.toContain('No pairing approvals');
+    expect(
+      container.querySelector('button[aria-label="Revoke Group: group-7"]'),
+    ).not.toBeNull();
   });
 
   it('shows pairing approvals and distinguishes configured allowlist access', async () => {
@@ -186,13 +242,63 @@ describe('ChannelPairingRequests', () => {
       confirm?.click();
     });
 
-    expect(revokeApproval).toHaveBeenCalledWith('release-bot', 'paired-user');
+    expect(revokeApproval).toHaveBeenCalledWith('release-bot', {
+      senderId: 'paired-user',
+    });
     expect(
       container.querySelector('button[aria-label="Revoke paired-user"]'),
     ).toBeNull();
     expect(container.textContent).toContain('second-user');
     expect(container.textContent).toContain(
       'Pairing approval for paired-user was revoked.',
+    );
+  });
+
+  it('lists and revokes a group pairing approval by group ID', async () => {
+    const revokeApproval = vi.fn().mockResolvedValue({
+      revoked: 'group-7',
+      senderIds: ['paired-user'],
+      groupIds: ['group-8'],
+    });
+    await renderRequests({
+      listApprovals: vi.fn().mockResolvedValue({
+        senderIds: ['paired-user'],
+        groupIds: ['group-7', 'group-8'],
+      }),
+      revokeApproval,
+    });
+
+    const revoke = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke Group: group-7"]',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      'Revoke pairing approval for Group: group-7?',
+    );
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Revoke approval',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(revokeApproval).toHaveBeenCalledWith('release-bot', {
+      groupId: 'group-7',
+    });
+    expect(
+      container.querySelector('button[aria-label="Revoke Group: group-7"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Revoke Group: group-8"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain(
+      'Pairing approval for Group: group-7 was revoked.',
     );
   });
 
@@ -372,6 +478,55 @@ describe('ChannelPairingRequests', () => {
     expect(
       container.querySelector('button[aria-label="Revoke paired-user"]'),
     ).toBeNull();
+  });
+
+  it('refreshes group approvals when a group revoke target is already gone', async () => {
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValueOnce({
+        senderIds: ['paired-user'],
+        groupIds: ['group-7', 'group-8'],
+      })
+      .mockResolvedValueOnce({
+        senderIds: ['paired-user'],
+        groupIds: ['group-8'],
+      });
+    const revokeError = Object.assign(new Error('Approval is gone.'), {
+      status: 404,
+      body: {
+        error: 'Pairing approval was not found.',
+        code: 'channel_pairing_approval_not_found',
+      },
+    });
+    const revokeApproval = vi.fn().mockRejectedValue(revokeError);
+    await renderRequests({ listApprovals, revokeApproval });
+
+    const revoke = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke Group: group-7"]',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Revoke approval',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(listApprovals).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain(
+      'Pairing approval was not found.',
+    );
+    expect(
+      container.querySelector('button[aria-label="Revoke Group: group-7"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Revoke Group: group-8"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).not.toBeNull();
   });
 
   it('shows an error when refreshing after a missing approval fails', async () => {
@@ -645,15 +800,22 @@ describe('ChannelPairingRequests', () => {
   it('does not show approvals from the previous Channel while loading', async () => {
     const listApprovals = vi
       .fn()
-      .mockResolvedValueOnce({ senderIds: ['paired-user'] })
+      .mockResolvedValueOnce({
+        senderIds: ['paired-user'],
+        groupIds: ['group-7'],
+      })
       .mockReturnValueOnce(
         new Promise<DaemonChannelPairingApprovalsSnapshot>(() => undefined),
       );
     await renderRequests({ listApprovals });
     expect(container.textContent).toContain('paired-user');
+    expect(
+      container.querySelector('button[aria-label="Revoke Group: group-7"]'),
+    ).not.toBeNull();
 
     await renderRequests({ channelName: 'other-bot', listApprovals });
 
     expect(container.textContent).not.toContain('paired-user');
+    expect(container.textContent).not.toContain('group-7');
   });
 });

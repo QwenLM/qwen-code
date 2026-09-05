@@ -9,12 +9,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Response } from 'express';
 import { SseStream } from './sse-stream.js';
 
+type WriteCallback = (err?: Error | null) => void;
+
 /**
  * Minimal Express `Response` mock: an EventEmitter with the `write`/`end`/
  * header surface `SseStream` touches. `writeBehavior` lets a test force
  * `res.write` to return false (backpressure) or throw (socket error).
  */
-function mockRes(writeBehavior?: () => boolean) {
+function mockRes(
+  writeBehavior?: () => boolean,
+  writeCallbacks?: WriteCallback[],
+) {
   const ee = new EventEmitter() as unknown as Response & {
     chunks: string[];
     ended: boolean;
@@ -26,7 +31,7 @@ function mockRes(writeBehavior?: () => boolean) {
     status: () => unknown;
     setHeader: () => void;
     flushHeaders: () => void;
-    write: (c: string) => boolean;
+    write: (c: string, callback?: WriteCallback) => boolean;
     end: () => void;
     req: EventEmitter;
   };
@@ -37,13 +42,18 @@ function mockRes(writeBehavior?: () => boolean) {
   m.setHeader = () => {};
   m.flushHeaders = () => {};
   m.req = new EventEmitter();
-  m.write = (chunk: string) => {
+  m.write = (chunk: string, callback?: WriteCallback) => {
     m.chunks.push(chunk);
+    if (callback) {
+      if (writeCallbacks) writeCallbacks.push(callback);
+      else queueMicrotask(callback);
+    }
     return writeBehavior ? writeBehavior() : true;
   };
   m.end = () => {
     m.ended = true;
     m.writableEnded = true;
+    ee.emit('finish');
   };
   return ee as unknown as Response & { chunks: string[]; ended: boolean };
 }
@@ -176,5 +186,102 @@ describe('SseStream', () => {
     (res as unknown as EventEmitter).emit('drain');
     await p;
     expect(settled).toBe(true);
+  });
+
+  it('waits for every write callback before reporting local delivery', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+    let settled = false;
+    void delivery.then(() => {
+      settled = true;
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+      expect(settled).toBe(false);
+      callbacks.shift()?.();
+    }
+
+    await expect(delivery).resolves.toBe('delivered');
+    expect(settled).toBe(true);
+  });
+
+  it('reports a write callback error as failed delivery', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    callbacks.shift()?.(new Error('EPIPE'));
+
+    await expect(delivery).resolves.toBe('failed');
+    await vi.waitFor(() => expect(s.isClosed).toBe(true));
+  });
+
+  it('does not retain drain listeners after a synchronous callback error', async () => {
+    const res = mockRes(() => false);
+    const writable = res as unknown as {
+      write: (chunk: string | Buffer, callback?: WriteCallback) => boolean;
+    };
+    writable.write = (_chunk, callback) => {
+      callback?.(new Error('EPIPE'));
+      return false;
+    };
+    const s = new SseStream(res);
+
+    await expect(s.sendSerialized(Buffer.from('{"ok":true}'))).resolves.toBe(
+      'failed',
+    );
+    expect((res as unknown as EventEmitter).listenerCount('drain')).toBe(0);
+  });
+
+  it('settles an active write as closed before its callback arrives', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    s.close();
+    await expect(delivery).resolves.toBe('closed');
+
+    callbacks.shift()?.();
+    expect(s.isClosed).toBe(true);
+  });
+
+  it('reports an accepted complete frame as outcome unknown on close', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+
+    for (let index = 0; index < 2; index++) {
+      await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+      callbacks.shift()?.();
+    }
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    expect((res as unknown as { chunks: string[] }).chunks.join('')).toBe(
+      'data: {"ok":true}\n\n',
+    );
+
+    (res as unknown as EventEmitter).emit('close');
+    await expect(delivery).resolves.toBe('outcome_unknown');
+    callbacks.shift()?.();
+  });
+
+  it('reports an incomplete accepted frame as closed', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    (res as unknown as EventEmitter).emit('close');
+
+    await expect(delivery).resolves.toBe('closed');
+    callbacks.shift()?.();
   });
 });

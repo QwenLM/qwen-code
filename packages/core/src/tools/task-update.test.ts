@@ -99,6 +99,31 @@ describe('TaskUpdateTool', () => {
     expect(result.llmContent).toContain('not found');
   });
 
+  it('reports not-found, not a derived refusal, for a missing task', async () => {
+    // Existence must be answered before the assignment gates: with a
+    // missing task the blocked-by set built from this same call's
+    // addBlockedBy (and the owner validation) would otherwise produce a
+    // wrong reason that sends the caller down a dead end. The referenced
+    // blocker must exist so the up-front referenced-ids check passes and
+    // only the primary-task existence check can answer; a missing
+    // referenced id would satisfy the same assertions on its own and
+    // leave this pin blind to the fix it guards.
+    const blocker = await createTask(TEAM, {
+      subject: 'Blocker',
+      description: 'Referenced by the missing task',
+    });
+    const invocation = tool.build({
+      taskId: '999',
+      status: 'in_progress',
+      owner: 'alice',
+      addBlockedBy: [blocker.id],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(String(result.llmContent)).toContain('not found');
+    expect(String(result.llmContent)).not.toContain('blocked by');
+  });
+
   it('allows plan-required teammates to claim a task before approval', async () => {
     const task = await createTask(TEAM, {
       subject: 'Plan first',

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   RunBudgetEnforcer,
   parseDurationSeconds,
+  validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from './runBudget.js';
@@ -82,6 +83,26 @@ describe('validateMaxWallTimeSetting', () => {
 
   it('rejects values larger than the Node.js timeout ceiling', () => {
     expect(() => validateMaxWallTimeSetting(3_000_000)).toThrow();
+  });
+});
+
+describe('validateGoalTokenBudget', () => {
+  it.each([-1, 1, 30_000_000, 300_000_000])(
+    'accepts supported value %s',
+    (value) => {
+      expect(validateGoalTokenBudget(value)).toBe(value);
+    },
+  );
+
+  it.each([0, -2, 1.5, 300_000_001, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid value %s',
+    (value) => {
+      expect(() => validateGoalTokenBudget(value)).toThrow();
+    },
+  );
+
+  it('rejects non-number settings values', () => {
+    expect(() => validateGoalTokenBudget('5000')).toThrow();
   });
 });
 

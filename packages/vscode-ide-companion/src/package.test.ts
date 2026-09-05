@@ -48,3 +48,22 @@ describe('package.json command metadata', () => {
     expect(sidebarView?.when).toBeUndefined();
   });
 });
+
+describe('generated settings schema', () => {
+  it('does not advertise the removed dynamic command translation setting', () => {
+    const schema = JSON.parse(
+      readFileSync(
+        resolve(import.meta.dirname, '../schemas/settings.schema.json'),
+        'utf8',
+      ),
+    ) as {
+      properties?: {
+        general?: { properties?: Record<string, unknown> };
+      };
+    };
+
+    expect(schema.properties?.general?.properties).not.toHaveProperty(
+      'dynamicCommandTranslation',
+    );
+  });
+});

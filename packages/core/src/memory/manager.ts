@@ -62,6 +62,7 @@ import {
   type AutoMemoryForgetMatch,
   type AutoMemoryForgetResult,
   type AutoMemoryForgetSelectionResult,
+  type AutoMemoryStorageScope,
 } from './forget.js';
 import {
   resolveRelevantAutoMemoryPromptForQuery,
@@ -762,17 +763,21 @@ export class MemoryManager {
 
       const result = await runAutoMemoryExtract(params);
       const durationMs = Date.now() - t0;
+      const skippedReason = result.skippedReason;
+      const status = skippedReason ? 'skipped' : 'completed';
       this.update(record, {
-        status: result.skippedReason ? 'skipped' : 'completed',
+        status,
         progressText:
           result.systemMessage ??
-          (result.touchedTopics.length > 0
-            ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
-            : 'Managed auto-memory extraction completed without durable changes.'),
+          (skippedReason
+            ? `Skipped: ${skippedReason.replaceAll('_', ' ')}.`
+            : result.touchedTopics.length > 0
+              ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
+              : 'Managed auto-memory extraction completed without durable changes.'),
         metadata: {
           touchedTopics: result.touchedTopics,
           processedOffset: result.cursor.processedOffset,
-          skippedReason: result.skippedReason,
+          skippedReason,
         },
       });
       if (params.config) {
@@ -780,7 +785,8 @@ export class MemoryManager {
           params.config,
           new MemoryExtractEvent({
             trigger: 'auto',
-            status: 'completed',
+            status,
+            ...(skippedReason ? { skipped_reason: skippedReason } : {}),
             patches_count: result.touchedTopics.length,
             touched_topics: result.touchedTopics,
             duration_ms: durationMs,
@@ -1401,6 +1407,7 @@ export class MemoryManager {
       config?: Config;
       limit?: number;
       abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
     } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
     return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
@@ -1420,7 +1427,11 @@ export class MemoryManager {
   forget(
     projectRoot: string,
     query: string,
-    options: { config?: Config; abortSignal?: AbortSignal } = {},
+    options: {
+      config?: Config;
+      abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
+    } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryEntries(projectRoot, query, options, now);

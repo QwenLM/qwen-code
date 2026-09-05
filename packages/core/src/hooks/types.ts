@@ -56,7 +56,7 @@ export enum HookEventName {
   SessionDelete = 'SessionDelete',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
-  // When a tool call is denied before a permission dialog is displayed
+  // When AUTO-mode classification denies a tool call
   PermissionDenied = 'PermissionDenied',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
@@ -828,8 +828,8 @@ export interface PostToolBatchToolCall {
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
-   * response_parts, result_display, error, error_type, content_length, and
-   * vision_bridge_notice when applicable.
+   * response_parts, result_display, error, error_type, execution_status,
+   * content_length, and vision_bridge_notice when applicable.
    */
   tool_response?: Record<string, unknown>;
 }

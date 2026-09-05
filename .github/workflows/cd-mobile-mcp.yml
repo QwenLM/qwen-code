@@ -22,6 +22,7 @@ jobs:
       name: 'production-release'
     permissions:
       contents: 'read'
+      id-token: 'write'
     steps:
       - uses: 'actions/checkout@v4'
 
@@ -32,6 +33,9 @@ jobs:
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
+
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
 
       - name: 'Determine version'
         id: 'version'
@@ -67,6 +71,4 @@ jobs:
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'
-        run: 'npm publish --access public'
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+        run: 'npm publish --provenance --access public'

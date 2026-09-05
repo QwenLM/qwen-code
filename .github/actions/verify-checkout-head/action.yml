@@ -1,0 +1,21 @@
+name: 'Verify Checkout Head'
+description: 'Fails the job when the checked-out tree does not contain the expected head commit, so a stale checkout (e.g. a caching egress proxy serving an old ref) is never silently tested into a merge. Cheap: one merge-base, sub-second.'
+
+inputs:
+  expected_sha:
+    description: 'Commit SHA that must be an ancestor of the checked-out HEAD.'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Verify checkout includes expected head commit'
+      shell: 'bash'
+      env:
+        EXPECTED_SHA: '${{ inputs.expected_sha }}'
+      run: |-
+        if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
+          echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
+          git log --oneline --decorate -5
+          exit 1
+        fi

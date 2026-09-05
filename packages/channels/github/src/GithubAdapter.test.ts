@@ -21,10 +21,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   getWorkspaceScopeDirName,
+  PairingStore,
   type ChannelAgentBridge,
   type ChannelConfig,
   type Envelope,
 } from '@qwen-code/channel-base';
+
+const mockExecFile = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', () => ({
+  execFile: mockExecFile,
+}));
 
 vi.mock('@octokit/rest', () => {
   const mockOctokit = {
@@ -68,11 +75,12 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
 
 import { GithubChannel } from './GithubAdapter.js';
 
-const mockOctokit = (
-  (await import('@octokit/rest')) as unknown as {
-    __mockOctokit: Record<string, unknown>;
-  }
-).__mockOctokit as {
+const octokitModule = (await import('@octokit/rest')) as unknown as {
+  Octokit: Mock;
+  __mockOctokit: Record<string, unknown>;
+};
+const mockOctokitConstructor = octokitModule.Octokit;
+const mockOctokit = octokitModule.__mockOctokit as {
   rest: {
     users: {
       getAuthenticated: ReturnType<typeof vi.fn>;
@@ -239,6 +247,7 @@ class TestableGithubChannel extends GithubChannel {
   sourceMessageId: string | undefined;
   sourceSenderId: string | undefined;
   sourceMetadata: string | undefined;
+  inboundErrorSourceLabel: string | undefined;
   handleInboundHook: ((envelope: Envelope) => void | Promise<void>) | undefined;
 
   protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -251,6 +260,12 @@ class TestableGithubChannel extends GithubChannel {
 
   protected getResponseMetadata(_sessionId: string): string | undefined {
     return this.sourceMetadata;
+  }
+
+  protected getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
@@ -323,6 +338,7 @@ describe('GithubChannel', () => {
     rmSync(process.env.QWEN_HOME!, { recursive: true, force: true });
     if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
     else process.env.QWEN_HOME = savedQwenHome;
+    vi.unstubAllEnvs();
   });
 
   async function initWithoutLoop(configOverrides?: Record<string, unknown>) {
@@ -347,9 +363,672 @@ describe('GithubChannel', () => {
   describe('connect', () => {
     it('resolves bot username', async () => {
       mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await channel.connect();
+        expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalled();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] using configured token\n',
+        );
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] authenticated as "test-bot"\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
+    it('sanitizes the authenticated login in the stderr audit line', async () => {
+      mockOctokit.rest.users.getAuthenticated.mockResolvedValue({
+        data: { id: 99999, login: 'bot\nforged-line' },
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await channel.connect();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] authenticated as "bot\\nforged-line"\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
+    it('requires explicit opt-in before using local gh authentication', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'configure a GitHub token or enable local GitHub CLI authentication',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a whitespace-only token', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: ' ' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'configure a GitHub token or enable local GitHub CLI authentication',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a quoted useLocalGh value from hand-edited settings', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: 'true' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] useLocalGh must be a boolean.',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-boolean useLocalGh even when a token is configured', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: 'test-token', useLocalGh: 'true' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'useLocalGh must be a boolean',
+      );
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('falls back to local gh for a whitespace-only token', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, 'local-gh-token\n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: ' ', useLocalGh: true }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
       await channel.connect();
-      expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalled();
+
+      expect(mockExecFile).toHaveBeenCalled();
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ auth: 'local-gh-token' }),
+      );
       channel.disconnect();
+    });
+
+    it('uses local gh authentication when explicitly enabled', async () => {
+      vi.stubEnv('GH_TOKEN', 'environment-token');
+      vi.stubEnv('GITHUB_TOKEN', 'environment-token');
+      vi.stubEnv('GH_ENTERPRISE_TOKEN', 'environment-token');
+      vi.stubEnv('GITHUB_ENTERPRISE_TOKEN', 'environment-token');
+      vi.stubEnv('GH_CONFIG_DIR', '/tmp/test-gh-config');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, 'local-gh-token\n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      try {
+        await channel.connect();
+
+        expect(mockExecFile).toHaveBeenCalledWith(
+          'gh',
+          ['auth', 'token', '--hostname', 'github.com'],
+          expect.objectContaining({
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024,
+            timeout: 10_000,
+            windowsHide: true,
+            env: expect.objectContaining({
+              GH_CONFIG_DIR: '/tmp/test-gh-config',
+            }),
+          }),
+          expect.any(Function),
+        );
+        const options = mockExecFile.mock.calls[0]?.[2] as {
+          env: NodeJS.ProcessEnv;
+        };
+        expect(options.env).not.toHaveProperty('GH_TOKEN');
+        expect(options.env).not.toHaveProperty('GITHUB_TOKEN');
+        expect(options.env).not.toHaveProperty('GH_ENTERPRISE_TOKEN');
+        expect(options.env).not.toHaveProperty('GITHUB_ENTERPRISE_TOKEN');
+        expect(options.env['PATH']).toBe(process.env['PATH']);
+        expect(mockOctokitConstructor).toHaveBeenCalledWith(
+          expect.objectContaining({ auth: 'local-gh-token' }),
+        );
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('local-gh-token'),
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
+    it('uses the enterprise host for local gh authentication', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, 'enterprise-token\n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'https://ghe.example.com:8443/api/v3',
+        }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      try {
+        await channel.connect();
+
+        expect(mockExecFile).toHaveBeenCalledWith(
+          'gh',
+          ['auth', 'token', '--hostname', 'ghe.example.com'],
+          expect.any(Object),
+          expect.any(Function),
+        );
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] using local gh credential for ghe.example.com\n',
+        );
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('enterprise-token'),
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
+    it('rejects an insecure API URL before resolving local gh credentials', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'http://api.github.com',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'local GitHub CLI authentication requires an HTTPS baseUrl',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('reports a malformed baseUrl before resolving local gh credentials', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'ghe.example.com/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl is not a valid URL: ghe.example.com/api/v3',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('reports a scheme-less baseUrl with a port as malformed', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'ghe.example.com:8443/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl is not a valid URL: ghe.example.com:8443/api/v3',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('rejects a baseUrl hostname that begins with a dash before spawning gh', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'https://--evil/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl hostname is invalid: --evil',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('rejects a baseUrl hostname outside the gh hostname allowlist', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'https://ghe.example_company.com/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl hostname is invalid: ghe.example_company.com',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('preserves explicit token support for an HTTP base URL', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: 'test-token',
+          useLocalGh: true,
+          baseUrl: 'http://ghe.example.com/api/v3',
+        }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          auth: 'test-token',
+          baseUrl: 'http://ghe.example.com/api/v3',
+        }),
+      );
+      channel.disconnect();
+    });
+
+    it('reports an empty token returned by GitHub CLI', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, ' \n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'GitHub CLI returned an empty token for github.com',
+      );
+    });
+
+    it('prefers an explicit token over enabled local gh authentication', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: 'test-token', useLocalGh: true }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ auth: 'test-token' }),
+      );
+      channel.disconnect();
+    });
+
+    it('reports when GitHub CLI is unavailable', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: NodeJS.ErrnoException, stdout: string) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('secret missing-cli failure'), {
+              code: 'ENOENT',
+            }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'GitHub CLI (gh) is not installed on the daemon host',
+      );
+      await expect(channel.connect()).rejects.not.toThrow(
+        'secret missing-cli failure',
+      );
+    });
+
+    it('reports when the selected gh host is not authenticated', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', '');
+      vi.stubEnv('HOME', '/home/test-user');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) =>
+          callback(Object.assign(new Error('secret stderr'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh auth login --hostname github.com',
+      );
+      await expect(channel.connect()).rejects.toThrow(
+        'gh config dir: /home/test-user/.config/gh',
+      );
+      await expect(channel.connect()).rejects.not.toThrow('secret stderr');
+    });
+
+    it('names the gh config dir when the host is not authenticated', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '/tmp/test-gh-config');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh config dir: /tmp/test-gh-config',
+      );
+    });
+
+    it('prefers XDG_CONFIG_HOME over HOME in the gh config dir hint', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '/tmp/test-xdg-config');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh config dir: /tmp/test-xdg-config/gh',
+      );
+    });
+
+    it('reports an unknown gh config dir when no config source is available', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', '');
+      vi.stubEnv('HOME', '');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow('gh config dir: unknown');
+    });
+
+    it('prefers the Windows AppData gh config dir on win32', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', 'C:\\Users\\test\\AppData\\Roaming');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+      const platform = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('win32');
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'gh config dir: C:\\Users\\test\\AppData\\Roaming\\GitHub CLI',
+        );
+      } finally {
+        platform.mockRestore();
+      }
+    });
+
+    it('falls back to HOME when APPDATA is unset on win32', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', '');
+      vi.stubEnv('HOME', '/home/test-user');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+      const platform = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('win32');
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'gh config dir: /home/test-user/.config/gh',
+        );
+      } finally {
+        platform.mockRestore();
+      }
+    });
+
+    it('surfaces bounded gh stderr in the authentication failure', async () => {
+      const rawStderr = `\u001b[2Jsecret${'x'.repeat(600)}`;
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (
+            error: Error & { code: number },
+            stdout: string,
+            stderr: string,
+          ) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('exit 1'), { code: 1 }),
+            '',
+            rawStderr,
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh auth login --hostname github.com',
+      );
+      const error = (await channel
+        .connect()
+        .catch((err: unknown) => err)) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).not.toContain('\u001b');
+      const hint = error.message.split(' gh stderr: ')[1] ?? '';
+      expect(hint).toContain('[2Jsecret');
+      expect(Array.from(hint).length).toBeLessThanOrEqual(256);
+    });
+
+    it('reports when the GitHub CLI authentication lookup times out', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (
+            error: Error & { killed: boolean },
+            stdout: string,
+          ) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('secret timeout failure'), {
+              killed: true,
+            }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'authentication lookup for github.com timed out after 10 seconds',
+      );
+      await expect(channel.connect()).rejects.not.toThrow(
+        'secret timeout failure',
+      );
+    });
+
+    it('treats a killed lookup that also exited as a timeout', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (
+            error: Error & { code: number; killed: boolean },
+            stdout: string,
+          ) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('exit 1'), { code: 1, killed: true }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'authentication lookup for github.com timed out after 10 seconds',
+      );
+    });
+
+    it('reports when GitHub CLI authentication cannot execute', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: NodeJS.ErrnoException, stdout: string) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('secret failure'), { code: 'EACCES' }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'authentication lookup for github.com failed to execute',
+      );
+      await expect(channel.connect()).rejects.not.toThrow('secret failure');
     });
 
     it('throws when bot identity fails', async () => {
@@ -782,6 +1461,7 @@ describe('GithubChannel', () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
         allowedUsers: ['maintainer', 'bob'],
+        messagePrefix: '/review',
       });
       channel.usePreflight = true;
       mockOctokit.paginate
@@ -804,7 +1484,7 @@ describe('GithubChannel', () => {
           makeComment({
             id: 1002,
             node_id: 'C_1002',
-            body: '@test-bot check this review note',
+            body: '@test-bot /review check this review note',
             created_at: '2026-07-04T09:30:00.000Z',
             user: { login: 'bob' },
           }),
@@ -828,11 +1508,12 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         threadId: 'pr:99',
         isMentioned: true,
+        bypassMessagePrefix: true,
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: ' check this review note',
+        text: 'check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -846,6 +1527,9 @@ describe('GithubChannel', () => {
       );
       expect(channel.inboundEnvelopes[0]!.text).toBe(
         'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+      );
+      expect(channel.inboundEnvelopes[0]!.displayText).toBe(
+        'Review requested: feat: divide',
       );
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'For review_requested, return a formal review summary',
@@ -982,6 +1666,7 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         isMentioned: true,
         text: 'Triage this issue and respond with the next action.',
+        displayText: 'Issue assigned: broken build',
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
@@ -1030,8 +1715,41 @@ describe('GithubChannel', () => {
         );
         expect(channel.inboundEnvelopes[0]!.text).toContain('@alice: first');
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
+        expect(channel.inboundEnvelopes[0]!.displayText).toBe(
+          '- @alice: first\n- @bob: second',
+        );
       },
     );
+
+    it('filters each aggregated comment and consumes unmatched comments', async () => {
+      await initWithoutLoop({ messagePrefix: '/review' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ignore this' }),
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            body: '/review inspect this',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        displayText: '- @bob: inspect this',
+        bypassMessagePrefix: true,
+      });
+      expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
+    });
 
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({
@@ -1128,6 +1846,235 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
+    it('dispatches directed follow-ups from an approved paired repo on the aggregate lane', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      const store = new PairingStore('test-github', '/tmp/test');
+      const created = store.createGroupRequest(
+        'owner/repo',
+        'owner/repo',
+        'alice',
+        'Alice',
+      );
+      if (!('code' in created)) {
+        throw new Error(`expected a pairing code, got ${created.rejected}`);
+      }
+      store.approve(created.code);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'please take a look' }),
+          makeComment({
+            id: 1002,
+            body: 'second opinion',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'alice',
+        text: 'please take a look',
+        isMentioned: true,
+      });
+      expect(channel.inboundEnvelopes[1]).toMatchObject({
+        senderId: 'bob',
+        text: 'second opinion',
+        isMentioned: true,
+      });
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('does not feed the issue body after a mentioning comment from an approved paired repo', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      const store = new PairingStore('test-github', '/tmp/test');
+      const created = store.createGroupRequest(
+        'owner/repo',
+        'owner/repo',
+        'alice',
+        'Alice',
+      );
+      if (!('code' in created)) {
+        throw new Error(`expected a pairing code, got ${created.rejected}`);
+      }
+      store.approve(created.code);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        messageId: '1001',
+        senderId: 'alice',
+      });
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+    });
+
+    it('posts one pairing comment when a mentioning comment and body arrive together', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('pairing code'),
+        }),
+      );
+    });
+
+    it('does not turn ambient comments into pairing requests under senderPolicy open', async () => {
+      await initWithoutLoop({ groupPolicy: 'pairing' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ambient chatter without a mention' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        new PairingStore('test-github', '/tmp/test').listPending(),
+      ).toEqual([]);
+    });
+
+    it('posts one pairing comment when assign and body mention both trigger pairing', async () => {
+      await initWithoutLoop({ groupPolicy: 'pairing' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'assign', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([
+          makeIssueEvent({
+            event: 'assigned',
+            assigner: { login: 'maintainer' },
+            assignee: { login: 'test-bot' },
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'broken build',
+          state: 'open',
+          user: { login: 'alice' },
+          body: '@test-bot please look at this issue',
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('pairing code'),
+        }),
+      );
+      expect(
+        new PairingStore('test-github', '/tmp/test').listPending(),
+      ).toHaveLength(1);
+    });
+
+    it('does not re-feed the body when a re-listed thread already had a pairing effect', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:42');
+
+      // Poll 2: marking the thread read failed, so it is listed as unread
+      // again. The mentioning comment is now outside the comment window; the
+      // body feed must stay suppressed or it would post a second identical
+      // pairing-code comment.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            last_read_at: null,
+            updated_at: '2026-07-02T11:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
     it('bounds each aggregated comment without hiding later comments', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
@@ -1146,6 +2093,60 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('a'.repeat(401));
       expect(channel.inboundEnvelopes[0]!.text).toContain('latest');
+    });
+
+    it('sanitizes crafted comment bodies in the aggregate display projection', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            body: 'line one\u202e hidden\u200b\u0007\r\nline two [BUG] kept',
+          }),
+        ]);
+
+      await pollOnce();
+
+      const displayText = channel.inboundEnvelopes[0]!.displayText!;
+      // eslint-disable-next-line no-control-regex
+      const craftedChars = /[\u202a-\u202e\u2066-\u2069\u200b\u0007\r]/;
+      expect(displayText).not.toMatch(craftedChars);
+      // Newlines and brackets are display content and must survive.
+      expect(displayText).toContain('line one');
+      expect(displayText).toContain('\nline two [BUG] kept');
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        displayText.slice('- @alice: '.length),
+      );
+    });
+
+    it('truncates aggregated comments on code-point boundaries', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          // 399 ASCII + one 2-unit emoji + tail: a UTF-16 slice(0, 400) would
+          // land mid-surrogate-pair and leave a lone surrogate behind.
+          makeComment({ body: 'a'.repeat(399) + '\ud83c\udf89' + 'tail' }),
+        ]);
+
+      await pollOnce();
+
+      const displayText = channel.inboundEnvelopes[0]!.displayText!;
+      expect(displayText).toContain('a'.repeat(399) + '\ud83c\udf89');
+      expect(displayText).not.toContain('tail');
+      expect(displayText).not.toMatch(
+        /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+      );
     });
 
     it('records aggregated comments that exceed the summary cap', async () => {
@@ -1526,6 +2527,49 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('attributes the published comment without changing raw audit metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 2002, html_url: 'https://example.test/comment/2002' },
+      });
+      await connectForPublication();
+      const response = 'Reviewed the implementation.';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+            sourceLabel?: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        response,
+        'session-publication',
+        '[review_*]',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: '\\[review\\_\\*\\]\nReviewed the implementation.',
+      });
+      const audits = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audits.at(-1)).toMatchObject({
+        bodyChars: Array.from(response).length,
+        bodySha256: createHash('sha256').update(response).digest('hex'),
+      });
+      expect(JSON.stringify(audits)).not.toContain('review_');
+    });
+
     it('uses the active prompt thread for final delivery', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
@@ -1664,7 +2708,10 @@ describe('GithubChannel', () => {
       ).rejects.toThrow('rate limited');
 
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
-      expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
+      // Windows has no POSIX mode bits; stat reports 0o666.
+      if (process.platform !== 'win32') {
+        expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
+      }
     });
 
     it('does not collapse same-body pending finals without a source message id', async () => {
@@ -1878,8 +2925,11 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('ignores invalid pending final retry records', async () => {
-      writePending([pendingRecord(), { id: 123, bad: true }]);
+    it('preserves attribution while ignoring invalid pending retry records', async () => {
+      writePending([
+        pendingRecord({ sourceLabel: '[review_*]' }),
+        { id: 123, bad: true },
+      ]);
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
           id: 2004,
@@ -1894,7 +2944,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: 'Final reply',
+        body: '\\[review\\_\\*\\]\nFinal reply',
       });
     });
 
@@ -2579,8 +3629,9 @@ describe('GithubChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
+    it('attributes the error comment when a named inbound turn fails', async () => {
       channel.handleInboundError = new Error('agent down');
+      channel.inboundErrorSourceLabel = '[review_*]';
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
@@ -2589,7 +3640,7 @@ describe('GithubChannel', () => {
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
+          body: '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
         }),
       );
     });
@@ -2771,6 +3822,59 @@ describe('GithubChannel', () => {
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).not.toHaveBeenCalled();
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('blocks cursor commit when a persisted envelope has a non-array mentionedMemberIds', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([
+        {
+          ...task,
+          envelope: { ...task.envelope, mentionedMemberIds: 'not-an-array' },
+        },
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('recovers an envelope carrying a valid mentionedMemberIds array', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([
+        {
+          ...task,
+          envelope: { ...task.envelope, mentionedMemberIds: ['member-x'] },
+        },
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.mentionedMemberIds).toEqual([
+        'member-x',
+      ]);
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('persists cancellation as a terminal task state', async () => {
@@ -3735,6 +4839,51 @@ describe('GithubChannel', () => {
     it('declares chat_thread as defaultSessionScope', async () => {
       const { plugin } = await import('./index.js');
       expect(plugin.defaultSessionScope).toBe('chat_thread');
+    });
+
+    it('allows explicit local gh authentication without a configured token', async () => {
+      const { plugin } = await import('./index.js');
+      const tokenField = plugin.management?.fields.find(
+        (field) => field.key === 'token',
+      );
+      const localGhField = plugin.management?.fields.find(
+        (field) => field.key === 'useLocalGh',
+      );
+      expect(plugin.requiredConfigFields).toBeUndefined();
+      expect(tokenField).toMatchObject({ kind: 'secret' });
+      expect(tokenField).not.toHaveProperty('required');
+      expect(localGhField).toMatchObject({ kind: 'boolean' });
+    });
+
+    it.each([
+      { label: 'no credential fields', config: {} },
+      { label: 'explicit opt-out', config: { useLocalGh: false } },
+      { label: 'blank token', config: { token: '   ' } },
+      {
+        label: 'cleared token with opt-out',
+        config: { token: '', useLocalGh: false },
+      },
+    ])('rejects a managed config with $label', async ({ config }) => {
+      const { plugin } = await import('./index.js');
+      expect(plugin.management?.validateConfig?.(config)).toBe(
+        'Channel requires a token or local GitHub CLI authentication (useLocalGh).',
+      );
+    });
+
+    it.each([
+      { label: 'literal token', config: { token: 'ghp_token' } },
+      {
+        label: 'environment reference token',
+        config: { token: '$GITHUB_TOKEN' },
+      },
+      { label: 'local gh opt-in', config: { useLocalGh: true } },
+      {
+        label: 'token and local gh opt-in',
+        config: { token: 'ghp_token', useLocalGh: true },
+      },
+    ])('accepts a managed config with $label', async ({ config }) => {
+      const { plugin } = await import('./index.js');
+      expect(plugin.management?.validateConfig?.(config)).toBeUndefined();
     });
   });
 

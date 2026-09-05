@@ -114,6 +114,41 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
+  it('can keep reads and writes user-memory-only', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeProjectMemory: false,
+        includeUserMemory: true,
+        restrictReadsToMemoryPaths: true,
+      }),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: getUserAutoMemoryRoot(),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getAutoMemoryRoot(projectRoot), 'project', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: getAutoMemoryRoot(projectRoot),
+      }),
+    ).resolves.toBe('deny');
+  });
+
   it('protects project pinned memory and aliases while leaving ordinary memory writable', async () => {
     const memoryRoot = getAutoMemoryRoot(projectRoot);
     const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
@@ -580,6 +615,100 @@ describe('createMemoryScopedAgentConfig', () => {
       }),
     ).resolves.toBe('deny');
   });
+
+  describe('registration-gate shim delegation (#10075)', () => {
+    it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
+      const gate = vi.fn().mockReturnValue(true);
+      const withGate: Pick<
+        PermissionManager,
+        'isToolDisabledByCoreToolsAllowList'
+      > = {
+        isToolDisabledByCoreToolsAllowList: gate,
+      };
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => withGate as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      expect(delegated.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        true,
+      );
+      expect(gate).toHaveBeenCalledWith(ToolNames.EDIT);
+
+      const noBase = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      expect(noBase.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        false,
+      );
+
+      // A base PM without the method (older shape) must not throw — the
+      // scheduler's own `typeof` guard relies on this returning false.
+      const legacyBase: Pick<PermissionManager, 'isToolEnabled'> = {
+        isToolEnabled: vi.fn().mockResolvedValue(true),
+      };
+      const legacy = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => legacyBase as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      expect(legacy.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        false,
+      );
+    });
+
+    it('getToolRegistrationStatus delegates when present, defaults to registered', async () => {
+      // Use a non-scoped tool: edit/write_file/shell short-circuit as
+      // scoped tools before the base delegation.
+      const status = vi.fn().mockResolvedValue('disabled');
+      const withStatus: Pick<PermissionManager, 'getToolRegistrationStatus'> = {
+        getToolRegistrationStatus: status,
+      };
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => withStatus as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      await expect(
+        delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      ).resolves.toBe('disabled');
+      expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+
+      const noBase = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      await expect(
+        noBase.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      ).resolves.toBe('registered');
+    });
+
+    it('gates the shell registration status on allowShell', async () => {
+      const disabled = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      await expect(
+        disabled.getToolRegistrationStatus(ToolNames.SHELL),
+      ).resolves.toBe('disabled');
+
+      const enabled = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot, {
+          allowShell: true,
+        }),
+      );
+      await expect(
+        enabled.getToolRegistrationStatus(ToolNames.SHELL),
+      ).resolves.toBe('registered');
+    });
+  });
 });
 
 describe('isAllowedMemoryPath with a symlinked project root', () => {
@@ -743,6 +872,48 @@ describe('isAllowedMemoryPath in default (shared) memory mode', () => {
 
     const memoryFile = path.join(root, 'project.md');
     expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
+  });
+
+  it('allows a managed project alias to a sibling project directory', async () => {
+    const projectsDir = path.join(tempDir, 'projects');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    clearAutoMemoryRootCache();
+
+    const managedRoot = getAutoMemoryRoot(projectRoot);
+    const canonicalProjectDir = path.join(projectsDir, 'canonical-project');
+    await fs.mkdir(path.join(canonicalProjectDir, 'memory'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      path.basename(canonicalProjectDir),
+      path.dirname(managedRoot),
+    );
+
+    expect(
+      isAllowedMemoryPath(
+        path.join(managedRoot, 'project', 'note.md'),
+        projectRoot,
+      ),
+    ).toBe(true);
+  });
+
+  it('denies a managed project alias that escapes the shared projects directory', async () => {
+    const projectsDir = path.join(tempDir, 'projects');
+    const outside = path.join(tempDir, 'outside');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    clearAutoMemoryRootCache();
+
+    const managedRoot = getAutoMemoryRoot(projectRoot);
+    await fs.mkdir(projectsDir, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await fs.symlink(outside, path.dirname(managedRoot));
+
+    expect(
+      isAllowedMemoryPath(
+        path.join(managedRoot, 'project', 'note.md'),
+        projectRoot,
+      ),
+    ).toBe(false);
   });
 
   it('denies a write when a symlink below the shared suffix escapes the anchor', async () => {

@@ -82,7 +82,7 @@ describe('settings-migration', () => {
 
   describe('V1 settings migration', () => {
     it('should migrate V1 settings forward through the chain on CLI startup', async () => {
-      rig.setup('v1-to-v3-migration');
+      await rig.setup('v1-to-v3-migration');
 
       // Write V1 settings directly (overwrites the one created by setup)
       overwriteSettingsFile(rig, v1Settings);
@@ -124,7 +124,7 @@ describe('settings-migration', () => {
     });
 
     it('should handle V1 settings with arrays and null values', async () => {
-      rig.setup('v1-array-and-null-migration');
+      await rig.setup('v1-array-and-null-migration');
 
       // Use fixture with arrays, null values, and string booleans
       overwriteSettingsFile(rig, v1ArrayAndNullSettings);
@@ -149,7 +149,7 @@ describe('settings-migration', () => {
     });
 
     it('should handle V1 settings with parent key collision', async () => {
-      rig.setup('v1-parent-collision-migration');
+      await rig.setup('v1-parent-collision-migration');
 
       // Use fixture where V1 flat keys (ui, general) conflict with V2/V3 nested structure
       overwriteSettingsFile(rig, v1ParentCollisionSettings);
@@ -175,7 +175,7 @@ describe('settings-migration', () => {
     });
 
     it('should handle V1 settings with string version and string booleans', async () => {
-      rig.setup('v1-string-version-migration');
+      await rig.setup('v1-string-version-migration');
 
       // Use fixture with $version as string and string boolean values
       overwriteSettingsFile(rig, v1VersionStringSettings);
@@ -212,7 +212,7 @@ describe('settings-migration', () => {
 
   describe('V2 settings migration', () => {
     it('should migrate V2 settings forward through the chain on CLI startup', async () => {
-      rig.setup('v2-to-v3-migration');
+      await rig.setup('v2-to-v3-migration');
 
       // Write V2 settings directly (overwrites the one created by setup)
       overwriteSettingsFile(rig, v2Settings);
@@ -278,7 +278,7 @@ describe('settings-migration', () => {
     });
 
     it('should handle V2 settings without any disable* keys', async () => {
-      rig.setup('v2-clean-migration');
+      await rig.setup('v2-clean-migration');
 
       // Use minimal V2 fixture and add ui/model settings without disable* keys
       const cleanV2Settings = {
@@ -310,7 +310,7 @@ describe('settings-migration', () => {
     });
 
     it('should normalize legacy numeric version with no migratable keys to current version', async () => {
-      rig.setup('legacy-version-normalization');
+      await rig.setup('legacy-version-normalization');
 
       // Use v1Settings fixture as base but with only custom key
       const legacyVersionWithoutMigratableKeys = {
@@ -336,7 +336,7 @@ describe('settings-migration', () => {
     });
 
     it('should coerce valid string booleans and remove invalid deprecated keys while bumping V2 forward through the chain', async () => {
-      rig.setup('v2-non-boolean-disable-values-migration');
+      await rig.setup('v2-non-boolean-disable-values-migration');
 
       // Cover both coercible string booleans and invalid non-boolean values:
       // - "TRUE"/"false" should be coerced and migrated
@@ -421,7 +421,7 @@ describe('settings-migration', () => {
     });
 
     it('should handle V2 settings with preexisting enable* keys', async () => {
-      rig.setup('v2-preexisting-enable-migration');
+      await rig.setup('v2-preexisting-enable-migration');
 
       // Use fixture with both disable* and enable* keys
       overwriteSettingsFile(rig, v2PreexistingEnableSettings);
@@ -486,7 +486,7 @@ describe('settings-migration', () => {
 
   describe('V3 settings handling', () => {
     it('should handle V3 settings with legacy disable* keys', async () => {
-      rig.setup('v3-legacy-disable-keys');
+      await rig.setup('v3-legacy-disable-keys');
 
       // Use fixture with V3 format but still has legacy disable* keys
       overwriteSettingsFile(rig, v3LegacyDisableSettings);
@@ -546,7 +546,7 @@ describe('settings-migration', () => {
     // CLI load → migrate → write path could regress without
     // this suite noticing.
     it('should expand legacy boolean general.gitCoAuthor: false through V3 → V4', async () => {
-      rig.setup('v3-gitcoauthor-boolean');
+      await rig.setup('v3-gitcoauthor-boolean');
 
       overwriteSettingsFile(rig, v3GitCoAuthorBooleanSettings);
 
@@ -577,7 +577,7 @@ describe('settings-migration', () => {
 
   describe('Future version settings handling', () => {
     it('should not modify future version settings', async () => {
-      rig.setup('v999-future-version');
+      await rig.setup('v999-future-version');
 
       // Use fixture with future version ($version: 999)
       overwriteSettingsFile(rig, v999FutureVersionSettings);
@@ -604,7 +604,7 @@ describe('settings-migration', () => {
 
   describe('Migration idempotency', () => {
     it('should produce consistent results when run multiple times on V1 settings', async () => {
-      rig.setup('v1-idempotency');
+      await rig.setup('v1-idempotency');
 
       overwriteSettingsFile(rig, v1Settings);
 
@@ -638,7 +638,7 @@ describe('settings-migration', () => {
 
   describe('Complex migration scenarios', () => {
     it('should preserve custom user settings during full migration chain', async () => {
-      rig.setup('preserve-custom-settings');
+      await rig.setup('preserve-custom-settings');
 
       // Use v1ComplexSettings fixture which has custom user settings
       overwriteSettingsFile(rig, v1ComplexSettings);

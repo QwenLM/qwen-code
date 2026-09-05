@@ -1,3 +1,4 @@
+import 'katex/dist/katex.min.css';
 import '../styles/globals.css';
 import {
   useLayoutEffect,
@@ -8,11 +9,7 @@ import {
   type ReactElement,
 } from 'react';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import {
-  CompactModeContext,
-  TodoDetailContext,
-  TodoTimelineContext,
-} from '../App';
+import { CompactModeContext, TodoContextsProvider } from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
@@ -41,14 +38,19 @@ import {
   WebShellThemeId,
   type WebShellTheme,
 } from '../themeContext';
-import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../transcriptRenderMode';
 import styles from '../App.module.css';
+import { McpAppHostContext } from '../mcpAppHostContext';
 
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 
 export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
+  renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   className?: string;
@@ -56,6 +58,7 @@ export interface WebShellTranscriptProps {
   chatMaxWidth?: number;
   workspaceCwd?: string;
   compactThinking?: boolean;
+  documentExpanded?: boolean;
   collapseCompletedTurns?: boolean;
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
@@ -67,6 +70,7 @@ export interface WebShellTranscriptProps {
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  mcpAppBaseUrl?: string;
 }
 
 function resolveLanguage(
@@ -99,6 +103,7 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
 
 function WebShellTranscriptContent({
   blocks,
+  renderMode = 'readonly',
   theme = WebShellThemeId.Dark,
   language,
   className,
@@ -106,7 +111,8 @@ function WebShellTranscriptContent({
   chatMaxWidth,
   workspaceCwd = '',
   compactThinking = false,
-  collapseCompletedTurns = true,
+  documentExpanded = true,
+  collapseCompletedTurns,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
@@ -117,12 +123,17 @@ function WebShellTranscriptContent({
   renderComposerTag,
   renderComposerTagTooltip,
   renderAssistantTurnFooter,
+  mcpAppBaseUrl,
 }: WebShellTranscriptProps): ReactElement {
+  const documentMode = renderMode === 'document';
+  const effectiveCollapseCompletedTurns =
+    !documentMode && (collapseCompletedTurns ?? true);
+  const effectiveMarkdownTableMode = documentMode ? 'basic' : markdownTableMode;
   const resolvedLanguage = resolveLanguage(language);
   const t = useMemo(() => getTranslator(resolvedLanguage), [resolvedLanguage]);
   const messages = useMemo(
-    () => transcriptBlocksToLocalizedMessages(blocks, t),
-    [blocks, t],
+    () => transcriptBlocksToLocalizedMessages(blocks, t, documentMode),
+    [blocks, documentMode, t],
   );
   const todoDetails = useMemo(() => computeTodoDetails(messages), [messages]);
   const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
@@ -136,16 +147,16 @@ function WebShellTranscriptContent({
       renderComposerTagTooltip,
       renderAssistantTurnFooter,
       compactThinking,
-      collapseCompletedTurns,
-      markdownTableMode,
+      collapseCompletedTurns: effectiveCollapseCompletedTurns,
+      markdownTableMode: effectiveMarkdownTableMode,
       markdown,
     }),
     [
-      collapseCompletedTurns,
+      effectiveCollapseCompletedTurns,
       compactThinking,
       composerTagIcons,
       markdown,
-      markdownTableMode,
+      effectiveMarkdownTableMode,
       parseUserMessageContent,
       renderAssistantTurnFooter,
       renderComposerTag,
@@ -233,38 +244,55 @@ function WebShellTranscriptContent({
   return (
     <ThemeProvider value={theme}>
       <I18nProvider language={resolvedLanguage}>
-        <WebShellPortalRootContext.Provider value={portalRoot}>
-          <TranscriptRenderModeProvider value="readonly">
-            <WebShellCustomizationProvider value={customization}>
-              <TodoTimelineContext.Provider value={todoTimeline}>
-                <TodoDetailContext.Provider value={todoDetails}>
-                  <CompactModeContext.Provider value={false}>
-                    <div
-                      ref={rootRef}
-                      className={rootClassName}
-                      style={rootStyle}
-                      data-web-shell-root
-                      data-web-shell-shadcn
-                      lang={resolvedLanguage}
-                    >
+        <McpAppHostContext.Provider value={mcpAppBaseUrl}>
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+            <TranscriptRenderModeProvider value={renderMode}>
+              <TranscriptDocumentExpandedProvider value={documentExpanded}>
+                <WebShellCustomizationProvider value={customization}>
+                  <TodoContextsProvider
+                    timeline={todoTimeline}
+                    details={todoDetails}
+                  >
+                    {/* Embedded read-only transcript API (not the main chat):
+                      keep tool groups unmerged so hosts see the full record,
+                      independent of the main app's always-on compact view. */}
+                    <CompactModeContext.Provider value={false}>
                       <div
-                        className={`${styles.content} ${styles.contentHasMessages}`}
+                        ref={rootRef}
+                        className={rootClassName}
+                        style={rootStyle}
+                        data-web-shell-root
+                        data-web-shell-shadcn
+                        data-transcript-render-mode={renderMode}
+                        data-document-expanded={
+                          documentMode ? String(documentExpanded) : undefined
+                        }
+                        lang={resolvedLanguage}
                       >
-                        <MessageList
-                          messages={messages}
-                          pendingApproval={null}
-                          isResponding={false}
-                          workspaceCwd={workspaceCwd}
-                          virtualScrollThreshold={virtualScrollThreshold}
-                        />
+                        <div
+                          className={`${styles.content} ${styles.contentHasMessages}`}
+                        >
+                          <MessageList
+                            messages={messages}
+                            pendingApproval={null}
+                            isResponding={false}
+                            workspaceCwd={workspaceCwd}
+                            virtualScrollThreshold={
+                              documentMode
+                                ? Number.MAX_SAFE_INTEGER
+                                : virtualScrollThreshold
+                            }
+                            hideSessionTimeline={documentMode}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  </CompactModeContext.Provider>
-                </TodoDetailContext.Provider>
-              </TodoTimelineContext.Provider>
-            </WebShellCustomizationProvider>
-          </TranscriptRenderModeProvider>
-        </WebShellPortalRootContext.Provider>
+                    </CompactModeContext.Provider>
+                  </TodoContextsProvider>
+                </WebShellCustomizationProvider>
+              </TranscriptDocumentExpandedProvider>
+            </TranscriptRenderModeProvider>
+          </WebShellPortalRootContext.Provider>
+        </McpAppHostContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );

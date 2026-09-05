@@ -44,13 +44,13 @@
 # fixed is still there" because the in-memory code is pre-fix.
 #
 # Layered escalation, in order of decreasing politeness:
-#   1. macOS: `launchctl unload <plist>` on the Rust LaunchAgent
-#      (com.trycua.cua-driver-rs.plist). Unload
+#   1. macOS: `launchctl unload <plist>` on the Qwen LaunchAgent
+#      (com.qwencode.qwen-cua-driver.plist). Unload
 #      is the documented way to stop a launchd-managed daemon — it
 #      also clears the KeepAlive flag so launchd doesn't immediately
 #      respawn the process we're about to kill. No-op (with stderr
 #      suppressed) when the plist isn't installed.
-#      Linux: `systemctl --user stop cua-driver-rs.service` for the
+#      Linux: `systemctl --user stop qwen-cua-driver.service` for the
 #      install-local --autostart path. Same shape — politely stop the
 #      supervisor first so it doesn't restart the process.
 #   2. `pkill -x qwen-cua-driver` as the backstop for processes that weren't
@@ -63,10 +63,9 @@
 #   product name so it coexists with any upstream `cua-driver` install —
 #   see build-app.sh `--identifier com.qwencode.cua-driver` and
 #   _install-rust.sh `BINARY_NAME="qwen-cua-driver"`). One `pkill -x
-#   qwen-cua-driver` targets exactly this fork's daemon. `cua-driver-uia`
-#   is a Windows-only helper (see
-#   packages/cua-driver/rust/crates/cua-driver-uia/) and never exists on
-#   macOS/Linux, so no pkill for it here.
+#   qwen-cua-driver` targets exactly this fork's daemon. The UIAccess helper
+#   is packaged only on Windows as `qwen-cua-driver-uia.exe`, so no pkill is
+#   needed for it here.
 #
 # Returns: always 0. Caller threads this through unconditionally; the
 # behaviour is "kill what we can, never block the install".
@@ -80,26 +79,22 @@ stop_cua_driver_daemons() {
     (
         case "$(uname -s 2>/dev/null || echo unknown)" in
             Darwin)
-                # Both known LaunchAgent plists. `launchctl unload` is a
-                # no-op-with-warning when the plist doesn't exist; swallow
-                # stderr to keep the install log clean.
+                # `launchctl unload` is a no-op-with-warning when the plist
+                # doesn't exist; swallow stderr to keep the install log clean.
                 local plist
-                # Rust LaunchAgent plist.
-                plist="$HOME/Library/LaunchAgents/com.trycua.cua-driver-rs.plist"
+                plist="$HOME/Library/LaunchAgents/com.qwencode.qwen-cua-driver.plist"
                 if [ -f "$plist" ]; then
-                    if [ -f "$plist" ]; then
-                        launchctl unload "$plist" >/dev/null 2>&1 || true
-                    fi
+                    launchctl unload "$plist" >/dev/null 2>&1 || true
                 fi
                 ;;
             Linux)
                 # systemctl --user is the only supported supervisor on
                 # Linux today (install-local-rust.sh --autostart writes
-                # ~/.config/systemd/user/cua-driver-rs.service). `command
+                # ~/.config/systemd/user/qwen-cua-driver.service). `command
                 # -v` so we don't error on systemd-less hosts (musl
                 # containers, NixOS without user services, etc.).
                 if command -v systemctl >/dev/null 2>&1; then
-                    systemctl --user stop cua-driver-rs.service >/dev/null 2>&1 || true
+                    systemctl --user stop qwen-cua-driver.service >/dev/null 2>&1 || true
                 fi
                 ;;
             *)

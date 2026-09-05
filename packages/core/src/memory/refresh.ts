@@ -6,8 +6,9 @@
 
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getAllMemoryFilenames } from '../utils/memory-constants.js';
 import { isAllowedMemoryPath } from './memory-scoped-agent-config.js';
 import {
   rebuildManagedAutoMemoryIndex,
@@ -30,10 +31,6 @@ const WRITE_TOOL_NAMES = new Set<string>([
   ToolNames.WRITE_FILE,
   ToolNames.EDIT,
 ]);
-
-function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-}
 
 function candidateFilePath(
   args: Record<string, unknown> | undefined,
@@ -91,6 +88,30 @@ export function didWriteManagedMemory(
   );
 }
 
+export function didWriteProjectContextFile(
+  candidates: readonly MemoryWriteCandidate[],
+  projectRoot: string,
+): boolean {
+  const contextFilePaths = new Set(
+    getAllMemoryFilenames()
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0)
+      .map((name) => path.resolve(projectRoot, name)),
+  );
+
+  return candidates.some((candidate) => {
+    if (!isSuccessfulWrite(candidate)) {
+      return false;
+    }
+
+    const filePath = candidateFilePath(candidate.args);
+    return (
+      filePath !== undefined &&
+      contextFilePaths.has(resolveCandidatePath(filePath, projectRoot))
+    );
+  });
+}
+
 async function rebuildWrittenMemoryIndexes(
   candidates: readonly MemoryWriteCandidate[],
   projectRoot: string,
@@ -136,7 +157,7 @@ export async function refreshMemoryInstruction(
   }
 
   try {
-    await config.getGeminiClient()?.refreshSystemInstruction();
+    await config.getLlmClient()?.refreshSystemInstruction();
   } catch (err) {
     debugLogger.warn(
       `${logPrefix(options)}refreshSystemInstruction failed: ${err}`,

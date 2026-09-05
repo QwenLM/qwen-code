@@ -15,11 +15,13 @@ vi.mock('../BranchPickerPopover', async () => {
       open,
       onOpenChange,
       side,
+      status,
     }: {
       children: ReactNode;
       open: boolean;
       onOpenChange: (open: boolean) => void;
       side?: string;
+      status?: { branch: string | null; operation?: string };
     }) =>
       createElement(
         'div',
@@ -27,6 +29,8 @@ vi.mock('../BranchPickerPopover', async () => {
           'data-testid': 'branch-picker',
           'data-open': open,
           'data-side': side,
+          'data-status-branch': status?.branch ?? undefined,
+          'data-status-operation': status?.operation ?? undefined,
           onClick: () => onOpenChange(true),
         },
         children,
@@ -124,6 +128,26 @@ describe('EnvironmentPanel', () => {
     expect(view.textContent).toContain('Environment');
     expect(view.textContent).toContain('Unavailable');
     expect(view.textContent).not.toContain('Clean');
+  });
+
+  it('hands its git status to the branch picker for the action hints', () => {
+    const view = mount({
+      gitWorkspaceCwd: '/work/qwen-code',
+      gitCwd: '/work/qwen-code',
+      gitStatus: {
+        v: 2,
+        workspaceCwd: '/work/qwen-code',
+        branch: 'feat/context-panels',
+        operation: 'rebase',
+        computedAt: 1,
+      },
+    });
+
+    const picker = view.querySelector('[data-testid="branch-picker"]');
+    expect(picker?.getAttribute('data-status-branch')).toBe(
+      'feat/context-panels',
+    );
+    expect(picker?.getAttribute('data-status-operation')).toBe('rebase');
   });
 
   it('opens the branch actions without dismissing a floating panel', () => {
@@ -275,14 +299,6 @@ describe('EnvironmentPanel', () => {
     ];
     const view = mount({ tasks });
 
-    expect(view.querySelectorAll('button[aria-expanded="false"]')).toHaveLength(
-      2,
-    );
-    expect(view.textContent).not.toContain('Explore code');
-
-    toggleSection(view, 'Subagents');
-    toggleSection(view, 'Background tasks');
-
     expect(
       view.querySelectorAll('button[aria-expanded="true"] svg'),
     ).toHaveLength(0);
@@ -349,7 +365,6 @@ describe('EnvironmentPanel', () => {
     };
     const view = mount({ tasks: [task], onOpenAgent });
 
-    toggleSection(view, 'Subagents');
     const item = Array.from(
       view.querySelectorAll<HTMLButtonElement>('ul button'),
     ).find((button) => button.textContent?.includes('Review current changes'));
@@ -360,6 +375,31 @@ describe('EnvironmentPanel', () => {
     expect(item?.querySelector('[data-agent-color]')).toBeNull();
     act(() => item?.click());
     expect(onOpenAgent).toHaveBeenCalledWith(task);
+  });
+
+  it('opens the agent workflow from the subagent section', () => {
+    const onOpenAgentWorkflow = vi.fn();
+    const view = mount({
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          label: 'Reviewer',
+          description: 'Review code',
+          status: 'completed',
+          startTime: 1,
+          runtimeMs: 1,
+          isBackgrounded: true,
+        },
+      ],
+      onOpenAgentWorkflow,
+    });
+
+    const button = view.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open agent workflow"]',
+    );
+    act(() => button?.click());
+    expect(onOpenAgentWorkflow).toHaveBeenCalledOnce();
   });
 
   it('shows the configured subagent color as a leading dot', () => {
@@ -378,8 +418,6 @@ describe('EnvironmentPanel', () => {
         },
       ],
     });
-
-    toggleSection(view, 'Subagents');
 
     const color = view.querySelector<HTMLElement>(
       '[data-agent-color="purple"]',
@@ -404,8 +442,6 @@ describe('EnvironmentPanel', () => {
         },
       ],
     });
-
-    toggleSection(view, 'Subagents');
 
     const color = view.querySelector<HTMLElement>(
       '[data-agent-color="default"]',
@@ -433,8 +469,6 @@ describe('EnvironmentPanel', () => {
       tasks: [],
       agentTasks: agentTasks.filter((task) => task.kind === 'agent'),
     });
-
-    toggleSection(view, 'Subagents');
 
     expect(view.textContent).toContain('Explore code');
     expect(view.textContent).toContain('Completed');
@@ -469,8 +503,6 @@ describe('EnvironmentPanel', () => {
       tasks: [],
       agentTasks: agentTasks.filter((task) => task.kind === 'agent'),
     });
-
-    toggleSection(view, 'Subagents');
 
     expect(view.textContent).toContain('Agent (1)');
     expect(view.textContent).toContain('Agent (2)');
@@ -528,5 +560,146 @@ describe('EnvironmentPanel', () => {
 
     expect(onOpenAgent).toHaveBeenCalledOnce();
     expect(onOpenTask).toHaveBeenCalledOnce();
+  });
+
+  it('lists uploaded images and files under the attachments section', async () => {
+    const onImagePreview = vi.fn();
+    const onAttachmentPreview = vi.fn();
+    const onReadImage = vi.fn(async () => 'data:image/png;base64,AQID');
+    const view = mount({
+      attachments: [
+        {
+          type: 'image',
+          attachmentId: 'photo.png',
+          mimeType: 'image/png',
+          size: 3,
+        },
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        },
+      ],
+      onReadImage,
+      onImagePreview,
+      onAttachmentPreview,
+    });
+
+    const header = Array.from(
+      view.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('Attachments'));
+    expect(header?.textContent).toContain('Attachments');
+    expect(view.textContent).toContain('notes.txt');
+    expect(view.querySelector('img')).toBeNull();
+    expect(onReadImage).not.toHaveBeenCalled();
+
+    const imageRow = Array.from(view.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('photo.png'),
+    );
+    await act(async () => imageRow?.click());
+    expect(onReadImage).toHaveBeenCalledWith('photo.png');
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,AQID',
+      'photo.png',
+      { kind: 'attachment', attachmentId: 'photo.png' },
+    );
+
+    const fileRow = Array.from(view.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('notes.txt'),
+    );
+    act(() => fileRow?.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'notes.txt',
+    });
+  });
+
+  it('hides the attachments section when the session has none', () => {
+    const view = mount();
+
+    expect(view.textContent).not.toContain('Attachments');
+    expect(view.textContent).toContain('Artifacts');
+  });
+
+  it('does not read an image until its name is clicked', async () => {
+    const error = new Error('attachment gone');
+    const onReadImage = vi.fn(async () => {
+      throw error;
+    });
+    const onAttachmentPreviewError = vi.fn();
+    const view = mount({
+      attachments: [
+        {
+          type: 'image',
+          attachmentId: 'photo.png',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+      onReadImage,
+      onAttachmentPreviewError,
+    });
+
+    expect(onReadImage).not.toHaveBeenCalled();
+    expect(view.querySelector('img')).toBeNull();
+
+    const imageRow = Array.from(view.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('photo.png'),
+    );
+    await act(async () => imageRow?.click());
+    expect(onAttachmentPreviewError).toHaveBeenCalledWith(error);
+  });
+
+  it('lists artifacts in a separate expanded section', () => {
+    const onOpenArtifact = vi.fn();
+    const view = mount({
+      artifacts: [
+        {
+          id: 'artifact-1',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report.md',
+          workspacePath: 'reports/report.md',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          updatedAt: '2026-08-26T00:00:00.000Z',
+        },
+      ],
+      onOpenArtifact,
+    });
+
+    expect(view.textContent).toContain('Artifacts');
+    expect(view.textContent).toContain('report.md');
+    const row = Array.from(view.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('report.md'),
+    );
+    act(() => row?.click());
+    expect(onOpenArtifact).toHaveBeenCalledWith('artifact-1');
+  });
+
+  it('describes the empty artifacts section', () => {
+    const view = mount({ artifacts: [] });
+
+    expect(view.textContent).toContain(
+      'Artifacts generated in this session will appear here.',
+    );
+  });
+
+  it('shows placeholders while attachments and artifacts load', () => {
+    const view = mount({
+      attachmentsLoading: true,
+      artifactsLoading: true,
+    });
+
+    expect(view.textContent).toContain('Attachments');
+    expect(view.textContent).toContain('Artifacts');
+    expect(
+      view.querySelectorAll('[data-testid="environment-file-list-skeleton"]'),
+    ).toHaveLength(2);
   });
 });

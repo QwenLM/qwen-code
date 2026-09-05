@@ -64,7 +64,7 @@ vi.mock('../utils/processUtils.js', () => ({
   requestUpdateOnExit: (...args: unknown[]) => mockRequestUpdateOnExit(...args),
 }));
 
-vi.mock('../utils/handleAutoUpdate.js', () => ({
+vi.mock('../ui/handleAutoUpdate.js', () => ({
   handleAutoUpdate: (...args: unknown[]) => mockHandleAutoUpdate(...args),
 }));
 
@@ -92,7 +92,7 @@ vi.mock('../core/initializer.js', () => ({
     mockConnectIdeForStartup(...args),
 }));
 
-vi.mock('../utils/housekeeping/scheduler.js', () => ({
+vi.mock('../services/housekeeping/scheduler.js', () => ({
   startBackgroundHousekeeping: (...args: unknown[]) =>
     mockStartBackgroundHousekeeping(...args),
 }));

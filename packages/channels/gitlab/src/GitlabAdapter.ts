@@ -76,9 +76,13 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
 
-    if (cfg.groupPolicy !== 'open' && cfg.groupPolicy !== 'allowlist') {
+    if (
+      cfg.groupPolicy !== 'open' &&
+      cfg.groupPolicy !== 'allowlist' &&
+      cfg.groupPolicy !== 'pairing'
+    ) {
       process.stderr.write(
-        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open" (or "allowlist" with the project listed) for todos to be dispatched\n`,
+        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open", "allowlist" (with the project listed), or "pairing" (after one-time group approval) for todos to be dispatched\n`,
       );
     }
 
@@ -113,6 +117,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!threadId) {
       throw new Error(
@@ -126,7 +131,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
     const targetType = threadId.startsWith('mr:') ? 'mr' : 'issue';
-    await this.createNote(chatId, targetType, Number(match[1]), text);
+    await this.createNote(
+      chatId,
+      targetType,
+      Number(match[1]),
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override onPromptStart(
@@ -343,6 +353,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       ),
       true,
     );
+    const isMentionTrigger =
+      todo.action_name === 'mentioned' ||
+      todo.action_name === 'directly_addressed';
+    if (!isNoteMention && !isMentionTrigger) {
+      envelope.bypassMessagePrefix = true;
+    }
 
     if (isNoteMention) {
       this.reactions.set(messageId, {
@@ -352,6 +368,23 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
     try {
       await this.handleInbound(envelope);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
+      );
+      try {
+        await this.createNote(
+          chatId,
+          targetType,
+          target.iid,
+          this.formatMarkdownAttributedText(
+            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            this.getInboundErrorSourceLabel(envelope),
+          ),
+        );
+      } catch {
+        // best-effort error comment
+      }
     } finally {
       this.reactions.delete(messageId);
     }

@@ -47,7 +47,9 @@
  *   QWEN_TUI_E2E_OUT               output dir (default under os.tmpdir())
  *   QWEN_TUI_E2E_REPO              repo root whose dist/cli.js is launched
  */
-import { createServer, type AddressInfo } from 'node:http';
+import { createServer } from 'node:http';
+// AddressInfo is declared by node:net, not node:http.
+import type { AddressInfo } from 'node:net';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';

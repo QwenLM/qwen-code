@@ -141,6 +141,11 @@ export const PluginDetailView = ({
             {redactUrlCredentials(ext.installMetadata.source)}
           </InfoRow>
         )}
+        {ext.installMetadata?.originSource && (
+          <InfoRow label={t('Origin:')}>
+            {ext.installMetadata.originSource}
+          </InfoRow>
+        )}
         <InfoRow label={t('Components:')}>{componentSummary(ext)}</InfoRow>
       </Box>
 

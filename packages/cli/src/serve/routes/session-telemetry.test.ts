@@ -222,6 +222,7 @@ describe('special session resolver telemetry publication', () => {
       secondaryCwd,
       'secondary-session',
       path.join(secondaryCwd, '.runtime'),
+      { allowActiveConflict: true },
     );
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
@@ -265,11 +266,13 @@ describe('special session resolver telemetry publication', () => {
       primaryCwd,
       'stored-secondary',
       path.join(primaryCwd, '.runtime'),
+      { allowActiveConflict: false },
     );
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       secondaryCwd,
       'stored-secondary',
       path.join(secondaryCwd, '.runtime'),
+      { allowActiveConflict: false },
     );
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(

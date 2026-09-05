@@ -25,6 +25,7 @@ import type {
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
 import {
   readAgentViewSupervisor,
+  writeAgentViewSupervisor,
   writeAgentViewSessionState,
 } from './supervisor-store.js';
 
@@ -325,7 +326,7 @@ describe('Agent View supervisor runner', () => {
     await expect(handle.shutdown(false)).resolves.toEqual({
       shuttingDown: true,
     });
-    expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: false });
+    expect(handler.shutdown).toHaveBeenCalledOnce();
   });
 
   it('closes the supervisor server when shutdown is requested', async () => {
@@ -353,6 +354,38 @@ describe('Agent View supervisor runner', () => {
     await supervisorPromise;
 
     await expectSupervisorUnreachable(socketPath, authToken);
+    await expect(readAgentViewSupervisor({ globalDir })).resolves.toMatchObject(
+      {
+        pid: process.pid,
+        authToken,
+      },
+    );
+  });
+
+  it('does not remove metadata written by a replacement supervisor', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const supervisorPromise = runAgentViewSupervisor({ globalDir });
+
+    await waitForSupervisor(socketPath, globalDir);
+    const authToken = await readAuthToken(globalDir);
+    const replacement = {
+      schemaVersion: 1 as const,
+      pid: process.pid + 1,
+      socketPath: `${socketPath}.replacement`,
+      authToken: 'replacement-token',
+      startedAt: '2026-08-20T00:00:00.000Z',
+      updatedAt: '2026-08-20T00:00:00.000Z',
+      protocolVersion: 1,
+    };
+    await writeAgentViewSupervisor(replacement, { globalDir });
+    await callAgentViewSupervisor(socketPath, 'shutdown', undefined, {
+      authToken,
+    });
+    await supervisorPromise;
+
+    await expect(readAgentViewSupervisor({ globalDir })).resolves.toEqual(
+      replacement,
+    );
   });
 
   it('auto-exits when maintenance sees only hibernated managed sessions', async () => {

@@ -15,7 +15,7 @@ import {
   type ProviderConfig,
   type ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
@@ -106,6 +106,10 @@ export const useAuthCommand = (
     isAuthenticating,
   );
 
+  // The dialog also auto-opens at startup when unauthenticated; only a
+  // command-opened dialog has an /auth invocation record to pair with.
+  const openedViaCommandRef = useRef(false);
+
   // -- Shared helpers -------------------------------------------------------
 
   const onAuthError = useCallback(
@@ -181,16 +185,22 @@ export const useAuthCommand = (
 
         completeAuthentication();
 
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: t(
-              'Successfully configured {{provider}}. Use /model to switch models.',
-              { provider: providerConfig.label },
-            ),
-          },
-          Date.now(),
-        );
+        const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+          type: MessageType.INFO,
+          text: t(
+            'Successfully configured {{provider}}. Use /model to switch models.',
+            { provider: providerConfig.label },
+          ),
+        };
+        addItem(feedbackItem, Date.now());
+        if (openedViaCommandRef.current) {
+          openedViaCommandRef.current = false;
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/auth',
+            outputHistoryItems: [feedbackItem],
+          });
+        }
 
         logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
       } catch (error) {
@@ -205,10 +215,12 @@ export const useAuthCommand = (
   // -- Dialog open / close / cancel ----------------------------------------
 
   const openAuthDialog = useCallback(() => {
+    openedViaCommandRef.current = true;
     setIsAuthDialogOpen(true);
   }, []);
 
   const closeAuthDialog = useCallback(() => {
+    openedViaCommandRef.current = false;
     setIsAuthDialogOpen(false);
     setAuthError(null);
   }, []);

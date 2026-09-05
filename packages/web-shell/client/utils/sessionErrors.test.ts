@@ -6,6 +6,9 @@ describe('isSessionDisconnectedError', () => {
     expect(
       isSessionDisconnectedError(new Error('Daemon session is not connected')),
     ).toBe(true);
+    expect(isSessionDisconnectedError(new TypeError('fetch failed'))).toBe(
+      false,
+    );
     expect(
       isSessionDisconnectedError(
         new Error('Get tasks failed: Daemon session is not connected'),

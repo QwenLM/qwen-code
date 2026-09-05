@@ -12,6 +12,7 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
+import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -20,7 +21,9 @@ import type {
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import { createDaemonToolResultTextPreview } from './toolPreview.js';
 import {
+  capDetails,
   getFirstString,
   getOutputText,
   getString,
@@ -42,6 +45,9 @@ type NormalizedEventBase = Pick<
   | 'eventId'
   | 'serverTimestamp'
   | 'sourceRecordIds'
+  | 'segmentId'
+  | 'promptId'
+  | 'branchRecordId'
   | 'originatorClientId'
   | 'rawEvent'
 >;
@@ -56,9 +62,10 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
 ]);
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
-const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
+
+const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -386,9 +393,9 @@ export function normalizeDaemonEvent(
       // unknown event types, the doubled block-consumption rate
       // accelerated `maxBlocks` trimming of real content. The `debug`
       // shape already carries the event-type as a prefix, so the
-      // status block was redundant. Adapters that want a user-visible
-      // banner can pattern-match on `event.type === 'debug'` and the
-      // text prefix.
+      // status block was redundant. Adapters deciding how to present a
+      // debug block must branch on `debugReason` — the text prefix is
+      // diagnostic wording and changes without notice.
       return normalizeUnrecognizedEvent(event, base);
   }
 }
@@ -401,7 +408,11 @@ function normalizeUnrecognizedEvent(
     {
       ...base,
       type: 'debug',
-      text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+      debugReason: 'unrecognized_event',
+      text: debugBlockText(
+        `${event.type} (unrecognized daemon event)`,
+        event.data,
+      ),
     },
   ];
 }
@@ -443,6 +454,7 @@ function normalizeHistoryTruncated(
   const truncatedEvents = numberField(event.data, 'truncatedEvents');
   const retainedEvents = numberField(event.data, 'retainedEvents');
   const maxBytes = numberField(event.data, 'maxBytes');
+  const maxEvents = numberField(event.data, 'maxEvents');
   if (
     reason !== 'replay_window_exceeded' ||
     truncatedEvents === undefined ||
@@ -453,12 +465,50 @@ function normalizeHistoryTruncated(
   ) {
     return fallbackDebug(event, base, 'malformed history_truncated payload');
   }
+  const scope = getString(event.data, 'scope');
+  if (
+    (event.data['scope'] !== undefined && !scope) ||
+    (event.data['maxEvents'] !== undefined &&
+      (maxEvents === undefined ||
+        !Number.isInteger(maxEvents) ||
+        maxEvents < 0))
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  const fullTranscriptAvailable = event.data['fullTranscriptAvailable'];
+  const limits = [
+    maxEvents === undefined
+      ? undefined
+      : `${maxEvents} ${scope === 'live_journal' ? 'replay entries' : 'events'}`,
+    `${maxBytes} bytes`,
+  ]
+    .filter((limit): limit is string => limit !== undefined)
+    .join(' / ');
+  const text =
+    scope === 'live_journal'
+      ? `History truncated for live turn replay: kept the latest ${retainedEvents} source events and dropped ${truncatedEvents} older source events (limits: ${limits}). ${
+          fullTranscriptAvailable
+            ? 'Complete content remains available after the turn finishes.'
+            : 'Complete content is not available for automatic recovery.'
+        }`
+      : scope === undefined
+        ? `History truncated in replay history: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+            fullTranscriptAvailable
+              ? 'Older content remains available from the full transcript.'
+              : 'Older content is not available from a full transcript.'
+          }`
+        : `History truncated: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+            fullTranscriptAvailable
+              ? 'Full transcript content remains available.'
+              : 'Full transcript content is not available.'
+          }`;
   return [
     {
       ...base,
       type: 'status',
-      text: `History truncated: retained ${retainedEvents}, dropped ${truncatedEvents} (window ${maxBytes} bytes).`,
+      text,
       source: 'history_truncated',
+      data: event.data,
     },
   ];
 }
@@ -533,24 +583,68 @@ function normalizeMidTurnMessageInjected(
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  const messages = Array.isArray(event.data['messages'])
-    ? event.data['messages'].filter(
-        (message): message is string =>
-          typeof message === 'string' && message.length > 0,
-      )
-    : [];
-  if (messages.length === 0) {
+  const data = event.data;
+  const rawMessages = data['messages'];
+  const messages =
+    Array.isArray(rawMessages) &&
+    rawMessages.every(
+      (message): message is string => typeof message === 'string',
+    )
+      ? rawMessages
+      : [];
+  const items = data['items'];
+  // An injected message is renderable when its text is non-empty OR its
+  // content carries an image, resource, or non-empty text block. The drain's
+  // degraded-media path publishes `messages: ['']` whose items hold only the
+  // '[Attachment is no longer available]' text block — dropping that
+  // frame as malformed would erase the echo of the user's message.
+  const hasRenderableItemContent =
+    Array.isArray(items) &&
+    items.some(
+      (item) =>
+        isRecord(item) &&
+        Array.isArray(item['content']) &&
+        item['content'].some(
+          (block) =>
+            isRecord(block) &&
+            (block['type'] === 'image' ||
+              block['type'] === 'resource' ||
+              (block['type'] === 'text' &&
+                typeof block['text'] === 'string' &&
+                (block['text'] as string).length > 0)),
+        ),
+    );
+  if (
+    messages.length === 0 ||
+    (!messages.some(Boolean) && !hasRenderableItemContent)
+  ) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  return [
-    {
+  const messageIds = Array.isArray(data['messageIds'])
+    ? data['messageIds']
+    : [];
+  return messages.map((text, index) => {
+    const item = Array.isArray(items) ? items[index] : undefined;
+    const messageId = messageIds[index];
+    return {
       ...base,
       type: 'status',
-      text: `Inserted message: ${messages.join('\n')}`,
+      text,
       source: 'mid_turn_message_injected',
-      data: event.data,
-    },
-  ];
+      data: {
+        ...data,
+        messages: [text],
+        ...(Array.isArray(items)
+          ? { items: item !== undefined ? [item] : [] }
+          : {}),
+        ...(typeof messageId === 'string'
+          ? { messageIds: [messageId] }
+          : Array.isArray(data['messageIds'])
+            ? { messageIds: [] }
+            : {}),
+      },
+    };
+  });
 }
 
 function createBase(
@@ -559,10 +653,15 @@ function createBase(
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
   const sourceRecordIds = extractSourceRecordIds(event);
+  const segmentId = extractTranscriptSegmentId(event);
+  const branchRecordId = extractBranchRecordId(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(segmentId ? { segmentId } : {}),
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -570,6 +669,31 @@ function createBase(
       ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
       : {}),
   };
+}
+
+function extractTranscriptSegmentId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const segmentId = getString(transcript, 'segmentId');
+  return segmentId && segmentId.length <= 512 ? segmentId : undefined;
+}
+
+function extractBranchRecordId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  return transcript ? getString(transcript, 'branchRecordId') : undefined;
 }
 
 /**
@@ -634,6 +758,24 @@ function parseTimestamp(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/**
+ * True for the session-attachment reference shape (`attachmentId` instead of inline
+ * data/url/source) that replay producers persist for uploaded attachments.
+ * `extractContentPart` cannot render it; see the `user_message_chunk` case
+ * below for how it degrades instead of vanishing.
+ */
+function isAttachmentReferenceContent(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value['type'] === 'image' || value['type'] === 'resource') &&
+    typeof value['attachmentId'] === 'string' &&
+    (value['attachmentId'] as string).length > 0 &&
+    value['data'] === undefined &&
+    value['url'] === undefined &&
+    value['source'] === undefined
+  );
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -645,7 +787,8 @@ function normalizeSessionUpdate(
       {
         ...base,
         type: 'debug',
-        text: `session_update: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText('session_update', event.data),
       },
     ];
   }
@@ -679,7 +822,21 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
-            return [{ ...base, type: 'user.image.delta', data, mimeType }];
+            const contentRecord = isRecord(content) ? content : undefined;
+            const attachmentId =
+              typeof contentRecord?.['attachmentId'] === 'string'
+                ? (contentRecord['attachmentId'] as string)
+                : undefined;
+            return [
+              {
+                ...base,
+                type: 'user.image.delta',
+                data,
+                mimeType,
+                ...(attachmentId ? { attachmentId } : {}),
+                ...(meta ? { meta } : {}),
+              },
+            ];
           }
           return [];
         }
@@ -696,6 +853,35 @@ function normalizeSessionUpdate(
             : [];
         }
         return [];
+      }
+      // Live consumers hydrate reference blocks before normalization; a path
+      // that reaches this point with one (offline record projection, failed
+      // hydrate) keeps the user's message visible via the placeholder.
+      if (isAttachmentReferenceContent(content)) {
+        if ((content as Record<string, unknown>)['type'] === 'resource') {
+          const attachmentId = (content as Record<string, unknown>)[
+            'attachmentId'
+          ] as string;
+          const mimeType = (content as Record<string, unknown>)['mimeType'];
+          return [
+            {
+              ...base,
+              type: 'user.file.delta',
+              name: attachmentId,
+              attachmentId,
+              mimeType: typeof mimeType === 'string' ? mimeType : '',
+              ...(meta ? { meta } : {}),
+            },
+          ];
+        }
+        return [
+          {
+            ...base,
+            type: 'user.text.delta',
+            text: ATTACHMENT_UNAVAILABLE_TEXT,
+            ...(meta ? { meta } : {}),
+          },
+        ];
       }
       const text = getTextContent(content);
       return text
@@ -741,12 +927,14 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const meta = extractUpdateMeta(update);
       return [
         {
           ...base,
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(meta ? { meta } : {}),
         },
       ];
     }
@@ -802,13 +990,24 @@ function normalizeSessionUpdate(
     case 'plan':
       return [normalizePlanUpdate(update, base)];
     case 'current_mode_update':
+    case 'usage_update':
       return [];
     default:
       return [
         {
           ...base,
           type: 'debug',
-          text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
+          // `getSessionUpdatePayload` accepts any record, so `kind` is
+          // `undefined` for a payload whose discriminator is missing, empty or
+          // not a string. That is a broken frame, not a kind from a newer
+          // daemon — classifying it as unrecognized would hide the only
+          // diagnostic a malformed `session_update` produces. A whitespace-only
+          // discriminator is truthy but no more usable than an empty one, so
+          // apply the same `trim()` convention `getFirstString` uses.
+          debugReason: kind?.trim()
+            ? 'unrecognized_session_update'
+            : 'malformed_payload',
+          text: debugBlockText(kind ?? 'session_update', update),
         },
       ];
   }
@@ -881,6 +1080,13 @@ function normalizeToolUpdate(
   base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    metadata && isRecord(metadata['qwenTranscript'])
+      ? metadata['qwenTranscript']
+      : undefined;
+  const resultPreview = createDaemonToolResultTextPreview(
+    getString(transcript, 'resultPreviewText') ?? '',
+  );
   const toolName =
     getString(update, 'toolName') ??
     getString(update, 'name') ??
@@ -964,6 +1170,7 @@ function normalizeToolUpdate(
     ...(subagentType ? { subagentType } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
+    ...(resultPreview ? { resultPreview } : {}),
     ...(rawInput !== undefined
       ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
@@ -995,6 +1202,7 @@ function normalizePlanUpdate(
   const todoPlan =
     meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
   const planId = getString(todoPlan, 'id');
+  const sessionWorkflow = meta?.['qwenSessionWorkflow'] === true;
   return {
     ...base,
     type: 'tool.update',
@@ -1013,6 +1221,7 @@ function normalizePlanUpdate(
       entries,
       ...(stats ? { stats } : {}),
       ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
     },
   };
 }
@@ -1083,9 +1292,15 @@ function asDaemonErrorKind(
     : undefined;
 }
 
-function capDetails(details: string): string {
-  if (details.length <= MAX_DETAILS_LENGTH) return details;
-  return `${details.slice(0, MAX_DETAILS_LENGTH)}... [truncated]`;
+/**
+ * Builds the `text` of a `debug` block that embeds an unrecognized or
+ * malformed payload, capped at the producer. One such block is appended per
+ * frame, so a high-frequency frame could otherwise accumulate 100KB blocks up
+ * to the transcript block cap; capping here means a future debug branch
+ * cannot drop the cap.
+ */
+function debugBlockText(prefix: string, data: unknown): string {
+  return capDetails(`${prefix}: ${stringifyRedactedJson(data)}`);
 }
 
 function normalizePermissionRequest(
@@ -1097,7 +1312,8 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -1108,7 +1324,8 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -1141,7 +1358,8 @@ function normalizePermissionResolved(
       {
         ...base,
         type: 'debug',
-        text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+        debugReason: 'malformed_payload',
+        text: debugBlockText(event.type, event.data),
       },
     ];
   }
@@ -1250,6 +1468,7 @@ function fallbackDebug(
     {
       ...base,
       type: 'debug',
+      debugReason: 'malformed_payload',
       text: `${event.type}: ${reason}`,
     },
   ];
@@ -1436,6 +1655,7 @@ function normalizeSettingsChanged(
   if (!key) {
     return fallbackDebug(event, base, 'malformed settings_changed payload');
   }
+  const mutation = isSettingsChangedData(event.data) && event.data.mutation;
   return [
     {
       ...base,
@@ -1443,6 +1663,7 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+      ...(mutation ? { mutation } : {}),
     },
   ];
 }

@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PairingStore } from '@qwen-code/channel-base';
+import type { CreatePairingRequestResult } from '@qwen-code/channel-base';
 import { pairingListCommand, pairingApproveCommand } from './pairing.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -53,6 +54,13 @@ describe('channel pairing CLI (--cwd scoping)', () => {
     }
   });
 
+  function codeOf(result: CreatePairingRequestResult): string {
+    if ('code' in result) return result.code;
+    throw new Error(
+      `expected a pairing code, got rejection "${result.rejected}"`,
+    );
+  }
+
   const stdoutText = () =>
     vi
       .mocked(writeStdoutLine)
@@ -93,7 +101,7 @@ describe('channel pairing CLI (--cwd scoping)', () => {
 
   it('approve acts on the --cwd workspace and leaves the other untouched', () => {
     const storeA = new PairingStore('support-bot', wsA);
-    const code = storeA.createRequest('user-alice', 'Alice')!;
+    const code = codeOf(storeA.createRequest('user-alice', 'Alice'));
     new PairingStore('support-bot', wsB).createRequest('user-bob', 'Bob');
 
     pairingApproveCommand.handler!({
@@ -114,11 +122,45 @@ describe('channel pairing CLI (--cwd scoping)', () => {
     );
   });
 
+  it('lists and approves a group request as a group', () => {
+    const store = new PairingStore('support-bot', wsA);
+    const code = codeOf(
+      store.createGroupRequest(
+        'group-1',
+        'Release Team',
+        'user-alice',
+        'Alice',
+      ),
+    );
+
+    pairingListCommand.handler!({
+      name: 'support-bot',
+      cwd: wsA,
+      _: [],
+      $0: '',
+    } as unknown as ListArgs);
+    expect(stdoutText()).toContain('Group: Release Team (group-1)');
+    expect(stdoutText()).toContain('Requested by: Alice (user-alice)');
+
+    pairingApproveCommand.handler!({
+      name: 'support-bot',
+      code,
+      cwd: wsA,
+      _: [],
+      $0: '',
+    } as unknown as Parameters<
+      NonNullable<typeof pairingApproveCommand.handler>
+    >[0]);
+
+    expect(store.isGroupApproved('group-1')).toBe(true);
+    expect(store.isApproved('user-alice')).toBe(false);
+    expect(stdoutText()).toContain('Approved: group Release Team (group-1)');
+  });
+
   it('approve with a code from another workspace fails with the scoped error', () => {
-    const codeB = new PairingStore('support-bot', wsB).createRequest(
-      'user-bob',
-      'Bob',
-    )!;
+    const codeB = codeOf(
+      new PairingStore('support-bot', wsB).createRequest('user-bob', 'Bob'),
+    );
     const exitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation((() => undefined) as unknown as typeof process.exit);

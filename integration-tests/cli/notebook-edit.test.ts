@@ -83,9 +83,9 @@ const expectNoSuccessfulRawNotebookWrites = (
     .readToolLogs()
     .filter(
       (log) =>
-        ['edit', 'write_file'].includes(log.toolRequest.name) &&
+        ['edit', 'write_file'].includes(log.toolRequest.name ?? '') &&
         log.toolRequest.success &&
-        log.toolRequest.args.includes(notebookFileName),
+        log.toolRequest.args?.includes(notebookFileName),
     );
 
   expect(rawNotebookWrites).toEqual([]);

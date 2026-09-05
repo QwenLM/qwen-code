@@ -31,6 +31,7 @@ export type ModelGenerationConfig = Pick<
   ContentGeneratorConfig,
   | 'samplingParams'
   | 'timeout'
+  | 'streamIdleTimeoutMs'
   | 'maxRetries'
   | 'retryInitialDelayMs'
   | 'retryMaxDelayMs'
@@ -74,6 +75,8 @@ export interface ModelConfig {
   voiceOnly?: boolean;
   /** When true, this model only appears in the vision model selector, not the main model list */
   visionOnly?: boolean;
+  /** Whether this route can be used by the built-in image_gen tool */
+  supportsImageGeneration?: boolean;
   /** When true, this model only appears in the image generation model selector */
   imageOnly?: boolean;
 }
@@ -144,6 +147,8 @@ export interface AvailableModel {
   voiceOnly?: boolean;
   /** When true, this model only appears in the vision model selector */
   visionOnly?: boolean;
+  /** Whether this route can be used by the built-in image_gen tool */
+  supportsImageGeneration?: boolean;
   /** When true, this model only appears in the image generation model selector */
   imageOnly?: boolean;
 

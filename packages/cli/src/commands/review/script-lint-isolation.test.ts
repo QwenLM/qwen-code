@@ -9,8 +9,12 @@
 // `emptyHadolintConfig()` caches its result at module scope, so once any earlier test
 // in a shared file has warmed the cache the failure path is unreachable — no stub can
 // reach it there. vitest gives each file a fresh module registry, so this file points
-// `TMPDIR` at a path that does not exist BEFORE importing script-lint; the very first
-// `emptyHadolintConfig()` call then fails to `mkdtempSync`, and the guard fires.
+// `TMPDIR` at a path that does not exist in `beforeAll`, before any test makes the
+// first — lazy — `emptyHadolintConfig()` call; that call then fails to `mkdtempSync`,
+// and the guard fires. The import below is STATIC on purpose: the module graph
+// (script-lint → diff-plan → the core barrel) costs seconds to instantiate, and a
+// static import pays that in the collect phase — a dynamic in-test import paid it
+// inside the test's timeout window and timed out under CI contention.
 //
 // Two properties, deliberately split so a mutation attributes cleanly:
 //   1. buildToolInvocation adds no `--config` — the argv logic; holds with or
@@ -23,6 +27,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { buildToolInvocation, runScriptLint } from './script-lint.js';
 
 // `os.tmpdir()` reads TMPDIR on POSIX but TEMP/TMP on Windows — override all three
 // so the "no private config could be created" path is exercised on every platform,
@@ -52,8 +57,7 @@ afterAll(() => {
 });
 
 describe('script-lint — hadolint fails closed when config isolation is unavailable', () => {
-  it('adds no --config when a private neutral config cannot be created', async () => {
-    const { buildToolInvocation } = await import('./script-lint.js');
+  it('adds no --config when a private neutral config cannot be created', () => {
     // No private config → no `--config` on the argv (and the run fails closed below,
     // so hadolint never lints unisolated against a cwd `.hadolint.yaml`).
     expect(buildToolInvocation('hadolint', '/w/Dockerfile').argv).not.toContain(
@@ -61,8 +65,7 @@ describe('script-lint — hadolint fails closed when config isolation is unavail
     );
   });
 
-  it('errors a Dockerfile (fail closed) instead of linting it unisolated', async () => {
-    const { runScriptLint } = await import('./script-lint.js');
+  it('errors a Dockerfile (fail closed) instead of linting it unisolated', () => {
     const wt = join(workDir, 'repo');
     mkdirSync(wt, { recursive: true });
     writeFileSync(join(wt, 'Dockerfile'), 'FROM alpine\nRUN echo hi\n');

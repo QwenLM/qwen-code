@@ -35,6 +35,8 @@ describe('coding plan provider', () => {
       modelIds: getDefaultModelIds(codingPlanProvider),
     });
 
+    expect(codingPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(plan.providerId).toBe('coding-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [CODING_PLAN_ENV_KEY]: 'sk-coding' });

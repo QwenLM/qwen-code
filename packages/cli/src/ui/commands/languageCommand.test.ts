@@ -79,7 +79,7 @@ import { languageCommand } from './languageCommand.js';
 import {
   initializeLlmOutputLanguage,
   writeOutputLanguageFile,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 
 describe('languageCommand', () => {
   let mockContext: CommandContext;
@@ -96,6 +96,7 @@ describe('languageCommand', () => {
         settings: {
           merged: {},
           setValue: vi.fn(),
+          setValues: vi.fn(),
         },
       },
     });
@@ -406,6 +407,8 @@ describe('languageCommand', () => {
         expect.anything(), // SettingScope.User
         'general.language',
         'en',
+        undefined,
+        { throwOnWriteFailure: true },
       );
     });
 
@@ -421,6 +424,8 @@ describe('languageCommand', () => {
         'user',
         'general.language',
         'en',
+        undefined,
+        { throwOnWriteFailure: true },
       );
     });
 
@@ -438,6 +443,8 @@ describe('languageCommand', () => {
         'workspace',
         'general.language',
         'zh',
+        undefined,
+        { throwOnWriteFailure: true },
       );
     });
 
@@ -458,6 +465,30 @@ describe('languageCommand', () => {
       expect(result).toMatchObject({
         messageType: 'error',
         content: expect.stringContaining('untrusted'),
+      });
+    });
+
+    it('rejects --project when workspace settings writes are disabled', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      mockContext.executionPolicy = {
+        allowSessionReset: false,
+        allowWorkspaceSettingsWrite: false,
+        persistModelSelection: false,
+        blockedBuiltinCommandNames: [],
+      };
+
+      const result = await languageCommand.action(
+        mockContext,
+        'ui en --project',
+      );
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('not available'),
       });
     });
 
@@ -531,7 +562,7 @@ describe('languageCommand', () => {
 
       const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
       const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
-      const getGeminiClient = vi
+      const getLlmClient = vi
         .fn()
         .mockReturnValue({ refreshSystemInstruction });
       (
@@ -543,7 +574,7 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        getGeminiClient,
+        getLlmClient,
       };
 
       const result = await languageCommand.action(mockContext, 'output auto');
@@ -575,7 +606,7 @@ describe('languageCommand', () => {
 
       const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
       const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
-      const getGeminiClient = vi
+      const getLlmClient = vi
         .fn()
         .mockReturnValue({ refreshSystemInstruction });
       (
@@ -587,7 +618,7 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        getGeminiClient,
+        getLlmClient,
       };
 
       const result = await languageCommand.action(
@@ -596,7 +627,7 @@ describe('languageCommand', () => {
       );
 
       expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-      expect(getGeminiClient).toHaveBeenCalledTimes(1);
+      expect(getLlmClient).toHaveBeenCalledTimes(1);
       expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
       // Memory MUST be refreshed before the system instruction is rebuilt;
       // otherwise the new instruction would be built from stale userMemory
@@ -630,7 +661,7 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        // No getGeminiClient — refreshSystemInstruction must not be reached.
+        // No getLlmClient — refreshSystemInstruction must not be reached.
       };
 
       const result = await languageCommand.action(mockContext, 'output Korean');
@@ -914,6 +945,128 @@ describe('languageCommand', () => {
 
       const result = await zhCNSubcommand.action(mockContext, 'extra args');
 
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('do not accept additional arguments'),
+      });
+    });
+
+    // Regression for #8592: the web-shell settings panel switches language
+    // via `/language ui <id> --global|--project`, and the router descends
+    // into these nested subcommands, so scope flags must not be rejected.
+    it('zh-CN action should accept --global and persist to user scope', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+
+      const result = await zhCNSubcommand.action(mockContext, '--global');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        'user',
+        'general.language',
+        'zh',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('zh-CN action should accept --project and persist to workspace scope when trusted', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+
+      const result = await zhCNSubcommand.action(mockContext, '--project');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        'workspace',
+        'general.language',
+        'zh',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('reports a workspace persistence failure without changing the language', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+      vi.mocked(mockContext.services.settings.setValue).mockImplementation(
+        () => {
+          throw new Error('EACCES');
+        },
+      );
+
+      const result = await zhCNSubcommand.action(mockContext, '--project');
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.ui.reloadCommands).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('EACCES'),
+      });
+    });
+
+    it('zh-CN action should reject --project in an untrusted workspace without persisting', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        false;
+
+      const result = await zhCNSubcommand.action(mockContext, '--project');
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('untrusted'),
+      });
+    });
+
+    it('zh-CN action should reject using both --project and --global together', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+
+      const result = await zhCNSubcommand.action(
+        mockContext,
+        '--project --global',
+      );
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('Cannot use both'),
+      });
+    });
+
+    it('zh-CN action should still reject extra arguments after a scope flag', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+
+      const result = await zhCNSubcommand.action(mockContext, '--global extra');
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',

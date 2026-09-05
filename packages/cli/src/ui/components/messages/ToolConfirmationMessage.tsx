@@ -62,6 +62,12 @@ export const ToolConfirmationMessage: React.FC<
 }) => {
   const { onConfirm } = confirmationDetails;
   const autoModeFallback = confirmationDetails.autoModeFallback;
+  const offersSwitchToDefault =
+    autoModeFallback?.reason === 'classifier_unavailable' ||
+    autoModeFallback?.reason === 'consecutive_unavailable';
+  const hidesAlwaysAllow =
+    'hideAlwaysAllow' in confirmationDetails &&
+    confirmationDetails.hideAlwaysAllow === true;
 
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
@@ -177,15 +183,15 @@ export const ToolConfirmationMessage: React.FC<
 
     // Calculate the vertical space (in lines) consumed by UI elements
     // surrounding the main body content. Compact mode drops outer padding
-    // and inter-section margins, and renders a fixed 3-option list rather
+    // and inter-section margins, and renders a reduced option list rather
     // than the full options array.
     const PADDING_OUTER_Y = compactMode ? 0 : 2;
     const MARGIN_BODY_BOTTOM = compactMode ? 0 : 1;
     const HEIGHT_QUESTION = 1;
     const MARGIN_QUESTION_BOTTOM = compactMode ? 0 : 1;
     const HEIGHT_OPTIONS = compactMode
-      ? 3
-      : options.length + (autoModeFallback ? 1 : 0);
+      ? 2 + (offersSwitchToDefault ? 1 : 0) + (hidesAlwaysAllow ? 0 : 1)
+      : options.length + (offersSwitchToDefault ? 1 : 0);
     const AUTO_MODE_FALLBACK_HEIGHT = autoModeFallback
       ? wrapAnsi(`⚠ ${autoModeFallback.message}`, warningContentWidth, {
           trim: false,
@@ -571,9 +577,25 @@ export const ToolConfirmationMessage: React.FC<
 
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
-        <Text color={theme.text.link}>
-          <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
-        </Text>
+        {infoProps.renderPromptAsPlainText ? (
+          <MaxSizedBox
+            maxHeight={availableBodyContentHeight()}
+            maxWidth={warningContentWidth}
+            overflowDirection="bottom"
+          >
+            {infoProps.prompt.split('\n').map((line, index) => (
+              <Box key={index}>
+                <Text color={theme.text.link} wrap="wrap">
+                  {line}
+                </Text>
+              </Box>
+            ))}
+          </MaxSizedBox>
+        ) : (
+          <Text color={theme.text.link}>
+            <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
+          </Text>
+        )}
         {displayUrls && infoProps.urls && infoProps.urls.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>
@@ -654,7 +676,7 @@ export const ToolConfirmationMessage: React.FC<
     });
   }
 
-  if (autoModeFallback) {
+  if (offersSwitchToDefault) {
     const cancelIndex = options.findIndex(
       (option) => option.value === ToolConfirmationOutcome.Cancel,
     );
@@ -668,6 +690,9 @@ export const ToolConfirmationMessage: React.FC<
       0,
       switchOption,
     );
+  }
+
+  if (autoModeFallback) {
     bodyContent = (
       <Box flexDirection="column">
         <Box paddingX={1} marginLeft={1} marginBottom={1}>
@@ -702,7 +727,7 @@ export const ToolConfirmationMessage: React.FC<
             label: t('Yes, allow once'),
             value: ToolConfirmationOutcome.ProceedOnce,
           },
-          ...(autoModeFallback
+          ...(offersSwitchToDefault
             ? [
                 {
                   key: 'switch-default-and-proceed-once',

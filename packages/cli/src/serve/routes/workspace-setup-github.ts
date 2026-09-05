@@ -7,7 +7,7 @@
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { WorkspaceEventBridge } from '../acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { isFsError, type WorkspaceFileSystemFactory } from '../fs/index.js';
 import {
@@ -29,7 +29,7 @@ const ROUTE = 'POST /workspace/setup-github';
 
 interface RegisterDeps {
   boundWorkspace: string;
-  bridge: AcpSessionBridge;
+  bridge: WorkspaceEventBridge;
   env: Readonly<NodeJS.ProcessEnv>;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;

@@ -11,6 +11,14 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
+        __dirname,
+        '../core/src/utils/no-follow-open.ts',
+      ),
+      '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
+        __dirname,
+        '../core/src/tools/sub-session-constants.ts',
+      ),
       '@qwen-code/qwen-code-core/goalWire': path.resolve(
         __dirname,
         '../core/src/goals/goal-wire.ts',
@@ -26,6 +34,18 @@ export default defineConfig({
       '@qwen-code/qwen-code-core/memoryScopes': path.resolve(
         __dirname,
         '../core/src/memory/scopes.ts',
+      ),
+      '@qwen-code/qwen-code-core/toolWriteOrigin': path.resolve(
+        __dirname,
+        '../core/src/services/tool-write-origin.ts',
+      ),
+      '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
+        __dirname,
+        '../core/src/utils/envVarResolver.ts',
+      ),
+      '@qwen-code/qwen-code-core/conversationsRuntimeMarker': path.resolve(
+        __dirname,
+        '../core/src/utils/conversations-runtime-marker.ts',
       ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
@@ -81,6 +101,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/bridgeOptions.ts',
       ),
+      '@qwen-code/acp-bridge/promptLedger': path.resolve(
+        __dirname,
+        '../acp-bridge/src/prompt-ledger.ts',
+      ),
       '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeTypes.ts',
@@ -109,6 +133,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
       ),
+      '@qwen-code/acp-bridge/externalToolGuard': path.resolve(
+        __dirname,
+        '../acp-bridge/src/externalToolGuard.ts',
+      ),
       '@qwen-code/audio-capture': path.resolve(
         __dirname,
         '../audio-capture/src/index.ts',
@@ -135,10 +163,25 @@ export default defineConfig({
     // See packages/core/vitest.config.ts: raise the per-test ceiling above
     // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
     // store's tempdir round-trip) don't blow it purely under CI contention.
-    testTimeout: 15000,
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 15_000,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
+    // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
+    maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? '25%'
+      : undefined,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
-    environment: 'jsdom',
+    // Terminal app: run under node. Only files that need a document (the
+    // @testing-library/react renderHook suites and a few DOM-touching UI
+    // tests) opt into jsdom with a `// @vitest-environment jsdom` control
+    // comment; vitest reads it from the file itself. Creating a jsdom per
+    // file cost 0.2–0.5s each, a tenth of the suite, while nine files in
+    // ten never touched the DOM.
+    environment: 'node',
     globals: true,
     reporters: ['default', 'junit'],
     silent: true,
@@ -146,8 +189,25 @@ export default defineConfig({
       junit: 'junit.xml',
     },
     setupFiles: ['./test-setup.ts'],
+    // Fail fast with an actionable message when workspace dist/ output or
+    // generated files are missing (fresh clone, new worktree, deep clean).
+    // See scripts/vitest-global-setup.js and issue #9149.
+    // Resolved against this config file (not vitest's root/cwd) so the guard
+    // also loads when vitest is launched from elsewhere with --config.
+    globalSetup: path.resolve(
+      __dirname,
+      '../../scripts/vitest-global-setup.js',
+    ),
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
-      enabled: true,
+      // CI collects coverage only where something keeps it: the post-merge
+      // run on main, which ci.yml marks with QWEN_CI_COVERAGE=1 and whose
+      // reports it uploads. Pull-request runs skip it — nothing read those
+      // reports, and v8 instrumentation plus the per-file merge on the main
+      // thread cost about a fifth of the suite's wall time. Local runs keep
+      // coverage.
+      enabled: !process.env.CI || process.env['QWEN_CI_COVERAGE'] === '1',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],
@@ -159,12 +219,6 @@ export default defineConfig({
         'cobertura',
         ['json-summary', { outputFile: 'coverage-summary.json' }],
       ],
-    },
-    poolOptions: {
-      threads: {
-        minThreads: 8,
-        maxThreads: 16,
-      },
     },
     server: {
       deps: {

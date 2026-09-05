@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ApprovalMode,
   InputFormat,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -50,6 +51,42 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('PermissionController', () => {
+  it.each([
+    [ApprovalMode.PLAN, 'allow'],
+    [ApprovalMode.DEFAULT, 'deny'],
+    [ApprovalMode.AUTO_EDIT, 'allow'],
+    [ApprovalMode.AUTO, 'allow'],
+    [ApprovalMode.YOLO, 'allow'],
+  ] as const)(
+    'checks %s permission mode for can_use_tool',
+    async (mode, behavior) => {
+      const context = createContext();
+      context.permissionMode = mode;
+      const controller = new PermissionController(
+        context,
+        createRegistry(),
+        'PermissionController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          {
+            subtype: 'can_use_tool',
+            tool_name: 'read_file',
+            tool_use_id: `tool-${mode}`,
+            input: {},
+            permission_suggestions: null,
+            blocked_path: null,
+          },
+          `request-${mode}`,
+        ),
+      ).resolves.toMatchObject({
+        subtype: 'can_use_tool',
+        behavior,
+      });
+    },
+  );
+
   it('round-trips workflow approval through can_use_tool with updated input', async () => {
     const context = createContext(120_000);
     const resolvePendingApproval = vi.fn().mockResolvedValue(true);
@@ -420,6 +457,66 @@ describe('PermissionController', () => {
     });
   });
 
+  it('binds an outgoing permission request to the turn that created it', async () => {
+    const firstTurn = new AbortController();
+    const secondTurn = new AbortController();
+    let activeTurnSignal = firstTurn.signal;
+    const context = {
+      ...createContext(120_000),
+      getActiveTurnAbortSignal: () => activeTurnSignal,
+    } satisfies IControlContext;
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    let requestSignal: AbortSignal | undefined;
+    vi.spyOn(controller, 'sendControlRequest').mockImplementation(
+      (_payload, _timeout, signal) => {
+        requestSignal = signal;
+        return new Promise((_, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new Error('Request aborted')),
+            { once: true },
+          );
+        });
+      },
+    );
+    const onConfirm = vi.fn();
+
+    const updateToolCalls = controller.getToolCallUpdateCallback();
+    activeTurnSignal = secondTurn.signal;
+    updateToolCalls([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-turn-owned',
+          name: 'run_shell_command',
+          args: { command: 'sleep 10' },
+        },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(requestSignal).toBeDefined();
+    });
+    firstTurn.abort();
+
+    await vi.waitFor(() => {
+      expect(requestSignal?.aborted).toBe(true);
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'Error: Request aborted',
+      });
+    });
+    expect(secondTurn.signal.aborted).toBe(false);
+  });
+
   it('routes ask_user_question answers from updatedInput into the confirmation payload', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(
@@ -443,6 +540,9 @@ describe('PermissionController', () => {
         callId: 'tool-call-answers',
         name: 'ask_user_question',
         args: { questions: [] } as Record<string, unknown>,
+      },
+      invocation: {
+        requiresUserInteraction: () => true,
       },
       confirmationDetails: {
         type: 'ask_user_question',

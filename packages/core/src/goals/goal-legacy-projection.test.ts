@@ -20,6 +20,7 @@ const GOAL: GoalRecord = {
   evidenceCursor: { recordId: 'state-1' },
   turnCount: 4,
   activeTimeMs: 2000,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 200,
   lastReason: 'continuing',
@@ -38,7 +39,7 @@ function payload(
 }
 
 describe('projectGoalStateToLegacy', () => {
-  it.each(['create', 'replace', 'edit', 'resume', 'migrated'] as const)(
+  it.each(['create', 'replace', 'edit', 'resume'] as const)(
     'projects %s as legacy set with an active projection',
     (cause) => {
       const projected = projectGoalStateToLegacy(payload(cause));
@@ -89,6 +90,17 @@ describe('projectGoalStateToLegacy', () => {
     expect(projected.goalTerminal).toBeNull();
   });
 
+  it('projects a migrated goal as paused, not as a re-asserted active goal', () => {
+    // `createMigratedGoalState` only ever persists `status: 'paused'`, and a
+    // paused goal drives no turns. Projecting `set` would leave every
+    // card-reading client showing a running goal that nothing advances.
+    const projected = projectGoalStateToLegacy(payload('migrated', 'paused'));
+
+    expect(projected.goalStatus.kind).toBe('paused');
+    expect(projected.activeGoal).toBeNull();
+    expect(projected.goalTerminal).toBeNull();
+  });
+
   it.each(['blocked', 'usage_limited'] as const)(
     'projects %s as a legacy stopped state',
     (status) => {
@@ -107,6 +119,14 @@ describe('projectGoalStateToLegacy', () => {
     const projected = projectGoalStateToLegacy(
       payload('turn_finished', 'active'),
     );
+
+    expect(projected.goalStatus.kind).toBe('checking');
+    expect(projected.activeGoal).not.toBeNull();
+    expect(projected.goalTerminal).toBeNull();
+  });
+
+  it('projects an internal checkpoint as legacy checking', () => {
+    const projected = projectGoalStateToLegacy(payload('checkpoint', 'active'));
 
     expect(projected.goalStatus.kind).toBe('checking');
     expect(projected.activeGoal).not.toBeNull();

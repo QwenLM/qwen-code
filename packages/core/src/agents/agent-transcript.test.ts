@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -12,16 +12,36 @@ import {
   getSubagentSessionDir,
   getAgentJsonlPath,
   getAgentMetaPath,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
+  buildAgentTranscriptAttach,
   normalizeResumedAgentDepth,
   readAgentMeta,
+  readAgentTrace,
   readLastTranscriptRecordUuidSync,
   writeAgentMeta,
   type AgentMeta,
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
+
+// Pin the git-branch annotation without spawning git: buildAgentTranscriptAttach
+// is the only consumer of getCachedGitBranch in this file's import graph.
+// vi.hoisted so the attach tests can also pin WHICH directory the builder
+// hands to the lookup (project root, not the storage dir).
+const { getCachedGitBranchMock } = vi.hoisted(() => ({
+  getCachedGitBranchMock: vi.fn(() => 'test-branch'),
+}));
+
+vi.mock('../utils/gitUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
+  return {
+    ...actual,
+    getCachedGitBranch: getCachedGitBranchMock,
+  };
+});
 
 describe('agent-transcript', () => {
   describe('path helpers', () => {
@@ -67,6 +87,61 @@ describe('agent-transcript', () => {
     it('preserves alphanumerics, underscores, and hyphens in agentId', () => {
       expect(getAgentJsonlPath('/proj', 'sess', 'agent_1-abc')).toBe(
         path.join('/proj', 'subagents', 'sess', 'agent-agent_1-abc.jsonl'),
+      );
+    });
+  });
+
+  describe('buildAgentTranscriptAttach', () => {
+    beforeEach(() => {
+      getCachedGitBranchMock.mockClear();
+    });
+
+    function makeConfig(cliVersion: string): Config {
+      return {
+        getSessionId: () => 'sess-9',
+        getProjectRoot: () => '/proj/root',
+        getCliVersion: () => cliVersion,
+        storage: { getProjectDir: () => '/proj/dir' },
+      } as unknown as Config;
+    }
+
+    it('assembles the path and launch metadata every attach site shares', () => {
+      const { jsonlPath, options } = buildAgentTranscriptAttach(
+        makeConfig('1.2.3'),
+        'agent-1',
+      );
+
+      expect(jsonlPath).toBe(
+        getAgentJsonlPath('/proj/dir', 'sess-9', 'agent-1'),
+      );
+      expect(options).toEqual({
+        agentId: 'agent-1',
+        sessionId: 'sess-9',
+        cwd: '/proj/root',
+        version: '1.2.3',
+        gitBranch: 'test-branch',
+      });
+      // The branch lookup is anchored at the project root — the storage dir
+      // is never inside a git repo, so a swap would silently drop gitBranch
+      // from every transcript.
+      expect(getCachedGitBranchMock).toHaveBeenCalledWith('/proj/root');
+    });
+
+    it('falls back to an unknown version when the CLI reports none', () => {
+      const { options } = buildAgentTranscriptAttach(makeConfig(''), 'agent-1');
+      expect(options.version).toBe('unknown');
+    });
+
+    it('routes the path through an overridden sessionId for resume', () => {
+      const { jsonlPath, options } = buildAgentTranscriptAttach(
+        makeConfig('1.2.3'),
+        'agent-1',
+        { sessionId: 'launch-session' },
+      );
+
+      expect(options.sessionId).toBe('launch-session');
+      expect(jsonlPath).toBe(
+        getAgentJsonlPath('/proj/dir', 'launch-session', 'agent-1'),
       );
     });
   });
@@ -147,6 +222,28 @@ describe('agent-transcript', () => {
         subagentName: 'explore',
         executionAllowedTools: [],
       });
+    });
+
+    it('caps the persisted terminal activity summary', () => {
+      const activities = Array.from({ length: 12 }, (_, index) => ({
+        name: `tool-${index}`,
+        description: `activity-${index}`,
+        at: index,
+      }));
+      const summary = getAgentMetaTerminalSummary(
+        { totalTokens: 12, outputTokens: 8, toolUses: 12, durationMs: 100 },
+        activities,
+      );
+
+      expect(summary.stats).toEqual({
+        totalTokens: 12,
+        outputTokens: 8,
+        toolUses: 12,
+        durationMs: 100,
+      });
+      expect(summary.recentActivities).toHaveLength(10);
+      expect(summary.recentActivities?.[0]?.name).toBe('tool-2');
+      expect(summary.recentActivities?.at(-1)?.name).toBe('tool-11');
     });
   });
 
@@ -278,6 +375,48 @@ describe('agent-transcript', () => {
       expect(records[0]?.systemPayload).not.toHaveProperty(
         'executionAllowedTools',
       );
+    });
+
+    it('seeds an agent_retry system marker at the retry seam', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const first = makeWriter(jsonlPath, { initialUserPrompt: 'task' });
+      first.emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt one',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      first.cleanup();
+
+      const emitter = new AgentEventEmitter();
+      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
+        agentId: 'agent-x',
+        sessionId: 'session-1',
+        cwd: '/proj',
+        version: '1.2.3',
+        appendToExisting: true,
+        retryAttempt: 2,
+      });
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt two',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+        ['user', undefined],
+        ['assistant', undefined],
+        ['system', 'agent_retry'],
+        ['assistant', undefined],
+      ]);
+      expect(records[2]?.systemPayload).toEqual({ attempt: 2 });
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+      expect(records[3]?.parentUuid).toBe(records[2]?.uuid);
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
@@ -783,6 +922,97 @@ describe('agent-transcript', () => {
       expect(normalizeResumedAgentDepth(null as unknown as number)).toBe(
         undefined,
       );
+    });
+  });
+
+  describe('readAgentTrace', () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+      projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-trace-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    it('returns complete, filtered lineage and marks missing parents', async () => {
+      const sessionId = 'session-1';
+      const write = (meta: AgentMeta) =>
+        writeAgentMeta(
+          getAgentMetaPath(projectDir, sessionId, meta.agentId),
+          meta,
+        );
+      write({
+        agentId: 'root',
+        agentType: 'reviewer',
+        description: 'root task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        status: 'completed',
+      });
+      write({
+        agentId: 'child',
+        agentType: 'tester',
+        description: 'child task',
+        parentSessionId: sessionId,
+        parentAgentId: 'root',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        status: 'running',
+      });
+      write({
+        agentId: 'orphan',
+        agentType: 'tester',
+        description: 'orphan task',
+        parentSessionId: sessionId,
+        parentAgentId: 'missing',
+        createdAt: '2026-01-01T00:00:02.000Z',
+      });
+      write({
+        agentId: 'cycle-a',
+        agentType: 'tester',
+        description: 'cycle a',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-b',
+        createdAt: '2026-01-01T00:00:03.000Z',
+      });
+      write({
+        agentId: 'cycle-b',
+        agentType: 'tester',
+        description: 'cycle b',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-a',
+        createdAt: '2026-01-01T00:00:04.000Z',
+      });
+      write({
+        agentId: '0-cycle-child',
+        agentType: 'tester',
+        description: 'cycle child',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-a',
+        createdAt: '2026-01-01T00:00:05.000Z',
+      });
+
+      const trace = await readAgentTrace(projectDir, sessionId, 'root');
+
+      expect(trace.rootAgentIds).toEqual(['root']);
+      expect(trace.nodes.map((node) => node.agentId)).toEqual([
+        'root',
+        'child',
+      ]);
+      expect(
+        trace.nodes.find((node) => node.agentId === 'child'),
+      ).toMatchObject({ rootAgentId: 'root', lineageState: 'complete' });
+      const fullTrace = await readAgentTrace(projectDir, sessionId);
+      expect(
+        fullTrace.nodes.find((node) => node.agentId === 'orphan'),
+      ).toMatchObject({ lineageState: 'orphaned' });
+      expect(
+        fullTrace.nodes
+          .filter((node) => node.lineageState === 'cycle')
+          .map((node) => node.rootAgentId),
+      ).toEqual(['cycle-a', 'cycle-a', 'cycle-a']);
     });
   });
 });

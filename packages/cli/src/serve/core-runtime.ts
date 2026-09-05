@@ -19,6 +19,7 @@ export {
   hashDaemonWorkspace,
   initializeDaemonMetrics,
   initializeTelemetry,
+  readCronTasks,
   recordDaemonCancel,
   recordDaemonChannelLifecycle,
   recordDaemonPipeMessage,

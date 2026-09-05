@@ -50,7 +50,7 @@ function makeConfig(opts: {
   model?: string;
 }): Config {
   return {
-    getGeminiClient: () => opts.client,
+    getLlmClient: () => opts.client,
     getFastModel: () => opts.fastModel,
     getModel: () => opts.model ?? 'main-model',
   } as unknown as Config;

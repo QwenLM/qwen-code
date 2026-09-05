@@ -16,6 +16,7 @@ import type {
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import {
   classifyShellCommandSafety,
+  classifyShellCommandSafetyInDirectory,
   type ShellCommandSafety,
 } from '../utils/shellAstParser.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
@@ -164,7 +165,13 @@ export async function evaluatePlanModeShellPolicy(input: {
   let classification: ShellCommandSafety;
   try {
     classification = await raceWithAbort(
-      () => classifyShellCommandSafety(safetyCommand),
+      () =>
+        permissionContext.cwd
+          ? classifyShellCommandSafetyInDirectory(
+              safetyCommand,
+              permissionContext.cwd,
+            )
+          : classifyShellCommandSafety(safetyCommand),
       input.signal,
     );
   } catch (error) {

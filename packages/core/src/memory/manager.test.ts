@@ -19,6 +19,15 @@ import type { Config } from '../config/config.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
+const telemetryMocks = vi.hoisted(() => ({
+  logMemoryExtract: vi.fn(),
+}));
+
+vi.mock('../telemetry/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../telemetry/index.js')>()),
+  logMemoryExtract: telemetryMocks.logMemoryExtract,
+}));
+
 vi.mock('./extract.js', () => ({
   runAutoMemoryExtract: vi.fn(),
 }));
@@ -135,6 +144,38 @@ describe('MemoryManager', () => {
       await mgr.drain();
       const tasks = mgr.listTasksByType('extract', projectRoot);
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
+    });
+
+    it('records a session mismatch as skipped', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        skippedReason: 'session_mismatch',
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const config = makeMockConfig();
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBe('session_mismatch');
+      expect(mgr.listTasksByType('extract', projectRoot)[0]).toMatchObject({
+        status: 'skipped',
+        progressText: 'Skipped: session mismatch.',
+        metadata: { skippedReason: 'session_mismatch' },
+      });
+      const event = telemetryMocks.logMemoryExtract.mock.calls[0]?.[1] as {
+        status: string;
+        skipped_reason?: string;
+      };
+      expect(event).toMatchObject({
+        status: 'skipped',
+        skipped_reason: 'session_mismatch',
+      });
     });
 
     it.each([

@@ -9,7 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchGitDiff,
   fetchGitDiffHunks,
@@ -28,6 +28,8 @@ import {
   parseStatusEntries,
   resolveGitDir,
 } from './gitDiff.js';
+import { UNVERIFIABLE_IDENTITY_CODE } from './no-follow-open.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1158,7 +1160,7 @@ describe('parseShortstat ReDoS guard', () => {
     const elapsed = Date.now() - start;
     // Expect the bounded regex to either reject (too long for \d{1,10}) or
     // match trivially. Either way it must not spin.
-    expect(elapsed).toBeLessThan(250);
+    expectWithinLatencyBudget(elapsed, 250, { poolMultiplier: 20 });
     expect(result).toBeNull();
   });
 });
@@ -2288,5 +2290,112 @@ describe('fetchGitLog range argument injection guard', () => {
     const log = await fetchGitLog(repo, { range: 'HEAD;rm -rf /' });
     expect(log).not.toBeNull();
     expect(log!.entries).toHaveLength(2);
+  });
+});
+
+// openUntrackedForDiffRead consumes openNoFollow's refusals, so this suite
+// stubs the helper at the seam. The helper's own rejection semantics (inode
+// 0 -> UNVERIFIABLE_IDENTITY_CODE, symlink/race -> ELOOP) are covered in
+// no-follow-open.test.ts; here we pin gitDiff's response to each code.
+const noFollowRefusal = vi.hoisted(() => ({
+  code: undefined as string | undefined,
+  message: '',
+}));
+
+vi.mock('./no-follow-open.js', async (importActual) => {
+  const actual = await importActual<typeof import('./no-follow-open.js')>();
+  return {
+    ...actual,
+    openNoFollow: (filePath: string) => {
+      if (noFollowRefusal.code !== undefined) {
+        return Promise.reject(
+          Object.assign(new Error(noFollowRefusal.message), {
+            code: noFollowRefusal.code,
+          }),
+        );
+      }
+      return actual.openNoFollow(filePath);
+    },
+  };
+});
+
+describe('untracked files on inode-unverifiable volumes (#8227 follow-up)', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await makeRepo();
+  });
+
+  afterEach(async () => {
+    noFollowRefusal.code = undefined;
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('falls back to a plain open when inode identity is unverifiable', async () => {
+    // On inode-0 volumes (FAT/exFAT, some SMB shares) openNoFollow refuses
+    // with UNVERIFIABLE_IDENTITY_CODE because identity can never be proven
+    // there. Diff display is not identity-sensitive, so untracked text
+    // files must keep their line counts instead of collapsing to a binary
+    // row (#8227 follow-up).
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'fat-volume.txt'), 'a\nb\nc\n');
+
+    noFollowRefusal.code = UNVERIFIABLE_IDENTITY_CODE;
+    noFollowRefusal.message = 'inode 0 cannot be verified';
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    expect(result!.perFileStats.get('fat-volume.txt')).toEqual({
+      added: 3,
+      removed: 0,
+      isBinary: false,
+      isUntracked: true,
+      truncated: false,
+    });
+    // The fallback keeps the lines in the aggregate total too.
+    expect(result!.stats.linesAdded).toBe(3);
+  });
+
+  it('still synthesizes an all-added hunk when inode identity is unverifiable', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'new.txt'), 'x\ny\n');
+
+    noFollowRefusal.code = UNVERIFIABLE_IDENTITY_CODE;
+    noFollowRefusal.message = 'inode 0 cannot be verified';
+
+    const result = await fetchGitDiffHunksForFile(repo, 'new.txt');
+    expect(result).not.toBeNull();
+    expect(result!.truncated).toBe(false);
+    expect(result!.hunks).toHaveLength(1);
+    expect(result!.hunks[0].lines).toEqual(['+x', '+y']);
+  });
+
+  it('never falls back to a plain open on a symlink refusal', async () => {
+    // Any refusal OTHER than the inode-unverifiable one (a genuine symlink
+    // race, ELOOP) must NOT degrade to a plain open — that would follow
+    // the symlink the guard just refused. The file collapses to a binary
+    // row instead.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'raced.txt'), 'a\nb\n');
+
+    noFollowRefusal.code = 'ELOOP';
+    noFollowRefusal.message = 'too many symbolic links';
+
+    const result = await fetchGitDiff(repo);
+    expect(result).not.toBeNull();
+    expect(result!.perFileStats.get('raced.txt')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: true,
+      isUntracked: true,
+      truncated: false,
+    });
+    expect(result!.stats.linesAdded).toBe(0);
   });
 });

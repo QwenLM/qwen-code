@@ -14,6 +14,8 @@ import {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
   Ignore,
+  makeFakeConfig,
+  RecordArtifactTool,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { createServeApp } from '../server.js';
@@ -665,6 +667,11 @@ describe('capability advertisement', () => {
       expect(res.body.features).toContain('workspace_file_read');
       expect(res.body.features).toContain('workspace_file_bytes');
       expect(res.body.features).toContain('workspace_file_write');
+      expect(res.body.features).toContain('workspace_file_upload');
+      // The upload byte cap is advertised alongside the feature.
+      expect(res.body.limits?.maxWorkspaceFileUploadBytes).toBe(
+        50 * 1024 * 1024,
+      );
     } finally {
       await teardown(h);
     }
@@ -776,6 +783,144 @@ describe('artifact workspacePath contract (write_file ⇄ GET /file)', () => {
       expect(res.status).toBe(200);
       expect(res.body.content).toBe(ARTIFACT);
       expect(res.body.content).not.toContain('UNRELATED ROOT FILE');
+    } finally {
+      await teardown(h);
+    }
+  });
+});
+
+describe('artifact workspacePath contract (record_artifact ⇄ GET /file)', () => {
+  const ARTIFACT = 'name,value\norders,12\n';
+  const signal = new AbortController().signal;
+
+  async function recordedWorkspacePath(
+    sessionCwd: string,
+    workspacePath: string,
+  ): Promise<string> {
+    const tool = new RecordArtifactTool(
+      makeFakeConfig({ targetDir: sessionCwd, cwd: sessionCwd }),
+    );
+    const result = await tool
+      .build({
+        title: 'Recorded report',
+        workspacePath,
+      })
+      .execute(signal);
+    const recorded = result.artifacts?.[0]?.workspacePath;
+    if (!recorded) {
+      throw new Error(
+        `record_artifact did not return workspacePath: ${String(result.llmContent)}`,
+      );
+    }
+    return recorded;
+  }
+
+  it('round-trips a cwd-relative file recorded in an ordinary session', async () => {
+    const h = await makeHarness();
+    try {
+      await fsp.writeFile(path.join(h.workspace, 'report.csv'), ARTIFACT);
+
+      const workspacePath = await recordedWorkspacePath(
+        h.workspace,
+        'report.csv',
+      );
+      expect(workspacePath).toBe('report.csv');
+
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: workspacePath })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+    } finally {
+      await teardown(h);
+    }
+  });
+
+  it('round-trips a file recorded inside a worktree session', async () => {
+    const h = await makeHarness();
+    try {
+      const sessionCwd = path.join(
+        h.workspace,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      await fsp.mkdir(sessionCwd, { recursive: true });
+      await fsp.writeFile(path.join(sessionCwd, 'report.csv'), ARTIFACT);
+
+      const workspacePath = await recordedWorkspacePath(
+        sessionCwd,
+        'report.csv',
+      );
+      expect(workspacePath).toBe('.qwen/worktrees/my-feature/report.csv');
+
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: workspacePath })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+    } finally {
+      await teardown(h);
+    }
+  });
+
+  it('round-trips a workspace-absolute file recorded from a worktree session', async () => {
+    const h = await makeHarness();
+    try {
+      await fsp.mkdir(path.join(h.workspace, 'docs'), { recursive: true });
+      const abs = path.join(h.workspace, 'docs/review.md');
+      await fsp.writeFile(abs, ARTIFACT);
+      const sessionCwd = path.join(
+        h.workspace,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      await fsp.mkdir(sessionCwd, { recursive: true });
+
+      const workspacePath = await recordedWorkspacePath(sessionCwd, abs);
+      expect(workspacePath).toBe('docs/review.md');
+
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: workspacePath })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+    } finally {
+      await teardown(h);
+    }
+  });
+
+  it('does not let a worktree recording open a same-named file at the workspace root', async () => {
+    const h = await makeHarness();
+    try {
+      await fsp.writeFile(
+        path.join(h.workspace, 'report.csv'),
+        'name,value\nUNRELATED,1\n',
+      );
+      const sessionCwd = path.join(
+        h.workspace,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      await fsp.mkdir(sessionCwd, { recursive: true });
+      await fsp.writeFile(path.join(sessionCwd, 'report.csv'), ARTIFACT);
+
+      const workspacePath = await recordedWorkspacePath(
+        sessionCwd,
+        'report.csv',
+      );
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: workspacePath })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+      expect(res.body.content).not.toContain('UNRELATED');
     } finally {
       await teardown(h);
     }

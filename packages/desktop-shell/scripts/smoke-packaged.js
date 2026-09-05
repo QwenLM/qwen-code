@@ -5,30 +5,50 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
+const repoRoot = path.resolve(packageDir, '../..');
 const executable = process.argv[2];
 if (!executable)
   throw new Error('Usage: node scripts/smoke-packaged.js <executable>');
 if (!fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
   throw new Error(`Packaged executable is missing: ${executable}`);
 }
+verifyMacRuntimeCommit();
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-desktop-smoke-'));
 const isolatedHome = path.join(workspace, 'home');
 const isolatedState = path.join(workspace, 'state');
 fs.mkdirSync(isolatedHome);
 fs.mkdirSync(isolatedState);
-const appId = 'com.qwen.code.desktop';
-const logRoot =
-  process.platform === 'darwin'
-    ? path.join(isolatedHome, 'Library', 'Logs', appId)
-    : path.join(isolatedState, appId, 'logs');
+const appId = JSON.parse(
+  fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+    'utf8',
+  ),
+).identifier;
+// On Windows the log lives under the real %LOCALAPPDATA% (a machine-global
+// path shared with any running desktop app), not the smoke workspace. The
+// packaged app also uses a Windows-known config directory, so opt this smoke
+// out of desktop-state writes before deleting its temporary workspace.
+const logRoot = resolveLogRoot(process.platform, process.env, {
+  isolatedHome,
+  isolatedState,
+  appId,
+});
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
+let previousLog = fs.readFileSync(logPath, {
+  encoding: 'utf8',
+  flag: 'a+',
+});
+// The packaged app opens the log append-only and never rotates it, so every
+// read extends this pre-spawn snapshot. A broken prefix means a foreign
+// writer rewrote the file; readNewLog then warns and rebases the baseline.
 const child = spawn(executable, [], {
   detached: process.platform !== 'win32',
   env: {
@@ -36,7 +56,6 @@ const child = spawn(executable, [], {
     QWEN_DESKTOP_WORKSPACE: workspace,
     QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
     HOME: isolatedHome,
-    LOCALAPPDATA: isolatedState,
     XDG_STATE_HOME: isolatedState,
     XDG_DATA_HOME: isolatedState,
     ...(process.platform === 'linux'
@@ -51,6 +70,9 @@ const child = spawn(executable, [], {
             'qwen-code',
           ),
         }),
+    ...(process.platform === 'win32'
+      ? { QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE: '1' }
+      : {}),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -88,10 +110,7 @@ async function waitForReady() {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (exitFailure) throw exitFailure;
-    const contents = fs.readFileSync(logPath, {
-      encoding: 'utf8',
-      flag: 'a+',
-    });
+    const contents = readNewLog();
     const match = contents.match(
       /qwen serve listening on (http:\/\/127\.0\.0\.1:\d+)/,
     );
@@ -105,9 +124,20 @@ async function waitForReady() {
     encoding: 'utf8',
     flag: 'a+',
   });
-  throw new Error(
-    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
-  );
+  throw smokeError('Timed out waiting for packaged desktop runtime.', contents);
+}
+
+function readNewLog() {
+  const contents = fs.readFileSync(logPath, {
+    encoding: 'utf8',
+    flag: 'a+',
+  });
+  const result = sliceNewLog(contents, previousLog);
+  if (!contents.startsWith(previousLog)) {
+    console.warn(`smoke: log was rewritten, resetting baseline: ${logPath}`);
+    previousLog = contents;
+  }
+  return result.text;
 }
 
 // The packaged smoke verifies the unauthenticated navigation boundary: the
@@ -162,7 +192,7 @@ async function verifyPackagedShell(baseUrl, contents) {
 
 function smokeError(message, contents) {
   return new Error(
-    `${message}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
+    `${message}\nLog: ${logPath}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
   );
 }
 
@@ -178,5 +208,25 @@ function terminate(pid) {
     }
   } catch {
     // The process may already have exited after the smoke succeeded or failed.
+  }
+}
+
+function verifyMacRuntimeCommit() {
+  if (process.platform !== 'darwin') return;
+  const manifestPath = path.resolve(
+    path.dirname(executable),
+    '../Resources/runtime/qwen-code/manifest.json',
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const expected =
+    process.env.QWEN_CODE_COMMIT ||
+    execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.env.QWEN_CODE_ROOT || repoRoot,
+      encoding: 'utf8',
+    }).trim();
+  if (manifest.qwenCodeCommit !== expected) {
+    throw new Error(
+      `Packaged runtime commit mismatch: expected ${expected}, found ${manifest.qwenCodeCommit || 'missing'}`,
+    );
   }
 }

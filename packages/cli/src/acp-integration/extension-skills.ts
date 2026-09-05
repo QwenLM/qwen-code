@@ -16,10 +16,6 @@ export function inactiveExtensionSkillRefs(config: Config): Set<string> {
     if (extension.isActive) continue;
     for (const skill of extension.skills ?? []) {
       refs.add(extensionSkillRef(extension.name, skill.name));
-      // SkillManager exposes extensionName as displayName ?? name.
-      if (extension.displayName) {
-        refs.add(extensionSkillRef(extension.displayName, skill.name));
-      }
     }
   }
   return refs;

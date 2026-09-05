@@ -18,6 +18,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -34,11 +35,17 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import { AcpWsTransport } from '@qwen-code/sdk/daemon/transports';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from '../../packages/cli/src/serve/local-path-open.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -52,6 +59,15 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'integration-test-token';
+// The ACP child's `initialize` handshake gets 10s by default, which is a
+// budget for an interactive desktop, not for a shard sharing a 128-core ECS
+// host with ~30 other jobs. Run 33633418567 lost `honors and reserves a
+// normalized caller-supplied session ID` to three ~10s
+// `AcpSessionBridge initialize timed out` attempts and a 504 on the
+// sandbox:docker leg while the same commit's sandbox:none shards passed —
+// the same signature #10605 diagnosed in run 33351032808. Nothing here
+// asserts the handshake budget, so raise it for the spawned daemon only.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
@@ -59,6 +75,16 @@ let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
+// The daemon evaluates isNativeDirectoryPickerAvailable() in its own process
+// at boot. Probe once at spawn time (same host, same uid, same relevant env)
+// so the expectation matches the daemon's boot-time view; re-probing at
+// assertion time minutes later diverged when the host's GUI session state
+// drifted mid-run (red macOS E2E runs after #9406, tracked in #10453).
+let nativeDirectoryPickerAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_open tag.
+let localPathOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_terminal tag.
+let localTerminalOpenAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -110,6 +136,9 @@ function chatRecord(
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
+  nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
+  localPathOpenAtBoot = isLocalPathOpenAvailable();
+  localTerminalOpenAtBoot = isLocalTerminalAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -129,6 +158,8 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -292,17 +323,27 @@ describe('qwen serve — capabilities envelope', () => {
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
     // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `native_directory_picker` is host-conditional (the daemon host's GUI
+    // environment, not a spawn flag) and is spliced at its registry
+    // position below, using the boot-time probe captured when the daemon
+    // was spawned rather than a fresh probe at assertion time.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
-    // `workspace_trust`, `workspace_github_setup`, and
-    // `workspace_reload`. The CLI serve path always wires `persistSetting`, the
-    // workspace service, and route-local workspace helpers).
-    expect(caps.features).toEqual([
+    // `workspace_trust`, `workspace_github_setup`, and `workspace_reload`.
+    // `scheduled_task_session_reuse` appears only after the managed runtime
+    // mounts, so the fast-path bootstrap and runtime envelopes legitimately
+    // differ by that tag. Its transition is covered by the serve startup tests.
+    expect(
+      caps.features.filter(
+        (feature) => feature !== 'scheduled_task_session_reuse',
+      ),
+    ).toEqual([
       'health',
       'daemon_status',
       'capabilities',
       'session_create',
+      'session_id_override',
       'session_scope_override',
       'session_load',
       'session_resume',
@@ -312,7 +353,11 @@ describe('qwen serve — capabilities envelope', () => {
       'session_source_metadata',
       'session_side_task',
       'session_prompt',
+      'session_turn_status',
+      'session_attachments',
+      'session_attachment_list',
       'session_mid_turn_message_mutation',
+      'session_mid_turn_message_query',
       'session_cancel',
       'session_events',
       'session_artifacts',
@@ -326,13 +371,17 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_vote',
       'workspace_mcp',
       'workspace_skills',
+      'workspace_skills_config_runtime',
       'workspace_providers',
       'workspace_acp_preheat',
       'workspace_acp_status',
       'auth_provider_install',
       'workspace_memory',
       'workspace_memory_remember',
+      'workspace_memory_remember_project_scope',
+      'workspace_memory_remember_user_scope',
       'workspace_memory_forget',
+      'workspace_memory_forget_scope',
       'workspace_memory_dream',
       'workspace_agents',
       'workspace_agent_generate',
@@ -342,17 +391,24 @@ describe('qwen serve — capabilities envelope', () => {
       'session_context_usage',
       'session_supported_commands',
       'session_tasks',
+      'session_agents',
+      'session_agent_trace',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
+      'session_resources',
       'session_status',
       'session_close',
       'session_archive',
+      'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',
       'session_export',
+      'standalone_sessions_v1',
+      'standalone_session_options_v1',
       'session_transcript',
       'session_transcript_pagination',
+      'session_turn_navigation',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
@@ -361,14 +417,18 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_bytes',
       'workspace_file_read_cursor',
       'workspace_file_write',
+      'workspace_file_upload',
       'session_approval_mode_control',
       'workspace_tool_toggle',
-      'workspace_skill_toggle',
+      'workspace_skill_settings_toggle',
+      'workspace_skill_settings_batch_toggle',
+      'extension_batch_activation_v2',
       'workspace_skill_manage',
       'workspace_settings',
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
@@ -383,6 +443,7 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_mediation',
       'non_blocking_prompt',
       'session_language',
+      'user_language_sync',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
@@ -393,16 +454,76 @@ describe('qwen serve — capabilities envelope', () => {
       'channel_control',
       'channel_management',
       'workspace_channel_observed_contacts',
+      'dynamic_workspace_registration',
       'persistent_workspace_registration',
       'workspace_display_name',
+      'scratch_workspace_registration',
       'workspace_runtime_removal',
+      ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
+      'workspace_runtime',
+      ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
+      ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_state',
+      'extension_git_credentials',
+      'extension_local_path_install',
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
+      'workspace_session_live_state',
+      'workspace_session_metadata',
+      'session_worktree_persistence_v1',
       'voice_transcribe',
+      'web_terminal',
     ]);
+  });
+});
+
+describe('qwen serve — local Extension install', () => {
+  it('installs an absolute daemon-local directory into managed storage', async () => {
+    const source = path.join(homeDir, 'local-extension-source');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({
+        name: 'daemon-local-path-e2e',
+        version: '1.0.0',
+      }),
+      'utf8',
+    );
+
+    const accepted = await client.installExtension({ source, consent: true });
+    await expect
+      .poll(
+        async () =>
+          (await client.extensionOperationStatus(accepted.operationId)).status,
+        { timeout: 10_000 },
+      )
+      .toBe('succeeded');
+
+    const operation = await client.extensionOperationStatus(
+      accepted.operationId,
+    );
+    expect(operation.result).toMatchObject({
+      status: 'installed',
+      source,
+      name: 'daemon-local-path-e2e',
+    });
+    const status = await client.workspaceExtensions();
+    const installed = status.extensions.find(
+      (extension) => extension.name === 'daemon-local-path-e2e',
+    );
+    expect(installed).toMatchObject({
+      source,
+      installType: 'local',
+    });
+    expect(installed?.path).not.toBe(source);
+    expect(
+      installed?.path.startsWith(
+        `${path.join(homeDir, '.qwen', 'extensions')}${path.sep}`,
+      ),
+    ).toBe(true);
   });
 });
 
@@ -445,6 +566,57 @@ describe('qwen serve — transcript paging route', () => {
     expect(second.events.some((event) => 'id' in event)).toBe(false);
   });
 
+  it('indexes and opens frozen turns through the real daemon owner path', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111112';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'first prompt'),
+      chatRecord(sessionId, 'a1', 'u1', 'first answer'),
+      chatRecord(sessionId, 'u2', 'a1', 'second prompt'),
+      chatRecord(sessionId, 'a2', 'u2', 'second answer'),
+    ]);
+
+    const initial = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(initial.totalTurns).toBe(2);
+    expect(initial.turns.map((turn) => turn.turnId)).toEqual(['u1', 'u2']);
+
+    const anchored = await client.getSessionTranscriptPage(sessionId, {
+      atRecordId: 'u2',
+      snapshot: initial.snapshot,
+      limit: 2,
+    });
+    expect(anchored.targetRecordId).toBe('u2');
+    expect(anchored.hasOlder).toBe(true);
+
+    appendFileSync(
+      filePath,
+      `${JSON.stringify(chatRecord(sessionId, 'u3', 'a2', 'third prompt'))}\n`,
+      'utf8',
+    );
+    const frozen = await client.getSessionTurnIndexPage(sessionId, {
+      snapshot: initial.snapshot,
+      start: 0,
+      limit: 10,
+    });
+    const fresh = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(frozen.totalTurns).toBe(2);
+    expect(fresh.totalTurns).toBe(3);
+
+    const tampered = `${initial.snapshot[0] === 'A' ? 'B' : 'A'}${initial.snapshot.slice(1)}`;
+    await expect(
+      client.getSessionTurnIndexPage(sessionId, {
+        snapshot: tampered,
+        start: 0,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'invalid_transcript_cursor' },
+    } satisfies Partial<DaemonHttpError>);
+  });
+
   it('maps transcript request validation errors through the real daemon', async () => {
     const sessionId = '99999999-aaaa-bbbb-cccc-222222222222';
     writePersistedTranscript(sessionId, [
@@ -470,7 +642,7 @@ describe('qwen serve — transcript paging route', () => {
     expect(missing.status).toBe(404);
   });
 
-  it('maps archived, conflicting, and unavailable transcript snapshots to 409', async () => {
+  it('reads exact conflicts from active and maps archived/unavailable snapshots to 409', async () => {
     const archivedId = '99999999-aaaa-bbbb-cccc-444444444444';
     const archivedRecord = chatRecord(
       archivedId,
@@ -486,19 +658,33 @@ describe('qwen serve — transcript paging route', () => {
     });
 
     const conflictId = '99999999-aaaa-bbbb-cccc-555555555555';
-    const conflictRecord = chatRecord(
+    const activeConflictRecord = chatRecord(
       conflictId,
       'u1',
       null,
-      'conflicting transcript',
+      'active conflicting transcript',
     );
-    writePersistedTranscript(conflictId, [conflictRecord]);
-    writePersistedTranscript(conflictId, [conflictRecord], 'archived');
+    const archivedConflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'archived conflicting transcript',
+    );
+    writePersistedTranscript(conflictId, [activeConflictRecord]);
+    writePersistedTranscript(conflictId, [archivedConflictRecord], 'archived');
     const conflict = await getTranscript(conflictId);
-    expect(conflict.status).toBe(409);
-    await expect(conflict.json()).resolves.toMatchObject({
-      code: 'session_conflict',
+    expect(conflict.status).toBe(200);
+    const conflictBody = await conflict.json();
+    expect(conflictBody).toMatchObject({
+      sessionId: conflictId,
+      hasMore: false,
     });
+    expect(JSON.stringify(conflictBody)).toContain(
+      'active conflicting transcript',
+    );
+    expect(JSON.stringify(conflictBody)).not.toContain(
+      'archived conflicting transcript',
+    );
 
     const unavailable = await getTranscript(
       '99999999-aaaa-bbbb-cccc-666666666666',
@@ -549,6 +735,93 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
       body: JSON.stringify({ cwd: 'relative/path' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('honors and reserves a normalized caller-supplied session ID', async () => {
+    const requestedId = '550E8400-E29B-41D4-A716-446655440000';
+    const normalizedId = requestedId.toLowerCase();
+    const created = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        cwd: REPO_ROOT,
+        sessionId: requestedId,
+        sessionScope: 'single',
+      }),
+    });
+    expect(created.status).toBe(200);
+    await expect(created.json()).resolves.toMatchObject({
+      sessionId: normalizedId,
+      attached: false,
+    });
+
+    try {
+      let conflict: unknown;
+      try {
+        await client.createOrAttachSession({
+          workspaceCwd: REPO_ROOT,
+          sessionId: normalizedId,
+        });
+      } catch (error) {
+        conflict = error;
+      }
+      expect(conflict).toBeInstanceOf(DaemonHttpError);
+      expect((conflict as DaemonHttpError).status).toBe(409);
+      expect((conflict as DaemonHttpError).body).toMatchObject({
+        code: 'session_id_conflict',
+        sessionId: normalizedId,
+      });
+
+      await client.closeSession(normalizedId);
+
+      const sdkRest = await client.createOrAttachSession({
+        workspaceCwd: REPO_ROOT,
+        sessionId: requestedId,
+      });
+      expect(sdkRest).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+      await client.closeSession(normalizedId);
+
+      const acpTransport = new AcpWsTransport(
+        `ws://127.0.0.1:${port}/acp`,
+        TOKEN,
+      );
+      const acpClient = new DaemonClient({
+        baseUrl: base,
+        token: TOKEN,
+        transport: acpTransport,
+      });
+      try {
+        const sdkAcp = await acpClient.createOrAttachSession({
+          workspaceCwd: REPO_ROOT,
+          sessionId: requestedId,
+        });
+        expect(sdkAcp).toMatchObject({ sessionId: normalizedId });
+        await client.closeSession(normalizedId);
+      } finally {
+        acpClient.dispose();
+      }
+
+      const invalid = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: REPO_ROOT, sessionId: '../escape' }),
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({
+        code: 'invalid_session_id',
+      });
+    } finally {
+      await client.closeSession(normalizedId).catch(() => undefined);
+    }
   });
 
   it('two parallel POSTs same workspace coalesce to one session', async () => {

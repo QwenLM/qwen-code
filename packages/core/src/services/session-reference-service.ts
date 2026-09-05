@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { estimateContentTokens } from './tokenEstimation.js';
+import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 
 /** Default token budget for an injected slimmed session reference. */
 export const SESSION_REF_TOKEN_BUDGET = 8000;
@@ -134,7 +135,7 @@ export class SessionReferenceService {
       // so we must emit its text here rather than short-circuiting on the tool
       // parts (which would silently drop the assistant's reasoning).
       if (rec.type === 'user') {
-        const text = this.visibleText(rec.message);
+        const text = this.visibleUserText(rec);
         if (text) out.push(`User: ${text}`);
       } else if (rec.type === 'assistant') {
         const text = this.visibleText(rec.message);
@@ -160,8 +161,19 @@ export class SessionReferenceService {
   }
 
   private visibleText(message?: Content): string {
-    if (!message?.parts) return '';
-    return message.parts
+    return this.visibleTextParts(message?.parts ?? []);
+  }
+
+  private visibleUserText(record: ChatRecord): string {
+    const projection = projectUserTranscriptForDisplay(record);
+    if (projection.displayText !== undefined) {
+      return projection.displayText.trim();
+    }
+    return this.visibleTextParts(projection.parts);
+  }
+
+  private visibleTextParts(parts: readonly Part[]): string {
+    return parts
       .filter((p: Part) => !(p as ThoughtPart).thought && p.text)
       .map((p: Part) => p.text)
       .join('')
@@ -185,7 +197,7 @@ export class SessionReferenceService {
     if (customTitle) return customTitle;
     for (const rec of records) {
       if (rec.type !== 'user') continue;
-      const text = this.visibleText(rec.message);
+      const text = this.visibleUserText(rec);
       if (!text) continue;
       const firstLine = text.split('\n')[0].trim();
       if (firstLine.length === 0) continue;

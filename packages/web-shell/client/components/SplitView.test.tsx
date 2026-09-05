@@ -22,14 +22,14 @@ let otherWorkspaceSessions: Record<string, any[]>;
 // Stable client object (assigned once per test) so the other-workspace hook's
 // load callback keeps a stable identity and its effect doesn't loop.
 let workspaceClient: {
-  listWorkspaceSessions: ReturnType<typeof vi.fn>;
+  listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
   workspaceByCwd: ReturnType<typeof vi.fn>;
 };
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
     <div
       data-session={props.sessionId}
@@ -62,6 +62,29 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
 }));
 
+vi.mock('../hooks/useScopedSessions', () => ({
+  useScopedSessions: (workspaceCwd: string | undefined) => {
+    const [sessions, setSessions] = React.useState<any[]>(() =>
+      workspaceCwd ? [] : sessionsState,
+    );
+    React.useEffect(() => {
+      if (!workspaceCwd) return;
+      void Promise.resolve().then(() => {
+        setSessions([...(otherWorkspaceSessions[workspaceCwd] ?? [])]);
+      });
+    }, [workspaceCwd]);
+    const reload = React.useCallback(async () => {
+      reloadMock();
+      const next = workspaceCwd
+        ? (otherWorkspaceSessions[workspaceCwd] ?? [])
+        : sessionsState;
+      setSessions([...next]);
+      return next;
+    }, [workspaceCwd]);
+    return { sessions, reload };
+  },
+}));
+
 vi.mock('./ChatPane', () => ({
   ChatPane: (props: any) => {
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
@@ -71,9 +94,11 @@ vi.mock('./ChatPane', () => ({
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
-        data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
         data-hidden={props.hidden ? 'true' : 'false'}
+        data-report-catalog-turn-completion={
+          props.reportCatalogTurnCompletion ? 'true' : 'false'
+        }
         data-voice-user-revision={String(props.voiceUserRevision ?? 0)}
         data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
@@ -120,13 +145,13 @@ beforeEach(() => {
   ];
   otherWorkspaceSessions = {};
   workspaceClient = {
-    listWorkspaceSessions: vi.fn(
-      async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
-    ),
+    listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
+      sessions: otherWorkspaceSessions[cwd] ?? [],
+    })),
     workspaceByCwd: vi.fn((cwd: string) => ({
-      listWorkspaceSessions: vi.fn(
-        async () => otherWorkspaceSessions[cwd] ?? [],
-      ),
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
     })),
   };
   reloadMock = vi.fn();
@@ -201,17 +226,36 @@ describe('SplitView', () => {
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
   });
 
+  it('leaves the outer session as the sole catalog turn-completion owner', () => {
+    render({ sessionIds: ['s3', 's1'] });
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('false');
+    expect(
+      panes()[1]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
+  });
+
+  it('reports completion for the same session id in another workspace', async () => {
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 's3', workspaceCwd: '/wsB', displayName: 'Other Three' },
+    ];
+
+    render({ sessionIds: ['s3'], workspaceCwd: '/wsB' });
+    await flushAsync();
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
+  });
+
   it('passes the prompt SSE restart option to pane providers', () => {
     render({ sessionIds: ['s1'], restartSseOnPrompt: true });
     expect(
       container!
         .querySelector('[data-session="s1"]')
         ?.getAttribute('data-restart-sse'),
-    ).toBe('true');
-    expect(
-      container!
-        .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
-        ?.getAttribute('data-pane-restart-sse'),
     ).toBe('true');
   });
 
@@ -735,24 +779,6 @@ describe('SplitView', () => {
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
   });
 
-  it('reloads the picker list when the parent bumps the reload token', () => {
-    render({ sessionIds: ['s1'], sessionListReloadToken: 0 });
-    // The initial token is not a change, so it does not trigger a reload.
-    expect(reloadMock).not.toHaveBeenCalled();
-    act(() =>
-      root!.render(
-        <I18nProvider language="en">
-          <SplitView
-            onExit={() => {}}
-            sessionIds={['s1']}
-            sessionListReloadToken={1}
-          />
-        </I18nProvider>,
-      ),
-    );
-    expect(reloadMock).toHaveBeenCalledTimes(1);
-  });
-
   it('mirrors the live pane set up to the parent as panes change', () => {
     const onPanesChange = vi.fn();
     render({ onPanesChange });
@@ -903,7 +929,7 @@ describe('SplitView', () => {
     // must not touch the daemon and the picker stays untagged.
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    expect(workspaceClient.listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(workspaceClient.listWorkspaceSessionsPage).not.toHaveBeenCalled();
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
   });
@@ -924,13 +950,13 @@ describe('SplitView', () => {
     ];
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    const before = workspaceClient.listWorkspaceSessions.mock.calls.length;
+    const before = workspaceClient.listWorkspaceSessionsPage.mock.calls.length;
     openPicker();
     await flushAsync();
     // Opening the picker reloads the other-workspace list so it never offers a
     // stale set (mirrors the primary `reload()` on picker open).
     expect(
-      workspaceClient.listWorkspaceSessions.mock.calls.length,
+      workspaceClient.listWorkspaceSessionsPage.mock.calls.length,
     ).toBeGreaterThan(before);
   });
 

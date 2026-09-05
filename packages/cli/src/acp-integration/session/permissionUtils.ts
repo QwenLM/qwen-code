@@ -27,6 +27,33 @@ const basicPermissionOptions = [
   },
 ] as const satisfies readonly PermissionOption[];
 
+export interface PermissionPersistencePolicy {
+  readonly allowProjectPersistence: boolean;
+  readonly allowUserPersistence: boolean;
+}
+
+function filterPermissionPersistenceOptions(
+  options: PermissionOption[],
+  policy: PermissionPersistencePolicy | undefined,
+): PermissionOption[] {
+  if (!policy) return options;
+  return options.filter((option) => {
+    if (
+      option.optionId === ToolConfirmationOutcome.ProceedAlwaysProject &&
+      !policy.allowProjectPersistence
+    ) {
+      return false;
+    }
+    if (
+      option.optionId === ToolConfirmationOutcome.ProceedAlwaysUser &&
+      !policy.allowUserPersistence
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function supportsHideAlwaysAllow(
   confirmation: ToolCallConfirmationDetails,
 ): confirmation is Exclude<
@@ -49,7 +76,12 @@ function filterAlwaysAllowOptions(
   const visibleOptions = hideAlwaysAllow
     ? options.filter((option) => option.kind !== 'allow_always')
     : options;
-  if (!confirmation.autoModeFallback) return visibleOptions;
+  if (
+    confirmation.autoModeFallback?.reason !== 'classifier_unavailable' &&
+    confirmation.autoModeFallback?.reason !== 'consecutive_unavailable'
+  ) {
+    return visibleOptions;
+  }
 
   const switchOption: PermissionOption = {
     optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
@@ -215,6 +247,7 @@ export function resolvePermissionOutcome(
 export function toPermissionOptions(
   confirmation: ToolCallConfirmationDetails,
   forceHideAlwaysAllow = false,
+  persistencePolicy?: PermissionPersistencePolicy,
 ): PermissionOption[] {
   switch (confirmation.type) {
     case 'edit':
@@ -234,56 +267,65 @@ export function toPermissionOptions(
       const label = formatExecPermissionScopeLabel(confirmation);
       return filterAlwaysAllowOptions(
         confirmation,
-        [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
-            name: `Always Allow in project: ${label}`,
-            kind: 'allow_always',
-          },
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
-            name: `Always Allow for user: ${label}`,
-            kind: 'allow_always',
-          },
-          ...basicPermissionOptions,
-        ],
+        filterPermissionPersistenceOptions(
+          [
+            {
+              optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+              name: `Always Allow in project: ${label}`,
+              kind: 'allow_always',
+            },
+            {
+              optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+              name: `Always Allow for user: ${label}`,
+              kind: 'allow_always',
+            },
+            ...basicPermissionOptions,
+          ],
+          persistencePolicy,
+        ),
         forceHideAlwaysAllow,
       );
     }
     case 'mcp':
       return filterAlwaysAllowOptions(
         confirmation,
-        [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
-            name: `Always Allow in project: ${confirmation.toolName}`,
-            kind: 'allow_always',
-          },
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
-            name: `Always Allow for user: ${confirmation.toolName}`,
-            kind: 'allow_always',
-          },
-          ...basicPermissionOptions,
-        ],
+        filterPermissionPersistenceOptions(
+          [
+            {
+              optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+              name: `Always Allow in project: ${confirmation.toolName}`,
+              kind: 'allow_always',
+            },
+            {
+              optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+              name: `Always Allow for user: ${confirmation.toolName}`,
+              kind: 'allow_always',
+            },
+            ...basicPermissionOptions,
+          ],
+          persistencePolicy,
+        ),
         forceHideAlwaysAllow,
       );
     case 'info':
       return filterAlwaysAllowOptions(
         confirmation,
-        [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
-            name: 'Always Allow in project',
-            kind: 'allow_always',
-          },
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
-            name: 'Always Allow for user',
-            kind: 'allow_always',
-          },
-          ...basicPermissionOptions,
-        ],
+        filterPermissionPersistenceOptions(
+          [
+            {
+              optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+              name: 'Always Allow in project',
+              kind: 'allow_always',
+            },
+            {
+              optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+              name: 'Always Allow for user',
+              kind: 'allow_always',
+            },
+            ...basicPermissionOptions,
+          ],
+          persistencePolicy,
+        ),
         forceHideAlwaysAllow,
       );
     case 'plan':

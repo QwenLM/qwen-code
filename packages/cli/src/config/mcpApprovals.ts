@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   getErrorMessage,
@@ -54,9 +55,102 @@ export function getMcpApprovalsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), MCP_APPROVALS_FILENAME);
 }
 
-/** Keys are stored normalized so the same project resolves consistently. */
+/**
+ * Keys are stored normalized so the same project resolves consistently. On
+ * Windows, paths are case-insensitive but the entry points that produce a
+ * project root disagree on casing: the CLI keeps `process.cwd()` as typed
+ * (`D:\project`) while IDE integrations hand over VS Code's
+ * `workspaceFolders[0].uri.fsPath`, which lowercases the drive letter
+ * (`d:\project`). Fold case on win32 — same convention as
+ * `getProjectHash()`/`sanitizeCwd()`. See issue #9775.
+ */
 function normalizeProjectRoot(projectRoot: string): string {
-  return path.resolve(projectRoot);
+  const resolved = path.resolve(projectRoot);
+  return os.platform() === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function isApprovalRecordMap(
+  value: unknown,
+): value is Record<string, McpApprovalRecord> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A win32 absolute path — drive-letter (`D:\...`) or UNC (`\\server\share`).
+ * These are the only stored keys whose case is folded at load time: folding
+ * every key would corrupt foreign POSIX paths (e.g. a `~/.qwen` synced from a
+ * Linux machine), whose case is significant on the filesystem they belong to.
+ */
+function isWin32AbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+/**
+ * Merge two per-project records that collided on case after folding. Stored
+ * decisions carry no timestamps and file order does not track recency (older
+ * builds appended differently-cased keys at the end), so on conflict keep the
+ * conservative outcome: a rejection always wins over an approval, never the
+ * reverse, so a stale approval cannot silently re-enable a server the user
+ * later rejected.
+ */
+function mergeApprovalRecords(
+  existing: Record<string, McpApprovalRecord>,
+  incoming: Record<string, McpApprovalRecord>,
+): Record<string, McpApprovalRecord> {
+  // Use a null-prototype target so a server literally named `__proto__`
+  // keeps its decision as an own property: on a normal object the assignment
+  // `merged['__proto__'] = record` goes through the Object.prototype setter,
+  // the record becomes the map's prototype and JSON.stringify omits it.
+  const merged: Record<string, McpApprovalRecord> = Object.assign(
+    Object.create(null),
+    existing,
+  );
+  for (const [name, record] of Object.entries(incoming)) {
+    // A stored record value can be `null` (corrupted sync / hand edit /
+    // format drift). Reading `record.status` would throw and condemn the
+    // whole approvals file — every project degrades to pending and the next
+    // save rewrites from a near-empty config — so skip non-record values.
+    if (!isApprovalRecordMap(record)) {
+      continue;
+    }
+    const current = merged[name];
+    if (!current) {
+      merged[name] = record;
+    } else if (current.status !== record.status) {
+      merged[name] = current.status === 'rejected' ? current : record;
+    }
+  }
+  return merged;
+}
+
+/**
+ * Approvals written by older builds may key a project by a differently-cased
+ * path than {@link normalizeProjectRoot} now produces (e.g. an uppercased
+ * drive letter recorded by the CLI). Fold stored keys to match at load time so
+ * those decisions aren't orphaned; duplicates that differ only in case merge
+ * into one entry and are rewritten in normalized form on the next save.
+ */
+function normalizeStoredProjectKeys(
+  config: McpApprovalsConfig,
+): McpApprovalsConfig {
+  if (os.platform() !== 'win32') {
+    return config;
+  }
+  const normalized: McpApprovalsConfig = Object.create(null);
+  for (const [key, value] of Object.entries(config)) {
+    // Stored keys are already absolute and separator-normalized; fold case
+    // only — re-resolving here could rewrite foreign keys into unrelated
+    // local ones, and folding non-win32 keys would corrupt POSIX paths.
+    const projectKey = isWin32AbsolutePath(key) ? key.toLowerCase() : key;
+    const existing = normalized[projectKey];
+    normalized[projectKey] =
+      isApprovalRecordMap(existing) && isApprovalRecordMap(value)
+        ? mergeApprovalRecords(existing, value)
+        : isApprovalRecordMap(value) || !isApprovalRecordMap(existing)
+          ? value
+          : existing;
+  }
+  return normalized;
 }
 
 export class LoadedMcpApprovals {
@@ -96,10 +190,11 @@ export class LoadedMcpApprovals {
   ): Promise<void> {
     const root = normalizeProjectRoot(projectRoot);
     const existing = this.file.config[root];
-    const project: Record<string, McpApprovalRecord> =
-      existing && typeof existing === 'object' && !Array.isArray(existing)
-        ? existing
-        : Object.create(null);
+    const project: Record<string, McpApprovalRecord> = isApprovalRecordMap(
+      existing,
+    )
+      ? existing
+      : Object.create(null);
     Object.defineProperty(project, serverName, {
       value: { hash: hashMcpServerConfig(config), status },
       enumerable: true,
@@ -141,7 +236,7 @@ export function loadMcpApprovals(): LoadedMcpApprovals {
           path: filePath,
         });
       } else {
-        config = parsed as McpApprovalsConfig;
+        config = normalizeStoredProjectKeys(parsed as McpApprovalsConfig);
       }
     }
   } catch (error: unknown) {

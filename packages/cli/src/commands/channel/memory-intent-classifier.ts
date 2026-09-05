@@ -223,7 +223,7 @@ export class BridgeChannelMemoryIntentClassifier
       const response = await bridge.prompt(
         sessionId,
         `${CLASSIFIER_PROMPT}${JSON.stringify(text)}${buildMemoryManifest(entries)}`,
-        {},
+        { displayText: '' },
       );
       try {
         return normalizeClassifierResult(extractJsonObject(response), entries);
@@ -234,11 +234,17 @@ export class BridgeChannelMemoryIntentClassifier
       }
     } finally {
       try {
-        await bridge.cancelSession(sessionId);
+        if (bridge.deleteSessionData) {
+          await bridge.deleteSessionData(sessionId);
+        } else if (bridge.discardSession) {
+          await bridge.discardSession(sessionId);
+        } else {
+          await bridge.cancelSession(sessionId);
+        }
       } catch (error) {
         // session cleanup must not mask a successful classification
         process.stderr.write(
-          `[classifier] cancelSession failed: ${sanitizeLogText(
+          `[classifier] session cleanup failed: ${sanitizeLogText(
             error instanceof Error ? error.message : String(error),
             200,
           )}\n`,

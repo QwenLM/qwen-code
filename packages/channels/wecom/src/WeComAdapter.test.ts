@@ -284,9 +284,22 @@ function makeBridge(): ChannelAgentBridge {
 
 class TestWeComChannel extends WeComChannel {
   readonly envelopes: Envelope[] = [];
+  readonly preflightedInbound = vi.fn();
+
+  protected override async processPreflightedInbound(
+    envelope: Envelope,
+    process: () => Promise<void> = () => this.processInbound(envelope),
+  ): Promise<void> {
+    this.preflightedInbound(envelope);
+    await super.processPreflightedInbound(envelope, process);
+  }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
     this.envelopes.push(envelope);
+  }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
   }
 }
 
@@ -428,6 +441,30 @@ describe('WeComChannel', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
+  });
+
+  it('shares attachment routing across senders in chat_thread scope', () => {
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ sessionScope: 'chat_thread' }),
+      makeBridge(),
+    );
+    const routeKey = (
+      channel as unknown as {
+        attachmentRouteKey(
+          senderId: string,
+          chatId: string,
+          threadId?: string,
+        ): string;
+      }
+    ).attachmentRouteKey.bind(channel);
+
+    expect(routeKey('alice', 'chat-1', 'topic-1')).toBe(
+      routeKey('bob', 'chat-1', 'topic-1'),
+    );
+    expect(routeKey('alice', 'chat-1', 'topic-1')).not.toBe(
+      routeKey('alice', 'chat-2', 'topic-1'),
+    );
   });
 
   it('requires botId and secret', () => {
@@ -1639,7 +1676,11 @@ describe('WeComChannel', () => {
     mocks.httpResponse.headers = {
       'content-disposition': 'attachment; filename="../secret.png"',
     };
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ messagePrefix: '/review' }),
+      makeBridge(),
+    );
     await channel.connect();
     const client = lastClient();
 
@@ -1653,7 +1694,93 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments?.[0]?.fileName).toBe('secret.png');
+    expect(channel.envelopes[0]?.syntheticText).toBe(true);
   });
+
+  it.each([
+    {
+      label: 'a transcribed voice message stays gated on the prefix',
+      event: 'message.voice',
+      payload: {
+        msgtype: 'voice',
+        voice: { content: 'please look at the build' },
+      },
+      dispatched: false,
+    },
+    {
+      label: 'a prefixed transcript is dispatched and stripped',
+      event: 'message.voice',
+      payload: {
+        msgtype: 'voice',
+        voice: { content: '/review please look at the build' },
+      },
+      dispatched: true,
+      text: 'please look at the build',
+      synthetic: undefined,
+    },
+    {
+      label: 'an untranscribed voice message runs as media',
+      event: 'message.voice',
+      payload: { msgtype: 'voice', voice: {} },
+      dispatched: true,
+      text: '(voice)',
+      synthetic: true,
+    },
+    {
+      label: 'a mixed message carrying text stays gated on the prefix',
+      event: 'message.mixed',
+      payload: {
+        msgtype: 'mixed',
+        mixed: {
+          msg_item: [
+            { msgtype: 'text', text: { content: 'inspect this' } },
+            { msgtype: 'image', image: {} },
+          ],
+        },
+      },
+      dispatched: false,
+    },
+    {
+      label: 'a mixed message with no text runs as media',
+      event: 'message.mixed',
+      payload: {
+        msgtype: 'mixed',
+        mixed: { msg_item: [{ msgtype: 'image', image: {} }] },
+      },
+      dispatched: true,
+      text: '',
+      synthetic: true,
+    },
+  ])(
+    'under a configured prefix, $label',
+    async ({ event, payload, dispatched, text, synthetic }) => {
+      // A transcript is the user's own words, so it carries the prefix like
+      // any other message; only the adapter's own placeholder is exempt.
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const channel = new TestWeComChannel(
+        'bot',
+        makeConfig({ messagePrefix: '/review' }),
+        makeBridge(),
+      );
+      await channel.connect();
+
+      lastClient().emit(event, {
+        msgid: `msg-${event}-${String(dispatched)}`,
+        chattype: 'single',
+        from: { userid: 'alice' },
+        ...payload,
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      if (!dispatched) {
+        expect(channel.envelopes).toHaveLength(0);
+        return;
+      }
+      await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+      expect(channel.envelopes[0]?.text).toBe(text);
+      expect(channel.envelopes[0]?.syntheticText).toBe(synthetic);
+    },
+  );
 
   it('logs sanitized payloads only when debug payload logging is enabled', async () => {
     const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
@@ -1917,6 +2044,42 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('consumes prefix mismatches without repeatedly reconsidering them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = makeBridge();
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-prefix-mismatch',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[Channel:bot] preflight rejected reason=message_prefix_mismatch\n',
+      ),
+    );
+    client.emit('message.text', payload);
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] dropping duplicate message msg-prefix-mismatch (already seen).\n',
+      ),
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
   it('allows messages interrupted during attachment download to be retried', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -1946,6 +2109,7 @@ describe('WeComChannel', () => {
 
     client.emit('message.image', payload);
     await vi.waitFor(() => expect(mocks.lookup).toHaveBeenCalledTimes(1));
+    expect(channel.preflightedInbound).toHaveBeenCalledTimes(1);
     inspectable.disconnectGeneration += 1;
     releaseLookup?.([{ address: '93.184.216.34', family: 4 }]);
     await vi.waitFor(() =>
@@ -2691,7 +2855,11 @@ describe('WeComChannel', () => {
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
     mocks.httpResponse.statusCode = 500;
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ messagePrefix: '/review' }),
+      makeBridge(),
+    );
     await channel.connect();
     const client = lastClient();
 
@@ -2705,6 +2873,9 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(channel.envelopes[0]?.text).toBe(
+      '(User sent media but download failed)',
+    );
     expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('media download failed: HTTP 500'),
@@ -4041,6 +4212,53 @@ describe('WeComChannel', () => {
     expect(first.markdown.content + second.markdown.content).toBe(
       'a'.repeat(3900),
     );
+  });
+
+  it('extracts media first and repeats an escaped label within every byte-limited chunk', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    const sourceLabel = '[review_*]';
+
+    await channel.sendAttributed(
+      'chat-1',
+      Array.from(
+        { length: 80 },
+        (_, index) => `paragraph ${index}: ${'x'.repeat(80)}`,
+      ).join('\n'),
+      sourceLabel,
+    );
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.startsWith('\\[review\\_\\*\\]\n')).toBe(true);
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(3800);
+    }
+  });
+
+  it('keeps attributed fenced-code openings line-leading in every chunk', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendAttributed(
+      'chat-1',
+      `\`\`\`text\n${'x'.repeat(3900)}\n\`\`\``,
+      '[review]',
+    );
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toMatch(/^\\\[review\\\]\n(?:```|~~~)/u);
+    }
   });
 
   it('splits long markdown responses without array-copying the remaining line', async () => {

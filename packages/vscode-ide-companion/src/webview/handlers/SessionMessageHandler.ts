@@ -6,11 +6,15 @@
 
 import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
+import * as fsp from 'fs/promises';
+import { pathToFileURL } from 'node:url';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { Conversation } from '../../services/conversationStore.js';
 import {
   getDisplayableImageMimeType,
+  MAX_IMAGE_SIZE,
+  splitMessageContentForImages,
   type ImageAttachment,
 } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
@@ -20,7 +24,7 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
-import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import { stripZeroWidthSpaces } from '../../utils/inputPlaceholder.js';
 import {
   exportSessionToFile,
   parseExportSlashCommand,
@@ -30,13 +34,49 @@ import {
   DISCONTINUED_MESSAGES,
   isDiscontinuedModel,
 } from '../utils/discontinuedModel.js';
+import type { InlineFilePayload } from '../../types/webviewMessageTypes.js';
+
+const INLINE_FILE_ATTRIBUTE_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&apos;',
+};
+
+function escapeInlineFileAttribute(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) => INLINE_FILE_ATTRIBUTE_ESCAPES[character] ?? character,
+  );
+}
+
+function appendInlineFiles(
+  promptText: string,
+  inlineFiles: readonly InlineFilePayload[],
+): string {
+  if (inlineFiles.length === 0) {
+    return promptText;
+  }
+
+  const fileBlocks = inlineFiles
+    .map(
+      (file) =>
+        `<attached_file name="${escapeInlineFileAttribute(file.name)}" media_type="${escapeInlineFileAttribute(file.mediaType)}">\n${file.text}\n</attached_file>`,
+    )
+    .join('\n\n');
+
+  return promptText.length > 0 ? `${promptText}\n\n${fileBlocks}` : fileBlocks;
+}
 
 function formatExportSuccessMessage(
   formatLabel: string,
   filename: string,
   filePath: string,
 ): string {
-  const markdownLinkPath = vscode.Uri.file(filePath).toString();
+  const markdownLinkPath = pathToFileURL(filePath)
+    .href.replace(/\(/g, '%28')
+    .replace(/\)/g, '%29');
   return `Session exported to ${formatLabel}: [${filename}](${markdownLinkPath})`;
 }
 
@@ -53,6 +93,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     return [
       'sendMessage',
       'editMessage',
+      'exportSession',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
@@ -101,6 +142,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
+          data?.inlineFiles as InlineFilePayload[] | undefined,
         );
         break;
 
@@ -126,9 +168,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
-          typeof data?.targetTurnIndex === 'number'
-            ? data.targetTurnIndex
-            : undefined,
+          data?.inlineFiles as InlineFilePayload[] | undefined,
+          data?.targetTurnIndex as number | undefined,
+        );
+        break;
+
+      case 'exportSession':
+        await this.handleWebShellExport(
+          (data?.text as string) || '',
+          (data?.sessionId as string) || undefined,
         );
         break;
 
@@ -241,9 +289,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
   private async captureConversationSnapshot(
     conversationId: string | null,
   ): Promise<Conversation | null> {
-    if (!conversationId) {
-      return null;
-    }
+    if (!conversationId) return null;
 
     const conversation =
       await this.conversationStore.getConversation(conversationId);
@@ -259,17 +305,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
         getSessionMessages?: (sessionId: string) => Promise<ChatMessage[]>;
       }
     ).getSessionMessages;
-    if (!getSessionMessages) {
-      return null;
-    }
+    if (!getSessionMessages) return null;
 
     const messages = await getSessionMessages.call(
       this.agentManager,
       conversationId,
     );
-    if (messages.length === 0) {
-      return null;
-    }
+    if (messages.length === 0) return null;
 
     const timestamps = messages.map((message) => message.timestamp);
     const recoveredConversation: Conversation = {
@@ -280,16 +322,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
       updatedAt: Math.max(...timestamps),
     };
     await this.conversationStore.upsertConversation(recoveredConversation);
-
     return recoveredConversation;
   }
 
   private async restoreConversationSnapshot(
     snapshot: Conversation | null,
   ): Promise<void> {
-    if (!snapshot) {
-      return;
-    }
+    if (!snapshot) return;
 
     const restored = await this.conversationStore.replaceMessages(
       snapshot.id,
@@ -304,7 +343,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     this.updateCurrentConversationId(snapshot.id);
     this.sendToWebView({
       type: 'conversationLoaded',
-      data: snapshot,
+      data: { ...snapshot, restoreTranscript: true },
     });
   }
 
@@ -434,11 +473,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
   private async handleExportCommand(
     format: SessionExportFormat,
+    explicitSessionId?: string,
   ): Promise<void> {
     // Prefer the active ACP session id. The local conversation id may still be
     // a webview-only `conv_*` placeholder after starting a fresh session.
     const sessionId =
-      this.agentManager.currentSessionId ?? this.currentConversationId;
+      explicitSessionId ??
+      this.agentManager.currentSessionId ??
+      this.currentConversationId;
     if (!sessionId) {
       const errorMsg = 'No active session found to export.';
       this.sendToWebView({
@@ -466,6 +508,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
             result.uri.fsPath,
           ),
           timestamp: Date.now(),
+          // Local confirmations never flow through ACP transcriptUpdate;
+          // without localOnly the WebShell transcript renders them nowhere.
+          localOnly: true,
+        },
+      });
+      this.sendToWebView({
+        type: 'exportCompleted',
+        data: {
+          format: formatLabel,
+          filename: result.filename,
+          filePath: result.uri.fsPath,
         },
       });
     } catch (error) {
@@ -474,6 +527,22 @@ export class SessionMessageHandler extends BaseMessageHandler {
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to export session: ${errorMsg}` },
+      });
+    }
+  }
+
+  private async handleWebShellExport(
+    text: string,
+    sessionId?: string,
+  ): Promise<void> {
+    try {
+      const format = parseExportSlashCommand(text);
+      if (!format) return;
+      await this.handleExportCommand(format, sessionId);
+    } catch (error) {
+      this.sendToWebView({
+        type: 'error',
+        data: { message: this.getErrorMessage(error) },
       });
     }
   }
@@ -498,6 +567,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       endLine?: number;
     },
     attachments?: ImageAttachment[],
+    inlineFiles?: InlineFilePayload[],
     editTargetTurnIndex?: number,
   ): Promise<void> {
     logger.log('[SessionMessageHandler] handleSendMessage called', {
@@ -509,7 +579,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // or model-selector interactions clear the input but still trigger a submit.
     const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
-    if (!trimmedText && !hasAttachments) {
+    const hasInlineFiles = (inlineFiles?.length ?? 0) > 0;
+    if (!trimmedText && !hasAttachments && !hasInlineFiles) {
       logger.warn('[SessionMessageHandler] Ignoring empty message');
       return;
     }
@@ -563,6 +634,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     }
     promptText = formattedText;
+    promptText = appendInlineFiles(promptText, inlineFiles ?? []);
     displayText = updatedDisplayText;
 
     if (hasAttachments && !trimmedText && savedImageCount === 0) {
@@ -585,9 +657,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       try {
         const newConv = await this.conversationStore.createConversation();
         this.updateCurrentConversationId(newConv.id);
+        // Carry the live ACP session id so this boundary re-pins the
+        // transcript guard instead of re-opening the adopt-on-null window
+        // to stale frames of the abandoned session on a first send.
         this.sendToWebView({
           type: 'conversationLoaded',
-          data: newConv,
+          data: {
+            ...newConv,
+            ...(this.agentManager.currentSessionId
+              ? { sessionId: this.agentManager.currentSessionId }
+              : {}),
+          },
         });
       } catch (error) {
         const errorMsg = `Failed to create conversation: ${this.getErrorMessage(error)}`;
@@ -620,15 +700,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     if (editTargetTurnIndex !== undefined) {
       if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
-        const errorMsg = 'Invalid message edit target.';
-        logger.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
         this.sendToWebView({
           type: 'error',
-          data: { message: errorMsg },
+          data: { message: 'Invalid message edit target.' },
         });
         return;
       }
-
       if (!this.agentManager.isConnected) {
         await this.promptAuth(
           'You need to configure your provider to use Qwen Code.',
@@ -636,55 +713,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      if (!this.agentManager.currentSessionId) {
-        try {
-          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-          const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-          await this.agentManager.createNewSession(workingDir);
-        } catch (createErr) {
-          logger.error(
-            '[SessionMessageHandler] Failed to create session before editing message:',
-            createErr,
-          );
-          const errorMsg = this.getErrorMessage(createErr);
-          if (this.shouldPromptAuth(createErr)) {
-            await this.promptAuth(
-              'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
-            );
-            return;
-          }
-          vscode.window.showErrorMessage(
-            `Failed to create session: ${errorMsg}`,
-          );
-          return;
-        }
-      }
-
       try {
         editRestoreSnapshot = await this.captureConversationSnapshot(
           this.currentConversationId,
         );
-      } catch (error) {
-        logger.error(
-          '[SessionMessageHandler] Failed to capture edit restore snapshot:',
-          error,
-        );
-        const errorMsg = this.getErrorMessage(error);
-        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
-        this.sendToWebView({
-          type: 'error',
-          data: { message: errorMsg },
-        });
-        return;
-      }
-
-      if (!editRestoreSnapshot) {
-        logger.warn(
-          '[SessionMessageHandler] Local conversation snapshot missing before edit; continuing with ACP rewind only.',
-        );
-      }
-
-      try {
         if (editRestoreSnapshot) {
           const truncated = await this.conversationStore.truncateFromUserTurn(
             this.currentConversationId,
@@ -700,37 +732,28 @@ export class SessionMessageHandler extends BaseMessageHandler {
           await this.agentManager.rewindSession(editTargetTurnIndex);
         editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
         editAcpMutationApplied = true;
-
+        const retainedConversation =
+          await this.conversationStore.getConversation(
+            this.currentConversationId,
+          );
         this.sendToWebView({
           type: 'conversationRewound',
-          data: { targetTurnIndex: editTargetTurnIndex },
+          data: {
+            targetTurnIndex: editTargetTurnIndex,
+            sessionId: this.agentManager.currentSessionId,
+            messages: retainedConversation?.messages ?? [],
+          },
         });
       } catch (error) {
         if (editAcpMutationApplied && editAcpHistorySnapshot) {
-          try {
-            await this.agentManager.restoreSessionHistory(
-              editAcpHistorySnapshot,
-            );
-          } catch (restoreError) {
-            logger.warn(
-              '[SessionMessageHandler] Failed to restore ACP history after rewind failure:',
-              restoreError,
-            );
-          }
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
         }
         if (editStoreMutationApplied) {
           await this.restoreConversationSnapshot(editRestoreSnapshot);
         }
         const errorMsg = this.getErrorMessage(error);
-        logger.error(
-          '[SessionMessageHandler] Failed to rewind session:',
-          error,
-        );
         vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
-        this.sendToWebView({
-          type: 'error',
-          data: { message: errorMsg },
-        });
+        this.sendToWebView({ type: 'error', data: { message: errorMsg } });
         return;
       }
     }
@@ -754,7 +777,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     // Generate title for first message, but only if it hasn't been set yet
-    if (isFirstMessage && !this.isTitleSet) {
+    if (isFirstMessage && (!this.isTitleSet || editTargetTurnIndex === 0)) {
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {
@@ -784,22 +807,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
 
       if (editAcpMutationApplied && editAcpHistorySnapshot) {
-        try {
-          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
-        } catch (restoreError) {
-          logger.warn(
-            '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
-            restoreError,
-          );
-        }
+        await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
       }
-
       if (editStoreMutationApplied) {
         await this.restoreConversationSnapshot(editRestoreSnapshot);
       }
 
       const errorMsg = this.getErrorMessage(error);
-      vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+      vscode.window.showErrorMessage(
+        `${editTargetTurnIndex === undefined ? 'Failed to send' : 'Failed to edit'} message: ${errorMsg}`,
+      );
       this.sendToWebView({
         type: 'error',
         data: { message: errorMsg },
@@ -815,6 +832,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // Check if agent is connected
     if (!this.agentManager.isConnected) {
       logger.warn('[SessionMessageHandler] Agent not connected');
+
+      // The send aborts before the transcript echo runs, so the user's own
+      // message would render nowhere; re-surface it as a local notice. The
+      // eager copy above is intentionally untagged because on successful
+      // sends the live transcript renders the prompt and a tagged copy here
+      // would double-render it.
+      this.sendToWebView({
+        type: 'message',
+        data: { ...userMessage, localOnly: true },
+      });
 
       // Show non-modal notification with Configure button
       await this.promptAuth(
@@ -834,6 +861,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
           '[SessionMessageHandler] Failed to create session before sending message:',
           createErr,
         );
+        // Aborted before the transcript echo runs; re-surface the user's
+        // own message as a local notice (see the not-connected branch).
+        this.sendToWebView({
+          type: 'message',
+          data: { ...userMessage, localOnly: true },
+        });
         const errorMsg = this.getErrorMessage(createErr);
         if (this.shouldPromptAuth(createErr)) {
           await this.promptAuth(
@@ -870,6 +903,54 @@ export class SessionMessageHandler extends BaseMessageHandler {
           requestId: myRequestId,
         },
       });
+
+      // The companion's direct stdio ACP channel never receives a
+      // user_message_chunk for an interactive prompt, so echo the user's
+      // own turn into the transcript timeline (mirrors the daemon-bridge
+      // echo on the SSE bus). Posted before the prompt is dispatched so
+      // the user block renders ahead of this turn's assistant frames.
+      const transcriptEchoSessionId = this.agentManager.currentSessionId;
+      const transcriptDisplayText =
+        splitMessageContentForImages(displayText).text;
+      if (transcriptEchoSessionId && transcriptDisplayText) {
+        this.sendToWebView({
+          type: 'transcriptUpdate',
+          data: {
+            sessionId: transcriptEchoSessionId,
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: transcriptDisplayText },
+            },
+          },
+        });
+      }
+      // The prompt carries attached images as ACP `resource_link` blocks,
+      // which the transcript reducer cannot render (no inline data). Echo
+      // each saved image back as an inline `user_message_chunk` image part
+      // (the daemon-echo content shape) so pasted/attached pictures render
+      // in the WebShell transcript timeline alongside the prompt text.
+      if (transcriptEchoSessionId && promptImages.length > 0) {
+        for (const image of promptImages) {
+          const imageData = await this.readPromptImageAsBase64(image.path);
+          if (imageData === null) {
+            continue;
+          }
+          this.sendToWebView({
+            type: 'transcriptUpdate',
+            data: {
+              sessionId: transcriptEchoSessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'image',
+                  data: imageData,
+                  mimeType: image.mimeType,
+                },
+              },
+            },
+          });
+        }
+      }
 
       await this.agentManager.sendMessage(
         buildPromptBlocks(promptText, promptImages),
@@ -923,16 +1004,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
       logger.error('[SessionMessageHandler] Error sending message:', error);
 
       if (editAcpMutationApplied && editAcpHistorySnapshot) {
-        try {
-          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
-        } catch (restoreError) {
-          logger.warn(
-            '[SessionMessageHandler] Failed to restore ACP history after send failure:',
-            restoreError,
-          );
-        }
+        await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
       }
-
       if (editStoreMutationApplied) {
         await this.restoreConversationSnapshot(editRestoreSnapshot);
       }
@@ -991,10 +1064,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
             timestamp: Date.now(),
           };
 
-          // Send a timeout message to the WebView
+          // Send a timeout message to the WebView. The popup is suppressed on
+          // this path, so this notice is the only user feedback; tag it
+          // localOnly or the WebShell transcript renders it nowhere.
           this.sendToWebView({
             type: 'message',
-            data: timeoutMessage,
+            data: { ...timeoutMessage, localOnly: true },
           });
           this.sendStreamEnd('timeout', myRequestId);
         } else {
@@ -1007,6 +1082,38 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.sendStreamEnd('error', myRequestId);
         }
       }
+    }
+  }
+
+  /**
+   * Read a saved prompt image back from disk as base64 so the transcript
+   * echo can carry it as inline data (the ACP `resource_link` form used in
+   * the prompt has no inline payload the transcript reducer can render).
+   * Returns `null` when the file is unreadable so the echo degrades to the
+   * text-only turn instead of failing the send.
+   */
+  private async readPromptImageAsBase64(
+    imagePath: string,
+  ): Promise<string | null> {
+    try {
+      const { size } = await fsp.stat(imagePath);
+      if (size > MAX_IMAGE_SIZE) {
+        logger.warn(
+          '[SessionMessageHandler] Skipping oversized image for transcript echo:',
+          imagePath,
+          size,
+        );
+        return null;
+      }
+      const buffer = await fsp.readFile(imagePath);
+      return buffer.toString('base64');
+    } catch (error) {
+      logger.warn(
+        '[SessionMessageHandler] Failed to read image for transcript echo:',
+        imagePath,
+        error,
+      );
+      return null;
     }
   }
 
@@ -1033,9 +1140,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
       this.updateCurrentConversationId(null);
 
+      // Publish the fresh ACP session id with the boundary so the
+      // transcript guard drops trailing frames from the abandoned session
+      // (which may still be streaming) instead of adopting them into the
+      // new conversation.
       this.sendToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: {
+          ...(this.agentManager.currentSessionId
+            ? { sessionId: this.agentManager.currentSessionId }
+            : {}),
+        },
       });
 
       // Reset title flag when creating a new session
@@ -1200,7 +1315,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
-              data: { sessionId, messages, session: sessionDetails },
+              data: {
+                sessionId,
+                messages,
+                session: sessionDetails,
+                // The fallback created a fresh ACP session whose live
+                // transcript frames carry the new id, not the archived one.
+                // Publish it so the transcript filter adopts the session
+                // that will actually stream instead of dropping every live
+                // frame.
+                liveSessionId: this.agentManager.currentSessionId ?? undefined,
+              },
             });
             this.sendToWebView({
               type: 'sessionLoadComplete',

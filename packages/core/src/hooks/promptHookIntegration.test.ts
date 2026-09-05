@@ -39,9 +39,7 @@ describe('Prompt Hook Integration', () => {
       getContentGenerator: vi.fn().mockReturnValue({
         generateContent: mockGenerateContent,
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
-        useSummarizedThinking: vi.fn().mockReturnValue(false),
       }),
       getBaseLlmClient: vi.fn().mockReturnValue({
         resolveForModel: vi.fn().mockResolvedValue({

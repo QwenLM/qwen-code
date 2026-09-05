@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -119,7 +120,13 @@ function makeConfig(opts: {
 }
 
 type StatusOverride = {
-  status?: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  status?:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
   endTime?: number;
 };
 
@@ -265,7 +272,7 @@ describe('useBackgroundTaskView', () => {
     ]);
   });
 
-  it('puts active (running + paused) entries above terminal entries even when terminals are newer', () => {
+  it('puts active entries above terminal entries even when terminals are newer', () => {
     // The literal phrasing of the issue is "new OR running tasks
     // should appear at the top". A pure startTime DESC sort handles
     // the "new" half but lets a long-running entry get buried under a
@@ -299,6 +306,33 @@ describe('useBackgroundTaskView', () => {
       // Terminal bucket (endTime DESC): a-done-fresh (600), s-failed (450).
       'a-done-fresh',
       's-failed',
+    ]);
+  });
+
+  it('keeps a pausing workflow in the active bucket', () => {
+    const pausing = {
+      id: 'wf-pausing',
+      kind: 'workflow' as const,
+      runId: 'wf-pausing',
+      status: 'pausing' as const,
+      startTime: 100,
+    } as WorkflowTask;
+    const done = agent('a-done', 500, {
+      status: 'completed',
+      endTime: 600,
+    });
+    const { config } = makeConfig({
+      agents: () => [done],
+      shells: () => [],
+      monitors: () => [],
+      workflows: () => [pausing],
+    });
+
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+
+    expect(result.current.entries.map(entryId)).toEqual([
+      'wf-pausing',
+      'a-done',
     ]);
   });
 

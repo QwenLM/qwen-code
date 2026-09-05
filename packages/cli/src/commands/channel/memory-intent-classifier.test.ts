@@ -56,9 +56,33 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
     expect(bridge.prompt).toHaveBeenCalledWith(
       'classifier-session',
       expect.stringContaining('"你记一下以后回复前说 1122"'),
-      {},
+      { displayText: '' },
     );
     expect(bridge.cancelSession).toHaveBeenCalledWith('classifier-session');
+  });
+
+  it('discards the internal classifier session when supported', async () => {
+    const bridge = bridgeWithResponse('{"intent":"none","confidence":0.9}');
+    bridge.discardSession = vi.fn();
+    const classifier = new BridgeChannelMemoryIntentClassifier(bridge, '/tmp');
+
+    await classifier.classifyChannelMemoryIntent('memory architecture');
+
+    expect(bridge.discardSession).toHaveBeenCalledWith('classifier-session');
+    expect(bridge.cancelSession).not.toHaveBeenCalled();
+  });
+
+  it('permanently deletes the internal classifier session when supported', async () => {
+    const bridge = bridgeWithResponse('{"intent":"none","confidence":0.9}');
+    bridge.discardSession = vi.fn();
+    bridge.deleteSessionData = vi.fn();
+    const classifier = new BridgeChannelMemoryIntentClassifier(bridge, '/tmp');
+
+    await classifier.classifyChannelMemoryIntent('memory architecture');
+
+    expect(bridge.deleteSessionData).toHaveBeenCalledWith('classifier-session');
+    expect(bridge.discardSession).not.toHaveBeenCalled();
+    expect(bridge.cancelSession).not.toHaveBeenCalled();
   });
 
   it('canonicalizes plural facts and asks the model to split independent durable facts', async () => {
@@ -402,7 +426,7 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       confidence: 0.93,
     });
     expect(stderrSpy).toHaveBeenCalledWith(
-      '[classifier] cancelSession failed: transport closed\n',
+      '[classifier] session cleanup failed: transport closed\n',
     );
     stderrSpy.mockRestore();
   });

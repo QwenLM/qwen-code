@@ -137,7 +137,7 @@ beforeAll(async () => {
 function createMockConfig(
   overrides: {
     fileReadCache?: Partial<FileReadCache>;
-    geminiClient?: {
+    llmClient?: {
       isInitialized?: () => boolean;
       getChat?: () => {
         getHistoryShallow?: () => unknown[];
@@ -153,7 +153,7 @@ function createMockConfig(
   } = {},
 ): Config {
   const client =
-    overrides.geminiClient === undefined
+    overrides.llmClient === undefined
       ? {
           isInitialized: () => true,
           getChat: () => ({
@@ -162,7 +162,7 @@ function createMockConfig(
             setHistory: vi.fn(),
           }),
         }
-      : overrides.geminiClient;
+      : overrides.llmClient;
   return {
     getProjectRoot: () => '/mock/project',
     getTargetDir: () => '/mock/project',
@@ -172,7 +172,7 @@ function createMockConfig(
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
-    getGeminiClient: () => client as never,
+    getLlmClient: () => client as never,
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
@@ -1248,7 +1248,7 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => false,
             getChat: () => ({
               getHistoryShallow: () => [{ role: 'user' }],
@@ -1272,7 +1272,7 @@ describe('MemoryPressureMonitor', () => {
       const originalHistory = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => originalHistory,
@@ -1296,7 +1296,7 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => [],
@@ -1318,7 +1318,7 @@ describe('MemoryPressureMonitor', () => {
     it('handles exceptions during compaction gracefully', async () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => {
               throw new Error('chat unavailable');
@@ -1337,11 +1337,11 @@ describe('MemoryPressureMonitor', () => {
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
-    it('handles getGeminiClient returning null', async () => {
+    it('handles getLlmClient returning null', async () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: null,
+          llmClient: null,
         }),
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
@@ -1392,7 +1392,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
@@ -1469,7 +1469,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
@@ -1529,7 +1529,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
@@ -1589,7 +1589,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,

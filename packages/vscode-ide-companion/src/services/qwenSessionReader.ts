@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import { getGitBranch, getProjectHash } from '@qwen-code/qwen-code-core';
 import { getRuntimeBaseDir } from '../utils/paths.js';
 import { truncatePanelTitle } from '../webview/utils/panelTitleUtils.js';
+import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 
 export interface QwenMessage {
   id: string;
@@ -261,7 +262,10 @@ export class QwenSessionReader {
             seenUuids.add(uuid);
           }
 
-          const text = this.contentToText(obj.message);
+          const text =
+            type === 'user'
+              ? qwenRecordToText(obj)
+              : qwenContentToText(obj.message);
           if (includeMessages) {
             messages.push({
               id: uuid || `${messages.length}`,
@@ -316,33 +320,6 @@ export class QwenSessionReader {
     } catch (error) {
       logger.error('[QwenSessionReader] Failed to parse JSONL session:', error);
       return null;
-    }
-  }
-
-  // Extract plain text from CLI Content structure
-  private contentToText(message: unknown): string {
-    try {
-      if (typeof message !== 'object' || message === null) {
-        return '';
-      }
-
-      const typed = message as { parts?: unknown[] };
-      const parts = Array.isArray(typed.parts) ? typed.parts : [];
-      const texts: string[] = [];
-      for (const part of parts) {
-        if (typeof part !== 'object' || part === null) {
-          continue;
-        }
-        const p = part as Record<string, unknown>;
-        if (typeof p.text === 'string') {
-          texts.push(p.text);
-        } else if (typeof p.data === 'string') {
-          texts.push(p.data);
-        }
-      }
-      return texts.join('\n');
-    } catch {
-      return '';
     }
   }
 

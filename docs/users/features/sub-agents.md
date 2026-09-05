@@ -133,9 +133,9 @@ Use continuation for related follow-up work. Launch a new agent when the task is
 
 ## Agent Working Directory
 
-For a named regular subagent, `working_dir` pins the agent to an existing git worktree in the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git and live inside the repository.
+For a named regular subagent, `working_dir` pins the agent to an existing git worktree of the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git as a linked worktree of this repository.
 
-A `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle. It cannot be combined with `subagent_type: "fork"` or background execution. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one.
+`working_dir` cannot be combined with `subagent_type: "fork"`. An unnamed caller-owned `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle: an explicit `run_in_background: true` request is rejected, while a configured background default (`background: true` in a subagent definition) is rejected at the top level and downgraded to the foreground when nested. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one. Workflow scripts are deliberately stricter: a workflow `agent()` call that receives both `workingDir` and `isolation` is rejected rather than run with `isolation` ignored.
 
 ## Getting Started
 
@@ -356,7 +356,7 @@ tools:
   - read_file
   - grep_search
   - glob
-  - list_directory
+  - web_fetch
 ---
 ```
 

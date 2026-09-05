@@ -7,7 +7,8 @@
 import React from 'react';
 import { render } from 'ink-testing-library';
 import type { ToolMessageProps } from './ToolMessage.js';
-import { ToolMessage } from './ToolMessage.js';
+import { formatInlineToolArgs, ToolMessage } from './ToolMessage.js';
+import { toggleKeyHint } from './ConversationMessages.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
@@ -16,6 +17,7 @@ import type {
   AnsiOutput,
   AnsiOutputDisplay,
   Config,
+  TodoResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { getScreenBuffer } from '../../selection/screen-buffer.js';
@@ -73,18 +75,24 @@ vi.mock('../AnsiOutput.js', () => ({
 vi.mock('../TerminalImage.js', () => ({
   TerminalImage: ({
     data,
+    image,
+    availableTerminalHeight,
   }: {
-    data: { filePath: string; mimeType: string };
+    data?: { filePath: string; mimeType: string };
+    image?: { mimeType: string };
+    availableTerminalHeight?: number;
   }) => (
     <Text>
-      MockTerminalImage:{data.filePath}:{data.mimeType}
+      {image
+        ? `MockTerminalImage:${image.mimeType}:height=${availableTerminalHeight ?? 'undef'}`
+        : `MockTerminalImage:${data?.filePath}:${data?.mimeType}:height=${availableTerminalHeight ?? 'undef'}`}
     </Text>
   ),
 }));
 
 // Mock child components or utilities if they are complex or have side effects
-vi.mock('../GeminiRespondingSpinner.js', () => ({
-  GeminiRespondingSpinner: ({
+vi.mock('../RespondingSpinner.js', () => ({
+  RespondingSpinner: ({
     nonRespondingDisplay,
   }: {
     nonRespondingDisplay?: string;
@@ -133,6 +141,14 @@ vi.mock('./ToolConfirmationMessage.js', () => ({
       </Text>
     );
   },
+}));
+
+vi.mock('../TodoDisplay.js', () => ({
+  TodoDisplay: ({
+    todos,
+  }: {
+    todos: Array<{ content: string; status: string }>;
+  }) => <Text>{todos.map((t) => t.content).join(', ')}</Text>,
 }));
 
 // Mock settings
@@ -185,6 +201,92 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('ReadFile');
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('routes a findings_list result to the findings renderer', () => {
+    // Pins the ToolMessage discriminator itself: FindingsDisplay has its own
+    // render tests, but without this the routing branch could be removed and
+    // every test would stay green (the display would fall through to the
+    // JSON-string path, which never joins file and line as `file:line`).
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReportFindings"
+        resultDisplay={{
+          type: 'findings_list',
+          level: 'high',
+          findings: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              confidence: 'high',
+              file: 'src/foo.ts',
+              line: 42,
+              // shortSummary differs from summary so this also pins that the
+              // routed renderer shows the compact label, not the summary.
+              summary:
+                'the provider returns the wrong value on every cold-cache lookup',
+              shortSummary: 'cold-cache wrong return',
+              failureScenario: 'first call after start returns undefined',
+            },
+            {
+              severity: 'Suggestion',
+              confidence: 'low',
+              file: 'src/bar.ts',
+              summary: 'the helper is duplicated between bar.ts and baz.ts',
+              shortSummary: 'duplicated helper',
+              failureScenario: 'two copies drift',
+            },
+          ],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('src/foo.ts:42');
+    expect(output).toContain('cold-cache wrong return');
+    expect(output).toContain('(low confidence)');
+    expect(output).not.toContain('"findings"'); // not the JSON fallback
+    expect(output.replace(/\s+/g, ' ')).not.toContain(
+      'wrong value on every cold-cache lookup',
+    );
+  });
+
+  it('renders inline images returned by a tool', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+
+  it('renders the number of omitted inline images', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} omittedImageCount={2} />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('[+2 more images]');
+  });
+
+  it('shares the tool height budget across inline images', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        availableTerminalHeight={20}
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+      />,
+      StreamingState.Responding,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=4');
   });
 
   it('always shows the vision bridge disclosure for a completed read', () => {
@@ -624,6 +726,80 @@ describe('<ToolMessage />', () => {
       expect(lastFrame()).toContain('?');
     });
 
+    it('hides a tool description repeated in a plain-text Hook confirmation', () => {
+      const content = `DESCRIPTION_TOP \u200b${'middle '.repeat(40)} DESCRIPTION_TAIL`;
+      const escapedContent = JSON.stringify(content).replace(
+        '\u200b',
+        '\\u200b',
+      );
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${escapedContent}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      const frame = lastFrame();
+      const header = frame?.split('\n')[0];
+      expect(header).toContain('test-tool');
+      expect(header).not.toContain('DESCRIPTION_TOP');
+      expect(header).not.toContain('DESCRIPTION_TAIL');
+    });
+
+    it('does not hide a tool description absent from the Hook confirmation', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={`COMMAND_TOP ${'middle '.repeat(20)} COMMAND_TAIL`}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: 'A hook requires approval.',
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('COMMAND_TOP');
+      expect(lastFrame()).toContain('COMMAND_TAIL');
+    });
+
+    it('keeps a repeated string description when another argument is not shown', () => {
+      const content = 'visible content';
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content, destructive: true })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${JSON.stringify(content)}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={80}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('destructive');
+    });
+
     it('shows - for Canceled status', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage {...baseProps} status={ToolCallStatus.Canceled} />,
@@ -683,6 +859,57 @@ describe('<ToolMessage />', () => {
     );
     // Check that the output contains the MockDiff content as part of the whole message
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
+  });
+
+  it('suppresses todo panel when resultDisplay has unchanged flag', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="TodoWrite"
+        description="Update todos"
+        resultDisplay={
+          {
+            type: 'todo_list',
+            todos: [
+              { id: '1', content: 'Task A', status: 'in_progress' },
+              { id: '2', content: 'Task B', status: 'pending' },
+            ],
+            unchanged: true,
+          } as TodoResultDisplay
+        }
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('TodoWrite');
+    // TodoDisplay should NOT render when unchanged is true
+    expect(output).not.toContain('Task A');
+    expect(output).not.toContain('Task B');
+    expect(output).not.toContain('in_progress');
+  });
+
+  it('renders todo panel normally when unchanged flag is absent', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="TodoWrite"
+        description="Update todos"
+        resultDisplay={{
+          type: 'todo_list',
+          todos: [
+            { id: '1', content: 'Task A', status: 'in_progress' },
+            { id: '2', content: 'Task B', status: 'pending' },
+          ],
+        }}
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('TodoWrite');
+    expect(output).toContain('Task A');
+    expect(output).toContain('Task B');
   });
 
   it('diff results are not collapsed for completed collapsible tools (bypass shouldCollapseResult)', () => {
@@ -1685,6 +1912,31 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('- Step 2: Do another thing');
   });
 
+  it('renders MCP App fallback text instead of stringifying HTML', () => {
+    const html = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html,
+          toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('MockMarkdown:Dashboard ready');
+    expect(output).not.toContain('PROBE_MCP_APP_HTML');
+    expect(output).not.toContain('mcp_app');
+  });
+
   it('renders approved plan content with approval message', () => {
     const planResultDisplay = {
       type: 'plan_summary' as const,
@@ -1754,4 +2006,211 @@ describe('<ToolMessage /> localized badge', () => {
     );
     expect(lastFrame() ?? '').toContain('ReadFile');
   }, 15000);
+});
+
+describe('ToolMessage inline tool-call arguments (ui.showToolCallArgs)', () => {
+  const mockConfig = {
+    getShouldUseNodePtyShell: () => false,
+  } as unknown as Config;
+
+  const argsProps: ToolMessageProps = {
+    callId: 'tool-args-1',
+    name: 'Edit',
+    description: 'src/foo.ts',
+    args: { file_path: 'src/foo.ts', old_string: 'a', new_string: 'b' },
+    resultDisplay: undefined,
+    status: ToolCallStatus.Success,
+    contentWidth: 120,
+    confirmationDetails: undefined,
+    emphasis: 'medium',
+    config: mockConfig,
+  };
+
+  describe('formatInlineToolArgs', () => {
+    it('serializes args to one-line JSON', () => {
+      expect(formatInlineToolArgs({ a: 1, b: 'x' }, 'summary', false)).toBe(
+        '{"a":1,"b":"x"}',
+      );
+    });
+
+    it('returns undefined for missing or empty args', () => {
+      expect(formatInlineToolArgs(undefined, 'summary', false)).toBeUndefined();
+      expect(formatInlineToolArgs({}, 'summary', false)).toBeUndefined();
+    });
+
+    it('skips the row when the description already IS the args JSON (MCP)', () => {
+      // DiscoveredMCPToolInvocation.getDescription() returns
+      // safeJsonStringify(params), so rendering both would print it twice.
+      const args = { owner: 'QwenLM', repo: 'qwen-code' };
+      expect(
+        formatInlineToolArgs(args, JSON.stringify(args), false),
+      ).toBeUndefined();
+    });
+
+    it('still renders when the description only resembles JSON', () => {
+      expect(formatInlineToolArgs({ a: 1 }, '{not json', false)).toBe(
+        '{"a":1}',
+      );
+    });
+
+    it('still renders when a JSON description describes different args', () => {
+      expect(formatInlineToolArgs({ a: 1 }, '{"a":2}', false)).toBe('{"a":1}');
+    });
+
+    it('caps the whole row at exactly 1000 columns when no width is known', () => {
+      // Pinned as literals: docs/users/configuration/settings.md promises "at
+      // most 1000 characters", and the marker is reserved INSIDE that budget
+      // (978 + 22 = 1000) so the `+N chars` tail is not what spills onto the
+      // row after the last one we are allowed to draw. A drifting cap or a
+      // corrupted `+N chars` counter must turn this red rather than ship green.
+      const args = { content: 'x'.repeat(5000) };
+      const json = JSON.stringify(args);
+      expect(json).toHaveLength(5014);
+
+      const out = formatInlineToolArgs(args, 'file.txt', false);
+
+      expect(out).toBe(`${json.slice(0, 978)}… +4036 chars (${toggleKeyHint})`);
+      expect(out).toHaveLength(1000);
+    });
+
+    it('never cuts a surrogate pair in half at the cap boundary', () => {
+      // 973 x's put the emoji astride the head budget: it is the code point the
+      // cut lands on, which a code-unit slice would leave as a lone high
+      // surrogate — drawn as a replacement glyph in the terminal.
+      const args = { a: 'x'.repeat(973) + '\u{1F600}' };
+      const json = JSON.stringify(args);
+      const out = formatInlineToolArgs(args, 'summary', false);
+
+      expect(out).toBeDefined();
+      // No unpaired surrogate anywhere in the rendered row.
+      expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      expect(out).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+      // The emoji plus the closing `"}` — three code points, not the four
+      // UTF-16 code units they occupy.
+      expect(out).toBe(`${json.slice(0, 979)}… +3 chars (${toggleKeyHint})`);
+    });
+
+    it('counts hidden astral characters as code points, not code units', () => {
+      // The row advertises what Ctrl+O will reveal, and Ctrl+O reveals
+      // characters. A code-unit count double-reports every emoji, so a payload
+      // of them would promise twice the content that actually exists — the
+      // same `toCodePoints` accounting the rest of this file uses.
+      const args = { a: 'x'.repeat(2000) + '\u{1F600}'.repeat(100) };
+      const out = formatInlineToolArgs(args, 'summary', false);
+      const hidden = Number(/\+(\d+) chars/.exec(out ?? '')?.[1]);
+
+      // 2000 x's + 100 emoji + the 8 structural chars of {"a":"…"} = 2108 code
+      // points; 978 of them are shown.
+      expect(hidden).toBe(2108 - 978);
+    });
+
+    it('bounds the row to two wrapped rows when the row width is known', () => {
+      // The height budget in ToolGroupMessage counts a result-less tool as one
+      // line and never sees this row, so a character-only cap let one pending
+      // batch draw past the terminal height (#5798). At width 40 the row may
+      // occupy 80 columns, not 1000.
+      const args = { content: 'x'.repeat(5000) };
+      const out = formatInlineToolArgs(args, 'file.txt', false, 40);
+
+      expect(out).toBeDefined();
+      expect(out?.length).toBeLessThanOrEqual(80);
+      expect(out).toContain(`chars (${toggleKeyHint})`);
+      // Tighter of the two bounds wins: a very wide row still stops at 1000.
+      expect(formatInlineToolArgs(args, 'file.txt', false, 4000)).toHaveLength(
+        1000,
+      );
+    });
+
+    it('measures the row in columns, so full-width args wrap at half the count', () => {
+      // Columns, not code points, are what decide where ink wraps: a CJK
+      // argument fills the row in half the characters.
+      const args = { a: '固'.repeat(500) };
+      const out = formatInlineToolArgs(args, 'summary', false, 40);
+      const head = out?.slice(0, out.indexOf('…')) ?? '';
+      const cjkCount = (head.match(/固/g) ?? []).length;
+
+      // 80 columns total, ~21 reserved for the marker: ~59 columns of head,
+      // which is ~29 double-width characters, not ~59.
+      expect(cjkCount).toBeGreaterThan(20);
+      expect(cjkCount).toBeLessThan(35);
+    });
+
+    it('lifts both caps in full-detail mode', () => {
+      const args = { content: 'x'.repeat(5000) };
+      expect(formatInlineToolArgs(args, 'file.txt', true)).toBe(
+        JSON.stringify(args),
+      );
+      expect(formatInlineToolArgs(args, 'file.txt', true, 40)).toBe(
+        JSON.stringify(args),
+      );
+    });
+
+    it('strips bidi override characters from the rendered args', () => {
+      // Trojan Source (CVE-2021-42572): JSON.stringify escapes C0 controls but
+      // leaves U+202E alone, which would visually reorder the very payload
+      // this row exists to expose.
+      const out = formatInlineToolArgs(
+        { file_path: 'report\u202egpj.exe' },
+        'report',
+        false,
+      );
+      expect(out).toBeDefined();
+      expect(out).not.toMatch(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+      expect(out).toContain('file_path');
+    });
+
+    it('returns undefined for unserializable args instead of throwing', () => {
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      expect(formatInlineToolArgs(circular, 'summary', false)).toBeUndefined();
+    });
+  });
+
+  it('does not render the args row when the setting is off', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...argsProps} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('src/foo.ts');
+    expect(output).not.toContain('old_string');
+  });
+
+  it('renders the full raw args when the setting is on', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...argsProps} showToolCallArgs={true} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    // The parameters Edit's getDescription() drops are what the setting exists
+    // to recover.
+    expect(output).toContain('old_string');
+    expect(output).toContain('new_string');
+  });
+
+  it('prints an MCP payload once, not twice', () => {
+    const mcpArgs = { owner: 'QwenLM', repo: 'qwen-code' };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...argsProps}
+        name="mcp__github__list_issues"
+        description={JSON.stringify(mcpArgs)}
+        args={mcpArgs}
+        showToolCallArgs={true}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output.split('QwenLM').length - 1).toBe(1);
+  });
+
+  it('renders nothing extra when args are absent (daemon path)', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...argsProps} args={undefined} showToolCallArgs={true} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('src/foo.ts');
+    expect(output).not.toContain('{');
+  });
 });

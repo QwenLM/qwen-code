@@ -11,6 +11,7 @@ import { setLanguageAsync, t } from './index.js';
 import { SUPPORTED_LANGUAGES } from './languages.js';
 import { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
 import { BuiltinCommandLoader } from '../services/BuiltinCommandLoader.js';
+import { advisorCommand } from '../ui/commands/advisor-command.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
@@ -141,6 +142,9 @@ describe('must-translate locale coverage', () => {
         'View or change the approval mode for tool usage',
       );
       expect(arenaCommand.description).not.toBe('Manage Arena sessions');
+      expect(advisorCommand.description).not.toBe(
+        'Get a second opinion on the current conversation from a reviewer model',
+      );
       expect(btwCommand.description).not.toBe(
         'Ask a quick side question without affecting the main conversation',
       );

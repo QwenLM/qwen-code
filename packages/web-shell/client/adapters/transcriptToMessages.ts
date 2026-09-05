@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTaskExecutionMode } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -22,7 +23,11 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isTodoWriteToolName } from '../utils/todos.js';
+import {
+  isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+} from './toolClassification.js';
+import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -44,12 +49,14 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
 interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
-  midTurnInserted?: (message: string) => string;
   modelStreamInterrupted?: string;
+  loopDetected?: string;
 }
 
 interface TranscriptMessageOptions {
   labels?: TranscriptMessageLabels;
+  includeSourceIdentity?: boolean;
+  safeToolProjection?: boolean;
 }
 
 interface BackgroundAgentTaskUpdate {
@@ -62,7 +69,7 @@ function collectBackgroundAgentTaskUpdates(
 ): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
   const updates = new Map<string, BackgroundAgentTaskUpdate>();
   for (const block of blocks) {
-    if (block.kind !== 'assistant') continue;
+    if (block.kind !== 'assistant' && block.kind !== 'user') continue;
     const meta = getRecord(block.meta);
     if (
       meta?.['source'] !== 'background_notification' ||
@@ -82,44 +89,104 @@ function collectBackgroundAgentTaskUpdates(
   return updates;
 }
 
-function applyBackgroundAgentTaskUpdate(
-  tool: DaemonMessageToolCall,
-  update: BackgroundAgentTaskUpdate | undefined,
-): void {
-  if (!update) return;
-  switch (update.status) {
-    case 'completed':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      break;
-    case 'failed':
-      tool.status = 'failed';
-      tool.endTime = update.endTime;
-      break;
-    case 'cancelled':
-    case 'canceled':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      tool.rawOutput = {
-        ...(getRecord(tool.rawOutput) ?? {}),
-        status: 'cancelled',
-      };
-      break;
-  }
+function isIgnoredWebShellStatus(text: string): boolean {
+  // `model.changed` projects to a `status` block, not a `debug` one, so this
+  // stays text-keyed. The Web Shell renders its own richer model-switch
+  // summary (dispatched as a client-side `debug` event) instead.
+  return text.startsWith('Model switched: ');
 }
 
-function isIgnoredWebShellStatus(text: string): boolean {
+/**
+ * Whole shape of the legacy top-level projection — `<event-type>
+ * (unrecognized daemon event): <payload>` — anchored at the start. Matching
+ * the marker anywhere in the text would hide any block that merely quotes it,
+ * such as a malformed payload carrying an upstream peer's message.
+ *
+ * The payload is deliberately unconstrained. `DaemonEvent.data` is `unknown`
+ * and `stringifyJson` returns strings verbatim, serializes primitives as
+ * `42` / `true` / `null`, and yields `''` for `undefined` — so keying on a
+ * leading `{` would let every non-object payload slip through. The event-type
+ * prefix plus the fixed phrase is specific enough on its own.
+ */
+const LEGACY_UNRECOGNIZED_EVENT_PATTERN =
+  /^[A-Za-z0-9_.-]+ \(unrecognized daemon event\): /;
+
+/**
+ * The legacy `session_update` projection is `<kind>: <json>` — no marker to
+ * key on, so those blocks can only be matched by kind name. Deliberately
+ * scoped to the kinds known to have leaked into transcripts before the
+ * normalizer suppressed them at the source: `usage_update` (#8790, the
+ * original spam report) and `a2ui`, whose command JSON the bridge splits out
+ * of the tool frame precisely to keep it out of transcripts. Anchored, and
+ * requiring the `: {` shape, so prose starting with the word still renders.
+ */
+const LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES = [
+  'usage_update: {',
+  'a2ui: {',
+];
+
+/**
+ * Daemon frames the normalizer had no case for are developer diagnostics —
+ * a raw JSON dump of an event this client does not understand. They routinely
+ * appear whenever the daemon ships a new event kind ahead of the UI, and
+ * rendering them drops unreadable JSON into the middle of the conversation.
+ *
+ * Keyed on the normalizer's `debugReason` rather than the block text. The
+ * SDK names reasons by category: `unrecognized_*` is forward-compat noise,
+ * hidden here by prefix so a reason a newer SDK adds is covered without a
+ * Web Shell change. Everything else deliberately stays visible — `malformed_*`
+ * means a frame this client *does* know arrived broken and is worth
+ * surfacing, and client-dispatched debug blocks (e.g. the model-switch
+ * summary) carry no `debugReason` at all.
+ *
+ * `WebShellTranscript` is a public entry point that takes already-projected
+ * blocks from its caller, so blocks projected — or persisted — by an SDK older
+ * than `debugReason` still arrive here with no reason at all. Those are
+ * matched by shape instead, and only ever by shape: text matching is a
+ * compatibility shim, so it is scoped to `debug` blocks (this helper is also
+ * called for `status`, which never carried these projections) and anchored to
+ * the whole projection, never a substring. A block that merely quotes a
+ * marker — a malformed payload relaying an upstream message, a
+ * client-dispatched summary, an ordinary status line — keeps rendering.
+ *
+ * Legacy `session_update` blocks have no marker, so they are matched by kind
+ * name instead — see the prefix list above. That list is closed on purpose: a
+ * generic `<word>: {` rule would swallow legitimate diagnostics. An old block
+ * for some other unrecognized session-update kind therefore still renders;
+ * new projections carry the reason and are covered.
+ */
+function isUnrecognizedDaemonDebug(
+  block: DaemonStatusTranscriptBlock,
+): boolean {
+  if (block.debugReason !== undefined) {
+    return block.debugReason.startsWith('unrecognized_');
+  }
+  // Only `debug` blocks ever carried an unrecognized projection; a `status`
+  // block matching one of these shapes is real content.
+  if (block.kind !== 'debug') return false;
   return (
-    text.startsWith('language_changed (unrecognized daemon event):') ||
-    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
-    text.startsWith('Model switched: ')
+    LEGACY_UNRECOGNIZED_EVENT_PATTERN.test(block.text) ||
+    LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES.some((prefix) =>
+      block.text.startsWith(prefix),
+    )
   );
+}
+
+// Resubmitting a prompt the daemon stopped for loop protection tends to
+// re-loop, so no retry affordance is offered for these turn errors.
+export function isRetryableTurnErrorKind(
+  errorKind: string | undefined,
+): boolean {
+  return errorKind !== 'loop_detected';
 }
 
 function getErrorDisplayText(
   block: DaemonStatusTranscriptBlock,
   labels?: TranscriptMessageLabels,
 ): string {
+  if (block.errorKind === 'loop_detected') {
+    return labels?.loopDetected ?? block.text;
+  }
   if (
     block.errorKind === 'model_stream_interrupted' ||
     // Older daemons emit this turn_error before they know about errorKind.
@@ -159,15 +226,112 @@ function getSessionBranchDisplayName(data: unknown): string | null {
     : null;
 }
 
-function getMidTurnInjectedText(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const messages = (data as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return null;
-  const text = messages
-    .filter((message): message is string => typeof message === 'string')
-    .join('\n')
-    .trim();
-  return text || null;
+/**
+ * Extract image content blocks from mid-turn injected message items.
+ * Returns an array of {data, mimeType} objects for rendering in the transcript.
+ */
+function getMidTurnInjectedImages(
+  data: unknown,
+):
+  | Array<{ data: string; mimeType: string; attachmentId?: string }>
+  | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const images: Array<{
+    data: string;
+    mimeType: string;
+    attachmentId?: string;
+  }> = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const type = (block as { type?: unknown }).type;
+      const blockData = (block as { data?: unknown }).data;
+      const mimeType = (block as { mimeType?: unknown }).mimeType;
+
+      if (
+        type === 'image' &&
+        typeof blockData === 'string' &&
+        typeof mimeType === 'string'
+      ) {
+        const record = block as Record<string, unknown>;
+        images.push({
+          data: blockData,
+          mimeType,
+          ...(typeof record['attachmentId'] === 'string'
+            ? { attachmentId: record['attachmentId'] }
+            : {}),
+        });
+      }
+    }
+  }
+
+  return images.length > 0 ? images : undefined;
+}
+
+function getMidTurnInjectedFiles(
+  data: unknown,
+): Array<{ name: string; mimeType: string; attachmentId: string }> | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items)) return undefined;
+  const files = items.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((block) => {
+      if (!block || typeof block !== 'object') return [];
+      const record = block as Record<string, unknown>;
+      return record['type'] === 'resource' &&
+        typeof record['attachmentId'] === 'string'
+        ? [
+            {
+              name: record['attachmentId'],
+              attachmentId: record['attachmentId'],
+              mimeType:
+                typeof record['mimeType'] === 'string'
+                  ? record['mimeType']
+                  : 'application/octet-stream',
+            },
+          ]
+        : [];
+    });
+  });
+  return files.length > 0 ? files : undefined;
+}
+
+/**
+ * Collect text content blocks from mid-turn injected message items. The
+ * degraded-media drain echo ships an empty `messages` array whose items carry
+ * only the unavailability notice, so the echo text can be empty while the
+ * items still hold renderable text.
+ */
+function getMidTurnInjectedItemText(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const texts: string[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if ((block as { type?: unknown }).type !== 'text') continue;
+      const text = (block as { text?: unknown }).text;
+      if (typeof text === 'string' && text.length > 0) texts.push(text);
+    }
+  }
+
+  return texts.length > 0 ? texts.join('\n') : undefined;
 }
 
 function isBackgroundNotificationBlock(
@@ -186,29 +350,6 @@ function getBackgroundNotificationData(
 
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
   return block.text.length === 0;
-}
-
-function parseDaemonTodoItemsFromEntries(
-  entries: readonly unknown[],
-): DaemonMessageTodoItem[] | undefined {
-  const todos = entries.flatMap((entry, index): DaemonMessageTodoItem[] => {
-    const item = getRecord(entry);
-    const content = getString(item, 'content');
-    if (!content) return [];
-    const id = getString(item, 'id') ?? `plan-${index}`;
-    return [
-      {
-        id,
-        content,
-        status: getTodoStatus(getString(item, 'status')),
-        ...(() => {
-          const priority = getTodoPriority(getString(item, 'priority'));
-          return priority ? { priority } : {};
-        })(),
-      },
-    ];
-  });
-  return todos.length > 0 ? todos : undefined;
 }
 
 /**
@@ -241,6 +382,8 @@ export function transcriptBlocksToDaemonMessages(
   options: TranscriptMessageOptions = {},
 ): DaemonMessage[] {
   const messages: DaemonMessage[] = [];
+  const retainSourceIdentity = options.includeSourceIdentity === true;
+  const safeToolProjection = options.safeToolProjection === true;
   const promptCancelledText =
     options.labels?.promptCancelled ?? 'Request cancelled.';
   // Replay can contain thousands of blocks. Keep tool calls indexed by callId
@@ -281,6 +424,7 @@ export function transcriptBlocksToDaemonMessages(
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
             timestamp: blockTime,
+            sourceBlockIds: [block.id],
           });
           break;
         }
@@ -294,21 +438,46 @@ export function transcriptBlocksToDaemonMessages(
         const inputAnnotations = Array.isArray(meta?.inputAnnotations)
           ? (meta.inputAnnotations as DaemonInputAnnotation[])
           : undefined;
+        const images = textBlock.images?.map((img) => ({
+          data: img.data,
+          mimeType: img.mimeType || 'image/*',
+          ...(img.attachmentId ? { attachmentId: img.attachmentId } : {}),
+        }));
+        const files = textBlock.files?.map((file) => ({
+          name: file.name,
+          mimeType: file.mimeType || 'text/plain',
+          ...(file.data !== undefined ? { data: file.data } : {}),
+          ...(file.text !== undefined ? { text: file.text } : {}),
+          ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
+        }));
+        if (source === 'mid_turn_message_injected') {
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source,
+            timestamp: blockTime,
+            ...(images && images.length > 0 ? { images } : {}),
+            ...(files && files.length > 0 ? { files } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
           content: textBlock.text,
           timestamp: blockTime,
+          sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
           ...(inputAnnotations ? { inputAnnotations } : {}),
         };
         // Attach images if present
-        if (textBlock.images && textBlock.images.length > 0) {
-          msg.images = textBlock.images.map((img) => ({
-            data: img.data,
-            mimeType: img.mimeType || 'image/*',
-          }));
+        if (images && images.length > 0) {
+          msg.images = images;
         }
+        if (files && files.length > 0) msg.files = files;
         messages.push(msg);
         break;
       }
@@ -327,6 +496,25 @@ export function transcriptBlocksToDaemonMessages(
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
             timestamp: blockTime,
+            sourceBlockIds: [block.id],
+          });
+          break;
+        }
+        const meta = getRecord(textBlock.meta);
+        if (meta?.['source'] === 'vision_bridge_notice') {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'vision_bridge_notice',
+            ...(meta['visionBridgeNotice'] !== undefined
+              ? { data: meta['visionBridgeNotice'] }
+              : {}),
+            timestamp: blockTime,
           });
           break;
         }
@@ -336,7 +524,7 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(parentSubAgent, textBlock.text);
+          appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
 
@@ -346,6 +534,8 @@ export function transcriptBlocksToDaemonMessages(
           let hasTerminal = false;
           let readyCount = 0;
           let errorCount = 0;
+          let textCount = 0;
+          let lastAssistantSegmentIndex: number | null = null;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
@@ -357,6 +547,7 @@ export function transcriptBlocksToDaemonMessages(
                   role: 'insight_ready',
                   path: seg.data.path,
                   timestamp: blockTime,
+                  sourceBlockIds: [block.id],
                 });
               } else if (seg.data.type === 'insight_error') {
                 hasTerminal = true;
@@ -365,17 +556,31 @@ export function transcriptBlocksToDaemonMessages(
                   role: 'insight_error',
                   error: seg.data.error,
                   timestamp: blockTime,
+                  sourceBlockIds: [block.id],
                 });
               }
             } else {
               messages.push({
-                id: `${block.id}-t-${messages.length}`,
+                id: retainSourceIdentity
+                  ? `${block.id}-t-${textCount++}`
+                  : `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
                 timestamp: blockTime,
+                sourceBlockIds: [block.id],
               });
               currentAssistantIdx = messages.length - 1;
+              lastAssistantSegmentIndex = currentAssistantIdx;
               currentThinkingIdx = null;
+            }
+          }
+          if (textBlock.branchRecordId && lastAssistantSegmentIndex !== null) {
+            const assistant = messages[lastAssistantSegmentIndex];
+            if (assistant?.role === 'assistant') {
+              messages[lastAssistantSegmentIndex] = {
+                ...assistant,
+                branchRecordId: textBlock.branchRecordId,
+              };
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -386,6 +591,7 @@ export function transcriptBlocksToDaemonMessages(
               progress: lastProgress.progress,
               detail: lastProgress.detail,
               timestamp: blockTime,
+              sourceBlockIds: [block.id],
             });
           }
           needsNewContentMessage = true;
@@ -400,6 +606,7 @@ export function transcriptBlocksToDaemonMessages(
           target &&
           target.role === 'assistant' &&
           !needsNewContentMessage &&
+          textBlock.segmentId === undefined &&
           !isTextBlockEmpty(textBlock)
         ) {
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
@@ -407,6 +614,10 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
@@ -418,6 +629,10 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            sourceBlockIds: [block.id],
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
@@ -427,6 +642,9 @@ export function transcriptBlocksToDaemonMessages(
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
         }
@@ -439,18 +657,24 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(parentSubAgent, textBlock.text);
+          appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
         const target =
           currentThinkingIdx !== null
             ? messages[currentThinkingIdx]
             : undefined;
-        if (target && target.role === 'thinking' && !needsNewContentMessage) {
+        if (
+          target &&
+          target.role === 'thinking' &&
+          !needsNewContentMessage &&
+          textBlock.segmentId === undefined
+        ) {
           messages[currentThinkingIdx!] = {
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
           };
           needsNewContentMessage = false;
         } else {
@@ -460,6 +684,7 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            sourceBlockIds: [block.id],
           });
           currentThinkingIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -470,10 +695,18 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
-        const toolCall = daemonToolBlockToToolCall(toolBlock);
-        applyBackgroundAgentTaskUpdate(
-          toolCall,
-          backgroundAgentTaskUpdates.get(toolCall.callId),
+        const projectedToolCall = daemonToolBlockToToolCall(
+          toolBlock,
+          safeToolProjection,
+        );
+        const backgroundAgentUpdate = backgroundAgentTaskUpdates.get(
+          projectedToolCall.callId,
+        );
+        const toolCall = projectTerminalBackgroundAgentTool(
+          projectedToolCall,
+          backgroundAgentUpdate?.status,
+          backgroundAgentUpdate?.endTime,
+          safeToolProjection,
         );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
@@ -488,7 +721,16 @@ export function transcriptBlocksToDaemonMessages(
         const existingTool = toolsByCallId.get(toolCall.callId);
 
         if (existingTool) {
-          mergeToolCall(existingTool, toolCall);
+          mergeToolCall(existingTool, toolCall, {
+            replaceArgs:
+              safeToolProjection ||
+              toolBlock.rawInput !== undefined ||
+              existingTool.args === undefined,
+            replaceRawOutput:
+              safeToolProjection ||
+              getRuntimeToolRawOutput(toolBlock) !== undefined ||
+              existingTool.rawOutput === undefined,
+          });
           break;
         }
 
@@ -520,9 +762,14 @@ export function transcriptBlocksToDaemonMessages(
             const nextTool = {
               ...targetTool,
               rawOutput: previousOutput + shellBlock.text,
+              sourceBlockIds: unionMessageIds(
+                targetTool.sourceBlockIds,
+                block.id,
+              ),
             };
             messages[messages.length - 1] = {
               ...lastMsg,
+              sourceBlockIds: unionMessageIds(lastMsg.sourceBlockIds, block.id),
               tools: [
                 ...lastMsg.tools.slice(0, targetIdx),
                 nextTool,
@@ -537,6 +784,7 @@ export function transcriptBlocksToDaemonMessages(
           messages.push({
             id: block.id,
             role: 'tool_group',
+            sourceBlockIds: [block.id],
             tools: [
               {
                 callId: block.id,
@@ -544,6 +792,7 @@ export function transcriptBlocksToDaemonMessages(
                 status: 'completed',
                 kind: 'execute',
                 rawOutput: shellBlock.text,
+                sourceBlockIds: [block.id],
               },
             ],
             timestamp: blockTime,
@@ -558,6 +807,7 @@ export function transcriptBlocksToDaemonMessages(
         messages.push({
           id: block.id,
           role: 'user_shell',
+          sourceBlockIds: [block.id],
           command: shellBlock.command,
           output: shellBlock.text,
           ...(shellBlock.cwd ? { cwd: shellBlock.cwd } : {}),
@@ -569,8 +819,15 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'permission': {
         const permBlock = block as DaemonPermissionTranscriptBlock;
-        rememberPermissionToolInfo(permBlock, permissionToolInfoByCallId);
-        const permissionToolCall = permissionBlockToToolCall(permBlock);
+        rememberPermissionToolInfo(
+          permBlock,
+          permissionToolInfoByCallId,
+          safeToolProjection,
+        );
+        const permissionToolCall = permissionBlockToToolCall(
+          permBlock,
+          safeToolProjection,
+        );
         if (!permissionToolCall) break;
         const isSubAgentPermission = isSubAgentToolCall(permissionToolCall);
         // Pending permissions are rendered by the dedicated permission UI.
@@ -589,7 +846,11 @@ export function transcriptBlocksToDaemonMessages(
                 ? permissionToolCall.status
                 : 'in_progress';
             } else {
-              permissionToolCall.status = 'failed';
+              permissionToolCall.status =
+                safeToolProjection &&
+                isNeutralPermissionResolution(permBlock.resolved)
+                  ? 'completed'
+                  : 'failed';
               permissionToolCall.endTime = permBlock.updatedAt;
             }
           }
@@ -627,7 +888,11 @@ export function transcriptBlocksToDaemonMessages(
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
           } else {
-            permissionToolCall.status = 'failed';
+            permissionToolCall.status =
+              safeToolProjection &&
+              isNeutralPermissionResolution(permBlock.resolved)
+                ? 'completed'
+                : 'failed';
             permissionToolCall.endTime = permBlock.updatedAt;
             appendToolCallMessage(
               messages,
@@ -647,20 +912,46 @@ export function transcriptBlocksToDaemonMessages(
       case 'status':
       case 'debug': {
         const statusBlock = block;
+        if (isUnrecognizedDaemonDebug(statusBlock)) break;
+        // Mid-turn injected echoes are user content, not daemon diagnostics:
+        // run them past no filter, or an injected message that merely starts
+        // like a status line ("Model switched: …") or plan JSON would be
+        // dropped or misrendered.
+        if (statusBlock.source === 'mid_turn_message_injected') {
+          const midTurnInjectedImages = getMidTurnInjectedImages(
+            statusBlock.data,
+          );
+          const midTurnInjectedFiles = getMidTurnInjectedFiles(
+            statusBlock.data,
+          );
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content:
+              statusBlock.text.length > 0
+                ? statusBlock.text
+                : (getMidTurnInjectedItemText(statusBlock.data) ??
+                  statusBlock.text),
+            variant: 'info',
+            timestamp: blockTime,
+            source: statusBlock.source,
+            ...(statusBlock.data !== undefined
+              ? { data: statusBlock.data }
+              : {}),
+            ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
+            ...(midTurnInjectedFiles ? { files: midTurnInjectedFiles } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
             : null;
-        const midTurnInsertedText =
-          statusBlock.source === 'mid_turn_message_injected'
-            ? getMidTurnInjectedText(statusBlock.data)
-            : null;
         const text =
           branchDisplayName && options.labels?.branchSuccess
             ? options.labels.branchSuccess(branchDisplayName)
-            : midTurnInsertedText && options.labels?.midTurnInserted
-              ? options.labels.midTurnInserted(midTurnInsertedText)
-              : statusBlock.text;
+            : statusBlock.text;
         if (isIgnoredWebShellStatus(text)) break;
         const todos = parsePlanTodos(text);
         if (todos) {
@@ -669,20 +960,23 @@ export function transcriptBlocksToDaemonMessages(
             role: 'plan',
             todos,
             timestamp: blockTime,
+            sourceBlockIds: [block.id],
           });
           needsNewContentMessage = true;
           break;
         }
-        // Status/debug blocks are daemon-level diagnostics, not tool output.
-        // Keeping them in the main transcript avoids hiding global messages
-        // such as SSE lag warnings, malformed-event debug lines, or shell
-        // result notices inside whichever subAgent happened to be active.
+        // Status blocks and the debug blocks that survive the filter above are
+        // daemon-level diagnostics, not tool output. Keeping them in the main
+        // transcript avoids hiding global messages such as SSE lag warnings,
+        // malformed-event debug lines, or shell result notices inside
+        // whichever subAgent happened to be active.
         messages.push({
           id: block.id,
           role: 'system',
           content: text,
           variant: 'info',
           timestamp: blockTime,
+          sourceBlockIds: [block.id],
           ...(statusBlock.source ? { source: statusBlock.source } : {}),
           ...(statusBlock.data !== undefined ? { data: statusBlock.data } : {}),
         });
@@ -698,8 +992,11 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
-          retryable: errorBlock.source === 'turn_error',
+          retryable:
+            errorBlock.source === 'turn_error' &&
+            isRetryableTurnErrorKind(errorKind),
           timestamp: blockTime,
+          sourceBlockIds: [block.id],
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
           ...getErrorMessageData(errorBlock.data, errorKind),
         });
@@ -715,6 +1012,7 @@ export function transcriptBlocksToDaemonMessages(
           variant: 'info',
           source: 'prompt_cancelled',
           timestamp: blockTime,
+          sourceBlockIds: [block.id],
         });
         needsNewContentMessage = true;
         break;
@@ -724,7 +1022,40 @@ export function transcriptBlocksToDaemonMessages(
     }
   }
 
+  synchronizeToolGroupSourceIdentity(messages);
+  if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
+}
+
+function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {
+  const collect = (tools: readonly DaemonMessageToolCall[]): string[] => {
+    const ids: string[] = [];
+    for (const tool of tools) {
+      ids.push(...(tool.sourceBlockIds ?? []));
+      if (tool.subTools) ids.push(...collect(tool.subTools));
+    }
+    return ids;
+  };
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    message.sourceBlockIds = unionMessageIds(
+      message.sourceBlockIds,
+      ...collect(message.tools),
+    );
+  }
+}
+
+function stripSourceIdentity(messages: DaemonMessage[]): void {
+  const stripTools = (tools: DaemonMessageToolCall[]): void => {
+    for (const tool of tools) {
+      delete tool.sourceBlockIds;
+      if (tool.subTools) stripTools(tool.subTools);
+    }
+  };
+  for (const message of messages) {
+    delete message.sourceBlockIds;
+    if (message.role === 'tool_group') stripTools(message.tools);
+  }
 }
 
 function appendSubTool(
@@ -733,10 +1064,26 @@ function appendSubTool(
 ): void {
   parent.subTools ||= [];
   parent.subTools.push(toolCall);
+  parent.sourceBlockIds = unionMessageIds(
+    parent.sourceBlockIds,
+    ...(toolCall.sourceBlockIds ?? []),
+  );
 }
 
-function appendSubContent(parent: DaemonMessageToolCall, text: string): void {
+function unionMessageIds(
+  current: readonly string[] | undefined,
+  ...incoming: string[]
+): string[] {
+  return [...new Set([...(current ?? []), ...incoming])];
+}
+
+function appendSubContent(
+  parent: DaemonMessageToolCall,
+  text: string,
+  blockId: string,
+): void {
   parent.subContent = (parent.subContent || '') + text;
+  parent.sourceBlockIds = unionMessageIds(parent.sourceBlockIds, blockId);
 }
 
 function appendToolCallMessage(
@@ -757,11 +1104,8 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
-  // Sub-agent calls and todo_write updates each stand alone in their own group
-  // box instead of being crammed in with the tools around them: an agent renders
-  // an expandable panel, and a todo update is its own collapsible checklist.
-  const isStandalone = (t: DaemonMessageToolCall) =>
-    isSubAgentToolCall(t) || isTodoWriteToolName(t.toolName);
+  // TodoWrite merges like any other tool.
+  const isStandalone = (t: DaemonMessageToolCall) => isSubAgentToolCall(t);
   const last = messages[messages.length - 1];
   if (
     last &&
@@ -771,6 +1115,7 @@ function appendToolCallMessage(
     !last.tools.some(isStandalone)
   ) {
     last.tools.push(toolCall);
+    last.sourceBlockIds = unionMessageIds(last.sourceBlockIds, blockId);
     return;
   }
   messages.push({
@@ -778,6 +1123,7 @@ function appendToolCallMessage(
     role: 'tool_group',
     tools: [toolCall],
     timestamp,
+    sourceBlockIds: [blockId],
   });
 }
 
@@ -812,36 +1158,34 @@ function findShellOutputTargetIndex(
 function mergeToolCall(
   target: DaemonMessageToolCall,
   source: DaemonMessageToolCall,
+  options: {
+    replaceArgs?: boolean;
+    replaceRawOutput?: boolean;
+  } = {},
 ): void {
   target.status = source.status ?? target.status;
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
   target.kind = source.kind ?? target.kind;
+  target.sourceBlockIds = unionMessageIds(
+    target.sourceBlockIds,
+    ...(source.sourceBlockIds ?? []),
+  );
   target.content = source.content ?? target.content;
   target.endTime = source.endTime ?? target.endTime;
-  target.rawOutput = source.rawOutput ?? target.rawOutput;
-  target.args = source.args ?? target.args;
+  target.wasCancelled = source.wasCancelled ?? target.wasCancelled;
+  if (options.replaceRawOutput !== false) {
+    target.rawOutput = source.rawOutput ?? target.rawOutput;
+  }
+  if (options.replaceArgs !== false) {
+    target.args = source.args ?? target.args;
+  }
+  target.executionMode = source.executionMode ?? target.executionMode;
   target.locations = source.locations ?? target.locations;
 }
 
 function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
   return status === 'completed' || status === 'failed';
-}
-
-function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'agent' || name === 'task') return true;
-  if (tool.subTools || tool.subContent) return true;
-  if (isTaskExecutionRaw(tool.rawOutput)) return true;
-  return Boolean(tool.args?.subagent_type);
-}
-
-function isTaskExecutionRaw(raw: unknown): boolean {
-  return (
-    !!raw &&
-    typeof raw === 'object' &&
-    (raw as Record<string, unknown>).type === 'task_execution'
-  );
 }
 
 function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
@@ -861,7 +1205,8 @@ function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
     ) {
       return undefined;
     }
-    return parseDaemonTodoItemsFromEntries(record['entries']);
+    const todos = parseTodoItemsFromEntries(record['entries']);
+    return todos.length > 0 ? todos : undefined;
   } catch {
     return undefined;
   }
@@ -882,28 +1227,18 @@ function getString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function getTodoStatus(
-  value: string | undefined,
-): DaemonMessageTodoItem['status'] {
-  return value === 'completed' || value === 'in_progress' || value === 'pending'
-    ? value
-    : 'pending';
-}
-
-function getTodoPriority(
-  value: string | undefined,
-): DaemonMessageTodoItem['priority'] | undefined {
-  return value === 'high' || value === 'medium' || value === 'low'
-    ? value
-    : undefined;
-}
-
 function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
+  safeToolProjection: boolean,
 ): DaemonMessageToolCall {
-  const rawOutput = getToolRawOutput(block);
+  const rawOutput = getToolRawOutput(block, safeToolProjection);
+  const executionMode = safeToolProjection
+    ? block.background === true
+      ? 'background'
+      : 'foreground'
+    : getRecord(rawOutput)?.['executionMode'];
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
-  const content = normalizeToolContent(block.content);
+  const content = safeToolProjection ? undefined : normalizeToolContent(block);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
     running: 'in_progress',
     pending: 'pending',
@@ -911,8 +1246,8 @@ function daemonToolBlockToToolCall(
     background: 'pending',
     completed: 'completed',
     failed: 'failed',
-    cancelled: 'completed',
-    canceled: 'completed',
+    cancelled: safeToolProjection ? 'failed' : 'completed',
+    canceled: safeToolProjection ? 'failed' : 'completed',
     in_progress: 'in_progress',
   };
   const isComplete =
@@ -920,58 +1255,88 @@ function daemonToolBlockToToolCall(
     block.status === 'failed' ||
     block.status === 'cancelled' ||
     block.status === 'canceled';
+  const forceBackgroundPending =
+    isBackgroundAgent && (!safeToolProjection || !isComplete);
 
   return {
     callId: block.toolCallId,
     toolName: block.toolName || 'unknown',
     title: block.title,
     status:
-      (isBackgroundAgent ? 'pending' : statusMap[block.status]) ||
+      (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||
       'in_progress',
     kind: inferToolKind(block.toolName, block.toolKind),
     rawOutput,
-    args: block.rawInput as Record<string, unknown> | undefined,
+    args: getToolArgs(block, safeToolProjection),
+    executionMode: isTaskExecutionMode(executionMode)
+      ? executionMode
+      : undefined,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
-    endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    endTime:
+      isComplete && !forceBackgroundPending ? block.updatedAt : undefined,
+    ...(isCancelledStatus(block.status) ? { wasCancelled: true } : {}),
     ...(content ? { content } : {}),
+    sourceBlockIds: [block.id],
   };
+}
+
+function getToolArgs(
+  block: DaemonToolTranscriptBlock,
+  safeToolProjection: boolean,
+): Record<string, unknown> | undefined {
+  if (!safeToolProjection) {
+    return block.rawInput as Record<string, unknown> | undefined;
+  }
+  return daemonToolPreviewToArgs(block.preview);
 }
 
 function permissionBlockToToolCall(
   block: DaemonPermissionTranscriptBlock,
+  safeToolProjection: boolean,
 ): DaemonMessageToolCall | undefined {
   const toolCall = getRecord(block.toolCall);
-  if (!toolCall) return undefined;
-
-  const rawInput = getToolCallRawInput(toolCall);
+  if (!safeToolProjection && !toolCall) return undefined;
+  const rawInput = safeToolProjection
+    ? daemonToolPreviewToArgs(block.preview)
+    : toolCall
+      ? getToolCallRawInput(toolCall)
+      : undefined;
   // AskUserQuestion permissions are rendered by the shell as a dedicated
   // interactive form from the pending permission itself. Emitting a synthetic
   // generic tool card here would show the same permission twice, especially
   // when older daemon events only expose it as kind: "think".
   if (Array.isArray(rawInput?.['questions'])) return undefined;
 
-  const meta = getRecord(toolCall['_meta']);
-  const kind = getString(toolCall, 'kind');
+  const meta = toolCall ? getRecord(toolCall['_meta']) : undefined;
+  const kind = safeToolProjection
+    ? block.toolKind
+    : getString(toolCall, 'kind');
   const toolName =
-    getString(meta, 'toolName') ??
-    getString(toolCall, 'toolName') ??
-    getString(toolCall, 'name') ??
+    (safeToolProjection
+      ? block.toolName
+      : (getString(meta, 'toolName') ??
+        getString(toolCall, 'toolName') ??
+        getString(toolCall, 'name'))) ??
     (rawInput?.['subagent_type'] ? 'agent' : undefined) ??
     (kind === 'fetch' ? 'web_fetch' : kind);
-  const toolCallId =
-    getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id');
+  const toolCallId = safeToolProjection
+    ? block.toolCallId
+    : (getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id'));
   if (!toolCallId || !toolName) return undefined;
 
   const syntheticTool: DaemonMessageToolCall = {
     callId: toolCallId,
     toolName,
-    title: getString(toolCall, 'title') ?? block.title,
+    title: safeToolProjection
+      ? block.title
+      : (getString(toolCall, 'title') ?? block.title),
     status: 'pending',
     kind: inferToolKind(toolName, kind),
     args: rawInput,
     startTime: block.createdAt,
+    sourceBlockIds: [block.id],
   };
 
   return syntheticTool;
@@ -980,13 +1345,21 @@ function permissionBlockToToolCall(
 function rememberPermissionToolInfo(
   block: DaemonPermissionTranscriptBlock,
   infoByCallId: Map<string, PermissionToolInfo>,
+  safeToolProjection: boolean,
 ): void {
   const toolCall = getRecord(block.toolCall);
-  const toolCallId =
-    getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id');
+  const toolCallId = safeToolProjection
+    ? block.toolCallId
+    : (getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id'));
   if (!toolCallId) return;
-  const title = getString(toolCall, 'title') ?? block.title;
-  const rawInput = toolCall ? getToolCallRawInput(toolCall) : undefined;
+  const title = safeToolProjection
+    ? block.title
+    : (getString(toolCall, 'title') ?? block.title);
+  const rawInput = safeToolProjection
+    ? daemonToolPreviewToArgs(block.preview)
+    : toolCall
+      ? getToolCallRawInput(toolCall)
+      : undefined;
   if (!Array.isArray(rawInput?.['questions'])) return;
   infoByCallId.set(toolCallId, {
     ...(title ? { title } : {}),
@@ -999,6 +1372,10 @@ function isApprovedPermissionResolution(resolved: string): boolean {
   if (isApprovalToken(primary)) return true;
   if (primary !== 'selected') return false;
   return isApprovalToken(detail.trim());
+}
+
+function isNeutralPermissionResolution(resolved: string): boolean {
+  return resolved.trim().toLowerCase() === 'resolved';
 }
 
 function isApprovalToken(token: string): boolean {
@@ -1039,11 +1416,20 @@ function isBackgroundAgentBlock(
 ): boolean {
   const name = block.toolName?.toLowerCase();
   if (name !== 'agent' && name !== 'task') return false;
+  if (block.background === true) return true;
   const raw = getRecord(rawOutput);
   return raw?.['status'] === 'background';
 }
 
-function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
+function getToolRawOutput(
+  block: DaemonToolTranscriptBlock,
+  safeToolProjection: boolean,
+): unknown {
+  if (!safeToolProjection) return getRuntimeToolRawOutput(block);
+  return daemonToolResultPreviewToOutput(block.resultPreview);
+}
+
+function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
   if (isAskUserQuestionBlock(block) && block.status === 'failed') {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
@@ -1074,10 +1460,109 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
   };
 }
 
+function daemonToolResultPreviewToOutput(
+  preview: DaemonToolTranscriptBlock['resultPreview'],
+): unknown {
+  if (!preview) return undefined;
+  if (preview.kind === 'text') return preview.text;
+  if (preview.kind === 'generic') return preview.summary;
+  return {
+    entries: preview.entries.map((entry) => ({
+      content: entry.content,
+      status: entry.status,
+      ...(entry.priority ? { priority: entry.priority } : {}),
+      _meta: {
+        qwenTodo: {
+          id: entry.id,
+          ...(entry.blockedBy ? { blockedBy: [...entry.blockedBy] } : {}),
+        },
+      },
+    })),
+    ...(preview.planId || preview.revision !== undefined
+      ? {
+          plan: {
+            ...(preview.planId ? { id: preview.planId } : {}),
+            ...(preview.revision !== undefined
+              ? { revision: preview.revision }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+function daemonToolPreviewToArgs(
+  preview: DaemonToolTranscriptBlock['preview'] | undefined,
+): Record<string, unknown> | undefined {
+  if (!preview) return undefined;
+  switch (preview.kind) {
+    case 'ask_user_question':
+      return {
+        questions: preview.questions.map((question) => ({
+          ...(question.header ? { header: question.header } : {}),
+          question: question.question,
+          options: question.options.map((option) => ({
+            label: option.label,
+            ...(option.description ? { description: option.description } : {}),
+          })),
+        })),
+      };
+    case 'todo_list':
+      return daemonToolResultPreviewToOutput(preview) as Record<
+        string,
+        unknown
+      >;
+    case 'command':
+      return {
+        command: preview.command,
+        ...(preview.cwd ? { cwd: preview.cwd } : {}),
+      };
+    case 'file_diff':
+      return {
+        path: preview.path,
+        ...(preview.oldText !== undefined ? { oldText: preview.oldText } : {}),
+        ...(preview.newText !== undefined ? { newText: preview.newText } : {}),
+        ...(preview.patch !== undefined ? { patch: preview.patch } : {}),
+      };
+    case 'file_read':
+      return {
+        path: preview.path,
+        ...(preview.range ? { range: [...preview.range] } : {}),
+      };
+    case 'web_fetch':
+      return {
+        url: preview.url,
+        ...(preview.method ? { method: preview.method } : {}),
+      };
+    case 'subagent_delegation':
+      return {
+        subagent_type: preview.agentName,
+        prompt: preview.task,
+        ...(preview.parentDelegationId
+          ? { parentDelegationId: preview.parentDelegationId }
+          : {}),
+      };
+    default:
+      return undefined;
+  }
+}
+
+// The transcript store uses copy-on-write: an unchanged tool keeps its block
+// identity across frames. Keying by the block, rather than its content array,
+// also handles callers that replace a block while reusing its content array.
+const normalizedToolContentCache = new WeakMap<
+  DaemonToolTranscriptBlock,
+  readonly DaemonMessageToolCallContent[]
+>();
+
 function normalizeToolContent(
-  value: unknown,
-): DaemonMessageToolCallContent[] | undefined {
+  block: DaemonToolTranscriptBlock,
+): readonly DaemonMessageToolCallContent[] | undefined {
+  const value = block.content;
   if (!Array.isArray(value)) return undefined;
+
+  const cached = normalizedToolContentCache.get(block);
+  if (cached !== undefined) return cached;
 
   const content = value.flatMap((entry): DaemonMessageToolCallContent[] => {
     const item = getRecord(entry);
@@ -1124,7 +1609,10 @@ function normalizeToolContent(
     return [];
   });
 
-  return content.length > 0 ? content : undefined;
+  if (content.length === 0) return undefined;
+  const frozen = Object.freeze(content);
+  normalizedToolContentCache.set(block, frozen);
+  return frozen;
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {

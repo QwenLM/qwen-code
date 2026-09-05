@@ -4,10 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
+
+// The factory intercepts every `createDebugLogger` caller in this module
+// graph, not just usageHistoryService: jsonl-utils builds its own logger and
+// calls warn/error on the tolerant-parse and read paths. A partial mock turns
+// those into `TypeError: ... is not a function`, so the whole DebugLogger
+// interface has to be here.
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => false,
+    debug: debugMock,
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 import {
   metricsToUsageRecord,
   aggregateUsage,
@@ -15,6 +34,8 @@ import {
   loadUsageHistoryWithLive,
   persistSessionUsage,
   persistUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  commitUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -397,6 +418,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   let originalQwenHome: string | undefined;
 
   beforeEach(() => {
+    debugMock.mockClear();
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-usage-history-'));
     originalQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = path.join(tmpHome, '.qwen');
@@ -603,6 +625,31 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(fs.existsSync(usagePath)).toBe(true);
   });
 
+  it('rebuild excludes the prompt ledger sidecar from transcript enumeration', async () => {
+    plantChatJsonl('sess-real', 1600);
+    // The ledger sidecar shares the chats dir and ends in `.jsonl`; plant a
+    // summarizable transcript under a distinct sessionId and rename it to
+    // the sidecar name, so an accidental ingestion would surface as a
+    // second session.
+    plantChatJsonl('sess-ghost', 800);
+    const chatsDir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+      'chats',
+    );
+    fs.renameSync(
+      path.join(chatsDir, 'sess-ghost.jsonl'),
+      path.join(chatsDir, 'sess-real.ledger.jsonl'),
+    );
+
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe('sess-real');
+  });
+
   it('end-to-end: /stats during first turn + /clear must not 2x the session', async () => {
     const sessionId = 'sess-e2e';
     plantChatJsonl(sessionId, 1600);
@@ -775,7 +822,44 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     const merged = await loadUsageHistoryWithLive();
     expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
+    // The garbage lines must be recovered by the tolerant JSONL parse, not by
+    // loadUsageHistoryWithLive's catch-all: a throwing `jsonl.read` would reach
+    // that catch and log here, hiding the regression behind a green test.
+    expect(debugMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('failed to read usage file'),
+    );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'withLive: skips and logs non-regular transcript entries',
+    async () => {
+      // A FIFO passing the `*.jsonl` name filter must be skipped before any
+      // read: opening it would block forever (no writer ever arrives) and
+      // wedge the rebuild — the daemon usage dashboard serves from this path.
+      // Observed in the wild from a test-suite leftover. The mkfifo call is
+      // skipped on Windows, matching storage.test.ts.
+      plantChatJsonl('sess-real', 1600);
+      const fifoPath = planted('sess-fifo');
+      const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
+      expect(mkfifo.status).toBe(0);
+      const danglingPath = planted('dangling');
+      fs.symlinkSync(
+        path.join(path.dirname(danglingPath), 'missing'),
+        danglingPath,
+      );
+
+      const merged = await loadUsageHistoryWithLive();
+      expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+      expect(debugMock).toHaveBeenCalledWith(
+        `rebuildFromSessionJsonl: skipping non-regular entry ${fifoPath}`,
+      );
+      expect(debugMock).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `rebuildFromSessionJsonl: cannot stat ${danglingPath}`,
+        ),
+      );
+    },
+  );
 });
 
 // Regression for #7384: deleting a session erased its usage from the
@@ -880,6 +964,24 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
       false,
     );
     const lines = fs.readFileSync(usagePath(), 'utf-8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('does not append stale salvage after authoritative usage is persisted', async () => {
+    const sessionId = 'sess-salvage-race';
+    const filePath = plantTranscript(sessionId, true);
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared).not.toBeNull();
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project',
+      startTime: new Date('2026-07-01T00:00:00Z'),
+      endTime: new Date('2026-07-01T00:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(false);
+    const lines = fs.readFileSync(usagePath(), 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);
   });
 

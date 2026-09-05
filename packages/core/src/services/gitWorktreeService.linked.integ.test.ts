@@ -229,3 +229,161 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
     },
   );
 });
+
+describe('GitWorktreeService.getMainWorktreePath() (real git)', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  const tmpDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tmpDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function commitInitial(tree: string): void {
+    execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: tree });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: tree });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: tree });
+    fs.writeFileSync(path.join(tree, 'README.md'), 'hi\n');
+    execFileSync('git', ['add', '.'], { cwd: tree });
+    execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+      cwd: tree,
+    });
+  }
+
+  function initRepo(prefix: string): string {
+    const repo = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), prefix)),
+    );
+    tmpDirs.push(repo);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    commitInitial(repo);
+    return repo;
+  }
+
+  it('answers the main tree even when called from inside a linked worktree', async () => {
+    // The anchor this PR re-anchored on: `--show-toplevel` from a linked
+    // worktree names the worktree's OWN root, which spuriously refused
+    // sibling pins. The porcelain listing names the main tree regardless of
+    // the calling worktree.
+    const repo = initRepo('qwen-mainpath-wt-');
+    const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
+    execFileSync('git', ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'], {
+      cwd: repo,
+    });
+
+    const fromWorktree = new GitWorktreeService(wt);
+    // Git emits forward slashes on Windows while `repo`/`wt` come from
+    // Node's fs APIs (backslashes); compare normalized forms so this asserts
+    // the resolved path, not the platform's separator style.
+    const mainFromWorktree = (await fromWorktree.getMainWorktreePath()) ?? '';
+    expect(path.normalize(mainFromWorktree)).toBe(path.normalize(repo));
+    const topFromWorktree = (await fromWorktree.getRepoTopLevel()) ?? '';
+    expect(path.normalize(topFromWorktree)).toBe(path.normalize(wt));
+    const fromMain = new GitWorktreeService(repo);
+    const mainFromMain = (await fromMain.getMainWorktreePath()) ?? '';
+    expect(path.normalize(mainFromMain)).toBe(path.normalize(repo));
+  });
+
+  // A newline inside the main-tree path splits the porcelain first entry;
+  // the truncated prefix can fall inside a DIFFERENT repository, against
+  // whose worktree registry the pin gate would then validate. The parse must
+  // refuse the truncated anchor so callers fall back to `--show-toplevel` —
+  // a single value, so interior newlines survive. Newline path components
+  // are not representable on Win32.
+  it.skipIf(process.platform === 'win32')(
+    'refuses the truncated anchor when the main-tree path contains a newline',
+    async () => {
+      const outer = initRepo('qwen-mainpath-outer-');
+      const nlRepo = path.join(outer, 'sub', '\nR1');
+      fs.mkdirSync(path.dirname(nlRepo), { recursive: true });
+      execFileSync('git', ['clone', '-q', outer, nlRepo], { cwd: outer });
+
+      const svc = new GitWorktreeService(nlRepo);
+      expect(await svc.getMainWorktreePath()).toBeNull();
+      expect(await svc.getRepoTopLevel()).toBe(nlRepo);
+    },
+  );
+
+  // The parse check catches a remainder that is NOT attribute-shaped, but a
+  // remainder that itself is a record attribute (`detached`) — or a path
+  // ending right at a newline — parses cleanly. The anchor is only trusted
+  // after the round-trip: `rev-parse --git-common-dir` run at the truncated
+  // prefix must agree with this repository's common dir. Here the prefix
+  // falls inside the enclosing repository (first arm) or nowhere at all
+  // (second arm), so both anchors are refused and the `--show-toplevel`
+  // fallback keeps the path intact.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a truncated anchor whose remainder is attribute-shaped',
+    async () => {
+      const outer = initRepo('qwen-mainpath-attr-');
+      const nlRepo = path.join(outer, 'sub', '\ndetached');
+      fs.mkdirSync(path.dirname(nlRepo), { recursive: true });
+      execFileSync('git', ['clone', '-q', outer, nlRepo], { cwd: outer });
+
+      const svc = new GitWorktreeService(nlRepo);
+      expect(await svc.getMainWorktreePath()).toBeNull();
+      expect(await svc.getRepoTopLevel()).toBe(nlRepo);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a truncated anchor when the main-tree path ends with a newline',
+    async () => {
+      const outer = initRepo('qwen-mainpath-trailnl-');
+      const nlRepo = path.join(outer, 'sub', 'tree\n');
+      fs.mkdirSync(path.dirname(nlRepo), { recursive: true });
+      execFileSync('git', ['clone', '-q', outer, nlRepo], { cwd: outer });
+
+      const svc = new GitWorktreeService(nlRepo);
+      expect(await svc.getMainWorktreePath()).toBeNull();
+      expect(await svc.getRepoTopLevel()).toBe(nlRepo);
+    },
+  );
+
+  // git's command stdout is LF-terminated on all platforms, so a trailing CR
+  // in the `--show-toplevel` / porcelain answer is part of the directory
+  // name, not a line terminator. Stripping it mutates the anchor into the
+  // CR-less sibling path — and when another repository lives there, the pin
+  // gate consults THAT repository's worktree registry and accepts its
+  // worktree. (A trailing CR is not representable on Win32.)
+  it.skipIf(process.platform === 'win32')(
+    'preserves a trailing CR in the repository directory name',
+    async () => {
+      const base = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mainpath-cr-')),
+      );
+      tmpDirs.push(base);
+      const crRepo = path.join(base, 'repo\r');
+      fs.mkdirSync(crRepo);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: crRepo });
+      commitInitial(crRepo);
+      const sibling = path.join(base, 'repo');
+      fs.mkdirSync(sibling);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: sibling });
+      commitInitial(sibling);
+      const foreignWt = path.join(sibling, 'wt');
+      execFileSync('git', ['worktree', 'add', '-b', 'fbranch', foreignWt], {
+        cwd: sibling,
+      });
+      const ownWt = path.join(crRepo, 'wt');
+      execFileSync('git', ['worktree', 'add', '-b', 'sbranch', ownWt], {
+        cwd: crRepo,
+      });
+
+      const svc = new GitWorktreeService(crRepo);
+      const main = await svc.getMainWorktreePath();
+      const top = await svc.getRepoTopLevel();
+      expect(main).toBe(crRepo);
+      expect(top).toBe(crRepo);
+      // worktree-pin.ts anchors the registry gate at `main ?? top ?? cwd`:
+      // a mutated anchor would read the sibling's registry and accept its
+      // worktree as a pin target of THIS repository.
+      const gate = new GitWorktreeService(main ?? top ?? crRepo);
+      expect(await gate.isRegisteredLinkedWorktree(foreignWt)).toBe(false);
+      expect(await gate.isRegisteredLinkedWorktree(ownWt)).toBe(true);
+    },
+  );
+});

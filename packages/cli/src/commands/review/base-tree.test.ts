@@ -175,6 +175,34 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true); // built through the corpse
   });
 
+  it('a budget-TRUNCATED build is unavailable but NOT settled — no marker either way', () => {
+    // A rerun against packages the budget left unbuilt manufactures
+    // "fails on base too" — but truncation says nothing about the SHA, so
+    // neither marker is written and a later shard may repay and succeed.
+    const truncatedBuild = {
+      ...okBuild,
+      notBuilt: ['packages/a', 'packages/b'],
+    } as unknown as BuildTestReport;
+    const builds: string[] = [];
+    const build = (w: string) => {
+      builds.push(w);
+      return truncatedBuild;
+    };
+    const first = run({}, build);
+    expect(first.available).toBe(false);
+    expect(first.note).toContain('not built');
+    expect(first.note).toContain('packages/a');
+    // No success marker and no failed marker: the next shard repays the build.
+    expect(existsSync(join(first.path!, '.qwen-review-base-ok'))).toBe(false);
+    expect(existsSync(join(first.path!, '.qwen-review-base-failed'))).toBe(
+      false,
+    );
+    const second = run({}, build);
+    expect(second.available).toBe(false);
+    expect(second.note).not.toContain('already failed');
+    expect(builds).toHaveLength(2);
+  });
+
   it('a FAILED build is a settled answer — later shards do not re-pay it', () => {
     const builds: string[] = [];
     const build = (w: string) => {
@@ -272,5 +300,38 @@ describe('runBaseTree', () => {
     const r = run({ plan: { mergeBaseSha: '0'.repeat(40) } });
     expect(r.available).toBe(false);
     expect(r.note).toMatch(/base worktree could not be created/);
+  });
+
+  it('ignores an exported GIT_DIR redirect when adding the base tree', () => {
+    // An exported GIT_DIR overrides repository discovery for every git call
+    // that inherits it: the add would land in the redirected repository and
+    // the A/B measure the wrong program while every check against the given
+    // tree passes. The sha below IS a commit — just not of this repo.
+    const foreign = mkdtempSync(join(tmpdir(), 'qwen-base-tree-foreign-'));
+    try {
+      git(foreign, 'init', '-q', '-b', 'main');
+      git(foreign, 'config', 'user.email', 't@t.t');
+      git(foreign, 'config', 'user.name', 't');
+      writeFileSync(join(foreign, 'b.txt'), 'x\n');
+      git(foreign, 'add', '-A');
+      git(foreign, 'commit', '-qm', 'foreign');
+      const foreignSha = git(foreign, 'rev-parse', 'HEAD');
+
+      process.env['GIT_DIR'] = join(foreign, '.git');
+      let r: BaseTreeReport;
+      try {
+        r = run({ plan: { mergeBaseSha: foreignSha } });
+      } finally {
+        delete process.env['GIT_DIR'];
+      }
+
+      expect(r.available).toBe(false);
+      expect(r.note).toMatch(/base worktree could not be created/);
+      // The foreign repository gained no worktree from this call — its list
+      // still holds only its own main checkout.
+      expect(git(foreign, 'worktree', 'list').split('\n')).toHaveLength(1);
+    } finally {
+      rmSync(foreign, { recursive: true, force: true });
+    }
   });
 });

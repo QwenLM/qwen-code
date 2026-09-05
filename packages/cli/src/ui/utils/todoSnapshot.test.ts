@@ -109,7 +109,7 @@ function makeEmptyTodoToolGroup(
   return item;
 }
 
-function makeGeminiHistoryItem(text: string, id: number): HistoryItem {
+function makeLlmHistoryItem(text: string, id: number): HistoryItem {
   return {
     type: 'gemini',
     id,
@@ -135,8 +135,8 @@ describe('getStickyTodos', () => {
     const history = [
       makeTodoToolGroup('first task', 1),
       makeTodoToolGroup('latest history task', 2),
-      makeGeminiHistoryItem('First response after todo', 3),
-      makeGeminiHistoryItem('Second response after todo', 4),
+      makeLlmHistoryItem('First response after todo', 3),
+      makeLlmHistoryItem('Second response after todo', 4),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toEqual([
@@ -168,7 +168,7 @@ describe('getStickyTodos', () => {
 
   it('keeps sticky todos hidden when the latest history todo is still the newest item', () => {
     const history = [
-      makeGeminiHistoryItem('Earlier response', 1),
+      makeLlmHistoryItem('Earlier response', 1),
       makeTodoToolGroup('latest history task', 2),
     ] as HistoryItem[];
 
@@ -178,7 +178,7 @@ describe('getStickyTodos', () => {
   it('keeps sticky todos hidden when the latest history todo has only one following item', () => {
     const history = [
       makeTodoToolGroup('latest history task', 1),
-      makeGeminiHistoryItem('One response after todo', 2),
+      makeLlmHistoryItem('One response after todo', 2),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toBeNull();
@@ -187,8 +187,8 @@ describe('getStickyTodos', () => {
   it('shows sticky todos once later history has likely moved the inline todo away', () => {
     const history = [
       makeTodoToolGroup('latest history task', 1),
-      makeGeminiHistoryItem('First response after todo', 2),
-      makeGeminiHistoryItem('Second response after todo', 3),
+      makeLlmHistoryItem('First response after todo', 2),
+      makeLlmHistoryItem('Second response after todo', 3),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toEqual([
@@ -217,8 +217,8 @@ describe('getStickyTodos', () => {
         ],
         1,
       ),
-      makeGeminiHistoryItem('First response after todo', 2),
-      makeGeminiHistoryItem('Second response after todo', 3),
+      makeLlmHistoryItem('First response after todo', 2),
+      makeLlmHistoryItem('Second response after todo', 3),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toBeNull();
@@ -230,8 +230,8 @@ describe('getStickyTodos', () => {
     const history = [
       makeUserHistoryItem('Do the tasks', 1),
       makeTodoToolGroup('task from turn N', 2),
-      makeGeminiHistoryItem('Working on it', 3),
-      makeGeminiHistoryItem('Done with turn N', 4),
+      makeLlmHistoryItem('Working on it', 3),
+      makeLlmHistoryItem('Done with turn N', 4),
       makeUserHistoryItem('Next question', 5),
     ] as HistoryItem[];
 
@@ -246,8 +246,8 @@ describe('getStickyTodos', () => {
     const history = [
       makeUserHistoryItem('Do the tasks', 1),
       makeTodoToolGroup('task from turn N', 2),
-      makeGeminiHistoryItem('Working on it', 3),
-      makeGeminiHistoryItem('Done with turn N', 4),
+      makeLlmHistoryItem('Working on it', 3),
+      makeLlmHistoryItem('Done with turn N', 4),
       makeUserHistoryItem('/stats', 5, false),
     ] as HistoryItem[];
 
@@ -259,8 +259,8 @@ describe('getStickyTodos', () => {
     const history = [
       makeUserHistoryItem('Do the tasks', 1),
       makeTodoToolGroup('current task', 2),
-      makeGeminiHistoryItem('Working on it', 3),
-      makeGeminiHistoryItem('Still working', 4),
+      makeLlmHistoryItem('Working on it', 3),
+      makeLlmHistoryItem('Still working', 4),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toEqual([
@@ -464,6 +464,81 @@ describe('sticky todo layout helpers', () => {
     it('respects height-derived floor when VP cap exceeds it', () => {
       // Very short terminal: base is 1, vpCap is 2, so min(2,1)=1.
       expect(getStickyTodoMaxVisibleItemsForMode(8, true)).toBe(1);
+    });
+  });
+
+  describe('unchanged snapshot guard', () => {
+    it('falls back to previous snapshot when the latest committed snapshot is unchanged', () => {
+      const history = [
+        makeCustomTodoToolGroup(
+          [{ id: '1', content: 'Old Task', status: 'in_progress' }],
+          1,
+        ),
+        makeLlmHistoryItem('Response', 2),
+        makeLlmHistoryItem('Response 2', 3),
+        {
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'todo-unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: {
+                type: 'todo_list' as const,
+                todos: [
+                  { id: '1', content: 'Old Task', status: 'in_progress' },
+                ],
+                unchanged: true,
+              },
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+          id: 4,
+        },
+      ] as HistoryItem[];
+
+      // It should skip the unchanged snapshot and return the previous valid one
+      expect(getStickyTodos(history, [])).toEqual([
+        { id: '1', content: 'Old Task', status: 'in_progress' },
+      ]);
+    });
+
+    it('allows history snapshot to be used when pending snapshot is unchanged', () => {
+      const history = [
+        makeCustomTodoToolGroup(
+          [{ id: '1', content: 'History Task', status: 'pending' }],
+          1,
+        ),
+        makeLlmHistoryItem('Response', 2),
+        makeLlmHistoryItem('Response 2', 3),
+      ] as HistoryItem[];
+
+      const pendingHistoryItems = [
+        {
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'todo-pending-unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: {
+                type: 'todo_list' as const,
+                todos: [
+                  { id: '1', content: 'History Task', status: 'pending' },
+                ],
+                unchanged: true,
+              },
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ] as HistoryItemWithoutId[];
+
+      expect(getStickyTodos(history, pendingHistoryItems)).toEqual([
+        { id: '1', content: 'History Task', status: 'pending' },
+      ]);
     });
   });
 });

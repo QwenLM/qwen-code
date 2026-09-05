@@ -41,7 +41,15 @@ export {
   createAcpSessionBridge,
   createHttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridge';
-export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+export {
+  DEFAULT_SESSION_RESTORE_TIMEOUT_MS,
+  MAX_SESSION_RESTORE_TIMEOUT_MS,
+  resolveSessionRestoreTimeoutMs,
+} from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+export {
+  defaultSpawnChannelFactory,
+  createSpawnChannelFactory,
+} from '@qwen-code/acp-bridge/spawnChannel';
 // `MAX_RESOLVED_PERMISSION_RECORDS`, `PendingPermission`,
 // `PermissionResolutionRecord` re-exports were removed alongside the
 // source definitions — the mediator now owns pending+resolved state.
@@ -61,6 +69,7 @@ export type {
   BridgeSessionLifecycle,
   BridgeSessionLifecycleEvent,
   BridgeOptions,
+  BridgeRuntimeEpochSource,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
@@ -77,12 +86,16 @@ export type {
   BridgeGenerationModelSource,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
+  BridgePromptContentBlock,
   BridgeSessionSummary,
+  BridgeTurnStatus,
+  BridgeSessionCatalogVersion,
   SessionMetadataUpdate,
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
   BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
   BridgeAutoMemoryTopic,
@@ -93,7 +106,10 @@ export type {
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeWorkspaceRuntimeLifecycleSnapshot,
   BridgeShutdownOptions,
+  WorkspaceEventPublisher,
+  WorkspaceEventBridge,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -119,10 +135,12 @@ export {
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
   WorkspaceDrainingError,
+  BridgeChannelQuarantinedError,
   InvalidRewindTargetError,
   TotalSessionLimitExceededError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
@@ -133,6 +151,11 @@ export {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+
+export {
+  BridgeTimeoutError,
+  SessionRestoreTimeoutError,
+} from '@qwen-code/acp-bridge/status';
 
 export {
   MAX_WORKSPACE_PATH_LENGTH,

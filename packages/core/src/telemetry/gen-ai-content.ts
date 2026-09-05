@@ -874,7 +874,7 @@ function anthropicTools(value: unknown): JsonObject[] | undefined {
   return result;
 }
 
-function geminiTools(value: unknown): JsonObject[] | undefined {
+function llmTools(value: unknown): JsonObject[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const result: JsonObject[] = [];
   for (const wrapper of value) {
@@ -933,7 +933,7 @@ export function extractAnthropicContent(
   };
 }
 
-export function extractGeminiContent(request: object): GenAiContentAttributes {
+export function extractLlmContent(request: object): GenAiContentAttributes {
   const value = request as Record<string, unknown>;
   const config = record(value['config']);
   return {
@@ -948,7 +948,7 @@ export function extractGeminiContent(request: object): GenAiContentAttributes {
         : undefined,
     toolDefinitions:
       config && Object.hasOwn(config, 'tools')
-        ? geminiTools(config['tools'])
+        ? llmTools(config['tools'])
         : undefined,
   };
 }
@@ -1275,7 +1275,7 @@ export class GenAiOutputAccumulator {
     }
   }
 
-  recordGeminiResponse(response: object): void {
+  recordLlmResponse(response: object): void {
     const candidates = (response as Record<string, unknown>)['candidates'];
     if (!Array.isArray(candidates)) return;
     this.observedResponse = true;
@@ -1307,7 +1307,7 @@ export class GenAiOutputAccumulator {
     }
   }
 
-  recordGeminiChunk(chunk: object): void {
+  recordLlmChunk(chunk: object): void {
     const candidates = (chunk as Record<string, unknown>)['candidates'];
     if (!Array.isArray(candidates)) return;
     this.observedResponse = true;

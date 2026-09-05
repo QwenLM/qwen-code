@@ -120,6 +120,18 @@ describe('renderExternalContext', () => {
     );
   });
 
+  it('drops contract-invalid required fields and non-finite scores', () => {
+    const rendered = renderExternalContext([
+      { id: '', content: 'missing id' },
+      { id: 'missing-content', content: '' },
+      { id: 'valid', content: 'valid', score: Number.NaN },
+    ]);
+
+    expect(JSON.parse(rendered).untrusted_external_context.items).toEqual([
+      { id: 'valid', content: 'valid' },
+    ]);
+  });
+
   it('renders an empty result set in the same untrusted envelope', () => {
     expect(JSON.parse(renderExternalContext([]))).toEqual({
       untrusted_external_context: {

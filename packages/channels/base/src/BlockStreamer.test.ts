@@ -42,9 +42,13 @@ describe('BlockStreamer', () => {
   it('emits at paragraph boundary when buffer >= minChars', async () => {
     const s = createStreamer({ minChars: 10 });
     s.push('Hello world, this is a paragraph.\n\nSecond part');
-    // Should have emitted the first paragraph
+    // Should have emitted the first paragraph, keeping the line terminator
+    // trim removed so consumers can see the real line boundary.
     await s.flush();
-    expect(sent).toEqual(['Hello world, this is a paragraph.', 'Second part']);
+    expect(sent).toEqual([
+      'Hello world, this is a paragraph.\n',
+      'Second part',
+    ]);
     expect(s.blockCount).toBe(2);
   });
 
@@ -82,7 +86,7 @@ describe('BlockStreamer', () => {
     s.push('line one\n\nline two\nline three xx');
     await s.flush();
     // Should split at \n\n (pos 10) since it's within maxChars
-    expect(sent[0]).toBe('line one');
+    expect(sent[0]).toBe('line one\n');
     expect(sent.length).toBe(2);
   });
 
@@ -151,8 +155,9 @@ describe('BlockStreamer', () => {
     const s = createStreamer({ minChars: 5 });
     s.push('  \n  Hello world  \n\n  Next  ');
     await s.flush();
-    // The first block includes leading whitespace up to \n\n, trimmed
-    expect(sent.every((t) => t === t.trim())).toBe(true);
+    // Leading whitespace and trailing spaces are trimmed; a block ending at
+    // a line break keeps exactly one restored newline.
+    expect(sent).toEqual(['Hello world\n', 'Next']);
   });
 
   it('does not emit empty blocks after trimming', async () => {
@@ -197,7 +202,40 @@ describe('BlockStreamer', () => {
     s.push('Para one.\n\nPara two.\n\nPara three.');
     await s.flush();
     // Should emit paras 1+2 as one block (last \n\n boundary), then para 3
-    expect(sent).toEqual(['Para one.\n\nPara two.', 'Para three.']);
+    expect(sent).toEqual(['Para one.\n\nPara two.\n', 'Para three.']);
+  });
+
+  it('restores one trailing newline when a block ends at a line break', async () => {
+    const s = createStreamer({ minChars: 10 });
+    s.push('First paragraph of the answer.\n\nSecond part');
+    await s.flush();
+    expect(sent).toEqual(['First paragraph of the answer.\n', 'Second part']);
+  });
+
+  it('adds no newline when a block is force-split mid-line', async () => {
+    const s = createStreamer({ minChars: 5, maxChars: 12 });
+    s.push('word one word two word three');
+    await s.flush();
+    expect(sent[0]).not.toMatch(/\n$/);
+  });
+
+  it('drain awaits queued sends without emitting buffered text', async () => {
+    vi.useRealTimers();
+    const delivered: string[] = [];
+    const s = new BlockStreamer({
+      minChars: 5,
+      maxChars: 10,
+      idleMs: 0,
+      send: async (text) => {
+        await new Promise((r) => setTimeout(r, 5));
+        delivered.push(text);
+      },
+    });
+    s.push('aaaa bbbb cccc dddd eeee');
+    await s.drain();
+    expect(delivered).toEqual(['aaaa bbbb', 'cccc dddd']);
+    await s.flush();
+    expect(delivered).toEqual(['aaaa bbbb', 'cccc dddd', 'eeee']);
   });
 
   it('works with idleMs=0 (idle timer disabled)', async () => {

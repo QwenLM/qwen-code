@@ -153,7 +153,7 @@ export function extensionConsentString(
   originSource: string = 'QwenCode',
 ): string {
   const output: string[] = [];
-  if (originSource !== 'QwenCode') {
+  if (originSource !== 'QwenCode' && originSource !== 'AgentPlugins') {
     output.push(
       t(
         'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.',
@@ -163,9 +163,7 @@ export function extensionConsentString(
   }
   const mcpServerEntries = Object.entries(extensionConfig.mcpServers || {});
   const displayLabel = extensionConfig.displayName ?? extensionConfig.name;
-  output.push(
-    t('Installing extension "{{name}}".', { name: displayLabel }),
-  );
+  output.push(t('Installing extension "{{name}}".', { name: displayLabel }));
   if (
     typeof extensionConfig.description === 'string' &&
     extensionConfig.description

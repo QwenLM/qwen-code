@@ -21,7 +21,7 @@ The deployment profiles are mutually exclusive:
 
 Auto-recall remains disabled in the extension manifest. An administrator must opt in by installing the dedicated user-settings Hook in a managed `QWEN_HOME`.
 
-The shared configuration loader and MCP entry point intentionally understand v2 for forward compatibility. Version selection therefore does not enforce profile isolation: the managed Auto Profile must omit the external-context extension and MCP configuration.
+The shared configuration loader accepts v1 and v2, but the MCP process entry point requires v1 and the Hook requires v2. Supplying the same v2 configuration to the MCP fails startup. The managed Auto Profile must still omit the external-context extension and MCP configuration because a separately configured v1 MCP process would permit duplicate retrieval.
 
 ## Why a separate profile
 
@@ -79,7 +79,7 @@ sequenceDiagram
     Q->>M: User prompt plus user-layer context
 ```
 
-Each Hook invocation is a new Node process. It reads configuration once, constructs one explicit adapter, performs at most one search, writes one JSON object to stdout, and exits. Hook and MCP entry points share configuration parsing, provider adapters, proxy setup, and rendering code but no mutable state.
+Each Hook invocation is a new Node process. It reads configuration once, constructs one explicit adapter, performs at most one search, writes one JSON object to stdout, and exits. The Hook owns and destroys its environment-aware proxy dispatcher after the attempted search; the long-running MCP process retains its dispatcher for its process lifetime. Hook and MCP entry points share configuration parsing, provider adapters, proxy setup, and rendering code but no mutable state.
 
 ## Configuration
 
@@ -100,7 +100,7 @@ Version 1 remains the exact on-demand schema. Version 2 is the auto-recall schem
 }
 ```
 
-`autoRecall.timeoutMs` defaults to 1500 milliseconds and must be from 1 through 5000; it is the only timeout the auto-recall Hook reads. A top-level `timeoutMs` is still accepted for forward compatibility with the on-demand MCP profile, but has no effect on auto recall. `repositoryRoot` must be an existing absolute directory. Startup resolves it through `realpath` and rejects a filesystem root. The event `cwd` is also resolved through `realpath`; retrieval runs only when it is the configured root or a descendant. Textual prefix comparisons are never used for containment.
+`autoRecall.timeoutMs` defaults to 1500 milliseconds and must be from 1 through 5000; it is the only timeout the auto-recall Hook reads. A top-level `timeoutMs` remains in the v2 schema for compatibility with existing v2 configuration files, but has no current runtime consumer: auto recall ignores it and the MCP process rejects v2. `repositoryRoot` must be an existing absolute directory. Startup resolves it through `realpath` and rejects a filesystem root. The event `cwd` is also resolved through `realpath`; retrieval runs only when it is the configured root or a descendant. Textual prefix comparisons are never used for containment.
 
 The repository root is an accidental-misrouting guard, not authorization. The provider credential, project, index, or corpus remains the security boundary. The configuration file, its path, credential, and binding must be administrator-controlled and immutable for the Qwen session. Switching repositories or corpora requires a new process. Rolling back to a binary that understands only v1 requires restoring the preserved v1 file.
 
@@ -132,7 +132,7 @@ If the result is empty, retrieval is skipped. These rules reduce accidental forw
 
 ## Search, timeout, and failure semantics
 
-The Hook installs the same environment-aware HTTP proxy dispatcher as Phase 1 and calls the selected adapter once with a limit of five. There is no retry or cache.
+The Hook installs the same environment-aware HTTP proxy dispatcher as Phase 1 and calls the selected adapter once with a limit of five. The dispatcher belongs to that Hook invocation and is destroyed in a `finally` path after successful, empty, or failed retrieval so a stalled proxy connection cannot retain the child process. There is no retry or cache.
 
 Timeouts are nested:
 

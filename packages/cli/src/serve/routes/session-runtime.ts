@@ -10,6 +10,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
@@ -46,11 +47,21 @@ export function requireSessionRuntime(opts: {
     daemonLog,
     details = {},
   } = opts;
-  if (workspaceRegistry.listEntries().length === 1) {
+  if (workspaceRegistry.listAllEntries().length === 1) {
     return requirePrimarySessionRuntime(workspaceRegistry, res);
   }
 
   const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+  if (resolution.kind === 'unavailable') {
+    daemonLog?.warn('session routing failed', {
+      route,
+      resolutionKind: 'workspace_runtime_unavailable',
+      sessionId,
+      ...details,
+    });
+    sendWorkspaceRuntimeUnavailable(res);
+    return undefined;
+  }
   if (resolution.kind === 'found') {
     const runtime = resolution.runtime;
     setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
@@ -74,6 +85,12 @@ export function requireSessionRuntime(opts: {
   }
 
   if (resolution.kind === 'not_found') {
+    if (
+      workspaceRegistry.primaryEntry.state !== 'active' ||
+      !workspaceRegistry.primaryEntry.current
+    ) {
+      return requirePrimarySessionRuntime(workspaceRegistry, res);
+    }
     daemonLog?.warn('session routing failed', {
       route,
       resolutionKind: 'not_found',
@@ -103,7 +120,11 @@ export function requireSessionRuntime(opts: {
     code: 'ambiguous_session_owner',
     sessionId,
     route,
-    workspaceIds,
+    ...(resolution.runtimes.every(
+      (runtime) => !isInternalWorkspaceRuntime(runtime),
+    )
+      ? { workspaceIds }
+      : {}),
   });
   return undefined;
 }

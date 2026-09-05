@@ -78,26 +78,30 @@ export async function runAutoRecall(
     return {};
   }
 
-  installEnvironmentProxy();
-  const provider = createProvider(config.provider);
-  const items = await provider.search({
-    query,
-    limit: 5,
-    signal: AbortSignal.any([
-      signal,
-      AbortSignal.timeout(config.autoRecall.timeoutMs),
-    ]),
-  });
-  if (items.length === 0) {
-    return {};
-  }
+  const dispatcher = installEnvironmentProxy();
+  try {
+    const provider = createProvider(config.provider);
+    const items = await provider.search({
+      query,
+      limit: 5,
+      signal: AbortSignal.any([
+        signal,
+        AbortSignal.timeout(config.autoRecall.timeoutMs),
+      ]),
+    });
+    if (items.length === 0) {
+      return {};
+    }
 
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'UserPromptSubmit',
-      additionalContext: renderExternalContext(items),
-    },
-  };
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext: renderExternalContext(items),
+      },
+    };
+  } finally {
+    await dispatcher.destroy();
+  }
 }
 
 export function createAutoRecallQuery(

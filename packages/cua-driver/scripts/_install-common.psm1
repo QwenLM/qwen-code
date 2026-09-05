@@ -18,8 +18,8 @@
 
 Set-StrictMode -Version Latest
 
-# Best-effort kill of any running cua-driver / cua-driver-uia processes
-# so the next `cua-driver autostart kick` / `cua-driver mcp` starts the
+# Best-effort kill of any running Qwen driver and UIA worker processes
+# so the next `qwen-cua-driver autostart kick` / `qwen-cua-driver mcp` starts the
 # FRESH binary, not whatever's still in memory. Without this the
 # previous daemon keeps running (and keeps drawing its overlay window)
 # until the user reboots - which surfaces as "the bug I just fixed is
@@ -41,18 +41,18 @@ function Stop-CuaDriverDaemons {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & schtasks.exe /End /TN "cua-driver-serve" 2>$null | Out-Null
+        & schtasks.exe /End /TN "qwen-cua-driver-serve" 2>$null | Out-Null
         Start-Sleep -Milliseconds 200
-        & taskkill.exe /F /IM "cua-driver.exe" /T 2>$null | Out-Null
-        & taskkill.exe /F /IM "cua-driver-uia.exe" /T 2>$null | Out-Null
+        & taskkill.exe /F /IM "qwen-cua-driver.exe" /T 2>$null | Out-Null
+        & taskkill.exe /F /IM "qwen-cua-driver-uia.exe" /T 2>$null | Out-Null
     } finally {
         $ErrorActionPreference = $prevEAP
     }
     Start-Sleep -Milliseconds 200
-    return @(Get-Process -Name "cua-driver","cua-driver-uia" -ErrorAction SilentlyContinue)
+    return @(Get-Process -Name "qwen-cua-driver","qwen-cua-driver-uia" -ErrorAction SilentlyContinue)
 }
 
-# Probe whether `\\.\pipe\cua-driver` is currently accepting connections.
+# Probe whether `\\.\pipe\qwen-cua-driver` is currently accepting connections.
 # Distinguishes a *healthy* High-IL daemon (process alive AND pipe
 # responsive - install can proceed by deferring to the user to restart
 # from elevated PS) from a *stale* daemon (process alive but pipe gone
@@ -66,7 +66,7 @@ function Test-CuaDriverPipeAlive {
     param()
     try {
         $fs = [System.IO.File]::Open(
-            '\\.\pipe\cua-driver',
+            '\\.\pipe\qwen-cua-driver',
             [System.IO.FileMode]::Open,
             [System.IO.FileAccess]::ReadWrite,
             [System.IO.FileShare]::ReadWrite
@@ -125,20 +125,20 @@ function Show-CuaDriverDaemonSurvivors {
     $pids = ($Survivors | ForEach-Object { $_.Id }) -join ', '
     if ($Stale) {
         Write-Host "" -ForegroundColor Red
-        Write-Host "ERROR: cua-driver daemon is STALE - process alive (pid: $pids) but \\.\pipe\cua-driver" -ForegroundColor Red
+        Write-Host "ERROR: qwen-cua-driver daemon is STALE - process alive (pid: $pids) but \\.\pipe\qwen-cua-driver" -ForegroundColor Red
         Write-Host "       is not accepting connections. The daemon is wedged; MCP / CLI calls will fail" -ForegroundColor Red
         Write-Host "       with 'cannot find the file specified' until this process is killed." -ForegroundColor Red
         Write-Host "" -ForegroundColor Red
         Write-Host "       From an ELEVATED PowerShell (right-click PowerShell, 'Run as Administrator'):" -ForegroundColor Yellow
         Write-Host "         Stop-Process -Id $pids -Force" -ForegroundColor Yellow
-        Write-Host "         schtasks /Run /TN 'cua-driver-serve'" -ForegroundColor Yellow
+        Write-Host "         schtasks /Run /TN 'qwen-cua-driver-serve'" -ForegroundColor Yellow
         Write-Host "" -ForegroundColor Yellow
         Write-Host "       Reboot also clears it. After the kill+restart, MCP recovers automatically." -ForegroundColor Yellow
     } else {
         Write-Host "Note: $($Survivors.Count) cua-driver process(es) still running after best-effort kill (pid: $pids)." -ForegroundColor Yellow
         Write-Host "      They are likely High-IL (spawned by RunLevel=Highest autostart task)." -ForegroundColor Yellow
         Write-Host "      From an elevated PowerShell:" -ForegroundColor Yellow
-        Write-Host "        taskkill /IM cua-driver.exe /F" -ForegroundColor Yellow
+        Write-Host "        taskkill /IM qwen-cua-driver.exe /F" -ForegroundColor Yellow
         Write-Host "      Or just reboot. Until they exit, the OLD binary keeps running." -ForegroundColor Yellow
     }
 }
@@ -218,10 +218,10 @@ function Invoke-CuaDriverStaleDaemonKill {
 foreach (`$p in @($pidList)) {
     try { Stop-Process -Id `$p -Force -ErrorAction Stop } catch {}
 }
-& schtasks.exe /Run /TN 'cua-driver-serve' | Out-Null
+& schtasks.exe /Run /TN 'qwen-cua-driver-serve' | Out-Null
 Start-Sleep -Milliseconds 1500
 try {
-    `$fs = [System.IO.File]::Open('\\.\pipe\cua-driver','Open','ReadWrite','ReadWrite')
+    `$fs = [System.IO.File]::Open('\\.\pipe\qwen-cua-driver','Open','ReadWrite','ReadWrite')
     `$fs.Close()
     exit 0
 } catch {
@@ -272,7 +272,7 @@ function Repair-CuaDriverStaleDaemon {
     $survivorPids = @($result.Survivors | ForEach-Object { $_.Id })
     Write-Host ""
     Write-Host "Detected STALE cua-driver daemon (pid: $($survivorPids -join ', '))." -ForegroundColor Yellow
-    Write-Host "  Process is alive but \\.\pipe\cua-driver is not accepting connections." -ForegroundColor Yellow
+    Write-Host "  Process is alive but \\.\pipe\qwen-cua-driver is not accepting connections." -ForegroundColor Yellow
     Write-Host "  Fixing this requires admin to terminate the High-IL daemon process." -ForegroundColor Yellow
     Write-Host ""
 
@@ -293,7 +293,7 @@ function Repair-CuaDriverStaleDaemon {
     Write-Host "  Triggering UAC prompt (accept to kill the stale daemon)..." -ForegroundColor Cyan
     $ok = Invoke-CuaDriverStaleDaemonKill -Pids $survivorPids
     if ($ok) {
-        Write-Host "  Stale daemon killed; new cua-driver-serve started; pipe is healthy." -ForegroundColor Green
+        Write-Host "  Stale daemon killed; new qwen-cua-driver-serve started; pipe is healthy." -ForegroundColor Green
         return [pscustomobject]@{
             Survivors = @()
             PipeAlive = $true

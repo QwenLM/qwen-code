@@ -1,22 +1,25 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useRef,
   useMemo,
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
+import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { PlanExecutionView } from './PlanExecutionView';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
-  onConfirm: (id: string, selectedOption: string) => void;
+  onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
@@ -91,7 +94,23 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   return request.title;
 }
 
-function getSafeDefaultIndex(options: PermissionRequest['options']): number {
+function getSafeDefaultIndex(
+  options: PermissionRequest['options'],
+  isAgent = false,
+): number {
+  if (isAgent) {
+    // Launching the agent is the model's proposed next action: default the
+    // selection to the one-shot allow instead of the reject button, and never
+    // to a permanent allow rule.
+    const allowOnceIdx = options.findIndex((o) => o.kind === 'allow_once');
+    if (allowOnceIdx >= 0) return allowOnceIdx;
+    // No one-shot option: fall back to the reject (safe) rather than landing
+    // on a permanent allow rule.
+    const rejectIdx = options.findIndex(
+      (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
+    );
+    return rejectIdx >= 0 ? rejectIdx : 0;
+  }
   if (
     options.length > 1 &&
     (options[0].kind === 'allow_always' || options[0].kind === 'reject_always')
@@ -205,13 +224,16 @@ export function ToolApproval({
   planTodos = [],
 }: ToolApprovalProps) {
   const { t } = useI18n();
+  const isAgent = isAgentTool(request.toolName);
   const displayOptions = useMemo(
     () => prepareDisplayOptions(request.options),
     [request.options],
   );
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
-    () => getSafeDefaultIndex(displayOptions),
-    [displayOptions],
+    () => getSafeDefaultIndex(displayOptions, isAgent),
+    [displayOptions, isAgent],
   );
   // Prefer the localized label. Known producers give every option a distinct
   // i18n key (plan mode's restore_previous has its own), so this normally
@@ -227,11 +249,28 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
+      if (showsPlanWorkflow) {
+        // An exit_plan_mode approval emits two `allow_once` options, so this
+        // cannot relabel by kind alone: `restore_previous` restores the
+        // pre-plan approval mode (YOLO if the user entered plan from YOLO)
+        // while the plain confirm keeps manual approval. Sharing one label
+        // would hide that difference behind two identical buttons.
+        if (
+          option.kind === 'allow_once' &&
+          option.id !== 'restore_previous' &&
+          option.id !== 'proceed_once_and_switch_to_default'
+        ) {
+          return t('workflow.planReview.confirm');
+        }
+        if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+          return t('workflow.planReview.continuePlanning');
+        }
+      }
       const key = getOptionI18nKey(option);
       if (key && keyCount.get(key) === 1) return t(key);
       return option.label || (key ? t(key) : '');
     };
-  }, [displayOptions, t]);
+  }, [displayOptions, showsPlanWorkflow, t]);
   const [selected, setSelected] = useState(safeDefaultIndex);
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -241,6 +280,7 @@ export function ToolApproval({
   const safeDefaultIndexRef = useRef(safeDefaultIndex);
   safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
@@ -260,15 +300,32 @@ export function ToolApproval({
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
-  const toolName = localizeToolDisplayName(rawToolName, t);
-  const descriptionText = getDescriptionText(request);
+  const toolName = showsPlanWorkflow
+    ? t('workflow.planReview.title')
+    : localizeToolDisplayName(rawToolName, t);
+  const descriptionText = showsPlanWorkflow
+    ? undefined
+    : getDescriptionText(request);
   const contentText = extractContentText(request);
 
   const confirm = useCallback(
     (optionId: string) => {
       if (submittedRef.current) return;
       submittedRef.current = true;
-      onConfirm(requestRef.current.id, optionId);
+      const requestId = requestRef.current.id;
+      const submission = onConfirm(requestId, optionId);
+      if (submission) {
+        void submission.catch(() => {
+          // Re-arm only if the rejected submission still belongs to the
+          // current request. This instance is reused across successive
+          // requests (no key at the mount sites), and a submission can
+          // reject late (up to the action timeout); a stale rejection would
+          // otherwise disarm the successor's double-submit guard mid-flight.
+          if (requestRef.current.id === requestId) {
+            submittedRef.current = false;
+          }
+        });
+      }
     },
     [onConfirm],
   );
@@ -290,7 +347,14 @@ export function ToolApproval({
   // already topmost on mount still focuses its default.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation (by reading layout) before any passive
+  // effect runs — Chromium drops focus from the just-hidden composer during
+  // that recalculation, so a passive guard would read `body` and miss.
+  // Layout effects run right after DOM mutation, before any recalculation,
+  // while the hidden composer still holds focus.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -298,6 +362,15 @@ export function ToolApproval({
     if (!keyboardActive) return;
     const requestChanged = request.id !== prevRequestId;
     if (wasActive && !requestChanged) return;
+    // The approval can appear while the user is mid-typing in the composer:
+    // the same commit hides the composer and mounts this overlay. Grabbing
+    // focus would redirect the in-progress keystrokes — Enter-to-send, Space,
+    // digits — to the safe-default option and can confirm the request
+    // unintentionally. Yield to the editable target; the dialog stays
+    // reachable by Tab/click.
+    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+      return;
+    }
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
@@ -367,23 +440,21 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
-  const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),
   );
-  const isExitPlanApproval =
-    request.toolKind === 'switch_mode' &&
-    request.toolName?.toLowerCase() === 'exit_plan_mode';
-  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
-  const questionText = isAgent
-    ? t('approval.launchAgentQuestion')
-    : isExec
-      ? t('approval.execQuestion', { tool: toolName })
-      : t('approval.changeQuestion');
+  const questionText = showsPlanWorkflow
+    ? t('workflow.planReview.question')
+    : isAgent
+      ? t('approval.launchAgentQuestion')
+      : isExec
+        ? t('approval.execQuestion', { tool: toolName })
+        : t('approval.changeQuestion');
 
   return (
     <div
+      ref={panelRef}
       className={
         variant === 'floating'
           ? `${styles.approval} ${styles.floating}${

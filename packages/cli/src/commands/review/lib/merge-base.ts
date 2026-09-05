@@ -15,7 +15,11 @@ export interface GitProbe {
   fetch(remote: string, ref: string): boolean;
   /** Does this ref resolve locally? */
   refExists(ref: string): boolean;
-  /** Merge-base of two refs, or null when there is none. */
+  /**
+   * Merge-base of two refs, or null when there is none. An implementation
+   * may THROW when the git surface cannot answer — distinct from answering
+   * "none" — and the throw propagates to the caller.
+   */
   mergeBase(a: string, b: string): string | null;
 }
 
@@ -35,10 +39,17 @@ export interface MergeBaseResult {
 /**
  * Resolve the merge-base of a PR head and its base branch.
  *
- * The remote-tracking ref (`origin/main`) is preferred because a CI checkout
- * has no local base branch; the local ref is the fallback for a developer who
- * has one but is offline. Null means neither resolved, and the caller degrades
- * to a diff-less report rather than failing the whole review.
+ * The remote-tracking ref is preferred because a CI checkout has no local
+ * base branch; the local ref is the fallback for a developer who has one
+ * but is offline. Null means neither resolved, and the caller degrades to
+ * a diff-less report rather than failing the whole review.
+ *
+ * The tracking-ref candidate is FULLY QUALIFIED (`refs/remotes/…`): git
+ * resolves an unqualified `origin/<name>` in `refs/tags` and `refs/heads`
+ * BEFORE `refs/remotes`, so a tag or branch literally named
+ * `origin/<baseRefName>` — a pushable, SERVER-CONTROLLED refname a plain
+ * clone auto-carries — would shadow the just-fetched tracking ref and
+ * silently move the base.
  */
 export function resolveMergeBase(
   remote: string,
@@ -47,7 +58,10 @@ export function resolveMergeBase(
   git: GitProbe,
 ): MergeBaseResult {
   const baseFetchFailed = !git.fetch(remote, baseRefName);
-  for (const candidate of [`${remote}/${baseRefName}`, baseRefName]) {
+  for (const candidate of [
+    `refs/remotes/${remote}/${baseRefName}`,
+    baseRefName,
+  ]) {
     if (!git.refExists(candidate)) continue;
     const mb = git.mergeBase(candidate, headRef);
     if (mb) return { sha: mb, baseFetchFailed };

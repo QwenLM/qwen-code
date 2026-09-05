@@ -82,16 +82,27 @@ describe('mapSkillConfigToStatus', () => {
     expect(status).not.toHaveProperty('lockedScope');
   });
 
-  it('surfaces optional model and extensionName only when present', () => {
-    expect(mapSkillConfigToStatus(makeSkill())).not.toHaveProperty('model');
-    expect(mapSkillConfigToStatus(makeSkill())).not.toHaveProperty(
-      'extensionName',
+  it('surfaces optional model and extension identity only when present', () => {
+    const nonExtension = mapSkillConfigToStatus(
+      makeSkill({
+        extensionName: 'ignored',
+        extensionDisplayName: 'Ignored',
+      }),
     );
+    expect(nonExtension).not.toHaveProperty('model');
+    expect(nonExtension).not.toHaveProperty('extensionName');
+    expect(nonExtension).not.toHaveProperty('extensionDisplayName');
 
     const status = mapSkillConfigToStatus(
-      makeSkill({ model: 'gpt-4o', extensionName: 'acme' }),
+      makeSkill({
+        level: 'extension',
+        model: 'gpt-4o',
+        extensionName: 'acme',
+        extensionDisplayName: 'Acme Tools',
+      }),
     );
     expect(status.model).toBe('gpt-4o');
     expect(status.extensionName).toBe('acme');
+    expect(status.extensionDisplayName).toBe('Acme Tools');
   });
 });

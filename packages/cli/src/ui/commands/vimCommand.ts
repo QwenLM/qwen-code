@@ -15,6 +15,7 @@ export const vimCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   action: async (context, _args) => {
     const newVimState = await context.ui.toggleVimEnabled();
 

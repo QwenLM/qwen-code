@@ -180,12 +180,15 @@ export async function atomicWriteFile(
         throw annotateWriteError(err, filePath);
       });
 
-  // Stat the target to preserve existing permissions and detect
+  // Inspect the target to preserve existing permissions and detect
   // ownership-changing renames (see the ownership-preservation note in
-  // the function doc).
+  // the function doc). noFollow must inspect the directory entry itself:
+  // following a symlink here can select the in-place write fallback below.
   let existingStat: Stats | undefined;
   try {
-    existingStat = await fs.stat(targetPath);
+    existingStat = options?.noFollow
+      ? await fs.lstat(targetPath)
+      : await fs.stat(targetPath);
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
@@ -198,7 +201,10 @@ export async function atomicWriteFile(
   let existingMode: number | undefined;
   if (!options?.forceMode || options?.mode === undefined) {
     existingMode =
-      existingStat !== undefined ? existingStat.mode & 0o7777 : undefined;
+      existingStat !== undefined &&
+      (!options?.noFollow || existingStat.isFile())
+        ? existingStat.mode & 0o7777
+        : undefined;
   }
   const desiredMode = existingMode ?? options?.mode;
 

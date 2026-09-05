@@ -39,7 +39,7 @@ describe('mcpCommand', () => {
     getMcpServers: ReturnType<typeof vi.fn>;
     getBlockedMcpServers: ReturnType<typeof vi.fn>;
     getPromptRegistry: ReturnType<typeof vi.fn>;
-    getGeminiClient: ReturnType<typeof vi.fn>;
+    getLlmClient: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -65,7 +65,7 @@ describe('mcpCommand', () => {
         getAllPrompts: vi.fn().mockReturnValue([]),
         getPromptsByServer: vi.fn().mockReturnValue([]),
       }),
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
     };
 
     mockContext = createMockCommandContext({

@@ -166,6 +166,7 @@ export const tasksCommand: SlashCommand = {
   // text dump as the only way to inspect background task state. See the
   // interactive-mode hint at the top of the output for the soft redirect.
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (context) => {
     const { config } = context.services;
     if (!config) {

@@ -86,6 +86,7 @@ function makeNote(overrides: Record<string, unknown> = {}) {
 class TestableGitlabChannel extends GitlabChannel {
   inboundEnvelopes: Envelope[] = [];
   handleInboundError: Error | null = null;
+  inboundErrorSourceLabel: string | undefined;
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.handleInboundError) throw this.handleInboundError;
@@ -96,12 +97,19 @@ class TestableGitlabChannel extends GitlabChannel {
     // no-op: tests call pollOnce() manually
   }
 
+  protected override getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
+  }
+
   async testSendThreadMessage(
     chatId: string,
     threadId: string,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    return this.sendThreadMessage(chatId, threadId, text);
+    return this.sendThreadMessage(chatId, threadId, text, sourceLabel);
   }
 }
 
@@ -222,6 +230,44 @@ describe('GitlabChannel', () => {
       expect(ch.config.allowedUsers).toEqual(['alice']);
       ch.disconnect();
     });
+
+    it('does not warn about groupPolicy when pairing is configured', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const config = makeConfig({ groupPolicy: 'pairing' });
+        const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+        await ch.connect();
+        ch.disconnect();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('groupPolicy is'),
+          ),
+        ).toBe(false);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('warns on connect when groupPolicy cannot dispatch todos', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const config = makeConfig({ groupPolicy: 'disabled' });
+        const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+        await ch.connect();
+        ch.disconnect();
+        const warnings = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .filter((text) => text.includes('groupPolicy is "disabled"'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain('"pairing"');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
   });
 
   describe('pollOnce', () => {
@@ -332,6 +378,7 @@ describe('GitlabChannel', () => {
       expect(env.senderId).toBe('alice');
       expect(env.isMentioned).toBe(true);
       expect(env.text).toContain('please fix this');
+      expect(env.bypassMessagePrefix).toBeUndefined();
       expect(env.metadata).toContain('Project: owner/repo');
     });
 
@@ -353,7 +400,36 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toContain(
         'Full issue description',
       );
+      expect(channel.inboundEnvelopes[0]!.bypassMessagePrefix).toBeUndefined();
       expect(mockApi.Issues.show).toHaveBeenCalled();
+    });
+
+    it('bypasses the prefix for provider-generated assignment todos', async () => {
+      const configured = makeConfig({
+        action_prompt_template: {
+          mentioned: 'Mentioned: %description%',
+          assigned: 'Assigned: %description%',
+        },
+      });
+      channel = new TestableGitlabChannel(
+        'test-gitlab',
+        configured,
+        makeBridge(),
+      );
+      await initWithoutLoop();
+
+      const todo = makeTodo({
+        action_name: 'assigned',
+        target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+      mockApi.Issues.show.mockResolvedValueOnce({
+        description: 'Please fix this',
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.bypassMessagePrefix).toBe(true);
     });
 
     it('skips todo authored by bot', async () => {
@@ -420,9 +496,10 @@ describe('GitlabChannel', () => {
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
     });
 
-    it('marks todo done and advances cursor even when handleInbound fails', async () => {
+    it('attributes failures while marking the todo done and advancing', async () => {
       await initWithoutLoop();
       channel.handleInboundError = new Error('agent failed');
+      channel.inboundErrorSourceLabel = '[review_*]';
 
       const todo = makeTodo();
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
@@ -431,6 +508,11 @@ describe('GitlabChannel', () => {
 
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
       expect(channel.cursor.lastProcessedId).toBe(100);
+      expect(mockApi.IssueNotes.create).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
+      );
     });
 
     it('advances cursor to max todo id', async () => {
@@ -536,6 +618,23 @@ describe('GitlabChannel', () => {
         'owner/repo',
         42,
         'reply',
+      );
+    });
+
+    it('escapes the source label before posting a note', async () => {
+      await initWithoutLoop();
+
+      await channel.testSendThreadMessage(
+        'owner/repo',
+        'issue:42',
+        'reply',
+        '[review_~~*]',
+      );
+
+      expect(mockApi.IssueNotes.create).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        '\\[review\\_\\~\\~\\*\\]\nreply',
       );
     });
 

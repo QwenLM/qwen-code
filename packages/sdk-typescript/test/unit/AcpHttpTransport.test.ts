@@ -1047,6 +1047,28 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(getCall?.headers['last-event-id']).toBeUndefined();
   });
 
+  it('ignores REST SSE identity, reason, lineage, and accepted callbacks', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const onSseStreamAccepted = vi.fn();
+    for await (const _e of t.subscribeEvents('sess-1', {
+      clientId: 'client-1',
+      sseConnectReason: 'prompt_restart',
+      previousSseStreamId: '123e4567-e89b-42d3-a456-426614174000',
+      onSseStreamAccepted,
+    })) {
+      // drain (empty stream)
+    }
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall).toBeDefined();
+    expect(new URL(getCall!.url).search).toBe('');
+    expect(getCall?.headers['x-qwen-client-id']).toBeUndefined();
+    expect(onSseStreamAccepted).not.toHaveBeenCalled();
+  });
+
   it('sends X-Qwen-Event-Epoch alongside the resume cursor (DAEMON-001)', async () => {
     const { fetch, calls } = sessionStreamFetch([]);
     const t = new AcpHttpTransport('http://d', undefined, fetch);

@@ -6,11 +6,18 @@
 
 import type { Content, FunctionCall, Part } from '@google/genai';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';
 const PROVIDER_TOOL_CALL_ID = Symbol('providerToolCallId');
 const debugLogger = createDebugLogger('TOOL_CALL_IDS');
+
+// Fingerprints are cached against the stable carrier object — a history or
+// stream FunctionCall part, or a ToolCallRequestInfo — so the args of a
+// given call (e.g. write_file content) are hashed once, not once per dedup
+// pass over it (breaker scan, admission loop, recording).
+const toolCallFingerprintCache = new WeakMap<object, string>();
 
 type FunctionCallWithProviderId = FunctionCall & {
   [PROVIDER_TOOL_CALL_ID]?: string;
@@ -55,6 +62,81 @@ export function collectToolCallIdsFromHistory(
     }
   }
   return ids;
+}
+
+/**
+ * Identity of a tool call for duplicate provider-id replay detection: the
+ * same canonical (name, args) key the loop guards use, so "replay" means
+ * the exact call the provider already saw answered — not merely a reused
+ * id. Providers whose ids are only unique within a single response (e.g.
+ * `{name}_{index}` schemes that restart at 0) legitimately reuse ids for
+ * different calls; those must not be treated as replays.
+ */
+export function getToolCallFingerprint(
+  name: string | undefined,
+  args: unknown,
+): string {
+  return getToolCallRepeatKey(name ?? '', args ?? {});
+}
+
+/**
+ * WeakMap-cached variant of {@link getToolCallFingerprint}, keyed by the
+ * stable object carrying the call (a `FunctionCall` part or a
+ * `ToolCallRequestInfo`). Callers must pass the same `name`/`args` the
+ * carrier holds; the cache assumes a carrier's call identity never changes.
+ */
+export function getCachedToolCallFingerprint(
+  carrier: object,
+  name: string | undefined,
+  args: unknown,
+): string {
+  let fingerprint = toolCallFingerprintCache.get(carrier);
+  if (fingerprint === undefined) {
+    fingerprint = getToolCallFingerprint(name, args);
+    toolCallFingerprintCache.set(carrier, fingerprint);
+  }
+  return fingerprint;
+}
+
+export function getFunctionCallFingerprint(functionCall: FunctionCall): string {
+  return getCachedToolCallFingerprint(
+    functionCall,
+    functionCall.name,
+    functionCall.args,
+  );
+}
+
+/**
+ * True when an incoming provider tool call replays an already-handled call:
+ * the provider id was handled before AND the (name, args) fingerprint
+ * matches the call that first executed under that id. An id collision with
+ * a different fingerprint is a fresh call and must execute (under the
+ * unique suffixed id assigned by {@link normalizeModelToolCallIds}).
+ * `fingerprint` is the incoming call's fingerprint, computed once per call
+ * object via {@link getCachedToolCallFingerprint}.
+ */
+export function isReplayOfHandledToolCall(
+  handledToolCallFingerprints: ReadonlyMap<string, string>,
+  providerCallId: string,
+  fingerprint: string,
+): boolean {
+  return handledToolCallFingerprints.get(providerCallId) === fingerprint;
+}
+
+/**
+ * Records a call admitted for execution. First-occurrence semantics: a
+ * provider id keeps naming the call that first executed under it, so a
+ * later id-colliding call (executed under its suffixed id) does not
+ * redefine what counts as a replay of the original.
+ */
+export function recordHandledToolCall(
+  handledToolCallFingerprints: Map<string, string>,
+  providerCallId: string,
+  fingerprint: string,
+): void {
+  if (!handledToolCallFingerprints.has(providerCallId)) {
+    handledToolCallFingerprints.set(providerCallId, fingerprint);
+  }
 }
 
 export function normalizeModelToolCallIds(

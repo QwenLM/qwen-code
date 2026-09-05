@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MessageEmitter } from './MessageEmitter.js';
 import type { SessionContext } from '../types.js';
-import { apiActivityTracker, type Config } from '@qwen-code/qwen-code-core';
+import {
+  apiActivityTracker,
+  type Config,
+  type GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core';
 
 describe('MessageEmitter', () => {
   let mockContext: SessionContext;
@@ -22,7 +26,11 @@ describe('MessageEmitter', () => {
     sendUpdateSpy = vi.fn().mockResolvedValue(undefined);
     mockContext = {
       sessionId: 'test-session-id',
-      config: {} as Config,
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          contextWindowSize: 128_000,
+        }),
+      } as unknown as Config,
       sendUpdate: sendUpdateSpy,
     };
     emitter = new MessageEmitter(mockContext);
@@ -114,29 +122,6 @@ describe('MessageEmitter', () => {
     });
   });
 
-  describe('emitGoalTerminal', () => {
-    it('should send a goal terminal update in metadata', async () => {
-      const event = {
-        kind: 'achieved' as const,
-        condition: 'ship goal support',
-        iterations: 2,
-        durationMs: 1234,
-        lastReason: 'The requested support is complete.',
-      };
-
-      await emitter.emitGoalTerminal(event);
-
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: '' },
-        _meta: {
-          goalTerminal: event,
-        },
-      });
-    });
-  });
-
   describe('emitGoalStatus', () => {
     it('should send a goal status update in metadata', async () => {
       const status = {
@@ -154,6 +139,60 @@ describe('MessageEmitter', () => {
         _meta: {
           goalStatus: status,
         },
+      });
+    });
+  });
+
+  describe('emitGoalState', () => {
+    it('sends canonical state with the legacy projection used by replay', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'ship ACP Goal support',
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        },
+      };
+
+      await emitter.emitGoalState(snapshot, 'create');
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: snapshot,
+          goalStatus: {
+            kind: 'set',
+            condition: 'ship ACP Goal support',
+            iterations: 0,
+            setAt: 1234,
+            durationMs: 0,
+          },
+        },
+      });
+    });
+
+    it('emits an authoritative status snapshot without inventing a cause', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      };
+
+      await emitter.emitGoalState(snapshot);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { goalState: snapshot },
       });
     });
   });
@@ -257,6 +296,85 @@ describe('MessageEmitter', () => {
   });
 
   describe('emitUsageMetadata', () => {
+    it('emits standard usage updates with the latest context occupancy, not a cumulative sum', async () => {
+      await emitter.emitUsageMetadata(
+        { promptTokenCount: 100, totalTokenCount: 175 },
+        '',
+        20,
+      );
+      await emitter.emitUsageMetadata(
+        { promptTokenCount: 120, totalTokenCount: 210 },
+        '',
+        30,
+      );
+
+      const usageUpdates = sendUpdateSpy.mock.calls
+        .map(([update]) => update)
+        .filter((update) => update.sessionUpdate === 'usage_update');
+      expect(usageUpdates).toEqual([
+        { sessionUpdate: 'usage_update', used: 100, size: 128_000 },
+        { sessionUpdate: 'usage_update', used: 120, size: 128_000 },
+      ]);
+
+      // Keep emitting the existing Qwen extension for current consumers.
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: expect.objectContaining({
+            usage: expect.objectContaining({ inputTokens: 120 }),
+          }),
+        }),
+      );
+    });
+
+    it('does not replace main-session context usage with replay or subagent usage', async () => {
+      await emitter.emitUsageMetadata({ promptTokenCount: 90 });
+      await emitter.emitUsageMetadata({ promptTokenCount: 40 }, '', 10, {
+        parentToolCallId: 'agent-parent-1',
+        subagentType: 'general-purpose',
+      });
+
+      expect(
+        sendUpdateSpy.mock.calls
+          .map(([update]) => update)
+          .filter((update) => update.sessionUpdate === 'usage_update'),
+      ).toEqual([]);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to total tokens when a live provider omits prompt tokens', async () => {
+      await emitter.emitUsageMetadata({ totalTokenCount: 75 }, '', 10);
+
+      expect(sendUpdateSpy).toHaveBeenLastCalledWith({
+        sessionUpdate: 'usage_update',
+        used: 75,
+        size: 128_000,
+      });
+    });
+
+    it('keeps private usage metadata when the context window is unresolved', async () => {
+      const ctx: SessionContext = {
+        ...mockContext,
+        config: {
+          getContentGeneratorConfig: () => undefined,
+        } as unknown as Config,
+      };
+
+      await new MessageEmitter(ctx).emitUsageMetadata(
+        { promptTokenCount: 75 },
+        '',
+        10,
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: expect.objectContaining({ usage: expect.any(Object) }),
+        }),
+      );
+    });
+
     it('should emit agent_message_chunk with _meta.usage containing token counts', async () => {
       const usageMetadata = {
         promptTokenCount: 100,
@@ -317,7 +435,7 @@ describe('MessageEmitter', () => {
 
       // Live round (durationMs present) → the counts are drained and stamped.
       await emitter.emitUsageMetadata({ totalTokenCount: 1 }, '', 500);
-      expect(sendUpdateSpy).toHaveBeenLastCalledWith(
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           _meta: expect.objectContaining({ apiErrors: 2, apiRetries: 1 }),
         }),
@@ -326,7 +444,14 @@ describe('MessageEmitter', () => {
       // A second live round with nothing pending carries neither key (the first
       // emit drained the tracker to zero).
       await emitter.emitUsageMetadata({ totalTokenCount: 1 }, '', 500);
-      const secondMeta = sendUpdateSpy.mock.lastCall?.[0]._meta;
+      const privateUsageUpdates = sendUpdateSpy.mock.calls
+        .map(([update]) => update)
+        .filter(
+          (update) =>
+            update.sessionUpdate === 'agent_message_chunk' &&
+            update._meta?.usage,
+        );
+      const secondMeta = privateUsageUpdates.at(-1)?._meta;
       expect(secondMeta).not.toHaveProperty('apiErrors');
       expect(secondMeta).not.toHaveProperty('apiRetries');
     });
@@ -352,7 +477,7 @@ describe('MessageEmitter', () => {
       };
       const ctx: SessionContext = {
         sessionId: 'test-session-id',
-        config: {} as Config,
+        config: mockContext.config,
         sendUpdate: sendUpdateSpy,
         cumulativeUsage,
       };

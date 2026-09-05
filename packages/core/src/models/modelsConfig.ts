@@ -12,7 +12,10 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
-import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
+import {
+  RUNTIME_SNAPSHOT_PREFIX,
+  buildRuntimeSnapshotId,
+} from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 import { ModelRegistry } from './modelRegistry.js';
@@ -578,7 +581,7 @@ export class ModelsConfig {
     authType: AuthType,
     modelId: string,
   ): string {
-    return `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+    return buildRuntimeSnapshotId(authType, modelId);
   }
 
   /**
@@ -1450,5 +1453,10 @@ export class ModelsConfig {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+  }
+
+  /** The raw providers config the registry was last built from. */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelRegistry.getModelProvidersConfig();
   }
 }

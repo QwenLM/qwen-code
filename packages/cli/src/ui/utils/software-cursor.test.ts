@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import chalk from 'chalk';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getSoftwareCursorBackground,
   renderSoftwareCursor,
@@ -12,6 +13,17 @@ import {
 import { themeManager } from '../themes/theme-manager.js';
 
 describe('renderSoftwareCursor', () => {
+  const originalChalkLevel = chalk.level;
+
+  beforeEach(() => {
+    chalk.level = 3;
+  });
+
+  afterEach(() => {
+    chalk.level = originalChalkLevel;
+    vi.restoreAllMocks();
+  });
+
   it('uses a dark cursor background on light themes', () => {
     expect(getSoftwareCursorBackground('#FAFAFA')).toBe('#3A3A3A');
   });
@@ -30,9 +42,20 @@ describe('renderSoftwareCursor', () => {
   });
 
   it('uses an explicit background instead of reverse-video styling', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     const rendered = renderSoftwareCursor('x');
 
     expect(rendered).toContain('x');
+    expect(rendered).toContain('\u001b[48;2;');
+    expect(rendered).not.toContain('\u001b[7m');
+  });
+
+  it('keeps the Windows IME composition cell free of a fixed background', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const rendered = renderSoftwareCursor('x');
+
+    expect(rendered).toBe('\u001b[4mx\u001b[24m');
+    expect(rendered).not.toContain('\u001b[48;');
     expect(rendered).not.toContain('\u001b[7m');
   });
 
@@ -43,7 +66,8 @@ describe('renderSoftwareCursor', () => {
   });
 
   it('renders an empty cursor cell as a space', () => {
-    expect(renderSoftwareCursor('')).toContain(' ');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    expect(renderSoftwareCursor('')).toBe('\u001b[4m \u001b[24m');
   });
 });
 

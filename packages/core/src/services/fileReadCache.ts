@@ -6,6 +6,7 @@
 
 import type { Stats } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { hasVerifiableInode } from '../utils/file-identity.js';
 
 /**
  * Session-scoped cache that tracks which files the model has Read or
@@ -25,11 +26,23 @@ import { resolve as resolvePath } from 'node:path';
  * case-insensitive filesystems all collapse onto the same entry, which
  * is what we want — the cache is reasoning about *files*, not strings.
  *
- * Platform note: on Windows, `Stats.ino` is documented as not guaranteed
- * unique (Node returns it from `_BY_HANDLE_FILE_INFORMATION.nFileIndex`,
- * which can collide across volumes and ReFS). Callers that target
- * Windows should consider falling back to a path-based key; the POSIX
- * platforms qwen-code primarily runs on (macOS / Linux) are unaffected.
+ * Platform note: when `Stats.ino` is `0` (seen on FAT/exFAT and some
+ * SMB-style filesystems), inode identity is unverifiable. The cache
+ * deliberately does not store those reads/writes, so later mutation
+ * checks fail closed instead of treating unrelated files as the same
+ * `dev:0` entry. On Windows, non-zero `ino` values from `nFileIndex`
+ * can also collide across volumes and on ReFS; a path-based key
+ * fallback for that case is not yet implemented.
+ *
+ * Keying on the resolved path when `ino === 0` would keep Edit /
+ * WriteFile usable on those filesystems while still giving distinct
+ * paths distinct entries, and it is the obvious follow-up if anyone
+ * reports the loss. It is deliberately not done here: a path key is
+ * strictly weaker (an in-place replacement that preserves mtime and
+ * size reads as the same file, and FAT's 2-second mtime granularity
+ * makes that collision cheap), so it trades a silent wrong edit for
+ * an availability win. This cache chose the honest failure first;
+ * availability can be added later behind an explicit decision.
  *
  * Lifecycle: one instance is created per `Config` via the field
  * initializer, so any code that constructs its own Config — notably
@@ -131,6 +144,7 @@ export interface FileReadEntry {
 export type FileReadCheckResult =
   | { state: 'fresh'; entry: FileReadEntry }
   | { state: 'stale'; entry: FileReadEntry }
+  | { state: 'unverifiable' }
   | { state: 'unknown' };
 
 export class FileReadCache {
@@ -140,6 +154,11 @@ export class FileReadCache {
   /** Build the canonical key for a file from its Stats. */
   static inodeKey(stats: Stats): string {
     return `${stats.dev}:${stats.ino}`;
+  }
+
+  /** See {@link hasVerifiableInode}. */
+  static hasVerifiableIdentity(stats: Stats): boolean {
+    return hasVerifiableInode(stats.ino);
   }
 
   /**
@@ -180,12 +199,26 @@ export class FileReadCache {
    * The fast-path `file_unchanged` check still gates on the
    * incoming request's own `isFullRead` (in `read-file.ts`), so a
    * partial read does not get a placeholder it shouldn't.
+   *
+   * When `stats.ino` is `0` the read is not stored and the returned
+   * entry is **detached**: it describes this read for the immediate
+   * caller, but it is not in the map, so mutating it has no effect
+   * and a later {@link check} still reports `unverifiable`.
    */
   recordRead(
     absPath: string,
     stats: Stats,
     opts: { full: boolean; cacheable: boolean },
   ): FileReadEntry {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      const entry = FileReadCache.createEntry(absPath, stats);
+      entry.lastReadAt = Date.now();
+      entry.readResidentInHistory = opts.full;
+      entry.lastReadWasFull = opts.full;
+      entry.lastReadCacheable = opts.cacheable;
+      return entry;
+    }
+
     const key = FileReadCache.inodeKey(stats);
     const existing = this.byInode.get(key);
     const sameFingerprint =
@@ -238,13 +271,18 @@ export class FileReadCache {
    * the default `cacheable: true`; structured writers such as notebook cell
    * editors can set `cacheable: false` so regular Edit / WriteFile still
    * reject the file as a non-text payload.
+   *
+   * As with {@link recordRead}, an `ino === 0` write returns a
+   * **detached** entry that was never added to the map.
    */
   recordWrite(
     absPath: string,
     stats: Stats,
     opts: { cacheable?: boolean } = {},
   ): FileReadEntry {
-    const entry = this.upsert(absPath, stats);
+    const entry = FileReadCache.hasVerifiableIdentity(stats)
+      ? this.upsert(absPath, stats)
+      : FileReadCache.createEntry(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
@@ -259,6 +297,8 @@ export class FileReadCache {
   /**
    * Compare the cached fingerprint against `stats` for the same inode.
    *
+   *  - `unverifiable` — the filesystem reported `ino === 0`, so the
+   *    file identity cannot be safely compared or cached.
    *  - `unknown` — no entry. The file has never been Read or written in
    *    this session.
    *  - `stale`   — entry exists but mtime or size differs. The file has
@@ -273,6 +313,10 @@ export class FileReadCache {
    * `0 occurrences` failure mode, which prompts the model to re-read.
    */
   check(stats: Stats): FileReadCheckResult {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      return { state: 'unverifiable' };
+    }
+
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (!entry) return { state: 'unknown' };
     if (entry.mtimeMs !== stats.mtimeMs || entry.sizeBytes !== stats.size) {
@@ -301,6 +345,10 @@ export class FileReadCache {
    * fall back to {@link clear}.
    */
   markReadEvictedFromHistory(stats: Stats): boolean {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      return false;
+    }
+
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (entry) {
       entry.readResidentInHistory = false;
@@ -311,6 +359,10 @@ export class FileReadCache {
 
   /** Remove the entry for the given Stats, if any. */
   invalidate(stats: Stats): void {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      return;
+    }
+
     this.byInode.delete(FileReadCache.inodeKey(stats));
   }
 
@@ -397,8 +449,14 @@ export class FileReadCache {
         this.byInode.delete(oldestKey);
       }
     }
-    const entry: FileReadEntry = {
-      inodeKey: key,
+    const entry = FileReadCache.createEntry(absPath, stats);
+    this.byInode.set(key, entry);
+    return entry;
+  }
+
+  private static createEntry(absPath: string, stats: Stats): FileReadEntry {
+    return {
+      inodeKey: FileReadCache.inodeKey(stats),
       realPath: absPath,
       mtimeMs: stats.mtimeMs,
       sizeBytes: stats.size,
@@ -406,7 +464,5 @@ export class FileReadCache {
       lastReadCacheable: false,
       readResidentInHistory: false,
     };
-    this.byInode.set(key, entry);
-    return entry;
   }
 }

@@ -42,6 +42,7 @@ export const lspCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (
     context: CommandContext,
     _args?: string,

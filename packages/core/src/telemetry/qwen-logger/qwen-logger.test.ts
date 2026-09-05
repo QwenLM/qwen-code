@@ -27,6 +27,7 @@ import {
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
+  SubagentExecutionEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -394,6 +395,50 @@ describe('QwenLogger', () => {
       );
     });
 
+    it('journals the loop detector attribution on subagent loop stops', () => {
+      // A loop stop must stay attributable in the journal (issue #9450
+      // requirement #7): dropping the loop_type spread would record the
+      // stop as an unattributable failure.
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new SubagentExecutionEvent('worker-a', 'failed', {
+        terminate_reason: 'loop_detected',
+        loop_type: 'consecutive_identical_tool_calls',
+      });
+
+      logger.logSubagentExecutionEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'tool',
+          name: 'subagent_execution',
+          properties: expect.objectContaining({
+            subagent_name: 'worker-a',
+            status: 'failed',
+            terminate_reason: 'loop_detected',
+            loop_type: 'consecutive_identical_tool_calls',
+          }),
+        }),
+      );
+    });
+
+    it('omits loop_type from subagent journals when no loop fired', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new SubagentExecutionEvent('worker-b', 'completed');
+
+      logger.logSubagentExecutionEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.not.objectContaining({
+            loop_type: expect.anything(),
+          }),
+        }),
+      );
+    });
+
     it('logs protocol tag sanitization without model content', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
@@ -592,6 +637,47 @@ describe('QwenLogger', () => {
       expect(TEST_ONLY.MAX_EVENTS).toBe(1000);
       expect(TEST_ONLY.MAX_RETRY_EVENTS).toBe(100);
       expect(TEST_ONLY.FLUSH_INTERVAL_MS).toBe(60000);
+    });
+  });
+
+  describe('logToolCallEvent outcomes', () => {
+    it('records terminal and execution outcomes with tool identity', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        function_name: 'mcp_tool',
+        call_id: 'call-1',
+        prompt_id: 'prompt-1',
+        response_id: 'response-1',
+        status: 'error',
+        execution_status: 'error',
+        success: false,
+        decision: undefined,
+        duration_ms: 25,
+        tool_type: 'mcp',
+        mcp_server_name: 'server-1',
+        error_type: 'mcp_tool_error',
+        error: 'failed',
+      } as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'tool',
+          name: 'tool_call#mcp_tool',
+          properties: expect.objectContaining({
+            call_id: 'call-1',
+            status: 'error',
+            execution_status: 'error',
+            tool_type: 'mcp',
+            success: 0,
+          }),
+        }),
+      );
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
     });
   });
 
@@ -989,8 +1075,8 @@ describe('QwenLogger', () => {
     });
   });
 
-  describe('logToolCallEvent', () => {
-    it('records terminal status and tool type without MCP server metadata', () => {
+  describe('logToolCallEvent privacy', () => {
+    it('records terminal status without forwarding MCP server metadata or function arguments', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = {
@@ -1025,8 +1111,8 @@ describe('QwenLogger', () => {
         }),
       );
       const rumEvent = enqueueSpy.mock.calls[0][0];
-      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
       expect(rumEvent.properties).not.toHaveProperty('function_args');
+      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
     });
   });
 });

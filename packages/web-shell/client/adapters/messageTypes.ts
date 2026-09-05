@@ -6,6 +6,15 @@
 
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 
+export interface AttachmentPreviewRequest {
+  name: string;
+  mimeType?: string;
+  data?: Blob;
+  text?: string;
+  workspacePath?: string;
+  attachmentId?: string;
+}
+
 export type DaemonMessageToolCallStatus =
   | 'pending'
   | 'in_progress'
@@ -42,17 +51,21 @@ export interface DaemonMessageToolCall {
   callId: string;
   toolName: string;
   args?: Record<string, unknown>;
+  executionMode?: 'foreground' | 'background';
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;
-  content?: DaemonMessageToolCallContent[];
+  content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
+  wasCancelled?: boolean;
   subContent?: string;
   subTools?: DaemonMessageToolCall[];
+  /** Transcript blocks folded into this tool presentation. */
+  sourceBlockIds?: string[];
 }
 
 export interface DaemonMessageTodoItem {
@@ -75,13 +88,27 @@ export interface DaemonMessageMeta {
    * that have no backing block.
    */
   timestamp?: number;
+  /** Stable transcript blocks folded into this rendered message. */
+  sourceBlockIds?: string[];
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {
   id: string;
   role: 'user';
   content: string;
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+    /** Present when the image is a session attachment; keeps it re-fetchable. */
+    attachmentId?: string;
+  }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
 }
@@ -91,6 +118,7 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  branchRecordId?: string;
   /**
    * Token usage folded onto this assistant block by the daemon SDK reducer
    * (summed when several blocks merge into one message). Summed again across a
@@ -111,6 +139,19 @@ export interface DaemonToolGroupMessage extends DaemonMessageMeta {
   id: string;
   role: 'tool_group';
   tools: DaemonMessageToolCall[];
+  /**
+   * Thinking folded into this group like a tool (compact mode). Streaming
+   * entries carry `isStreaming` so the summary can read "Thinking…" while
+   * the model works, then settle to a click-to-expand row when done.
+   * `beforeToolCallId` pins each thought to the tool that follows it so the
+   * group renders in the original interleaved order; thoughts without one
+   * trail the last tool.
+   */
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>;
 }
 
 export interface DaemonPlanMessage extends DaemonMessageMeta {
@@ -127,6 +168,12 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   retryable?: boolean;
   source?: string;
   data?: unknown;
+  images?: Array<{ data: string; mimeType: string }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    attachmentId?: string;
+  }>;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

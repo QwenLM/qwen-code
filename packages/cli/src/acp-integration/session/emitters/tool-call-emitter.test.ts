@@ -12,6 +12,7 @@ import type {
   SubagentMeta,
 } from '../types.js';
 import type {
+  AgentResultDisplay,
   Config,
   ToolRegistry,
   AnyDeclarativeTool,
@@ -600,6 +601,33 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toBeUndefined();
     });
 
+    it('should replay an intact saved patch without truncated file bodies', async () => {
+      const fileDiff = '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new';
+
+      await emitter.emitResult({
+        toolName: 'edit_file',
+        callId: 'call-edit',
+        success: true,
+        message: [],
+        resultDisplay: {
+          fileName: '/test/file.ts',
+          originalContent: 'old preview',
+          newContent: 'new preview',
+          fileDiff,
+          truncatedForSession: true,
+          fileDiffTruncated: false,
+        },
+      });
+
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+        fileName: '/test/file.ts',
+        fileDiff,
+      });
+      expect(sendUpdateSpy.mock.calls[0][0].content).not.toContainEqual(
+        expect.objectContaining({ type: 'diff' }),
+      );
+    });
+
     it('should transform message parts to content', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',
@@ -1011,6 +1039,49 @@ describe('ToolCallEmitter', () => {
         expect(call._meta).toEqual({
           toolName: 'test_tool',
           provenance: 'builtin',
+        });
+      });
+
+      it('should omit diagnostic artifact summaries from rawOutput', async () => {
+        const resultDisplay: AgentResultDisplay = {
+          type: 'task_execution',
+          subagentName: 'test-agent',
+          taskDescription: 'Test task',
+          taskPrompt: 'Test prompt',
+          status: 'completed',
+          toolCalls: [
+            {
+              callId: 'child-call',
+              name: 'read_file',
+              status: 'success',
+              resultDisplay: 'done',
+              boundaryArtifact: { state: 'reusable', kinds: ['file'] },
+            },
+          ],
+        };
+
+        await emitter.emitResult({
+          toolName: 'task',
+          callId: 'parent-call',
+          success: true,
+          message: [],
+          resultDisplay,
+        });
+
+        expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+          ...resultDisplay,
+          toolCalls: [
+            {
+              callId: 'child-call',
+              name: 'read_file',
+              status: 'success',
+              resultDisplay: 'done',
+            },
+          ],
+        });
+        expect(resultDisplay.toolCalls?.[0].boundaryArtifact).toEqual({
+          state: 'reusable',
+          kinds: ['file'],
         });
       });
     });

@@ -3,7 +3,7 @@ import { dp } from './dialogStyles';
 import {
   useTools,
   type DaemonWorkspaceToolStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 

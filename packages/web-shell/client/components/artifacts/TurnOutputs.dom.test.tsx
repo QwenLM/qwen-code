@@ -1,19 +1,51 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 
-const { readFileBytes, stat } = vi.hoisted(() => ({
+const {
+  readFileBytes,
+  stat,
+  secondaryReadFileBytes,
+  secondaryReadWorkspaceFile,
+  secondaryStat,
+  workspaceByCwd,
+} = vi.hoisted(() => ({
   readFileBytes: vi.fn(),
   stat: vi.fn(),
+  secondaryReadFileBytes: vi.fn(),
+  secondaryReadWorkspaceFile: vi.fn(),
+  secondaryStat: vi.fn(),
+  workspaceByCwd: vi.fn(),
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => ({
     readFileBytes,
     stat,
+  }),
+  useWorkspace: () => ({
+    actions: { readFileBytes, stat },
+    client: { workspaceByCwd },
+    capabilities: {
+      workspaceCwd: '/primary',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
   }),
 }));
 
@@ -34,6 +66,18 @@ beforeEach(() => {
     returnedBytes: 3,
     sizeBytes: 3,
   });
+  secondaryStat.mockResolvedValue({ sizeBytes: 9, modifiedMs: 2 });
+  secondaryReadFileBytes.mockResolvedValue({
+    contentBase64: btoa('secondary'),
+    offset: 0,
+    returnedBytes: 9,
+    sizeBytes: 9,
+  });
+  workspaceByCwd.mockReturnValue({
+    readWorkspaceFile: secondaryReadWorkspaceFile,
+    readWorkspaceFileBytes: secondaryReadFileBytes,
+    fileStat: secondaryStat,
+  });
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
     value: vi.fn((blob: Blob) => {
@@ -52,6 +96,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   readFileBytes.mockReset();
   stat.mockReset();
+  secondaryReadFileBytes.mockReset();
+  secondaryReadWorkspaceFile.mockReset();
+  secondaryStat.mockReset();
+  workspaceByCwd.mockReset();
 });
 
 describe('TurnOutputs artifact downloads', () => {
@@ -65,6 +113,7 @@ describe('TurnOutputs artifact downloads', () => {
       'audio',
       'pdf',
       'notebook',
+      'document',
       'other',
     ];
     const artifacts = kinds.map(
@@ -87,6 +136,7 @@ describe('TurnOutputs artifact downloads', () => {
         <I18nProvider language="en">
           <TurnOutputs
             turnId="turn-1"
+            workspaceCwd="/primary"
             changes={[]}
             artifacts={artifacts}
             scheduledTasks={[]}
@@ -96,6 +146,20 @@ describe('TurnOutputs artifact downloads', () => {
           />
         </I18nProvider>,
       );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toHaveLength(3);
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(
@@ -120,6 +184,7 @@ describe('TurnOutputs artifact downloads', () => {
         <I18nProvider language="en">
           <TurnOutputs
             turnId="turn-1"
+            workspaceCwd="/primary"
             changes={[]}
             artifacts={[
               {
@@ -161,6 +226,198 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('routes a secondary workspace download through its qualified client', async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-secondary"
+              workspaceCwd="/secondary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'secondary-artifact',
+                  kind: 'file',
+                  storage: 'workspace',
+                  status: 'available',
+                  title: 'Secondary report',
+                  workspacePath: 'report.txt',
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>
+        </StrictMode>,
+      );
+    });
+
+    await act(async () => {
+      const download = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Download',
+      );
+      download?.click();
+      await Promise.resolve();
+    });
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(secondaryReadFileBytes).toHaveBeenCalledWith('report.txt', {
+      offset: 0,
+      maxBytes: 100 * 1024,
+    });
+    expect(readFileBytes).not.toHaveBeenCalled();
+    expect(click).toHaveBeenCalledOnce();
+
+    act(() => root.unmount());
+  });
+
+  it('hides Download when the artifact workspace cannot be resolved', () => {
+    workspaceByCwd.mockReturnValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-unknown"
+            workspaceCwd="/unknown"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'unknown-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'Unknown report',
+                workspacePath: 'report.txt',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toBeUndefined();
+    expect(readFileBytes).not.toHaveBeenCalled();
+    expect(secondaryReadFileBytes).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('stamps secondary ownership onto every panel open request', () => {
+    const onOpenRequest = vi.fn();
+    const artifact = {
+      id: 'secondary-artifact',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      title: 'Secondary artifact',
+      workspacePath: 'report.txt',
+    } as DaemonSessionArtifact;
+    const scheduledTask = {
+      id: 'secondary-task',
+      toolCallId: 'task-call',
+      title: 'Secondary schedule',
+      cron: '0 9 * * *',
+      prompt: 'secondary only',
+      recurring: true,
+      durable: true,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-secondary"
+            workspaceCwd="/secondary"
+            changes={[
+              {
+                path: 'changed.ts',
+                status: 'modified',
+                toolCallId: 'change-call',
+                isArtifact: false,
+                diffs: [],
+              },
+            ]}
+            artifacts={[artifact]}
+            scheduledTasks={[scheduledTask]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
+        ?.click();
+      container
+        .querySelector<HTMLButtonElement>('button[title="Secondary artifact"]')
+        ?.click();
+      container
+        .querySelector<HTMLButtonElement>('button[title="Secondary schedule"]')
+        ?.click();
+    });
+
+    expect(onOpenRequest).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        kind: 'review',
+        workspaceCwd: '/secondary',
+        workspaceId: 'secondary-id',
+      }),
+    );
+    expect(onOpenRequest).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        kind: 'artifact',
+        artifact,
+        workspaceCwd: '/secondary',
+        workspaceId: 'secondary-id',
+      }),
+    );
+    expect(onOpenRequest).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        kind: 'scheduled_task',
+        task: expect.objectContaining({
+          id: 'secondary-task',
+          workspaceId: 'secondary-id',
+        }),
+        workspaceCwd: '/secondary',
+        workspaceId: 'secondary-id',
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
   it('disables repeated downloads and reports failures through the toast callback', async () => {
     let rejectStat: ((error: Error) => void) | undefined;
     stat.mockReturnValue(
@@ -178,6 +435,7 @@ describe('TurnOutputs artifact downloads', () => {
         <I18nProvider language="en">
           <TurnOutputs
             turnId="turn-1"
+            workspaceCwd="/primary"
             changes={[]}
             artifacts={[
               {
@@ -265,6 +523,7 @@ describe('TurnOutputs artifact downloads', () => {
         <I18nProvider language="en">
           <TurnOutputs
             turnId="turn-1"
+            workspaceCwd="/primary"
             changes={[]}
             artifacts={artifacts}
             scheduledTasks={[]}
@@ -274,6 +533,14 @@ describe('TurnOutputs artifact downloads', () => {
           />
         </I18nProvider>,
       );
+    });
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(
@@ -304,6 +571,7 @@ describe('TurnOutputs artifact downloads', () => {
         <I18nProvider language="en">
           <TurnOutputs
             turnId="turn-1"
+            workspaceCwd="/primary"
             changes={[]}
             artifacts={[
               {
@@ -348,5 +616,51 @@ describe('TurnOutputs artifact downloads', () => {
     });
 
     expect(click).not.toHaveBeenCalled();
+  });
+
+  it('disables Open for a missing workspace artifact and shows the recorded path', () => {
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-missing"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'missing-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'missing',
+                title: 'Missing report',
+                workspacePath: 'w/agent/report.csv',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    expect(open?.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      'File not found in the workspace · w/agent/report.csv',
+    );
+
+    act(() => open?.click());
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
   });
 });

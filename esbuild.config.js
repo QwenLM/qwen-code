@@ -61,9 +61,12 @@ const wasmBinaryPlugin = {
 // both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
 // and defeat the per-protocol dynamic imports in
 // `packages/core/src/telemetry/sdk-{impl,exporters-grpc,exporters-http}.ts`
-// (issue #7264). qwen-code always passes explicit `spanProcessors` /
+// (issue #7264). From sdk-node 0.221 the env auto-configuration helpers were
+// additionally extracted into `@opentelemetry/configuration` and the two
+// `otlp-*exporter-base` packages, which sdk-node requires eagerly; they get
+// the same treatment. qwen-code always passes explicit `spanProcessors` /
 // `logRecordProcessors` to NodeSDK, so those env code paths are unreachable
-// for traces and logs. Stub the exporter packages ONLY when imported by
+// for traces and logs. Stub the packages ONLY when imported by
 // sdk-node itself — our own protocol modules keep resolving the real ones.
 // The stubbed constructors throw so an unexpectedly reached env path (e.g.
 // `OTEL_METRICS_EXPORTER=otlp`) fails loudly instead of exporting nowhere;
@@ -72,12 +75,18 @@ const wasmBinaryPlugin = {
 const sdkNodeExporterStubPlugin = {
   name: 'sdk-node-exporter-stub',
   setup(build) {
-    build.onResolve({ filter: /^@opentelemetry\/exporter-/ }, (args) => {
-      if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
-        return null;
-      }
-      return { path: args.path, namespace: 'sdk-node-exporter-stub' };
-    });
+    build.onResolve(
+      {
+        filter:
+          /^@opentelemetry\/(exporter-|configuration$|otlp-(grpc-)?exporter-base$)/,
+      },
+      (args) => {
+        if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
+          return null;
+        }
+        return { path: args.path, namespace: 'sdk-node-exporter-stub' };
+      },
+    );
     build.onLoad(
       { filter: /.*/, namespace: 'sdk-node-exporter-stub' },
       (args) => ({
@@ -120,7 +129,7 @@ const syncFileEncodingTreeShakePlugin = {
   name: 'sync-file-encoding-tree-shake',
   setup(build) {
     build.onResolve(
-      { filter: /^\.\/utils\/sync-file-encoding\.js$/ },
+      { filter: /^\.\/services\/sync-file-encoding\.js$/ },
       (args) => {
         if (
           !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(

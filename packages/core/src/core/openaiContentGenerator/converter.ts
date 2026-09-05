@@ -28,7 +28,10 @@ import {
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
 } from '../../utils/request-tokenizer/textTokenizer.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
-import { parseTaggedThinkingText } from './taggedThinkingParser.js';
+import {
+  parseTaggedThinkingText,
+  TaggedThinkingParser,
+} from './taggedThinkingParser.js';
 import {
   convertSchema,
   relaxSchemaForFunctionCalling,
@@ -251,7 +254,7 @@ type OpenAIContentPart =
 /**
  * Convert Gemini tool parameters to OpenAI JSON Schema format.
  */
-export function convertGeminiToolParametersToOpenAI(
+export function convertLlmToolParametersToOpenAI(
   parameters: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   if (!parameters || typeof parameters !== 'object') {
@@ -331,13 +334,13 @@ export function convertGeminiToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
-export async function convertGeminiToolsToOpenAI(
-  geminiTools: ToolListUnion,
+export async function convertLlmToolsToOpenAI(
+  llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
 ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
   const openAITools: OpenAI.Chat.ChatCompletionTool[] = [];
 
-  for (const tool of geminiTools) {
+  for (const tool of llmTools) {
     let actualTool: Tool;
 
     // Handle CallableTool vs Tool
@@ -364,7 +367,7 @@ export async function convertGeminiToolsToOpenAI(
             parameters = paramsCopy;
           } else if (func.parameters) {
             // Gemini tool format - convert parameters to OpenAI format
-            parameters = convertGeminiToolParametersToOpenAI(
+            parameters = convertLlmToolParametersToOpenAI(
               func.parameters as Record<string, unknown>,
             );
           }
@@ -399,7 +402,7 @@ export async function convertGeminiToolsToOpenAI(
 /**
  * Convert Gemini request to OpenAI message format.
  */
-export function convertGeminiRequestToOpenAI(
+export function convertLlmRequestToOpenAI(
   request: GenerateContentParameters,
   requestContext: RequestContext,
   options: { cleanOrphanToolCalls: boolean } = { cleanOrphanToolCalls: true },
@@ -424,7 +427,7 @@ export function convertGeminiRequestToOpenAI(
 /**
  * Convert Gemini response to OpenAI completion format (for logging).
  */
-export function convertGeminiResponseToOpenAI(
+export function convertLlmResponseToOpenAI(
   response: GenerateContentResponse,
   requestContext: RequestContext,
 ): OpenAI.Chat.ChatCompletion {
@@ -474,7 +477,7 @@ export function convertGeminiResponseToOpenAI(
     message.tool_calls = toolCalls;
   }
 
-  const finishReason = mapGeminiFinishReasonToOpenAI(candidate?.finishReason);
+  const finishReason = mapLlmFinishReasonToOpenAI(candidate?.finishReason);
 
   const usageMetadata = response.usageMetadata;
   const usage: OpenAI.CompletionUsage = {
@@ -1096,7 +1099,10 @@ function convertOpenAITextToParts(
   requestContext: RequestContext,
   final = true,
 ): Part[] {
-  if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+  if (
+    !requestContext.responseParsingOptions?.taggedThinkingTags &&
+    !requestContext.taggedThinkingParser
+  ) {
     return text ? [{ text }] : [];
   }
 
@@ -1160,8 +1166,25 @@ function classifyContentOnlyThinkingTagPrefix(
   for (const closing of [false, true, false]) {
     const tagLength = consumeTag(rest, closing);
     if (tagLength === null) return 'pending';
-    if (tagLength === undefined) return 'clean';
+    if (tagLength === undefined) {
+      if (!closing) return 'clean';
+      break;
+    }
     rest = rest.slice(tagLength).trimStart();
+    if (closing && !rest) return 'clean';
+    // An opening tag followed by ordinary text is only a legitimate literal
+    // if a closing tag still balances it later. Without one, the turn is an
+    // unclosed thinking block — the exact shape of the recorded production
+    // leaks (issue #6666). Hold it mid-stream (a closing tag may still
+    // arrive) and reject it once the stream finishes. Whitespace-only tails
+    // stay undecided: they may still resolve into a closing tag.
+    if (
+      closing === false &&
+      /\S/.test(rest) &&
+      !/<\/think(?:ing)?\s*>/i.test(rest)
+    ) {
+      return streamFinished ? 'leaked' : 'pending';
+    }
   }
 
   let depth = 1;
@@ -1193,7 +1216,7 @@ function throwProtocolTagLeak(requestContext: RequestContext): never {
 /**
  * Convert OpenAI response to Gemini format.
  */
-export function convertOpenAIResponseToGemini(
+export function convertOpenAIResponseToLlm(
   openaiResponse: OpenAI.Chat.ChatCompletion,
   requestContext: RequestContext,
 ): GenerateContentResponse {
@@ -1245,7 +1268,7 @@ export function convertOpenAIResponseToGemini(
           parts,
           role: 'model' as const,
         },
-        finishReason: mapOpenAIFinishReasonToGemini(
+        finishReason: mapOpenAIFinishReasonToLlm(
           choice.finish_reason || 'stop',
         ),
         index: 0,
@@ -1292,7 +1315,7 @@ export function convertOpenAIResponseToGemini(
           : estimatedThinkingTokens;
       if (thinkingTokens > 0) {
         debugLogger.debug(
-          `convertOpenAIResponseToGemini: reasoning_tokens absent; estimated ${thinkingTokens} from text`,
+          `convertOpenAIResponseToLlm: reasoning_tokens absent; estimated ${thinkingTokens} from text`,
         );
       }
     }
@@ -1327,7 +1350,7 @@ export function convertOpenAIResponseToGemini(
  * same instance for every chunk of that stream. Concurrent streams MUST use
  * distinct parsers or their tool-call buffers will interleave (issue #3516).
  */
-export function convertOpenAIChunkToGemini(
+export function convertOpenAIChunkToLlm(
   chunk: OpenAI.Chat.ChatCompletionChunk,
   requestContext: RequestContext,
 ): GenerateContentResponse {
@@ -1337,7 +1360,7 @@ export function convertOpenAIChunkToGemini(
   const toolCallParser = requestContext.toolCallParser;
   if (!toolCallParser) {
     throw new Error(
-      'convertOpenAIChunkToGemini requires requestContext.toolCallParser — attach a fresh StreamingToolCallParser at stream start.',
+      'convertOpenAIChunkToLlm requires requestContext.toolCallParser — attach a fresh StreamingToolCallParser at stream start.',
     );
   }
 
@@ -1352,17 +1375,51 @@ export function convertOpenAIChunkToGemini(
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      const normalizedContent = normalizeStreamingTextDelta(
-        choice.delta.content,
-        (requestContext.textDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
-      );
-      // Skip empty-string push mid-stream; still call on finish_reason to
-      // flush any buffered tagged-thinking content.
-      if (normalizedContent || choice.finish_reason) {
+      const rawContent = choice.delta.content;
+      const replayState = requestContext.textDeltaState;
+      const replayedTaggedThinkingSnapshot =
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning === true &&
+        requestContext.taggedThinkingParser !== undefined &&
+        replayState !== undefined &&
+        (replayState.emittedText === rawContent ||
+          (rawContent.length === replayState.emittedLength &&
+            rawContent.startsWith(replayState.emittedText))) &&
+        THINKING_TAG_PATTERN.test(rawContent);
+      if (replayedTaggedThinkingSnapshot) {
+        replayState.emittedText = rawContent;
+        replayState.emittedLength = rawContent.length;
+        replayState.cumulativeMode = true;
+      }
+      const normalizedContent = replayedTaggedThinkingSnapshot
+        ? ''
+        : normalizeStreamingTextDelta(
+            rawContent,
+            (requestContext.textDeltaState ??= {
+              emittedText: '',
+              emittedLength: 0,
+              cumulativeMode: false,
+            }),
+          );
+      const taggedThinkingCandidate =
+        (requestContext.pendingThinkingTagCandidate?.text ?? '') +
+        normalizedContent;
+      if (
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning &&
+        (requestContext.hasStructuredReasoningContent || reasoningText) &&
+        LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
+        !taggedThinkingCandidate.trimStart().startsWith('</')
+      ) {
+        requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
+        requestContext.pendingThinkingTagCandidate = undefined;
+        contentParts = requestContext.taggedThinkingParser.parse(
+          taggedThinkingCandidate,
+          Boolean(choice.finish_reason),
+        );
+      } else if (normalizedContent || choice.finish_reason) {
+        // Skip empty-string push mid-stream; still call on finish_reason to
+        // flush any buffered tagged-thinking content.
         contentParts = convertOpenAITextToParts(
           normalizedContent,
           requestContext,
@@ -1374,15 +1431,23 @@ export function convertOpenAIChunkToGemini(
       contentParts = convertOpenAITextToParts('', requestContext, true);
     }
 
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      requestContext.taggedThinkingParser?.hasUnclosedThought()
+    ) {
+      throwProtocolTagLeak(requestContext);
+    }
+
     if (hasThoughtPart(contentParts)) {
       requestContext.hasTaggedThinkingThought = true;
       requestContext.pendingReasoningText = undefined;
       debugLogger.debug(
-        'convertOpenAIChunkToGemini: tagged thinking content emitted a thought; dropping buffered reasoning',
+        'convertOpenAIChunkToLlm: tagged thinking content emitted a thought; dropping buffered reasoning',
       );
       if (requestContext.pendingContentParts?.length) {
         debugLogger.debug(
-          `convertOpenAIChunkToGemini: flushing ${requestContext.pendingContentParts.length} buffered content part(s) before tagged content`,
+          `convertOpenAIChunkToLlm: flushing ${requestContext.pendingContentParts.length} buffered content part(s) before tagged content`,
         );
         parts.push(...requestContext.pendingContentParts);
         requestContext.pendingContentParts = undefined;
@@ -1424,7 +1489,7 @@ export function convertOpenAIChunkToGemini(
         requestContext.pendingReasoningText =
           (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
         debugLogger.debug(
-          `convertOpenAIChunkToGemini: buffered reasoning text (${requestContext.pendingReasoningText.length} chars) for tagged stream`,
+          `convertOpenAIChunkToLlm: buffered reasoning text (${requestContext.pendingReasoningText.length} chars) for tagged stream`,
         );
       }
     }
@@ -1440,7 +1505,7 @@ export function convertOpenAIChunkToGemini(
         ...contentParts,
       ];
       debugLogger.debug(
-        `convertOpenAIChunkToGemini: buffered ${contentParts.length} content part(s) behind pending reasoning`,
+        `convertOpenAIChunkToLlm: buffered ${contentParts.length} content part(s) behind pending reasoning`,
       );
       contentParts = [];
     }
@@ -1452,7 +1517,7 @@ export function convertOpenAIChunkToGemini(
       requestContext.pendingReasoningText
     ) {
       debugLogger.debug(
-        'convertOpenAIChunkToGemini: flushing buffered reasoning for tagged stream with no tagged thought',
+        'convertOpenAIChunkToLlm: flushing buffered reasoning for tagged stream with no tagged thought',
       );
       parts.push(
         createOpenAIReasoningThoughtPart(requestContext.pendingReasoningText),
@@ -1461,7 +1526,7 @@ export function convertOpenAIChunkToGemini(
     }
     if (choice.finish_reason && requestContext.pendingContentParts?.length) {
       debugLogger.debug(
-        `convertOpenAIChunkToGemini: flushing ${requestContext.pendingContentParts.length} buffered content part(s) on stream finish`,
+        `convertOpenAIChunkToLlm: flushing ${requestContext.pendingContentParts.length} buffered content part(s) on stream finish`,
       );
       parts.push(...requestContext.pendingContentParts);
       requestContext.pendingContentParts = undefined;
@@ -1564,8 +1629,18 @@ export function convertOpenAIChunkToGemini(
         Boolean(choice.finish_reason) &&
         !closingTagName &&
         !/\S/.test(combinedCandidateText);
+      // The length cap releases undecided prefixes (e.g. a literal "<t" that
+      // never resolves) so ordinary content is not buffered forever. Once the
+      // candidate has committed to a complete opening tag, though, releasing
+      // it can leak the whole block — production thinking-tag leaks are longer
+      // than the cap (issue #6666). Keep those held until a closing tag arrives
+      // or the finished-stream check rejects an unclosed block.
+      const confirmedOpeningTagCandidate =
+        LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
+        !combinedCandidateText.trimStart().startsWith('</');
       const releaseContentOnlyCandidate =
         contentOnlyThinkingState === 'pending' &&
+        !confirmedOpeningTagCandidate &&
         (Boolean(choice.finish_reason) ||
           combinedCandidateText.trimStart().length >
             MAX_THINKING_TAG_CANDIDATE_LENGTH);
@@ -1591,6 +1666,7 @@ export function convertOpenAIChunkToGemini(
         requestContext.pendingThinkingTagCandidate = undefined;
       } else if (isPossibleTag) {
         if (
+          !confirmedOpeningTagCandidate &&
           !closingTagName &&
           combinedCandidateText.trimStart().length >
             MAX_THINKING_TAG_CANDIDATE_LENGTH
@@ -1729,7 +1805,7 @@ export function convertOpenAIChunkToGemini(
       safetyRatings: [],
     };
     if (effectiveFinishReason) {
-      candidate.finishReason = mapOpenAIFinishReasonToGemini(
+      candidate.finishReason = mapOpenAIFinishReasonToLlm(
         effectiveFinishReason,
       );
     }
@@ -1766,7 +1842,7 @@ export function convertOpenAIChunkToGemini(
         : estimatedThinkingTokens);
     if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
       debugLogger.debug(
-        `convertOpenAIChunkToGemini: reasoning_tokens absent; estimated ${thinkingTokens} from streamed text`,
+        `convertOpenAIChunkToLlm: reasoning_tokens absent; estimated ${thinkingTokens} from streamed text`,
       );
     }
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
@@ -1806,28 +1882,32 @@ export function convertOpenAIChunkToGemini(
   return response;
 }
 
-function mapOpenAIFinishReasonToGemini(
-  openaiReason: string | null,
-): FinishReason {
-  if (!openaiReason) return FinishReason.FINISH_REASON_UNSPECIFIED;
+function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {
+  if (typeof openaiReason !== 'string') {
+    return FinishReason.FINISH_REASON_UNSPECIFIED;
+  }
   const mapping: Record<string, FinishReason> = {
     stop: FinishReason.STOP,
     length: FinishReason.MAX_TOKENS,
+    max_tokens: FinishReason.MAX_TOKENS,
     content_filter: FinishReason.SAFETY,
     function_call: FinishReason.STOP,
     tool_calls: FinishReason.STOP,
   };
-  return mapping[openaiReason] || FinishReason.FINISH_REASON_UNSPECIFIED;
+  return (
+    mapping[openaiReason.toLowerCase()] ||
+    FinishReason.FINISH_REASON_UNSPECIFIED
+  );
 }
 
-function mapGeminiFinishReasonToOpenAI(
-  geminiReason?: FinishReason,
+function mapLlmFinishReasonToOpenAI(
+  llmReason?: FinishReason,
 ): 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call' {
-  if (!geminiReason) {
+  if (!llmReason) {
     return 'stop';
   }
 
-  switch (geminiReason) {
+  switch (llmReason) {
     case FinishReason.STOP:
       return 'stop';
     case FinishReason.MAX_TOKENS:
@@ -2154,10 +2234,10 @@ function mergeConsecutiveAssistantMessages(
 }
 
 export const OpenAIContentConverter = {
-  convertGeminiToolParametersToOpenAI,
-  convertGeminiToolsToOpenAI,
-  convertGeminiRequestToOpenAI,
-  convertGeminiResponseToOpenAI,
-  convertOpenAIResponseToGemini,
-  convertOpenAIChunkToGemini,
+  convertLlmToolParametersToOpenAI,
+  convertLlmToolsToOpenAI,
+  convertLlmRequestToOpenAI,
+  convertLlmResponseToOpenAI,
+  convertOpenAIResponseToLlm,
+  convertOpenAIChunkToLlm,
 };

@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
+import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
 import type { getTranslator } from '../i18n';
+import { isCommandPrompt } from '../utils/localCommandQueue';
 import {
   useWebShellCustomization,
   type UserMessageContentParser,
@@ -22,6 +25,8 @@ import {
 } from '../utils/composerTag';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { ReadonlyComposerTag } from './messages/UserMessage';
+import { FileTypeIcon } from './FileTypeIcon';
+import { isSafeImageSrc } from './messages/Markdown';
 import styles from '../App.module.css';
 
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
@@ -122,29 +127,41 @@ export interface QueuedPrompt {
   sessionId?: string;
   text: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
+  onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
   midTurnFailedAction?: 'delete' | 'edit';
+  isInserting?: boolean;
   isEditing?: boolean;
   isRemoving?: boolean;
+  payloadCompleteness?: 'complete' | 'summary-only';
 }
 
 export function QueuedPromptDisplay({
   prompts,
   t,
   canMutateMidTurn = false,
+  canInsertMidTurn = true,
   onDelete,
+  onInsert,
   onEdit,
+  onImagePreview,
+  onAttachmentPreview,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
+  canInsertMidTurn?: boolean;
   onDelete: (id: number) => void;
+  onInsert: (id: number) => void;
   onEdit: (id: number) => void;
+  onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
 }) {
   const {
     parseUserMessageContent,
@@ -161,15 +178,28 @@ export function QueuedPromptDisplay({
     latestPrompt.serverState !== 'submitting' &&
     latestPrompt.serverState !== 'running' &&
     !latestPrompt.isEditing &&
-    !latestPrompt.isRemoving;
+    !latestPrompt.isRemoving &&
+    !latestPrompt.isInserting &&
+    latestPrompt.payloadCompleteness !== 'summary-only';
 
   return (
-    <div className={styles.queuedPrompts}>
+    <div className={styles.queuedPrompts} data-web-shell-queued-prompts="">
       {prompts.map((prompt) => {
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
         );
-        const imageCount = prompt.images?.length ?? 0;
+        const safeImages = (prompt.images ?? []).flatMap((image, index) => {
+          const src = `data:${image.media_type};base64,${image.data}`;
+          return isSafeImageSrc(src) ? [{ index, src }] : [];
+        });
+        const imageCount = safeImages.length;
+        const fileCount = prompt.files?.length ?? 0;
+        const attachmentLabel = [
+          imageCount > 0 ? t('queue.imageCount', { count: imageCount }) : '',
+          fileCount > 0 ? t('queue.fileCount', { count: fileCount }) : '',
+        ]
+          .filter(Boolean)
+          .join(', ');
         const isSubmitting = prompt.serverState === 'submitting';
         const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
@@ -177,22 +207,38 @@ export function QueuedPromptDisplay({
         const isMidTurnLocked =
           prompt.midTurnState === 'submitting' ||
           (prompt.midTurnState === 'queued' && !prompt.midTurnMessageId);
+        const isSummaryOnly = prompt.payloadCompleteness === 'summary-only';
         const showActions = !isMidTurnPending || canMutateMidTurn;
         const isRemoving = prompt.isRemoving === true;
+        const isInserting = prompt.isInserting === true;
+        const canInsert =
+          canMutateMidTurn &&
+          canInsertMidTurn &&
+          prompt.serverState === undefined &&
+          prompt.serverPromptId === undefined &&
+          !isMidTurnPending &&
+          imageCount === 0 &&
+          fileCount === 0 &&
+          (prompt.inputAnnotations?.length ?? 0) === 0;
         const hasStateSpinner =
           isSubmitting ||
           prompt.midTurnState === 'submitting' ||
           prompt.isEditing === true ||
-          isRemoving;
+          isRemoving ||
+          isInserting;
         const isBusy =
           isSubmitting ||
           isRunning ||
           isMidTurnLocked ||
           prompt.isEditing === true ||
-          isRemoving;
+          isRemoving ||
+          isInserting;
+        const isEditDisabled = isBusy || isSummaryOnly;
         let editTitle = t('queue.editTip');
-        if (isBusy) {
-          editTitle = t('queue.submittingDisabled');
+        if (isEditDisabled) {
+          editTitle = isSummaryOnly
+            ? t('queue.summaryEditDisabled')
+            : t('queue.submittingDisabled');
         }
         const deleteTitle = isBusy
           ? t('queue.submittingDisabled')
@@ -222,15 +268,93 @@ export function QueuedPromptDisplay({
                 ),
               )}
               {preview.truncated ? '...' : null}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
             </span>
+            {imageCount > 0 || fileCount > 0 ? (
+              <span
+                className={styles.queuedPromptImages}
+                aria-label={attachmentLabel}
+                title={attachmentLabel}
+              >
+                {safeImages.map(({ index, src }) => {
+                  const alt = t('user.uploadedImage', { index: index + 1 });
+                  return (
+                    <img
+                      key={index}
+                      className={`${styles.queuedPromptImage}${
+                        onImagePreview
+                          ? ` ${styles.queuedPromptImageInteractive}`
+                          : ''
+                      }`}
+                      src={src}
+                      alt={alt}
+                      role={onImagePreview ? 'button' : undefined}
+                      tabIndex={onImagePreview ? 0 : undefined}
+                      onClick={
+                        onImagePreview
+                          ? () => onImagePreview(src, alt)
+                          : undefined
+                      }
+                      onKeyDown={
+                        onImagePreview
+                          ? (event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ')
+                                return;
+                              event.preventDefault();
+                              onImagePreview(src, alt);
+                            }
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+                {prompt.files?.map((file, index) => {
+                  const previewable = Boolean(
+                    onAttachmentPreview &&
+                      (file.data !== undefined ||
+                        file.text !== undefined ||
+                        file.attachmentId),
+                  );
+                  return (
+                    <button
+                      key={`${file.name}-${index}`}
+                      type="button"
+                      className={styles.queuedPromptFile}
+                      disabled={!previewable}
+                      title={file.name}
+                      onClick={() =>
+                        onAttachmentPreview?.({
+                          name: file.name,
+                          mimeType: file.media_type,
+                          ...(file.data !== undefined
+                            ? { data: file.data }
+                            : {}),
+                          ...(file.text !== undefined
+                            ? { text: file.text }
+                            : {}),
+                          ...(file.attachmentId
+                            ? { attachmentId: file.attachmentId }
+                            : {}),
+                        })
+                      }
+                    >
+                      <FileTypeIcon
+                        name={file.name}
+                        mimeType={file.media_type}
+                        size={14}
+                        aria-hidden="true"
+                      />
+                      <span>{file.name}</span>
+                    </button>
+                  );
+                })}
+              </span>
+            ) : null}
             {isSubmitting ||
             isQueued ||
             isMidTurnPending ||
             prompt.isEditing ||
-            isRemoving ? (
+            isRemoving ||
+            isInserting ? (
               <span
                 className={`${styles.queuedPromptState}${
                   hasStateSpinner ? ` ${styles.queuedPromptStateLoading}` : ''
@@ -245,17 +369,42 @@ export function QueuedPromptDisplay({
                     ? t('queue.removing')
                     : prompt.isEditing
                       ? t('queue.editing')
-                      : isMidTurnPending
-                        ? t('queue.midTurnQueued')
-                        : isQueued
-                          ? t('queue.serverQueued')
-                          : t('queue.submitting')}
+                      : isInserting
+                        ? t('queue.inserting')
+                        : isMidTurnPending
+                          ? t('queue.midTurnQueued')
+                          : isQueued
+                            ? t('queue.serverQueued')
+                            : t('queue.submitting')}
                 </span>
               </span>
             ) : null}
             <span className={styles.queuedPromptActions}>
               {showActions ? (
                 <>
+                  {canInsert && (
+                    <button
+                      type="button"
+                      className={styles.queuedPromptAction}
+                      onClick={() => onInsert(prompt.id)}
+                      disabled={isBusy || isCommandPrompt(prompt.text)}
+                      aria-label={t('queue.insert')}
+                      title={
+                        isCommandPrompt(prompt.text)
+                          ? t('queue.insertCommandDisabled')
+                          : isBusy
+                            ? t('queue.submittingDisabled')
+                            : t('queue.insertTip')
+                      }
+                    >
+                      <span
+                        className={styles.queuedPromptActionIcon}
+                        style={cssUrlVar('--queued-icon-url', insertIconUrl)}
+                        aria-hidden="true"
+                      />
+                      {t('queue.insert')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={styles.queuedPromptAction}
@@ -274,7 +423,7 @@ export function QueuedPromptDisplay({
                     type="button"
                     className={styles.queuedPromptAction}
                     onClick={() => onEdit(prompt.id)}
-                    disabled={isBusy}
+                    disabled={isEditDisabled}
                     aria-label={t('queue.edit')}
                     title={editTitle}
                   >

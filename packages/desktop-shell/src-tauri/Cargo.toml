@@ -12,6 +12,7 @@ tauri-build = { version = "2.4.1", features = [] }
 
 [dependencies]
 command-group = "5.0.1"
+dunce = "1.0.5"
 open = "5.4.0"
 rand = "0.9.2"
 serde = { version = "1.0", features = ["derive"] }

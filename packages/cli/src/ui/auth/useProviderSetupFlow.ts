@@ -314,6 +314,10 @@ export function useProviderSetupFlow(
     setModelIdsError(null);
   }, []);
 
+  const clearModelIdsError = useCallback(() => {
+    setModelIdsError(null);
+  }, []);
+
   const submitModelIds = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): boolean => {
       const normalized = overrides?.modelIds ?? normalizeModelIds(modelIds);
@@ -512,6 +516,7 @@ export function useProviderSetupFlow(
     changeApiKey,
     submitApiKey,
     changeModelIds,
+    clearModelIdsError,
     submitModelIds,
     moveAdvancedFocusUp,
     moveAdvancedFocusDown,

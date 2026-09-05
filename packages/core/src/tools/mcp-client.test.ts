@@ -5,10 +5,12 @@
  */
 
 import * as GenAiLib from '@google/genai';
-import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import * as ClientLib from '@modelcontextprotocol/client';
+import {
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+} from '@modelcontextprotocol/client';
+import * as SdkClientStdioLib from '@modelcontextprotocol/client/stdio';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AuthProviderType,
@@ -32,12 +34,14 @@ import {
   _setMcpFetchForTest,
   addMCPStatusChangeListener,
   attemptAutomaticMcpOAuth,
+  connectAndDiscover,
   connectToMcpServer,
   createStreamableHttpCompatibilityFetch,
   createTransport,
   discoverPrompts,
   discoverResources,
   getAllMCPServerStatuses,
+  getMCPServerLastError,
   getMcpOAuthDialogInstruction,
   getMCPServerStatus,
   hasNetworkTransport,
@@ -69,8 +73,12 @@ const TEST_MCP_TOOL_IDLE_TIMEOUT_MS = 300000;
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
 }));
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
-vi.mock('@modelcontextprotocol/sdk/client/index.js');
+vi.mock('@modelcontextprotocol/client/stdio');
+vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@modelcontextprotocol/client')>();
+  return { ...actual, Client: vi.fn() };
+});
 vi.mock('@google/genai');
 vi.mock('../mcp/oauth-provider.js');
 vi.mock('../mcp/oauth-token-storage.js');
@@ -93,6 +101,38 @@ function cfgWithResources(): Config {
       removeResourcesByServer: vi.fn(),
     }),
   } as unknown as Config;
+}
+
+function mockAppOnlyMcpServer(): void {
+  const methodNotFound = Object.assign(new Error('Method not found'), {
+    code: -32601,
+  });
+  vi.mocked(ClientLib.Client).mockReturnValue({
+    connect: vi.fn(),
+    registerCapabilities: vi.fn(),
+    setRequestHandler: vi.fn(),
+    getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+    request: vi.fn().mockRejectedValue(methodNotFound),
+    listTools: vi.fn().mockResolvedValue({
+      tools: [
+        {
+          name: 'internal_refresh',
+          _meta: { ui: { visibility: ['app'] } },
+        },
+      ],
+    }),
+    getInstructions: vi.fn(),
+    close: vi.fn(),
+  } as unknown as ClientLib.Client);
+  vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+    {} as SdkClientStdioLib.StdioClientTransport,
+  );
+  vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+    tool: () =>
+      Promise.resolve({
+        functionDeclarations: [{ name: 'internal_refresh' }],
+      }),
+  } as unknown as GenAiLib.CallableTool);
 }
 
 describe('mcp-client', () => {
@@ -1305,6 +1345,83 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect((result.contents[0] as { text: string }).text).toBe('BODY');
     });
 
+    it('readResource uses the cache-aware helper for modern sessions', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        readResource: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'BODY' }],
+        }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const result = await client.readResource('res://doc');
+      expect(mockedClient.readResource).toHaveBeenCalledWith(
+        { uri: 'res://doc' },
+        undefined,
+      );
+      expect((result.contents[0] as { text: string }).text).toBe('BODY');
+    });
+
+    it('readResource falls back to a raw request when a modern server omits resources', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        readResource: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'TYPED' }],
+        }),
+        request: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'BODY' }],
+        }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const result = await client.readResource('res://doc');
+      expect(mockedClient.readResource).not.toHaveBeenCalled();
+      expect(mockedClient.request).toHaveBeenCalledWith(
+        { method: 'resources/read', params: { uri: 'res://doc' } },
+        expect.anything(),
+        undefined,
+      );
+      expect((result.contents[0] as { text: string }).text).toBe('BODY');
+    });
+
     it('should not skip tools even if a parameter is missing a type', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -1535,6 +1652,155 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       expect(tools).toHaveLength(1);
       expect(tools[0].alwaysLoad).toBe(true);
+    });
+
+    it('skips MCP App tools whose visibility does not include model', async () => {
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            {
+              name: 'show_dashboard',
+              _meta: {
+                ui: {
+                  resourceUri: 'ui://demo/dash',
+                  visibility: ['model'],
+                },
+              },
+            },
+            {
+              name: 'internal_refresh',
+              _meta: {
+                ui: {
+                  resourceUri: 'ui://demo/refresh',
+                  visibility: ['app'],
+                },
+              },
+            },
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'show_dashboard' },
+              { name: 'internal_refresh' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'apps',
+        { command: 'test-command' },
+        mockedClient,
+        cfgWithResources(),
+        { applyConfigFilters: false },
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual([
+        'show_dashboard',
+      ]);
+    });
+
+    it('attaches listing-level app resource UI onto discovered tools', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({
+          tools: {},
+          resources: {},
+        }),
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            {
+              name: 'show_dashboard',
+              _meta: { ui: { resourceUri: 'ui://demo/dash' } },
+            },
+          ],
+        }),
+        listResources: vi.fn().mockResolvedValue({
+          resources: [
+            {
+              uri: 'ui://demo/dash',
+              name: 'dash',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://api.example.com'] },
+                  permissions: { clipboardWrite: {} },
+                },
+              },
+            },
+          ],
+        }),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'show_dashboard' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const client = new McpClient(
+        'apps',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      const snapshot = await client.discoverAndReturn(cfgWithResources(), {
+        applyConfigFilters: false,
+      });
+
+      expect(snapshot.tools[0]?.appResourceUri).toBe('ui://demo/dash');
+      expect(snapshot.tools[0]?.appResourceUi).toEqual({
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('lists tools via request when a modern server omits the tools capability', async () => {
+      const mockedClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        request: vi.fn().mockResolvedValue({
+          tools: [{ name: 'echo' }],
+        }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'echo' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'under-declared',
+        { command: 'test-command' },
+        mockedClient,
+        cfgWithResources(),
+        { applyConfigFilters: false },
+      );
+
+      expect(vi.mocked(mockedClient.request)).toHaveBeenCalledWith(
+        { method: 'tools/list', params: {} },
+        expect.anything(),
+      );
+      expect(vi.mocked(mockedClient.listTools)).not.toHaveBeenCalled();
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['echo']);
     });
 
     it('allows invocation context only for a client bound to a created stdio transport', async () => {
@@ -1872,6 +2138,94 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
+    it('discoverAndReturn records the discovery failure cause in the status registry (issue #9944)', async () => {
+      // Same carrier as connect()'s catch: a server whose connect()
+      // succeeds but discovery fails (up-but-empty) reaches
+      // discoverAndReturn()'s catch, which the manager swallows for
+      // best-effort discovery. `qwen mcp reconnect` relies on
+      // `getMCPServerLastError` to print the cause — the status enum alone
+      // only says DISCONNECTED.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const client = new McpClient(
+        'discovery-cause-server',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('No prompts, tools, or resources found on the server.');
+
+      expect(getMCPServerLastError('discovery-cause-server')).toBe(
+        'No prompts, tools, or resources found on the server.',
+      );
+
+      removeMCPServerStatus('discovery-cause-server');
+    });
+
+    it('keeps a server with only app-visible tools connected', async () => {
+      mockAppOnlyMcpServer();
+      const client = new McpClient(
+        'app-only-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      expect(snapshot).toEqual({ tools: [], prompts: [], resources: [] });
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+    });
+
+    it('keeps standalone discovery connected for app-visible-only tools', async () => {
+      mockAppOnlyMcpServer();
+      const serverName = `app-only-standalone-${Date.now()}`;
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+
+      await connectAndDiscover(
+        serverName,
+        { command: 'test-command' },
+        toolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        false,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+          onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+        } as unknown as WorkspaceContext,
+        cfgWithResources(),
+      );
+
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+    });
+
     it('discoverAndReturn throws when called before connect()', async () => {
       const client = new McpClient(
         'unconnected-server',
@@ -2097,11 +2451,13 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     });
 
     it('attempts prompts/list even when the prompts capability is undeclared (lenient)', async () => {
-      // Regression guard: pre-fix this returned [] WITHOUT a request when
-      // `capabilities.prompts` was absent, hiding prompts from servers that
-      // under-declare the capability. We now always attempt the call.
+      // Regression guard: the v2 typed helper returns [] WITHOUT a request
+      // when `capabilities.prompts` is absent. Modern under-declared servers
+      // must still hit the wire.
       const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
         getServerCapabilities: vi.fn().mockReturnValue({}),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
         request: vi
           .fn()
           .mockRejectedValue(new Error('MCP error -32601: Method not found')),
@@ -2109,11 +2465,14 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const result = await listMcpPrompts('no-prompts', mockClient);
       expect(result).toEqual([]);
       expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.listPrompts)).not.toHaveBeenCalled();
     });
 
     it('lists prompts from a server that omits the prompts capability but still answers', async () => {
       const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
         getServerCapabilities: vi.fn().mockReturnValue({}),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
         request: vi.fn().mockResolvedValue({
           prompts: [{ name: 'greet' }],
         }),
@@ -2122,6 +2481,23 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(result).toHaveLength(1);
       expect(result[0].name).toBe('greet');
       expect(result[0].serverName).toBe('under-declared');
+      expect(vi.mocked(mockClient.listPrompts)).not.toHaveBeenCalled();
+    });
+
+    it('uses the typed helper when a modern server declares prompts', async () => {
+      const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        listPrompts: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'greet' }],
+        }),
+        request: vi.fn(),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('modern', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('greet');
+      expect(vi.mocked(mockClient.listPrompts)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.request)).not.toHaveBeenCalled();
     });
 
     it('returns [] on protocol error (server up but list call rejects)', async () => {
@@ -2184,7 +2560,9 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
     it('attempts resources/list even when the resources capability is undeclared (lenient)', async () => {
       const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
         getServerCapabilities: vi.fn().mockReturnValue({}),
+        listResources: vi.fn().mockResolvedValue({ resources: [] }),
         request: vi
           .fn()
           .mockRejectedValue(new Error('MCP error -32601: Method not found')),
@@ -2192,6 +2570,23 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const result = await listMcpResources('no-resources', mockClient);
       expect(result).toEqual([]);
       expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.listResources)).not.toHaveBeenCalled();
+    });
+
+    it('uses the typed helper when a modern server declares resources', async () => {
+      const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        listResources: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'file:///a.txt', name: 'a' }],
+        }),
+        request: vi.fn(),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('modern', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].uri).toBe('file:///a.txt');
+      expect(vi.mocked(mockClient.listResources)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.request)).not.toHaveBeenCalled();
     });
 
     it('returns [] on protocol error (server up but list call rejects)', async () => {
@@ -2469,6 +2864,71 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(fetchSpy).toHaveBeenCalledTimes(1);
       });
 
+      it('stops Agent Plugin redirects when headers or authorization are present', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response(null, { status: 204 }));
+        const configuredHeadersFetch = createStreamableHttpCompatibilityFetch(
+          'configured-headers',
+          fetchFn,
+          {
+            httpUrl: 'https://example.com/mcp',
+            headers: { 'X-Tenant': 'portable' },
+            agentPluginV1: true,
+          },
+        );
+        const authorizationFetch = createStreamableHttpCompatibilityFetch(
+          'authorization',
+          fetchFn,
+          {
+            httpUrl: 'https://example.com/mcp',
+            agentPluginV1: true,
+          },
+        );
+        const ordinaryFetch = createStreamableHttpCompatibilityFetch(
+          'ordinary',
+          fetchFn,
+          { httpUrl: 'https://example.com/mcp' },
+        );
+        const requestAuthorizationFetch =
+          createStreamableHttpCompatibilityFetch(
+            'request-authorization',
+            fetchFn,
+            {
+              httpUrl: 'https://example.com/mcp',
+              agentPluginV1: true,
+            },
+          );
+
+        await configuredHeadersFetch('https://example.com/mcp', {
+          method: 'POST',
+        });
+        await authorizationFetch('https://example.com/mcp', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer token' },
+        });
+        await ordinaryFetch('https://example.com/mcp', { method: 'POST' });
+        await requestAuthorizationFetch(
+          new Request('https://example.com/mcp', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer token' },
+          }),
+        );
+
+        expect(fetchFn.mock.calls[0]?.[1]).toMatchObject({
+          method: 'POST',
+          redirect: 'manual',
+        });
+        expect(fetchFn.mock.calls[1]?.[1]).toMatchObject({
+          method: 'POST',
+          redirect: 'manual',
+        });
+        expect(fetchFn.mock.calls[2]?.[1]).toEqual({ method: 'POST' });
+        expect(fetchFn.mock.calls[3]?.[1]).toMatchObject({
+          redirect: 'manual',
+        });
+      });
+
       it('treats 400 from optional GET SSE stream as unsupported', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()
@@ -2487,6 +2947,115 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(response.status).toBe(405);
         expect(response.statusText).toBe('Method Not Allowed');
         expect(await response.text()).toBe('');
+      });
+
+      it('treats 404 from optional GET SSE stream as unsupported', async () => {
+        const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+          // Streamable HTTP servers with no GET route at all reject the optional
+          // standalone GET/SSE notification stream with 404 — e.g. the official
+          // MCP SDK's documented stateless StreamableHTTPServerTransport pattern
+          // behind Express, where 404 is Express's own default fallthrough for
+          // the unhandled GET (#8784). (Note: context7 returns a raw 405, which
+          // the SDK tolerates natively — the earlier claim that it returned 404
+          // was retracted in the issue as a reporter-side misconfiguration.)
+          new Response('not found', { status: 404 }),
+        );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'no-get-route',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(405);
+        expect(response.statusText).toBe('Method Not Allowed');
+        expect(await response.text()).toBe('');
+      });
+
+      it('does not rewrite non-SSE GET 404 responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'plain-get-404',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('not found');
+      });
+
+      it('does not rewrite POST 404 responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'post-404',
+          fetchFn,
+        );
+
+        // The SDK's real POST requests set this exact Accept header
+        // (streamableHttp.ts's transport always sends
+        // 'application/json, text/event-stream'), so the method check is
+        // the only thing standing between a genuine tool-call 404 and being
+        // silently rewritten into a synthetic 405 — the Accept header alone
+        // does not disambiguate POST from the optional GET/SSE probe.
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+          },
+        });
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('not found');
+      });
+
+      it('bounds the fallback body excerpt read when the 404 body stalls', async () => {
+        // A server that answers the optional GET/SSE probe with 404 headers and
+        // then never sends a body chunk must not park the diagnostics read
+        // forever: the MCP dispatcher runs with `headersTimeout: 0,
+        // bodyTimeout: 0` and nothing above this wrapper bounds the body.
+        vi.useFakeTimers();
+        try {
+          const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+            new Response(
+              new ReadableStream({
+                // Headers are already delivered; the body never yields.
+                pull: () => new Promise<void>(() => {}),
+              }),
+              { status: 404 },
+            ),
+          );
+          const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+            'stalled-404-body',
+            fetchFn,
+          );
+
+          const pending = fetchWithFallback('http://test-server/mcp', {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          });
+          await vi.advanceTimersByTimeAsync(2_000);
+          const response = await pending;
+
+          expect(response.status).toBe(405);
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.not.stringContaining('Response body:'),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
       it('omits response body diagnostics when the fallback body is empty', async () => {
@@ -2846,7 +3415,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
         expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const authProvider = (transport as any)._authProvider;
+        const authProvider = (transport as any)._oauthProvider;
         expect(authProvider).toBeInstanceOf(GoogleCredentialProvider);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((transport as any)._fetch).toEqual(expect.any(Function));
@@ -2867,7 +3436,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
         expect(transport).toBeInstanceOf(SSEClientTransport);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const authProvider = (transport as any)._authProvider;
+        const authProvider = (transport as any)._oauthProvider;
         expect(authProvider).toBeInstanceOf(GoogleCredentialProvider);
       });
 
@@ -3149,6 +3718,13 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       // The entry must remain absent — no resurrection.
       expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
+      // Same invariant for the failure-cause map: the status write is
+      // suppressed by the `isDisconnecting` guard, and the lastError record
+      // in connect()'s catch must be gated the same way — otherwise the
+      // doomed in-flight connect resurrects an orphan cause entry that
+      // `removeMCPServerStatus` already dropped (persisting until process
+      // exit and misattributing to a later re-added incarnation).
+      expect(getMCPServerLastError('racy-server')).toBeUndefined();
     });
 
     it('disconnect() propagates DISCONNECTED to the global registry', async () => {
@@ -3200,6 +3776,189 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       // Cleanup the registry entry so this test doesn't leak.
       removeMCPServerStatus('healthy-server');
+    });
+
+    it('disconnect() terminates a Streamable HTTP session before closing the transport (issue #9944)', async () => {
+      // The SDK's `transport.close()` only tears down local state; the
+      // server-side session stays alive unless we send the spec's DELETE
+      // (`terminateSession()`). An abandoned session keeps occupying
+      // single-session servers, which then reject every later `initialize`
+      // with "Server already initialized".
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const callOrder: string[] = [];
+      const mockedTransport = {
+        terminateSession: vi.fn().mockImplementation(async () => {
+          callOrder.push('terminateSession');
+        }),
+        close: vi.fn().mockImplementation(async () => {
+          callOrder.push('close');
+        }),
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'http-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      await client.disconnect();
+
+      expect(mockedTransport.terminateSession).toHaveBeenCalledTimes(1);
+      // Termination must happen while the transport can still send
+      // requests — i.e. before `close()` aborts it.
+      expect(callOrder).toEqual(['terminateSession', 'close']);
+
+      removeMCPServerStatus('http-server');
+    });
+
+    it('disconnect() swallows session-termination failures (issue #9944)', async () => {
+      // A dead server must not block teardown: the DELETE fails, but
+      // disconnect still completes and closes the transport.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const mockedTransport = {
+        terminateSession: vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'dead-http-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      await expect(client.disconnect()).resolves.toBeUndefined();
+      expect(mockedTransport.close).toHaveBeenCalledTimes(1);
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+      removeMCPServerStatus('dead-http-server');
+    });
+
+    it('disconnect() does not hang when terminateSession never responds (issue #9944)', async () => {
+      // A live-but-unresponsive server (TCP open, never answers the DELETE)
+      // must not block teardown: the SDK's `terminateSession()` has no
+      // timeout of its own and the transport's abort controller is only
+      // aborted by `close()` — which runs after the await. `disconnect()`
+      // therefore bounds the call and proceeds to `close()`, which aborts
+      // the still-in-flight request.
+      vi.useFakeTimers();
+      try {
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          close: vi.fn(),
+          getInstructions: vi.fn(),
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        const mockedTransport = {
+          terminateSession: vi.fn(() => new Promise<void>(() => {})), // never settles
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+        vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+          mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+        );
+
+        const client = new McpClient(
+          'unresponsive-http-server',
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          { getDirectories: () => [] } as unknown as WorkspaceContext,
+          false,
+        );
+
+        await client.connect();
+        const disconnected = client.disconnect();
+        // The bounded wait fires, and teardown completes even though the
+        // DELETE never got an answer.
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(disconnected).resolves.toBeUndefined();
+        expect(mockedTransport.close).toHaveBeenCalledTimes(1);
+        expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+        removeMCPServerStatus('unresponsive-http-server');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records the connect failure cause in the status registry (issue #9944)', async () => {
+      // Discovery is best-effort and swallows connect errors (the manager's
+      // catch logs them via debugLogger only), so the status enum alone
+      // cannot tell a consumer WHY a server is not CONNECTED. connect() must
+      // record the cause so `qwen mcp reconnect` can print it.
+      const mockedClient = {
+        connect: vi
+          .fn()
+          .mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:3939')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const client = new McpClient(
+        'cause-recording-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await expect(client.connect()).rejects.toThrow(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+      expect(getMCPServerLastError('cause-recording-server')).toBe(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+
+      // A recovered connection clears the stale cause.
+      mockedClient.connect.mockResolvedValue(undefined);
+      await client.connect();
+      expect(getMCPServerLastError('cause-recording-server')).toBeUndefined();
+
+      removeMCPServerStatus('cause-recording-server');
     });
   });
 

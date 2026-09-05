@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { Composer } from './Composer.js';
+import { InputPrompt } from './InputPrompt.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import {
   UIActionsContext,
@@ -75,7 +76,7 @@ vi.mock('./ShellModeIndicator.js', () => ({
 }));
 
 vi.mock('./InputPrompt.js', () => ({
-  InputPrompt: () => <Text>InputPrompt</Text>,
+  InputPrompt: vi.fn(() => <Text>InputPrompt</Text>),
   calculatePromptWidths: vi.fn(() => ({
     inputWidth: 80,
     suggestionsWidth: 40,
@@ -116,6 +117,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     messageQueue: [],
     constrainHeight: false,
     isInputActive: true,
+    isConfigInitialized: true,
     buffer: '',
     inputWidth: 80,
     suggestionsWidth: 40,
@@ -131,7 +133,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     ctrlDPressedOnce: false,
     showEscapePrompt: false,
     ideContextState: null,
-    geminiMdFileCount: 0,
+    memoryFileCount: 0,
     showToolDescriptions: false,
     sessionStats: {
       lastPromptTokenCount: 0,
@@ -146,8 +148,9 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     taskStartStreamingChars: 0,
     responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
+    voiceMicWarnedStatusRef: { current: null },
     isReceivingContent: false,
-    pendingGeminiHistoryItems: [],
+    pendingLlmHistoryItems: [],
     terminalWidth: 80,
     ...overrides,
   }) as UIState;
@@ -175,21 +178,26 @@ const createMockConfig = (overrides = {}) => ({
 });
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+const composerElement = (
+  uiState: UIState,
+  config = createMockConfig(),
+  uiActions = createMockUIActions(),
+) => (
+  <ConfigContext.Provider value={config as any}>
+    <UIStateContext.Provider value={uiState}>
+      <UIActionsContext.Provider value={uiActions}>
+        <Composer />
+      </UIActionsContext.Provider>
+    </UIStateContext.Provider>
+  </ConfigContext.Provider>
+);
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 const renderComposer = (
   uiState: UIState,
   config = createMockConfig(),
   uiActions = createMockUIActions(),
-) =>
-  render(
-    <ConfigContext.Provider value={config as any}>
-      <UIStateContext.Provider value={uiState}>
-        <UIActionsContext.Provider value={uiActions}>
-          <Composer />
-        </UIActionsContext.Provider>
-      </UIStateContext.Provider>
-    </ConfigContext.Provider>,
-  );
-/* eslint-enable @typescript-eslint/no-explicit-any */
+) => render(composerElement(uiState, config, uiActions));
 
 describe('Composer', () => {
   describe('Footer Display', () => {
@@ -200,6 +208,34 @@ describe('Composer', () => {
 
       // Smoke check that the Footer renders
       expect(lastFrame()).toContain('Footer');
+    });
+
+    it('renders the startup footer while config initialization is pending', () => {
+      // Footer is the sole production consumer of useConfigInitMessage, which
+      // returns a message only while isConfigInitialized is false. Gating the
+      // footer on isInputActive alone makes the two windows disjoint, so
+      // startup would show no progress feedback at all.
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: false,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('Footer');
+      // The race this change closes must stay closed: no input before init.
+      expect(lastFrame()).not.toContain('InputPrompt');
+    });
+
+    it('keeps the footer hidden when input is inactive and initialization is done', () => {
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('Footer');
     });
   });
 
@@ -430,6 +466,37 @@ describe('Composer', () => {
       const { lastFrame } = renderComposer(uiState);
 
       expect(lastFrame()).not.toContain('InputPrompt');
+    });
+
+    it('forwards the session voice permission ref across input-active toggles', () => {
+      const mockedInputPrompt = vi.mocked(InputPrompt);
+      mockedInputPrompt.mockClear();
+      const voiceMicWarnedStatusRef = { current: null };
+      const config = createMockConfig();
+      const uiActions = createMockUIActions();
+      const activeState = createMockUIState({ voiceMicWarnedStatusRef });
+      const inactiveState = createMockUIState({
+        voiceMicWarnedStatusRef,
+        isInputActive: false,
+      });
+
+      const { rerender } = render(
+        composerElement(activeState, config, uiActions),
+      );
+      expect(mockedInputPrompt).toHaveBeenCalled();
+      expect(
+        mockedInputPrompt.mock.calls.at(-1)![0].voiceMicWarnedStatusRef,
+      ).toBe(voiceMicWarnedStatusRef);
+
+      // Input goes inactive (InputPrompt unmounts), then active again — the
+      // remounted InputPrompt must receive the same ref object, not a new one.
+      rerender(composerElement(inactiveState, config, uiActions));
+      mockedInputPrompt.mockClear();
+      rerender(composerElement(activeState, config, uiActions));
+      expect(mockedInputPrompt).toHaveBeenCalled();
+      expect(
+        mockedInputPrompt.mock.calls.at(-1)![0].voiceMicWarnedStatusRef,
+      ).toBe(voiceMicWarnedStatusRef);
     });
 
     // Note: AutoAcceptIndicator and ShellModeIndicator are now rendered inside Footer component

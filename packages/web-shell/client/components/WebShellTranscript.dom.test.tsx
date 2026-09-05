@@ -184,11 +184,18 @@ describe('WebShellTranscript DOM integration', () => {
     const summaries = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
     ).filter((button) => button.textContent?.includes('Updated task list'));
-    expect(summaries).toHaveLength(2);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].textContent).toContain('2 times');
     act(() => {
-      summaries[1].click();
+      summaries[0].click();
     });
-    const completedSnapshot = summaries[1].parentElement;
+    const completedSnapshot = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((row) => row.textContent?.includes('1/1'))?.parentElement;
+    expect(completedSnapshot).not.toBeNull();
+    act(() => {
+      completedSnapshot?.querySelector<HTMLElement>('[role="button"]')?.click();
+    });
     const detailButton = completedSnapshot?.querySelector<HTMLButtonElement>(
       'button[title="Show task detail"]',
     );
@@ -335,6 +342,12 @@ describe('WebShellTranscript DOM integration', () => {
       <WebShellTranscript blocks={blocks} collapseCompletedTurns={false} />,
     );
 
+    const summary = container.querySelector('button')!;
+    expect(summary.textContent).toContain('Asked 1 question');
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+    act(() => summary.click());
+
     expect(container.textContent).toContain('Ask user 1 question');
     expect(container.textContent).toContain('User answer: Staging');
     expect(container.querySelector('button[type="submit"]')).toBeNull();
@@ -370,15 +383,11 @@ describe('WebShellTranscript DOM integration', () => {
     expect(container.textContent).toContain('Hidden reasoning');
   });
 
-  it('suppresses session and goal events while preserving their text', () => {
+  it('suppresses session events while preserving their text', () => {
     const sessionEvents: unknown[] = [];
-    const goalEvents: unknown[] = [];
     const onSession = (event: Event) =>
       sessionEvents.push((event as CustomEvent).detail);
-    const onGoal = (event: Event) =>
-      goalEvents.push((event as CustomEvent).detail);
     window.addEventListener('qwen:open-session', onSession);
-    window.addEventListener('web-shell-goal-status-active', onGoal);
     const { container } = render(
       <WebShellTranscript
         blocks={[
@@ -413,9 +422,7 @@ describe('WebShellTranscript DOM integration', () => {
     expect(container.querySelector('a[role="button"]')).toBeNull();
     expect(container.textContent).toContain('All checks pass');
     expect(sessionEvents).toEqual([]);
-    expect(goalEvents).toEqual([]);
     window.removeEventListener('qwen:open-session', onSession);
-    window.removeEventListener('web-shell-goal-status-active', onGoal);
   });
 
   it('mounts a themed scoped portal root and removes it on unmount', () => {

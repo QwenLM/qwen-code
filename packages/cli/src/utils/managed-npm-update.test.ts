@@ -17,6 +17,7 @@ import {
 import { EventEmitter } from 'node:events';
 import type { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -128,6 +129,36 @@ describe('managed npm update', () => {
     });
     expect(fs.readFileSync(bootstrap, 'utf8')).toBe('global launcher');
     expect(fs.readFileSync(runningChunk, 'utf8')).toBe('old chunk');
+  });
+
+  it('still activates when the lock is compromised during activation', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      path.join(root, 'updates'),
+    );
+    writeInstallation(update.stagingDir, '2.0.0');
+
+    const { lockSpy, getOnCompromised } = mockCompromisedLock();
+
+    try {
+      await expect(
+        activateManagedNpmUpdate(update, '2.0.0', bootstrap),
+      ).resolves.toBeUndefined();
+      expect(getOnCompromised()).toBeTypeOf('function');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(update.launcherRoot, 'active.json'),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ version: '2.0.0' });
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it('installs and activates inside the managed worker', async () => {

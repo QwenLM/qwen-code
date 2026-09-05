@@ -19,6 +19,15 @@ export interface DaemonTransportFetchOptions {
   timeout?: number;
 }
 
+export type DaemonSseConnectReason =
+  | 'initial'
+  | 'resume'
+  | 'prompt_restart'
+  | 'stream_end'
+  | 'transport_error'
+  | 'state_resync'
+  | 'unknown';
+
 /**
  * Options for {@link DaemonTransport.subscribeEvents}. Mirrors
  * `DaemonClient.SubscribeOptions` — the transport layer consumes
@@ -44,6 +53,14 @@ export interface DaemonTransportSubscribeOptions {
   onEpoch?: (epoch: string) => void;
   /** Per-subscriber backlog cap (SSE `?maxQueued=N`). */
   maxQueued?: number;
+  /** Client identity used by REST/SSE. Ignored by ACP transports. */
+  clientId?: string;
+  /** Diagnostic-only REST/SSE connection reason. */
+  sseConnectReason?: DaemonSseConnectReason;
+  /** Diagnostic-only predecessor for the next REST/SSE stream. */
+  previousSseStreamId?: string;
+  /** Called after a REST/SSE handshake is accepted. */
+  onSseStreamAccepted?: (streamId: string | undefined) => void;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
   /**

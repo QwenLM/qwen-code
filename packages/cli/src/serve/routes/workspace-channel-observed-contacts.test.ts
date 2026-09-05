@@ -160,6 +160,26 @@ describe('workspace observed channel contact routes', () => {
     expect(empty.body).toEqual({ users: [], groups: [] });
   });
 
+  it('fails closed before internal contact reads when the activity gate is absent', async () => {
+    const primary = runtime('primary', '/work/main');
+    const live = {
+      ...runtime('conversations', '/work/Conversations'),
+      provenance: 'live-conversation' as const,
+    };
+    const app = express();
+    registerWorkspaceChannelObservedContactRoutes(app, {
+      primaryWorkspace: primary.workspaceCwd,
+      workspaceRegistry: registry([primary, live]),
+    });
+
+    const response = await request(app).get(
+      '/workspaces/conversations/channel/observed-contacts',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('conversation_runtime_unavailable');
+  });
+
   it('rejects legacy reads when the live primary workspace is untrusted', async () => {
     const primary = runtime('primary', '/work/main');
     const app = express();

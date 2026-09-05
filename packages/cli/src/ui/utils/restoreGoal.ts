@@ -9,8 +9,8 @@ import {
   setGoalTerminalObserver,
   setLastGoalTerminal,
   unregisterGoalHook,
-  type ChatRecord,
   type Config,
+  type GoalRecoveryRecord,
   type GoalTerminalEvent,
   type GoalTerminalKind,
   type SlashCommandRecordPayload,
@@ -39,7 +39,7 @@ export interface RestorableGoal {
  *
  * The iteration count is carried so the MAX_GOAL_ITERATIONS safety cap survives
  * resume instead of resetting to zero. `checking` items persist the running
- * count (see useGeminiStream's continuation handler); `set` items predate any
+ * count (see useLlmStream's continuation handler); `set` items predate any
  * iteration, so they restore at 0.
  *
  * `setAt` is carried so elapsed time keeps measuring from the original `/goal`.
@@ -178,7 +178,7 @@ export function parseGoalStatusItem(item: unknown): GoalStatusItem | null {
  * exists, so `findGoalToRestore` / `findLastTerminalGoal` are fed from here.
  */
 export function collectGoalStatusItemsFromRecords(
-  records: readonly ChatRecord[],
+  records: readonly GoalRecoveryRecord[],
 ): GoalStatusItem[] {
   const items: GoalStatusItem[] = [];
   for (const record of records) {

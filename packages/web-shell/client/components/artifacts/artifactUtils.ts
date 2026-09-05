@@ -2,9 +2,36 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 
-export function artifactKindLabel(kind: string): string {
+export function artifactKindLabel(
+  kind: string,
+  workspacePath?: string,
+): string {
+  const ext = pathExtension(workspacePath);
+  switch (ext) {
+    case '.doc':
+    case '.docx':
+    case '.docm':
+    case '.dotx':
+    case '.odt':
+      return 'Word';
+    case '.xls':
+    case '.xlsx':
+    case '.xlsm':
+    case '.xlsb':
+    case '.ods':
+      return 'Excel';
+    case '.ppt':
+    case '.pptx':
+    case '.pptm':
+    case '.odp':
+      return 'PowerPoint';
+    case '.csv':
+      return 'CSV';
+    default:
+      break;
+  }
   switch (kind) {
     case 'html':
       return 'HTML';
@@ -12,16 +39,109 @@ export function artifactKindLabel(kind: string): string {
       return 'PDF';
     case 'notebook':
       return 'Notebook';
+    case 'document':
+      return 'Document';
     default:
       return kind || 'artifact';
   }
+}
+
+// Keep in sync with OFFICE_DOCUMENT_EXTENSIONS in
+// packages/core/src/utils/workspace-artifact-directory.ts
+const OFFICE_DOCUMENT_EXTENSIONS = new Set([
+  '.doc',
+  '.docx',
+  '.docm',
+  '.dotx',
+  '.xls',
+  '.xlsx',
+  '.xlsm',
+  '.xlsb',
+  '.ppt',
+  '.pptx',
+  '.pptm',
+  '.odt',
+  '.ods',
+  '.odp',
+]);
+
+const DOWNLOAD_ONLY_EXTENSIONS = new Set([
+  ...OFFICE_DOCUMENT_EXTENSIONS,
+  '.pdf',
+  '.mp4',
+  '.mov',
+  '.webm',
+  '.mp3',
+  '.wav',
+  '.m4a',
+  '.ogg',
+]);
+
+export function isOfficeDocumentPath(workspacePath?: string): boolean {
+  return OFFICE_DOCUMENT_EXTENSIONS.has(pathExtension(workspacePath));
+}
+
+export function isDownloadOnlyWorkspaceArtifact(artifact: {
+  kind?: string;
+  workspacePath?: string;
+  mimeType?: string;
+}): boolean {
+  const extension = pathExtension(artifact.workspacePath);
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
+  if (
+    extension === '.svg' ||
+    mimeType === 'image/svg+xml' ||
+    DOWNLOAD_ONLY_EXTENSIONS.has(extension)
+  ) {
+    return true;
+  }
+  if (
+    getArtifactImageMimeType(artifact) ||
+    extension === '.md' ||
+    extension === '.markdown' ||
+    extension === '.html' ||
+    extension === '.htm' ||
+    mimeType === 'text/markdown' ||
+    mimeType === 'text/html'
+  ) {
+    return false;
+  }
+  if (
+    artifact.kind === 'image' ||
+    artifact.kind === 'document' ||
+    artifact.kind === 'pdf' ||
+    artifact.kind === 'video' ||
+    artifact.kind === 'audio'
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function pathExtension(workspacePath?: string): string {
+  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+// Mirrors WORKSPACE_CONTENT_SHA256_METADATA_KEY in the core package, which the
+// Web Shell client cannot import.
+const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
+
+export function getArtifactFreshnessKey(
+  artifact: Pick<DaemonSessionArtifact, 'status' | 'updatedAt' | 'metadata'>,
+): string {
+  const workspaceHash =
+    artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
+  const hash = typeof workspaceHash === 'string' ? workspaceHash : '';
+  return `${artifact.status}:${artifact.updatedAt}:${hash}`;
 }
 
 export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
   const artifactType = artifact.metadata?.['artifactType'];
   return typeof artifactType === 'string' && artifactType
     ? artifactType
-    : artifactKindLabel(artifact.kind);
+    : artifactKindLabel(artifact.kind, artifact.workspacePath);
 }
 
 export function formatArtifactSize(sizeBytes: number | undefined): string {
@@ -45,11 +165,15 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
 const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
 const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 100 * 1024;
 
+export function normalizeArtifactMimeType(mimeType?: string): string {
+  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+}
+
 export function getArtifactImageMimeType(
-  artifact: DaemonSessionArtifact,
+  artifact: Pick<DaemonSessionArtifact, 'mimeType' | 'workspacePath'>,
 ): string | undefined {
-  const mimeType = artifact.mimeType?.split(';', 1)[0]?.trim().toLowerCase();
-  if (mimeType?.startsWith('image/')) {
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
+  if (mimeType.startsWith('image/')) {
     if (mimeType === 'image/jpg') return 'image/jpeg';
     return Object.values(IMAGE_MIME_TYPES).includes(mimeType)
       ? mimeType
@@ -85,7 +209,7 @@ export async function readWorkspaceFileAsBlob(
   options: {
     statFile: (
       filePath: string,
-    ) => Promise<{ sizeBytes: number; modifiedMs: number }>;
+    ) => Promise<{ sizeBytes: number; modifiedMs: number; type?: string }>;
     isCancelled?: () => boolean;
     maxBytes?: number;
   },
@@ -95,6 +219,9 @@ export async function readWorkspaceFileAsBlob(
   const initialStat = await options.statFile(filePath);
   if (options.isCancelled?.()) {
     throw new Error('File loading was cancelled.');
+  }
+  if (initialStat.type === 'directory') {
+    throw new Error('Directories cannot be opened or downloaded as artifacts.');
   }
   if (initialStat.sizeBytes > maxBytes) {
     throw new Error('File is too large to preview or download.');

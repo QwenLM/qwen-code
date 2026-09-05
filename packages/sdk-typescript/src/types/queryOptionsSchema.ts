@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { CanUseTool } from './types.js';
 import type { SubagentConfig } from './protocol.js';
+import { PERMISSION_MODES } from './permission-mode.js';
 
 const RESERVED_CLI_FLAGS = new Set([
   '--input-format',
@@ -107,6 +108,7 @@ export const CLIMcpServerConfigSchema = z.object({
   tcp: z.string().optional(),
   // Common
   timeout: z.number().optional(),
+  versionNegotiation: z.enum(['auto', 'legacy']).optional(),
   trust: z.boolean().optional(),
   // Metadata
   description: z.string().optional(),
@@ -200,9 +202,7 @@ export const QueryOptionsSchema = z
         QuerySystemPromptPresetSchema,
       ])
       .optional(),
-    permissionMode: z
-      .enum(['default', 'plan', 'auto-edit', 'auto', 'yolo'])
-      .optional(),
+    permissionMode: z.enum(PERMISSION_MODES).optional(),
     canUseTool: z
       .custom<CanUseTool>((val) => typeof val === 'function', {
         message: 'canUseTool must be a function',

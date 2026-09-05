@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -24,13 +25,126 @@ import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   PollingChannelBase,
+  sanitizeDisplayText,
   sanitizeLogText,
+  sanitizePromptText,
+  stripMessagePrefix,
+  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
   reasonFilter?: unknown;
+  useLocalGh?: boolean;
+}
+
+const GH_AUTH_TIMEOUT_MS = 10_000;
+const GH_AUTH_MAX_BUFFER = 64 * 1024;
+// Same allowlist as the sibling gh wrappers, plus a leading-dash rejection so
+// the value cannot be parsed as a gh option when passed to `gh auth token`.
+const GH_HOSTNAME_RE = /^[A-Za-z0-9.-]+$/;
+
+function ghHostname(channelName: string, baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
+  if (!url.hostname) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
+    );
+  }
+  const hostname =
+    url.hostname === 'api.github.com' ? 'github.com' : url.hostname;
+  if (hostname.startsWith('-') || !GH_HOSTNAME_RE.test(hostname)) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl hostname is invalid: ${hostname}`,
+    );
+  }
+  return hostname;
+}
+
+// Sibling gh subprocess wrappers: core/src/utils/github-prs.ts, cli/src/commands/review/lib/gh.ts
+function resolveGhAuthToken(
+  channelName: string,
+  hostname: string,
+): Promise<string> {
+  const env = { ...process.env };
+  delete env['GH_TOKEN'];
+  delete env['GITHUB_TOKEN'];
+  delete env['GH_ENTERPRISE_TOKEN'];
+  delete env['GITHUB_ENTERPRISE_TOKEN'];
+  return new Promise((resolve, reject) => {
+    execFile(
+      'gh',
+      ['auth', 'token', '--hostname', hostname],
+      {
+        timeout: GH_AUTH_TIMEOUT_MS,
+        maxBuffer: GH_AUTH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          let message: string;
+          if (code === 'ENOENT') {
+            message =
+              'GitHub CLI (gh) is not installed on the daemon host or is not on the daemon PATH.';
+          } else if ((error as { killed?: unknown }).killed === true) {
+            // Node sets killed=true even when the timed-out child also exited
+            // with a numeric code, so this must precede the exit-code branch.
+            message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
+          } else if (typeof code === 'number') {
+            // Matches go-gh's ConfigDir precedence: GH_CONFIG_DIR,
+            // XDG_CONFIG_HOME, %AppData%\GitHub CLI (Windows only), HOME.
+            message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host. gh config dir: ${
+              env['GH_CONFIG_DIR'] ||
+              (env['XDG_CONFIG_HOME']
+                ? `${env['XDG_CONFIG_HOME']}/gh`
+                : process.platform === 'win32' && env['APPDATA']
+                  ? `${env['APPDATA']}\\GitHub CLI`
+                  : env['HOME']
+                    ? `${env['HOME']}/.config/gh`
+                    : 'unknown')
+            }`;
+          } else {
+            message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
+          }
+          const stderrHint = stderr ? sanitizeLogText(stderr, 256).trim() : '';
+          reject(
+            new Error(
+              `[Channel:${channelName}] ${message}${
+                stderrHint ? ` gh stderr: ${stderrHint}` : ''
+              }`,
+            ),
+          );
+          return;
+        }
+        const token = stdout.trim();
+        if (!token) {
+          reject(
+            new Error(
+              `[Channel:${channelName}] GitHub CLI returned an empty token for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`,
+            ),
+          );
+          return;
+        }
+        resolve(token);
+      },
+    );
+  });
 }
 
 const KNOWN_NOTIFICATION_REASONS = new Set([
@@ -198,6 +312,7 @@ interface PendingFinalDelivery {
   sourceMessageId?: string;
   actor?: string;
   triggerKind?: string;
+  sourceLabel?: string;
 }
 
 type InboundTaskState =
@@ -262,6 +377,7 @@ function isInboundEnvelope(value: unknown): value is Envelope | undefined {
       typeof envelope.messageId === 'string') &&
     (envelope.referencedText === undefined ||
       typeof envelope.referencedText === 'string') &&
+    isOptionalStringArray(envelope.mentionedMemberIds) &&
     (envelope.imageBase64 === undefined ||
       typeof envelope.imageBase64 === 'string') &&
     (envelope.imageMimeType === undefined ||
@@ -270,6 +386,8 @@ function isInboundEnvelope(value: unknown): value is Envelope | undefined {
       Array.isArray(envelope.attachments)) &&
     (envelope.metadata === undefined ||
       typeof envelope.metadata === 'string') &&
+    (envelope.bypassMessagePrefix === undefined ||
+      envelope.bypassMessagePrefix === true) &&
     (envelope.alreadyPrefixed === undefined ||
       envelope.alreadyPrefixed === true)
   );
@@ -352,6 +470,23 @@ function buildTriggerGuidance(reason: string): string {
   return `For ${reason}, output exactly ${NO_REPLY_SENTINEL} when a public reply is unnecessary.`;
 }
 
+function isPersistedSourceLabel(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 3 ||
+    value.length > 256 ||
+    !value.startsWith('[') ||
+    !value.endsWith(']')
+  ) {
+    return false;
+  }
+  for (let index = 1; index < value.length - 1; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
 function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
   const item = value as PendingFinalDelivery;
   return (
@@ -362,7 +497,8 @@ function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
     typeof item.chatId === 'string' &&
     typeof item.threadId === 'string' &&
     typeof item.fullText === 'string' &&
-    typeof item.sessionId === 'string'
+    typeof item.sessionId === 'string' &&
+    (item.sourceLabel === undefined || isPersistedSourceLabel(item.sourceLabel))
   );
 }
 
@@ -431,11 +567,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const cfg = this.config as GithubConfig;
     this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
+    const configuredToken = cfg.token?.trim() ?? '';
+    if (cfg.useLocalGh !== undefined && typeof cfg.useLocalGh !== 'boolean') {
+      throw new Error(`[Channel:${this.name}] useLocalGh must be a boolean.`);
+    }
+    if (!configuredToken && cfg.useLocalGh !== true) {
+      throw new Error(
+        `[Channel:${this.name}] configure a GitHub token or enable local GitHub CLI authentication.`,
+      );
+    }
+    let auth = configuredToken;
+    let credential = 'configured token';
+    if (!configuredToken) {
+      const hostname = ghHostname(this.name, baseUrl);
+      auth = await resolveGhAuthToken(this.name, hostname);
+      credential = `local gh credential for ${hostname}`;
+    }
+    process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
       .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
     this.octokit = new Octokit({
-      auth: cfg.token,
+      auth,
       baseUrl,
       ...(this.proxy
         ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
@@ -444,6 +597,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = data.login;
+      process.stderr.write(
+        `[Channel:${this.name}] authenticated as "${sanitizeLogText(data.login, 64)}"\n`,
+      );
     } catch (err) {
       throw new Error(
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
@@ -464,7 +620,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       if (allowed.every((user) => user === botUsername)) {
         throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
         );
       }
       process.stderr.write(
@@ -527,20 +683,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.createIssueComment(chatId, threadId, text);
+    await this.createIssueComment(
+      chatId,
+      threadId,
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     await this.publishFinalResponse(
       chatId,
       this.getResponseThreadId(sessionId),
       text,
       sessionId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
     );
   }
 
@@ -549,6 +712,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string | undefined,
     fullText: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const threadMatch = threadId?.match(/^(issue|pr):(\d+)$/);
     const metadata = this.getResponseMetadata(sessionId);
@@ -591,7 +755,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const comment = await this.createIssueComment(
         chatId,
         threadId,
-        fullText,
+        this.formatMarkdownAttributedText(fullText, sourceLabel),
         3,
         isDefiniteNoWriteGithubError,
       );
@@ -622,6 +786,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             chatId,
             threadId,
             fullText,
+            sourceLabel,
           });
         } catch (persistError) {
           throw new Error(
@@ -671,6 +836,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       chatId: string;
       threadId: string;
       fullText: string;
+      sourceLabel?: string;
     },
   ): void {
     const record: PendingFinalDelivery = {
@@ -693,6 +859,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sourceMessageId: input.sourceMessageId,
       actor: input.actor,
       triggerKind: input.triggerKind,
+      sourceLabel: input.sourceLabel,
     };
     const pending = this.readPendingFinalDeliveries(true).filter(
       (item) => item.id !== record.id,
@@ -737,7 +904,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const comment = await this.createIssueComment(
           record.chatId,
           record.threadId,
-          record.fullText,
+          this.formatMarkdownAttributedText(
+            record.fullText,
+            record.sourceLabel,
+          ),
           3,
           isDefiniteNoWriteGithubError,
           signal,
@@ -1184,7 +1354,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      const allowed = this.gate.isAllowed(senderId);
+      // Approved paired groups bypass the sender gate in preflight, so the
+      // directed lane must mirror that or follow-ups fail mention gating.
+      const allowed =
+        this.gate.isAllowed(senderId) ||
+        (directed &&
+          this.config.groupPolicy === 'pairing' &&
+          this.groupGate.isGroupApproved(ctx.chatId));
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1194,7 +1370,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         messageId: String(comment.id),
         text: this.botUsername ? stripBotMention(body, this.botUsername) : body,
         isGroup: true,
-        isMentioned: hasMention || (directed && allowed),
+        // Never synthesize a mention into an unapproved pairing group: the
+        // pairing step must keep dropping ambient comments, and a synthesized
+        // mention would turn every ambient comment into a pairing request.
+        isMentioned:
+          hasMention ||
+          (directed &&
+            allowed &&
+            (this.config.groupPolicy !== 'pairing' ||
+              this.groupGate.isGroupApproved(ctx.chatId))),
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(ctx),
       };
@@ -1209,7 +1393,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       if (allowed) {
         this.recordDispatchedComment(key);
-        if (hasMention) dispatched = true;
+      }
+      // A mention under group pairing has a visible effect (dispatch or a
+      // pairing code comment) even when the sender gate rejects the sender;
+      // suppress the first-contact body feed so the same intent cannot be
+      // dispatched twice. Record the body as consumed too: if the thread is
+      // later re-listed as unread (mark-read can fail), the body feed must
+      // not re-trigger the same pairing intent on a later poll.
+      if (hasMention && (allowed || this.config.groupPolicy === 'pairing')) {
+        dispatched = true;
+        this.recordDispatchedBody(`${ctx.chatId}|${ctx.threadId}`);
       }
     }
 
@@ -1230,6 +1423,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? await this.fetchPrMeta(ctx)
         : await this.fetchIssueMeta(ctx);
     const title = meta.title || ctx.subjectTitle;
+    const displayTitle = truncateCodePoints(sanitizePromptText(title), 500);
     const details =
       reason === 'review_requested'
         ? `Author: ${meta.user?.login || 'unknown'} | State: ${meta.state || 'unknown'} | Draft: ${meta.draft ? 'true' : 'false'} | Branch: ${meta.head?.ref || 'unknown'} → ${meta.base?.ref || 'unknown'}`
@@ -1247,6 +1441,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
           : 'Triage this issue and respond with the next action.',
+      displayText:
+        reason === 'review_requested'
+          ? `Review requested: ${displayTitle}`
+          : `Issue assigned: ${displayTitle}`,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1259,11 +1458,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (this.config.senderPolicy === 'pairing') {
+    if (
+      this.config.senderPolicy === 'pairing' ||
+      this.config.groupPolicy === 'pairing'
+    ) {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
@@ -1271,18 +1473,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.gate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const messagePrefix = this.configuredMessagePrefix();
+    const comments = newComments
+      .flatMap((comment) => {
+        const rawBody = comment.body || '';
+        const body = messagePrefix
+          ? stripMessagePrefix(
+              this.botUsername
+                ? stripBotMention(rawBody, this.botUsername)
+                : rawBody,
+              messagePrefix,
+            )
+          : rawBody.trim();
+        return body === undefined ? [] : [{ comment, body }];
+      })
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${(comment.body || '').trim().slice(0, MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1293,6 +1508,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: ctx.threadId,
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
+      displayText: summary,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1300,7 +1517,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });
@@ -1566,6 +1783,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
+            this.getInboundErrorSourceLabel(envelope),
           );
         }
         this.transitionInboundTask(task.id, 'failed', {
@@ -1985,6 +2203,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async postErrorComment(
     chatId: string,
     issueNumber: number,
+    sourceLabel?: string,
   ): Promise<boolean> {
     try {
       await this.githubApi(
@@ -1993,7 +2212,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             owner: chatId.split('/')[0],
             repo: chatId.split('/')[1],
             issue_number: issueNumber,
-            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            body: this.formatMarkdownAttributedText(
+              '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+              sourceLabel,
+            ),
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
       );

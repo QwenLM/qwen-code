@@ -159,10 +159,10 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       const revealedBefore = registry.isDeferredToolRevealed(exitPlanModeName);
       if (!revealedBefore) {
         registry.revealDeferredTool(exitPlanModeName);
-        const geminiClient = this.config.getGeminiClient();
-        if (geminiClient) {
+        const llmClient = this.config.getLlmClient();
+        if (llmClient) {
           try {
-            await geminiClient.setTools();
+            await llmClient.setTools();
           } catch (setErr) {
             // Rollback the reveal on setTools failure so the registry
             // stays consistent with the chat's declaration list.

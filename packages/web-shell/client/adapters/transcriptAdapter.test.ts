@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   DaemonTranscriptBlock,
   DaemonTranscriptState,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { extractPendingPermission } from './transcriptAdapter';
 
 function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
@@ -157,7 +157,13 @@ describe('extractPendingPermission', () => {
       toolCall: {
         toolCallId: 'call-plan',
         kind: 'switch_mode',
-        _meta: { toolName: 'exit_plan_mode' },
+        _meta: {
+          toolName: 'exit_plan_mode',
+          qwenTodoApproval: {
+            planId: 'plan-1',
+            sourceCallId: 'todo-call-1',
+          },
+        },
         content: [
           {
             type: 'content',
@@ -174,6 +180,7 @@ describe('extractPendingPermission', () => {
     expect(extractPendingPermission(state([permission]).blocks)).toMatchObject({
       toolKind: 'switch_mode',
       toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
       content: [{ type: 'text', text: '1. Prepare\n2. Ship' }],
     });
   });

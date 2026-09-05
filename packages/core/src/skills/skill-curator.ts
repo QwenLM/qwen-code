@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { QWEN_DIR } from '../config/storage.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import {
   getArchivedSkillsRoot,
@@ -22,6 +23,8 @@ import { SKILL_NAME_PATTERN, validateSkillName } from './types.js';
 export const AUTO_SKILL_CURATOR_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 export const AUTO_SKILL_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 export const AUTO_SKILL_ARCHIVE_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
+
+const debugLogger = createDebugLogger('SKILL_CURATOR');
 
 const AUTO_SKILL_PREFIX = 'auto-skill-';
 const CURATOR_STATE_VERSION = 1;
@@ -156,6 +159,9 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     randomize: true,
   },
   stale: 10_000,
+  onCompromised: (err) => {
+    debugLogger.warn('skill curator lock compromised:', err);
+  },
 };
 
 function getCuratorPaths(projectRoot: string): CuratorPaths {

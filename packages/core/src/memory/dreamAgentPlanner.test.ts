@@ -12,8 +12,8 @@ import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { Storage } from '../config/storage.js';
-import type { ForkedAgentResult } from '../utils/forkedAgent.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import type { ForkedAgentResult } from '../agents/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -28,7 +28,7 @@ import {
 } from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
@@ -52,6 +52,7 @@ describe('dreamAgentPlanner', () => {
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
   });
@@ -148,7 +149,6 @@ describe('dreamAgentPlanner', () => {
           'read_file',
           'grep_search',
           'glob',
-          'list_directory',
           'run_shell_command',
           'write_file',
           'edit',
@@ -168,6 +168,34 @@ describe('dreamAgentPlanner', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('preserves the zero turn limit sentinel', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
     );
   });
 

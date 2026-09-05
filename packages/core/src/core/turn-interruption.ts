@@ -5,7 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
+import { isSystemReminderContent } from './environmentContext.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -118,7 +118,7 @@ export function detectTurnInterruption(history: Content[]): TurnInterruption {
 /**
  * Build the error `functionResponse` parts that close the dangling
  * `functionCall`s of an `interrupted_turn`. Shape matches the repair pass's
- * synthesized responses (`applyRepair` in geminiChat.ts) so downstream
+ * synthesized responses (`applyRepair` in llm-chat.ts) so downstream
  * dedup and telemetry treat both identically.
  *
  * @param danglingCalls - The unanswered calls from {@link detectTurnInterruption}.

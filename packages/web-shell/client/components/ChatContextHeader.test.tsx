@@ -6,6 +6,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import { ChatContextHeader } from './ChatContextHeader';
 
+// The QR entry reads the workspace connection from context.
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      baseUrl: 'http://127.0.0.1:8080/',
+      token: 'test-token',
+    }),
+  };
+});
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 let container: HTMLDivElement | null = null;
@@ -100,6 +115,45 @@ describe('ChatContextHeader', () => {
     );
 
     expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Toggle environment information',
+      'Toggle right panel',
+    ]);
+  });
+
+  it('opens the token usage panel from the trailing header action', () => {
+    const onOpenTokenUsage = vi.fn();
+    const view = mount({ rightPanelAvailable: true, onOpenTokenUsage });
+    const actions = Array.from(
+      view.querySelectorAll<HTMLButtonElement>('button'),
+    );
+
+    expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Toggle environment information',
+      'Session token usage',
+      'Toggle right panel',
+    ]);
+    act(() => actions[1]!.click());
+    expect(onOpenTokenUsage).toHaveBeenCalledOnce();
+  });
+
+  it('hides the token usage action when no session is available', () => {
+    const view = mount();
+    expect(
+      view.querySelector('button[aria-label="Session token usage"]'),
+    ).toBeNull();
+  });
+
+  it('shows the Local Control QR entry ahead of the other actions', () => {
+    const view = mount({
+      rightPanelAvailable: true,
+      onOpenLocalControlSettings: vi.fn(),
+    });
+    const actions = Array.from(
+      view.querySelectorAll<HTMLButtonElement>('button'),
+    );
+
+    expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Mobile access',
       'Toggle environment information',
       'Toggle right panel',
     ]);

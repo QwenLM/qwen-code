@@ -24,6 +24,7 @@ import {
   parseLineTolerant,
   read,
   readLines,
+  readLinesWithIntegrity,
   write,
   writeLine,
   writeLineSync,
@@ -241,6 +242,57 @@ describe('read() / readLines() with malformed lines', () => {
     ]);
   });
 
+  it('reports complete recovery for glued object records', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 5),
+    ).resolves.toEqual({
+      records: [{ i: 1 }, { i: 2 }, { i: 3 }],
+      complete: true,
+    });
+  });
+
+  it.each([
+    ['a truncated record', '{"i":1}{"i":\n{"i":3}\n'],
+    ['trailing garbage', '{"i":1}garbage\n{"i":3}\n'],
+    ['an invalid middle fragment', '{"i":1}{"invalid":}{"i":2}\n{"i":3}\n'],
+    ['a non-object value', '{"i":1}\nnull\n{"i":3}\n'],
+  ])('reports incomplete recovery for %s', async (_name, content) => {
+    const file = tmpFile(content);
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 5),
+    ).resolves.toMatchObject({ complete: false });
+  });
+
+  it('measures completeness against a line budget, not a record budget', async () => {
+    // Line 1 alone satisfies a 2-record budget; the corrupt line 2 must still
+    // be scanned because the budget counts physical lines.
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":\n');
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 2),
+    ).resolves.toMatchObject({ complete: false });
+  });
+
+  it('returns every record recovered from the scanned lines', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+
+    await expect(
+      readLinesWithIntegrity<{ i: number }>(file, 1),
+    ).resolves.toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
+  });
+
+  it('keeps the plain reader on a record budget after zero-record lines', async () => {
+    const file = tmpFile('{"i":\nnull\n{"i":1}\n{"i":2}\n');
+
+    await expect(readLines<{ i: number }>(file, 2)).resolves.toEqual([
+      { i: 1 },
+      { i: 2 },
+    ]);
+  });
+
   it('skips blank lines', async () => {
     const file = tmpFile('{"a":1}\n\n{"a":2}\n');
     expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
@@ -261,6 +313,60 @@ describe('read() / readLines() with malformed lines', () => {
 });
 
 describe('reader resource cleanup', () => {
+  it('propagates the caller abort reason from readLines', async () => {
+    const file = tmpFile(
+      Array.from({ length: 1_000 }, (_, index) => `{"i":${index}}`).join('\n'),
+    );
+    const controller = new AbortController();
+    const reason = new Error('jsonl scan cancelled');
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) =>
+        originalCreateReadStream(...args),
+      );
+
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1_000, {
+        signal: controller.signal,
+      });
+      expect(spy).toHaveBeenCalledWith(file, { signal: controller.signal });
+
+      controller.abort(reason);
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('observes cancellation while readLines is closing its stream', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n');
+    const controller = new AbortController();
+    const reason = new Error('cancelled during stream cleanup');
+    let capturedStream: fs.ReadStream | undefined;
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
+        const stream = originalCreateReadStream(...args);
+        capturedStream = stream;
+        return stream;
+      });
+
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1, {
+        signal: controller.signal,
+      });
+      expect(capturedStream).toBeDefined();
+      capturedStream!.once('close', () => controller.abort(reason));
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('closes the file stream after readLines stops at the requested limit', async () => {
     const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}\n');
 
@@ -269,6 +375,16 @@ describe('reader resource cleanup', () => {
     );
 
     expect(result).toEqual([{ i: 1 }]);
+  });
+
+  it('closes the file stream after an integrity-aware read', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+
+    const result = await withCapturedReadStream(() =>
+      readLinesWithIntegrity<{ i: number }>(file, 1),
+    );
+
+    expect(result).toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
   });
 
   it('closes the file stream after read consumes all lines', async () => {

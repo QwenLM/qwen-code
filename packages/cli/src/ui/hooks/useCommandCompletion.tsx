@@ -30,7 +30,7 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
   parseSlashCommand,
-} from '../../utils/commands.js';
+} from '../commands/commands.js';
 
 export enum CompletionMode {
   IDLE = 'IDLE',
@@ -84,6 +84,8 @@ export interface UseCommandCompletionReturn {
   activeCategory: SuggestionCategory | 'all';
   /** Tabs available for the current suggestion set (always includes 'all'). */
   availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Select an exact category tab; a category change resets active/scroll index. */
+  selectCategory: (category: SuggestionCategory | 'all') => void;
   /** Cycle the active category tab; resets active/scroll index. */
   switchCategory: (direction: 1 | -1) => void;
 }
@@ -230,7 +232,7 @@ export function useCommandCompletion(
     visibleStartIndex,
     showSuggestions,
     isLoadingSuggestions,
-    isPerfectMatch,
+    isPerfectMatch: publishedIsPerfectMatch,
     dismissed,
 
     setSuggestions,
@@ -246,6 +248,7 @@ export function useCommandCompletion(
     navigateDown,
     activeCategory,
     availableCategories,
+    selectCategory,
     switchCategory,
   } = useCompletion({ query });
 
@@ -268,6 +271,10 @@ export function useCommandCompletion(
     setIsLoadingSuggestions,
     setIsPerfectMatch,
   });
+  const isPerfectMatch =
+    completionMode === CompletionMode.SLASH
+      ? slashCompletionRange.isPerfectMatch
+      : publishedIsPerfectMatch;
 
   useEffect(() => {
     setActiveSuggestionIndex(suggestions.length > 0 ? 0 : -1);
@@ -445,6 +452,7 @@ export function useCommandCompletion(
     midInputGhostText,
     activeCategory,
     availableCategories,
+    selectCategory,
     switchCategory,
   };
 }

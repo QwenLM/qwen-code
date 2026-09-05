@@ -183,11 +183,11 @@
   max-width: 100%;
 }
 .turnStatusRow {
-  margin-bottom: 4px;
+  padding-bottom: 4px;
 }
 
 .turnAnswerRow {
-  margin-top: 10px;
+  padding-top: 10px;
 }
 
 .turnContentRow {
@@ -243,6 +243,13 @@
     rgb(0 0 0 / 18%) calc(100% - 10px),
     transparent 100%
   );
+}
+
+:global([data-transcript-render-mode='document']) .sessionTimelineViewport {
+  max-height: none;
+  overflow-y: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 .sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar {

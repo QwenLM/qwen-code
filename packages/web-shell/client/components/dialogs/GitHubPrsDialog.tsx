@@ -12,13 +12,14 @@ import {
   GitPullRequestDraftIcon,
   XIcon,
 } from 'lucide-react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonGitHubPullRequest,
   DaemonGitHubPullRequestChecks,
   DaemonGitHubPullRequestList,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { timeAgo } from '../../utils/timeAgo';
 import styles from './GitHubPrsDialog.module.css';
 
@@ -77,6 +78,7 @@ function PullRequestRow({
   now: number;
 }) {
   const { t, language } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const StateIcon =
     pr.state === 'draft' ? GitPullRequestDraftIcon : GitPullRequestIcon;
   const reviewBadge =
@@ -95,13 +97,13 @@ function PullRequestRow({
     ) : null;
 
   return (
-    <button
-      type="button"
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noopener noreferrer"
       className={styles.prRow}
       aria-label={t('githubPrs.open', { number: pr.number })}
-      onClick={() => {
-        if (pr.url) window.open(pr.url, '_blank', 'noopener,noreferrer');
-      }}
+      onClick={(event) => openExternalLink(event, pr.url)}
     >
       <span className={styles.prLine}>
         <StateIcon
@@ -119,7 +121,7 @@ function PullRequestRow({
         {pr.author ? ` · ${pr.author}` : ''} ·{' '}
         {timeAgo(pr.updatedAt, now, language)}
       </span>
-    </button>
+    </a>
   );
 }
 

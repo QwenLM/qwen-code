@@ -10,9 +10,8 @@ import { SettingScope } from './settings.js';
 
 // settingsUtils makes real fs calls in backup/restore — stub them out so the
 // tests can focus on adapter behavior without touching disk.
-vi.mock('../utils/settingsUtils.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/settingsUtils.js')>();
+vi.mock('./settingsUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./settingsUtils.js')>();
   return {
     ...actual,
     backupSettingsFile: vi.fn(),

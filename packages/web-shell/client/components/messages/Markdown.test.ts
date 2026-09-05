@@ -3,12 +3,13 @@
  */
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
   type WebShellCodeBlockRenderInfo,
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import { ThemeProvider } from '../../themeContext';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
@@ -30,6 +31,29 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+function renderMd(content: string): HTMLDivElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      createElement(
+        I18nProvider,
+        { language: 'en' },
+        createElement(Markdown, { content }),
+      ),
+    );
+  });
+  (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+    act(() => root.unmount());
+  return container as HTMLDivElement;
+}
+
+function cleanup(container: HTMLDivElement) {
+  (container as HTMLDivElement & { __unmount: () => void }).__unmount();
+  container.remove();
+}
 
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
@@ -101,6 +125,10 @@ describe('isSafeImageSrc', () => {
     expect(isSafeImageSrc('data:image/webp;base64,UklG')).toBe(true);
   });
 
+  it('allows data:image/bmp base64', () => {
+    expect(isSafeImageSrc('data:image/bmp;base64,Qk0=')).toBe(true);
+  });
+
   it('blocks data:image/svg+xml (can load external resources)', () => {
     expect(isSafeImageSrc('data:image/svg+xml;base64,PHN2Zz4=')).toBe(false);
   });
@@ -119,6 +147,16 @@ describe('isSafeImageSrc', () => {
 
   it('allows relative paths', () => {
     expect(isSafeImageSrc('/images/logo.png')).toBe(true);
+  });
+
+  it('allows only approved data images in document mode', () => {
+    expect(isSafeImageSrc('data:image/png;base64,iVBOR', true)).toBe(true);
+    expect(isSafeImageSrc('https://example.com/img.png', true)).toBe(false);
+    expect(isSafeImageSrc('/images/logo.png', true)).toBe(false);
+    expect(isSafeImageSrc('data:image/bmp;base64,Qk0=', true)).toBe(false);
+    expect(
+      isSafeImageSrc('data:image/png;base64,iVBOR" onerror=alert(1)', true),
+    ).toBe(false);
   });
 });
 
@@ -141,27 +179,18 @@ describe('markdownUrlTransform', () => {
     expect(markdownUrlTransform('javascript:alert(1)')).toBe('');
     expect(markdownUrlTransform('data:text/html;base64,PHN2Zz4=')).toBe('');
   });
+
+  it('allows only approved data images in document mode', () => {
+    expect(
+      markdownUrlTransform('data:image/png;base64,iVBORw0KGgo=', true),
+    ).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(
+      markdownUrlTransform('data:image/svg+xml;base64,PHN2Zz4=', true),
+    ).toBe('');
+  });
 });
 
 describe('qwen-session:// links', () => {
-  function renderMd(content: string): HTMLDivElement {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    act(() => {
-      root.render(
-        createElement(
-          I18nProvider,
-          { language: 'en' },
-          createElement(Markdown, { content }),
-        ),
-      );
-    });
-    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
-      act(() => root.unmount());
-    return container as HTMLDivElement;
-  }
-
   it('survives react-markdown url sanitization and becomes a button', () => {
     // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
     // href to '' before `components.a` runs, so the interception branch never
@@ -226,6 +255,57 @@ describe('qwen-session:// links', () => {
     expect(a.getAttribute('href')).toBeNull();
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();
     c.remove();
+  });
+});
+
+describe('document image policy', () => {
+  it('does not put remote Markdown image URLs into the DOM', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '![remote](https://example.com/secret.png)',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('img')?.getAttribute('src')).toBeNull();
+    expect(container.innerHTML).not.toContain('https://example.com');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('renders chart fences as static code in document mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '```echarts\n{"series":[]}\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      '{"series":[]}',
+    );
+    expect(container.textContent).not.toContain('Show chart');
+
+    act(() => root.unmount());
+    container.remove();
   });
 });
 
@@ -1317,9 +1397,117 @@ describe('Markdown custom code block rendering', () => {
     });
     container.remove();
   });
+
+  it('applies transformMarkdown to a large streaming response', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const rawContent = `raw prefix ${'streaming text '.repeat(3_000)}`;
+    const transformMarkdown = vi.fn((content: string) =>
+      content.replace('raw prefix', 'transformed prefix'),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { transformMarkdown } } },
+          createElement(Markdown, {
+            content: rawContent,
+            source: 'assistant',
+            isStreaming: true,
+          }),
+        ),
+      );
+    });
+
+    expect(
+      container.querySelector('[data-markdown-streaming-plain-text="true"]'),
+    ).not.toBeNull();
+    expect(transformMarkdown).toHaveBeenCalledWith(rawContent, {
+      source: 'assistant',
+    });
+    expect(container.textContent).toContain('transformed prefix');
+    expect(container.textContent).not.toContain('raw prefix');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
 });
 
 describe('Markdown code highlighting while streaming', () => {
+  it('keeps code plain in document mode without loading the highlighter', async () => {
+    __resetForTesting();
+    await getCodeHighlighter('json');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '```json\n{ "safe": true }\n```',
+            isStreaming: false,
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      '"safe": true',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('drops a warmed highlight when switching to document mode', async () => {
+    __resetForTesting();
+    await getCodeHighlighter('json');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const content = '```json\n{ "safe": true }\n```';
+
+    await act(async () => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'interactive' },
+          createElement(Markdown, { content, isStreaming: false }),
+        ),
+      );
+    });
+    expect(container.querySelector('.shiki')).not.toBeNull();
+
+    await act(async () => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, { content, isStreaming: false }),
+        ),
+      );
+    });
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      '"safe": true',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('keeps streamed code content visible while streaming', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -1372,6 +1560,8 @@ describe('Markdown code highlighting while streaming', () => {
           isStreaming: true,
         }),
       );
+      // Wait for the 80ms streaming throttle to flush the new content
+      await new Promise((resolve) => setTimeout(resolve, 100));
     });
     expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const b = 2;');
@@ -1519,5 +1709,224 @@ describe('Markdown code highlighting while streaming', () => {
       root.unmount();
     });
     container.remove();
+  });
+});
+
+describe('Markdown streaming throttle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('flushes the latest content when multiple tokens arrive in one throttle window', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1 Token 2',
+          isStreaming: true,
+        }),
+      );
+    });
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1 Token 2 Token 3',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain('Token 1');
+    expect(container.textContent).not.toContain('Token 1 Token 2 Token 3');
+
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    expect(container.textContent).toContain('Token 1 Token 2 Token 3');
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+});
+
+describe('external links in the desktop shell', () => {
+  type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
+
+  function clickLink(container: HTMLElement): MouseEvent {
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      container.querySelector('a')!.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  afterEach(() => {
+    delete (window as TauriWindow).__TAURI__;
+  });
+
+  it('routes external link clicks through the desktop opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('routes modified desktop clicks through the opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      c.querySelector('a')!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('requests an error toast when the desktop opener fails', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const toasts: ToastRequestDetail[] = [];
+    const handler = (e: Event) =>
+      toasts.push((e as CustomEvent<ToastRequestDetail>).detail);
+    window.addEventListener(TOAST_REQUEST_EVENT, handler);
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    window.removeEventListener(TOAST_REQUEST_EVENT, handler);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe('error');
+    expect(toasts[0].message).toContain('no browser');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('keeps native anchor behavior outside the desktop shell', () => {
+    const openSpy = vi.spyOn(window, 'open');
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const a = c.querySelector('a')!;
+    expect(a.getAttribute('target')).toBe('_blank');
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(false);
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+});
+
+describe('Markdown CJK emphasis', () => {
+  // CommonMark flanking rules reject emphasis delimiters adjacent to CJK
+  // punctuation (commonmark/commonmark-spec#650); the registered CJK-friendly
+  // remark plugin relaxes that so assistant answers can bold quoted terms.
+
+  it('bolds emphasis starting with ASCII quotes after a CJK character', () => {
+    const c = renderMd('这是**"示例"文本**。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('"示例"文本');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('bolds emphasis starting with fullwidth quotes after a CJK character', () => {
+    const c = renderMd('这是**“示例”文本**。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('“示例”文本');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('bolds emphasis closed by a CJK full stop', () => {
+    const c = renderMd('**示例句子。**后续文本。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('示例句子。');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('keeps plain English emphasis unchanged', () => {
+    const c = renderMd('This is **important**.');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('important');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('keeps CJK bold when a host supplies custom remark plugins', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { remarkPlugins: [] } } },
+            createElement(Markdown, {
+              content: '这是**"示例"文本**。',
+              source: 'assistant',
+            }),
+          ),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    const strong = container.querySelector('strong');
+    expect(strong?.textContent).toBe('"示例"文本');
+    expect(container.textContent).not.toContain('**');
+    cleanup(container);
   });
 });

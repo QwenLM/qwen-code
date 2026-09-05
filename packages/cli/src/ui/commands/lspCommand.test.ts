@@ -30,6 +30,10 @@ describe('lspCommand', () => {
     ]);
   });
 
+  it('opts in to running during streaming', () => {
+    expect(lspCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it('returns an error when config is unavailable in non-interactive mode', async () => {
     if (!lspCommand.action) {
       throw new Error('lspCommand must have an action');

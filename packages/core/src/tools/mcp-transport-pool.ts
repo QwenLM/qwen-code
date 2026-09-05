@@ -1044,7 +1044,8 @@ export class McpTransportPool {
           });
         })(),
         timeoutMs,
-        `pool spawn for ${id}`,
+        `pool spawn for ${id} ` +
+          `(pool will roll back the spawn and free its budget slot)`,
       );
       if (this.draining) {
         debugLogger.warn(
@@ -1274,7 +1275,8 @@ export class McpTransportPool {
           });
         })(),
         timeoutMs,
-        `unpooled spawn for ${id}`,
+        `unpooled spawn for ${id} ` +
+          `(pool will roll back the spawn and free its budget slot)`,
       );
       // Re-check terminal state after the await — a concurrent
       // `releaseSession(sessionId)` may have invoked `forceShutdown`

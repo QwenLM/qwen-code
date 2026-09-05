@@ -7,6 +7,7 @@
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
+import type { Content } from '@google/genai';
 import type {
   Config,
   ModelInvocableCommandExecutorResult,
@@ -36,6 +37,7 @@ export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -97,7 +99,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     name: string;
     description: string;
   }> = [];
+  private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
+  private loadedSkillContents: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -145,8 +149,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // skill that the same-turn <system-reminder> just announced as available.
     // (refreshSkills now only updates in-memory sets; it no longer mutates the
     // tool declaration or calls setTools — see SKILL_TOOL_DESCRIPTION.)
-    this.removeChangeListener = this.skillManager.addChangeListener(() =>
-      this.refreshSkills(),
+    this.removeChangeListener = this.skillManager.addChangeListener((options) =>
+      this.refreshSkills(options),
     );
 
     // Populate the runtime sets asynchronously.
@@ -161,7 +165,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * toggle, or MCP-prompt provider change).
    *
    * It deliberately does NOT mutate the tool declaration or call
-   * `geminiClient.setTools()`. The Skill tool's description is static
+   * `llmClient.setTools()`. The Skill tool's description is static
    * (`SKILL_TOOL_DESCRIPTION`), so the skill set no longer affects the tools
    * block — and the tools block is the front of the tools → system → messages
    * prompt-cache prefix, where any byte change invalidates the whole cached
@@ -170,7 +174,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * available skills comes from the `<available_skills>` snapshot in the startup
    * prelude plus per-turn `<system-reminder>` deltas.
    */
-  async refreshSkills(): Promise<void> {
+  async refreshSkills(options?: { throwOnError?: boolean }): Promise<void> {
     try {
       // Invalidate the memoization cache so this refresh picks up any
       // skill-set mutations (file edits, conditional activations, config
@@ -184,11 +188,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
       this.modelInvocableCommands = collected.modelInvocableCommands;
+      this.hiddenSkillNames = collected.hiddenSkillNames ?? new Set();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
       this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
+      this.hiddenSkillNames = new Set();
+      if (options?.throwOnError) throw error;
     }
   }
 
@@ -207,12 +214,19 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
     // Check file-based skills
     const skillExists = this.availableSkills.some(
-      (skill) => skill.name === params.skill,
+      (skill) =>
+        skill.name === params.skill && this.config.isSkillEnabled(skill),
     );
     if (skillExists) return null;
 
-    // Check model-invocable commands (e.g. MCP prompts) listed in <available_skills>
-    const commandExists = this.modelInvocableCommands.some(
+    // Check model-invocable commands (e.g. MCP prompts) listed in
+    // <available_skills>. Consults the live provider — not just the cached
+    // snapshot — because in interactive mode the provider is only attached
+    // after CommandService initialisation resolves, which races SkillTool
+    // construction: the constructor's refreshSkills() then reads a still-null
+    // provider and caches an empty command set that is never refreshed unless
+    // an unrelated SkillManager change event happens to fire (issue #9821).
+    const commandExists = this.getModelInvocableCommands().some(
       (cmd) => cmd.name === params.skill,
     );
     if (commandExists) return null;
@@ -222,7 +236,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // `fileBasedSkillNames` exclusion in `refreshSkills`, a disabled skill
     // no longer shadows a same-named non-skill command, and we don't want
     // this branch to block the legitimate command path.
-    if (this.config.getDisabledSkillNames().has(params.skill.toLowerCase())) {
+    const knownSkill = this.skillManager
+      .getCachedSkills()
+      ?.find((skill) => skill.name === params.skill);
+    if (
+      this.config.getDisabledSkillNames().has(params.skill.toLowerCase()) ||
+      (knownSkill && !this.config.isSkillEnabled(knownSkill))
+    ) {
       return `Skill "${params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
     }
 
@@ -236,8 +256,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
 
     const availableNames = [
-      ...this.availableSkills.map((s) => s.name),
-      ...this.modelInvocableCommands.map((c) => c.name),
+      ...new Set([
+        ...this.availableSkills.map((s) => s.name),
+        ...this.getModelInvocableCommands().map((c) => c.name),
+      ]),
     ];
     if (availableNames.length === 0) {
       return `Skill "${params.skill}" not found. No skills are currently available.`;
@@ -245,14 +267,64 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
   }
 
+  /**
+   * Returns the model-invocable commands to validate against, preferring a
+   * live read of the config provider over the cached snapshot from the last
+   * `refreshSkills()` (see `validateToolParams` for the late-attach race).
+   * Falls back to the cache when no provider is registered (e.g. SDK mode)
+   * or when the provider throws. The provider is synchronous, so the live
+   * read is cheap enough to run on every validation.
+   *
+   * Commands whose names collide with a file-based skill (active or pending
+   * path-activation) are dropped, mirroring the `fileBasedSkillNames` dedup
+   * in `collectAvailableSkillEntries` — without this, a command named after
+   * a path-gated skill would pass validation here and bypass the
+   * "gated by paths:" branch above.
+   */
+  private getModelInvocableCommands(): ReadonlyArray<{
+    name: string;
+    description: string;
+  }> {
+    let commands: ReadonlyArray<{ name: string; description: string }>;
+    const provider = this.config.getModelInvocableCommandsProvider();
+    if (provider) {
+      try {
+        commands = provider();
+      } catch (error) {
+        debugLogger.warn(
+          'Model-invocable commands provider threw; falling back to cached set:',
+          error,
+        );
+        commands = this.modelInvocableCommands;
+      }
+    } else {
+      commands = this.modelInvocableCommands;
+    }
+    const knownSkills = this.skillManager.getCachedSkills() ?? [];
+    const shadowedNames = new Set<string>([
+      ...this.availableSkills
+        .filter((skill) => this.config.isSkillEnabled(skill))
+        .map((skill) => skill.name),
+      ...Array.from(this.pendingConditionalSkillNames).filter((name) => {
+        const skill = knownSkills.find((candidate) => candidate.name === name);
+        return !skill || this.config.isSkillEnabled(skill);
+      }),
+    ]);
+    return commands.filter((cmd) => !shadowedNames.has(cmd.name));
+  }
+
   protected createInvocation(params: SkillParams) {
     return new SkillToolInvocation(
       this.config,
       this.skillManager,
       params,
-      (name: string) => this.loadedSkillNames.add(name),
+      (name: string, content?: string) => {
+        this.loadedSkillNames.add(name);
+        if (content !== undefined) this.loadedSkillContents.add(content);
+      },
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
+      (name: string) => this.hiddenSkillNames.has(name),
     );
   }
 
@@ -275,12 +347,72 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return this.loadedSkillNames;
   }
 
+  getLoadedSkillContents(): ReadonlySet<string> {
+    return this.loadedSkillContents;
+  }
+
+  restoreLoadedSkillsFromHistory(history: Content[]): void {
+    this.clearLoadedSkills();
+
+    const skillByName = new Map<string, { name: string; output: string }>();
+    for (const skill of this.skillManager.getCachedSkills() ?? []) {
+      const output = buildSkillLlmContent(
+        path.dirname(skill.filePath),
+        skill.body,
+      );
+      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+    }
+
+    const pendingSkillCalls = new Map<string, string>();
+    for (const content of history) {
+      for (const part of content.parts ?? []) {
+        const call = part.functionCall;
+        const requestedSkill = call?.args?.['skill'];
+        if (
+          call?.name === ToolNames.SKILL &&
+          typeof call.id === 'string' &&
+          typeof requestedSkill === 'string'
+        ) {
+          pendingSkillCalls.set(call.id, requestedSkill);
+          continue;
+        }
+
+        const response = part.functionResponse;
+        const output = response?.response?.['output'];
+        if (
+          response?.name !== ToolNames.SKILL ||
+          typeof response.id !== 'string' ||
+          typeof output !== 'string'
+        ) {
+          continue;
+        }
+
+        const requestedName = pendingSkillCalls.get(response.id);
+        pendingSkillCalls.delete(response.id);
+        if (requestedName === undefined) continue;
+        const skill = skillByName.get(requestedName.toLowerCase());
+        if (
+          !skill ||
+          (output !== skill.output && !output.startsWith(`${skill.output}\n`))
+        ) {
+          continue;
+        }
+
+        this.loadedSkillContents.add(skill.output);
+        this.loadedSkillNames.add(skill.name);
+      }
+    }
+  }
+
   /**
-   * Clears the loaded-skills tracking. Should be called when the session
-   * is reset (e.g. /clear) so that stale body-token data is not shown.
+   * Clears the loaded-skills tracking. Called when the session is reset
+   * (e.g. /clear) and conservatively at destructive history-rewrite
+   * boundaries (compaction, truncation, orphan stripping), so a skill
+   * whose body was evicted never stays stuck behind the dedup guard.
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
+    this.loadedSkillContents.clear();
   }
 
   /**
@@ -307,7 +439,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly config: Config,
     private readonly skillManager: SkillManager,
     params: SkillParams,
-    private readonly onSkillLoaded: (name: string) => void,
+    private readonly onSkillLoaded: (name: string, content?: string) => void,
     private readonly commandExecutor:
       | ((
           name: string,
@@ -315,6 +447,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
+    private readonly isSkillHidden: (name: string) => boolean = () => false,
   ) {
     super(params);
   }
@@ -341,6 +474,75 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return 'ask';
   }
 
+  /**
+   * Apply the skill's side effects — `allowedTools` session allow rules and
+   * frontmatter hooks — when the folder-trust gate allows it. Idempotent:
+   * both underlying registrations dedup already-applied entries.
+   *
+   * The gate has two sides. This is the way in; a project skill's grants
+   * are additionally marked trust-gated, and both the permission manager
+   * and the hook event handler re-read `isTrustedFolder()` at decision
+   * time, so a trust revoked mid-session (an IDE trust notification flips it
+   * live) suspends the already-applied hooks and allow rules without a
+   * restart, and a trust granted again restores them.
+   */
+  private applySideEffects(skill: SkillConfig): void {
+    if (!canApplySkillSideEffects(skill, this.config)) {
+      debugLogger.warn(
+        `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+      );
+      return;
+    }
+    // Auto-approve the skill's declared allowedTools for the rest of the session.
+    applySkillAllowedTools(
+      this.config.getPermissionManager(),
+      skill.allowedTools,
+      { trustGated: skill.level === 'project' },
+    );
+    this.registerHooks(skill);
+  }
+
+  private registerHooks(skill: SkillConfig): void {
+    debugLogger.debug('Skill hooks check:', {
+      hasHooks: !!skill.hooks,
+      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
+      skillName: skill.name,
+    });
+    if (!skill.hooks) {
+      // Re-run on every invocation (the gate is re-evaluated each time), so
+      // a hookless skill would otherwise WARN on every use of it.
+      debugLogger.debug(
+        `Skill "${this.params.skill}" has no hooks to register`,
+      );
+      return;
+    }
+    const hookSystem = this.config.getHookSystem();
+    const sessionId = this.config.getSessionId();
+    debugLogger.debug('Hook system and session:', {
+      hasHookSystem: !!hookSystem,
+      sessionId,
+    });
+    if (!hookSystem || !sessionId) {
+      return;
+    }
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const hookCount = registerSkillHooks(sessionHooksManager, sessionId, skill);
+    if (hookCount > 0) {
+      debugLogger.info(
+        `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+      );
+    } else {
+      // Zero is the expected outcome of every re-invocation: the hooks are
+      // already registered and `registerSkillHooks` dedups them (it logs
+      // each skip at debug level). Not a warning — a steady-state WARN
+      // claiming "no hooks registered" over hooks that are firing sends
+      // whoever reads the log after a phantom failure.
+      debugLogger.debug(
+        `No new hooks registered from skill "${this.params.skill}" (already registered or none registrable)`,
+      );
+    }
+  }
+
   private async recordAutoSkillUsageBestEffort(
     skill: SkillConfig,
   ): Promise<void> {
@@ -353,31 +555,64 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     }
   }
 
+  private async executeDisabledSkill(): Promise<ToolResult> {
+    let disabledCommandFallbackAttempted = false;
+    if (this.commandExecutor) {
+      disabledCommandFallbackAttempted = true;
+      // Wrap in try/catch matching the non-disabled path's graceful
+      // degradation: if the MCP server throws
+      // (network error, timeout, protocol violation), fall through to
+      // the disabled-error message instead of propagating an unhandled
+      // rejection out of execute(). Without this, disabling a skill
+      // makes the system MORE fragile to MCP failures, not less.
+      try {
+        const content = await this.commandExecutor(
+          this.params.skill,
+          this.params.args ?? '',
+        );
+        if (content && typeof content === 'object' && 'error' in content) {
+          return {
+            llmContent: content.error,
+            returnDisplay: content.error,
+          };
+        }
+        if (typeof content === 'string') {
+          // Delegated to a same-named non-skill command (file command
+          // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
+          // track via `onSkillLoaded` — no skill body was loaded, and
+          // conflating the two would inflate skill telemetry /
+          // `/context` skill-token attribution with command runs.
+          return {
+            llmContent: [{ text: content }],
+            returnDisplay: `Delegated to command: ${this.params.skill}`,
+          };
+        }
+      } catch {
+        // Fall through to the disabled-error message below.
+      }
+    }
+    logSkillLaunch(
+      this.config,
+      new SkillLaunchEvent(this.params.skill, false, this.promptId),
+    );
+    if (!disabledCommandFallbackAttempted) {
+      recordSkillInvocation(this.config, {
+        skillName: this.params.skill,
+        success: false,
+      });
+    }
+    const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
+    return { llmContent: msg, returnDisplay: msg };
+  }
+
   async execute(
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
-    // Disabled-skill guard. Mirrors validateToolParams's commandExists →
-    // disabled ordering at the execution layer: when a skill is disabled
-    // but a same-named non-skill command (MCP prompt, file command)
-    // exists, we MUST run the command instead of loading the disabled
-    // skill from disk. `loadSkillForRuntime` resolves by name and ignores
-    // the `skills.disabled` setting, so without this guard a disabled
-    // skill would still execute its body whenever it shadows a real
-    // command.
-    const disabled = this.config
-      .getDisabledSkillNames()
-      .has(this.params.skill.toLowerCase());
-    if (disabled) {
-      let disabledCommandFallbackAttempted = false;
+    if (this.isSkillHidden(this.params.skill)) {
+      let hiddenCommandFallbackAttempted = false;
       if (this.commandExecutor) {
-        disabledCommandFallbackAttempted = true;
-        // Wrap in try/catch matching the non-disabled path's graceful
-        // degradation: if the MCP server throws
-        // (network error, timeout, protocol violation), fall through to
-        // the disabled-error message instead of propagating an unhandled
-        // rejection out of execute(). Without this, disabling a skill
-        // makes the system MORE fragile to MCP failures, not less.
+        hiddenCommandFallbackAttempted = true;
         try {
           const content = await this.commandExecutor(
             this.params.skill,
@@ -390,32 +625,46 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
             };
           }
           if (typeof content === 'string') {
-            // Delegated to a same-named non-skill command (file command
-            // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
-            // track via `onSkillLoaded` — no skill body was loaded, and
-            // conflating the two would inflate skill telemetry /
-            // `/context` skill-token attribution with command runs.
             return {
               llmContent: [{ text: content }],
               returnDisplay: `Delegated to command: ${this.params.skill}`,
             };
           }
-        } catch {
-          // Fall through to the disabled-error message below.
+        } catch (error) {
+          debugLogger.warn(
+            `Hidden-skill command fallback failed for "${this.params.skill}":`,
+            error,
+          );
+          // Fall through to the generic not-found message.
         }
       }
       logSkillLaunch(
         this.config,
         new SkillLaunchEvent(this.params.skill, false, this.promptId),
       );
-      if (!disabledCommandFallbackAttempted) {
+      if (!hiddenCommandFallbackAttempted) {
         recordSkillInvocation(this.config, {
           skillName: this.params.skill,
           success: false,
         });
       }
-      const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
+      const msg = `Skill "${this.params.skill}" not found.`;
       return { llmContent: msg, returnDisplay: msg };
+    }
+
+    // Disabled-skill guard. Mirrors validateToolParams's commandExists →
+    // disabled ordering at the execution layer: when a skill is disabled
+    // but a same-named non-skill command (MCP prompt, file command)
+    // exists, we MUST run the command instead of loading the disabled
+    // skill from disk. `loadSkillForRuntime` resolves by name and ignores
+    // the `skills.disabled` setting, so without this guard a disabled
+    // skill would still execute its body whenever it shadows a real
+    // command.
+    const disabled = this.config
+      .getDisabledSkillNames()
+      .has(this.params.skill.toLowerCase());
+    if (disabled) {
+      return this.executeDisabledSkill();
     }
 
     let commandFallbackAttempted = false;
@@ -425,6 +674,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const skill = await this.skillManager.loadSkillForRuntime(
         this.params.skill,
       );
+      if (skill && !this.config.isSkillEnabled(skill)) {
+        return this.executeDisabledSkill();
+      }
 
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
@@ -453,7 +705,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
               this.config,
               new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
-            this.onSkillLoaded(this.params.skill);
+            // Don't track via `onSkillLoaded` (mirrors the disabled
+            // branch above): the result is raw command text, not a
+            // skill body, so a tracked name here would block a later
+            // same-named file skill behind the dedup guard even though
+            // no body is resident.
             return {
               llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,
@@ -508,6 +764,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
+        // Re-evaluated on every invocation, not just the first load: folder
+        // trust can be granted mid-session (IDE trust notifications flip it
+        // live), and a project skill first invoked while untrusted must not
+        // stay side-effect-less for the rest of the session. Both grants
+        // dedup, so re-applying is idempotent.
+        this.applySideEffects(skill);
         void this.recordAutoSkillUsageBestEffort(skill);
         const msg = `Skill "${this.params.skill}" is already loaded in context.`;
         return {
@@ -516,52 +778,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         };
       }
 
-      this.onSkillLoaded(this.params.skill);
-
-      // Auto-approve the skill's declared allowedTools for the rest of the session.
-      applySkillAllowedTools(
-        this.config.getPermissionManager(),
-        skill.allowedTools,
-      );
-
-      // Register skill hooks if present
-      debugLogger.debug('Skill hooks check:', {
-        hasHooks: !!skill.hooks,
-        hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-        skillName: skill.name,
-      });
-      if (skill.hooks) {
-        const hookSystem = this.config.getHookSystem();
-        const sessionId = this.config.getSessionId();
-        debugLogger.debug('Hook system and session:', {
-          hasHookSystem: !!hookSystem,
-          sessionId,
-        });
-        if (hookSystem && sessionId) {
-          const sessionHooksManager = hookSystem.getSessionHooksManager();
-          const hookCount = registerSkillHooks(
-            sessionHooksManager,
-            sessionId,
-            skill,
-          );
-          if (hookCount > 0) {
-            debugLogger.info(
-              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-            );
-          } else {
-            debugLogger.warn(
-              `No hooks registered from skill "${this.params.skill}"`,
-            );
-          }
-        }
-      } else {
-        debugLogger.warn(
-          `Skill "${this.params.skill}" has no hooks to register`,
-        );
-      }
-
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
+      this.onSkillLoaded(this.params.skill, llmContent);
+      this.applySideEffects(skill);
+
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,

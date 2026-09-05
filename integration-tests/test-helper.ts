@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
@@ -13,7 +14,17 @@ import fs from 'node:fs';
 import { EOL } from 'node:os';
 import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
-import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
+import { vi } from 'vitest';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServerOptions,
+  type FakeOpenAIToolCall,
+} from './fake-openai-server.js';
+import {
+  e2eRendererEnv,
+  pickE2eRenderer,
+  resolveE2eCliCommand,
+} from './renderer-matrix.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,7 +38,11 @@ function sanitizeTestName(name: string) {
 // Helper to create detailed error messages
 export function createToolCallErrorMessage(
   expectedTools: string | string[],
-  foundTools: string[],
+  // Callers build this by mapping `toolRequest.name` over the parsed
+  // telemetry, where the name is optional. This is a failure message, so a
+  // missing entry should print as `undefined` rather than force every call
+  // site to filter first.
+  foundTools: Array<string | undefined>,
   result: string,
 ) {
   const expectedStr = Array.isArray(expectedTools)
@@ -170,6 +185,10 @@ interface ParsedLog {
     duration_ms?: number;
     status?: string;
     'error.message'?: string;
+    // Telemetry carries far more attributes than the tool-call subset named
+    // above; callers reach them by key (`attributes['request_text']`). Every
+    // value is `unknown` because nothing validates the payload shape.
+    [key: string]: unknown;
   };
   scopeMetrics?: {
     metrics: {
@@ -186,6 +205,7 @@ export class TestRig {
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
+  private readonly interactiveProcesses: pty.IPty[] = [];
 
   constructor() {
     this.bundlePath = join(__dirname, '..', 'dist/cli.js');
@@ -199,7 +219,7 @@ export class TestRig {
     return 15000; // 15s locally
   }
 
-  setup(
+  async setup(
     testName: string,
     options: { settings?: Record<string, unknown> } = {},
   ) {
@@ -210,7 +230,7 @@ export class TestRig {
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
-    rmSync(this.testDir, { recursive: true, force: true });
+    await rm(this.testDir, { recursive: true, force: true });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector
@@ -244,11 +264,6 @@ export class TestRig {
 
   mkdir(dir: string) {
     mkdirSync(join(this.testDir!, dir), { recursive: true });
-  }
-
-  sync() {
-    // ensure file system is done before spawning
-    execSync('sync', { cwd: this.testDir! });
   }
 
   /**
@@ -484,10 +499,21 @@ export class TestRig {
   }
 
   async cleanup() {
+    // A session a test never closed keeps its CLI child forwarding PTY bytes
+    // into this worker's stdout; after vitest tears the worker down those
+    // writes EPIPE and fail an otherwise all-green run (#10969).
+    for (const ptyProcess of this.interactiveProcesses.splice(0)) {
+      try {
+        ptyProcess.kill();
+      } catch {
+        // Process may have already exited
+      }
+    }
+
     // Clean up test directory
     if (this.testDir && !env['KEEP_OUTPUT']) {
       try {
-        execSync(`rm -rf ${this.testDir}`);
+        await rm(this.testDir, { recursive: true, force: true });
       } catch (error) {
         // Ignore cleanup errors
         if (env['VERBOSE'] === 'true') {
@@ -500,8 +526,6 @@ export class TestRig {
   async waitForTelemetryReady() {
     // Telemetry is always written to the test directory
     const logFilePath = join(this.testDir!, 'telemetry.log');
-
-    if (!logFilePath) return;
 
     // Wait for telemetry file to exist and have content
     await this.poll(
@@ -816,12 +840,17 @@ export class TestRig {
     }
 
     const parsedLogs = this._readAndParseTelemetryLog();
+    // Every field is optional because it is copied straight out of the
+    // telemetry attributes, which nothing validates. The stdout fallback above
+    // reconstructs the same fields from a regex and can promise them; this
+    // branch cannot, and claiming otherwise just moved the `undefined` past
+    // the type checker into the assertions.
     const logs: {
       toolRequest: {
-        name: string;
-        args: string;
-        success: boolean;
-        duration_ms: number;
+        name?: string;
+        args?: string;
+        success?: boolean;
+        duration_ms?: number;
         status?: string;
         error?: string;
       };
@@ -850,7 +879,9 @@ export class TestRig {
     return logs;
   }
 
-  readLastApiRequest(): Record<string, unknown> | null {
+  // Returns the parsed log, not a bare record: callers want `.attributes`,
+  // and `Record<string, unknown>` hid that the value already has a shape.
+  readLastApiRequest(): ParsedLog | null {
     const logs = this._readAndParseTelemetryLog();
     const apiRequests = logs.filter(
       (logData) =>
@@ -894,7 +925,16 @@ export class TestRig {
     ptyProcess: pty.IPty;
     promise: Promise<{ exitCode: number; signal?: number; output: string }>;
   } {
-    const { command, initialArgs } = this._getCommandAndArgs(['--yolo']);
+    const renderer = pickE2eRenderer();
+    const { command: cliCommand, initialArgs } = this._getCommandAndArgs([
+      '--yolo',
+    ]);
+    // The renderer matrix swaps node for bun only when driving the repo
+    // bundle directly; installed-release runs keep their own launcher and
+    // still get the pinned QWEN_TUI_RENDERER below.
+    const isNpmRelease =
+      process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
+    const command = isNpmRelease ? cliCommand : resolveE2eCliCommand(renderer);
     const commandArgs = [...initialArgs, ...args];
 
     this._interactiveOutput = ''; // Reset output for the new run
@@ -904,8 +944,12 @@ export class TestRig {
       cols: 80,
       rows: 30,
       cwd: this.testDir!,
-      env: process.env as { [key: string]: string },
+      env: {
+        ...process.env,
+        ...e2eRendererEnv(renderer),
+      } as { [key: string]: string },
     });
+    this.interactiveProcesses.push(ptyProcess);
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;
@@ -925,5 +969,58 @@ export class TestRig {
     });
 
     return { ptyProcess, promise };
+  }
+}
+
+export async function runForcedToolCallScenario(options: {
+  rig: TestRig;
+  toolCall: FakeOpenAIToolCall;
+  prompt: string;
+  finalResponse: string;
+}): Promise<Array<Record<string, unknown>>> {
+  const { rig, toolCall, prompt, finalResponse } = options;
+  let streamingRequestIndex = 0;
+  const fakeServer = await startFakeOpenAIServer(({ body }) => {
+    if (body['stream'] !== true) {
+      return { content: '{"selected_memories":[]}' };
+    }
+    if (streamingRequestIndex++ === 0) {
+      return { toolCalls: [toolCall] };
+    }
+    return { content: finalResponse };
+  }, fakeServerHostOptions());
+
+  const noProxy = IS_CONTAINER_SANDBOX
+    ? CONTAINER_SANDBOX_NO_PROXY
+    : '127.0.0.1,localhost';
+  vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+  vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+  vi.stubEnv('OPENAI_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('NO_PROXY', noProxy);
+  vi.stubEnv('no_proxy', noProxy);
+
+  try {
+    // Explicit CLI flags outrank a developer's ~/.qwen/settings.json
+    // (settings.model.name beats the OPENAI_MODEL env var and can silently
+    // route the run to a real model endpoint instead of the fake server).
+    await rig.run(
+      prompt,
+      '--auth-type',
+      'openai',
+      '--model',
+      'fake-model',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--openai-api-key',
+      'fake-key',
+    );
+    return fakeServer.requests
+      .filter(({ body }) => body['stream'] === true)
+      .map(({ body }) => body);
+  } finally {
+    await fakeServer.close();
   }
 }

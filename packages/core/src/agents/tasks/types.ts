@@ -62,7 +62,7 @@ export type TaskStatus =
  * Common envelope every task carries regardless of kind. Per-kind
  * modules extend this via intersection (`TaskBase & { kind: 'agent', ... }`).
  */
-export interface TaskBase {
+export interface TaskBase<Status extends string = TaskStatus> {
   /** Stable id used as the registry key. Per-kind types alias this to
    *  their existing field name (e.g. `agentId`) during the back-compat
    *  window; both fields are populated to the same value at register time. */
@@ -71,7 +71,7 @@ export interface TaskBase {
   kind: TaskKind;
   /** Human label rendered in the pill/panel/dialog. */
   description: string;
-  status: TaskStatus;
+  status: Status;
   /** ms epoch when the task was registered. */
   startTime: number;
   /** ms epoch when the task transitioned out of running. */
@@ -110,7 +110,7 @@ export interface TaskBase {
  * further (e.g. shells let the registry alias `outputPath` →
  * `outputFile`).
  */
-export type TaskRegistration<T extends TaskBase> = Omit<
+export type TaskRegistration<T extends TaskBase<string>> = Omit<
   T,
   'id' | 'kind' | 'outputOffset' | 'notified'
 >;

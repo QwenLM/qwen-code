@@ -10,6 +10,8 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { CRON_TASKS_DISPLAY_PATH } from '../services/cronTasksFile.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 /** "1 day" / "7 days" / "0.5 days". Callers handle the Infinity case. */
 function formatDays(days: number): string {
@@ -44,6 +46,7 @@ export interface CronCreateParams {
   prompt: string;
   recurring?: boolean;
   durable?: boolean;
+  sessionMode?: 'unbound' | 'current';
 }
 
 class CronCreateInvocation extends BaseToolInvocation<
@@ -74,10 +77,22 @@ class CronCreateInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
-    const scheduler = this.config.getCronScheduler();
     const recurring = this.params.recurring !== false;
     const durable = this.params.durable === true;
+    const useCurrentSession = this.params.sessionMode === 'current';
     const prompt = this.params.prompt.trim();
+
+    if (durable && this.config.getSessionSourceType?.() === 'standalone') {
+      const message =
+        'Durable cron jobs are not supported in standalone sessions.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
+
+    const scheduler = this.config.getCronScheduler();
 
     try {
       // Validate cron expression before creating the job
@@ -87,15 +102,39 @@ class CronCreateInvocation extends BaseToolInvocation<
       // silently never fire. Throws with a clear message.
       nextFireTime(this.params.cron, new Date());
 
-      const job = durable
-        ? await scheduler.createDurable(this.params.cron, prompt, recurring)
-        : scheduler.create(this.params.cron, prompt, recurring);
+      if (useCurrentSession && !durable) {
+        throw new Error(
+          'Current-session scheduling requires durable: true because session-only jobs cannot survive a daemon session switch.',
+        );
+      }
+
+      let job: { id: string; cronExpr: string };
+      if (useCurrentSession) {
+        const creator = this.config.getCurrentSessionScheduledTaskCreator();
+        const promptId = promptIdContext.getStore();
+        if (!creator || !promptId) {
+          throw new Error(
+            'current_session_scheduling_unavailable: Current-session scheduling requires an active daemon prompt.',
+          );
+        }
+        const created = await creator({
+          cron: this.params.cron,
+          prompt,
+          recurring,
+          promptId,
+        });
+        job = { id: created.id, cronExpr: created.cron };
+      } else {
+        job = durable
+          ? await scheduler.createDurable(this.params.cron, prompt, recurring)
+          : scheduler.create(this.params.cron, prompt, recurring);
+      }
 
       const display = humanReadableCron(job.cronExpr);
-      const returnDisplay = `Scheduled ${job.id} (${display})${durable ? ' [durable]' : ''}`;
+      const returnDisplay = `Scheduled ${job.id} (${display})${durable ? ' [durable]' : ''}${useCurrentSession ? ' [current conversation]' : ''}`;
 
       const where = durable
-        ? `Persisted to ${CRON_TASKS_DISPLAY_PATH}`
+        ? `Persisted to ${CRON_TASKS_DISPLAY_PATH}${useCurrentSession ? ' and bound to the current conversation' : ''}`
         : 'Session-only (not written to disk, dies when Qwen Code exits)';
       const maxAgeDays = this.config.getCronRecurringMaxAgeDays();
       const expiry = Number.isFinite(maxAgeDays)
@@ -109,7 +148,7 @@ class CronCreateInvocation extends BaseToolInvocation<
 
       return { llmContent, returnDisplay };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       return {
         llmContent: `Error creating cron job: ${message}`,
         returnDisplay: message,
@@ -153,6 +192,10 @@ export class CronCreateTool extends BaseDeclarativeTool<
         `Pass durable: true to write to ${CRON_TASKS_DISPLAY_PATH} so the job survives restarts. ` +
         'Only use durable: true when the user explicitly asks for persistence ("keep doing this every day", "set this up permanently"). ' +
         'Most "remind me in 5 minutes" requests should stay session-only.\n\n' +
+        '## Session binding\n\n' +
+        'By default (sessionMode: "unbound") a durable task stays unbound and uses the existing per-project scheduler owner; it does not reuse this conversation. ' +
+        'Use sessionMode: "current" only when the user explicitly wants future runs to continue in this conversation. ' +
+        'Current-session mode requires durable: true and an active daemon-backed prompt.\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
         `${recurringExpiryBlurb(maxAgeDays)}\n\n` +
@@ -183,6 +226,12 @@ export class CronCreateTool extends BaseDeclarativeTool<
           durable: {
             type: 'boolean',
             description: `true = persist to ${CRON_TASKS_DISPLAY_PATH} and survive restarts. false (default) = in-memory only, dies when Qwen Code exits. Use true only when the user asks the task to survive across sessions.`,
+          },
+          sessionMode: {
+            type: 'string',
+            enum: ['unbound', 'current'],
+            description:
+              'unbound (default) = preserve the existing unbound durable scheduler behavior. current = bind a durable task to this daemon conversation; requires durable: true.',
           },
         },
         required: ['cron', 'prompt'],
@@ -227,6 +276,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
       prompt: params.prompt,
       recurring: params.recurring ?? true,
       durable: params.durable ?? false,
+      sessionMode: params.sessionMode ?? 'unbound',
     };
   }
 }

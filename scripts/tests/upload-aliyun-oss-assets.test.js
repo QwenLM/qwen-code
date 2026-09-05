@@ -8,7 +8,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseUploadArgs, uploadAssets } from '../upload-aliyun-oss-assets.js';
+import {
+  parseUploadArgs,
+  resolveAttemptTimeoutMs,
+  uploadAssets,
+} from '../upload-aliyun-oss-assets.js';
 
 describe('parseUploadArgs', () => {
   it('returns help=true and skips later validation when --help is passed', () => {
@@ -87,12 +91,16 @@ describe('uploadAssets (integration)', () => {
     fs.mkdirSync(workDir, { recursive: true });
     const ossutilPath = path.join(workDir, 'ossutil-shim.cjs');
     const logPath = path.join(workDir, 'ossutil.log');
+    const exitLine =
+      behavior === 'hang'
+        ? 'setTimeout(() => {}, 60000);' // never exits on its own
+        : `process.exit(${behavior === 'fail' ? 1 : 0});`;
     fs.writeFileSync(
       ossutilPath,
       [
         "const fs = require('node:fs');",
         `fs.appendFileSync(${JSON.stringify(logPath)}, process.argv.slice(2).join('\\n') + '\\n');`,
-        `process.exit(${behavior === 'fail' ? 1 : 0});`,
+        exitLine,
         '',
       ].join('\n'),
     );
@@ -172,4 +180,102 @@ describe('uploadAssets (integration)', () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('kills a stalled attempt and retries it when attemptTimeoutMs is set', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-hang-'));
+    try {
+      const { logPath, ossutilCommand, ossutilCommandArgs } = makeOssutilShim(
+        tmp,
+        'hang',
+      );
+      const assetPath = path.join(tmp, 'asset.tar.gz');
+      fs.writeFileSync(assetPath, 'asset');
+      const configPath = path.join(tmp, '.ossutilconfig');
+      fs.writeFileSync(configPath, '[Credentials]\n');
+
+      // Without the bound this test would sit in the shim's 60s hang; the
+      // kill turns the stall into an ordinary failed attempt, so all three
+      // attempts happen and the uploader fails loudly instead of hanging.
+      // The bound must stay above worst-case child-spawn latency: a SIGKILL
+      // landing before the shim's first appendFileSync loses that attempt's
+      // log line, so the count below reads short (or the log is never
+      // created at all) even though all three attempts ran. 400ms did
+      // exactly that under CPU contention; 2000ms keeps the worst case of
+      // three kills plus 6s of backoff inside this test's 30s budget.
+      expect(() =>
+        uploadAssets(
+          {
+            assets: [assetPath],
+            bucket: 'qwen-test-bucket',
+            config: configPath,
+            prefix: 'releases/qwen-code/v0.0.0',
+          },
+          { ossutilCommand, ossutilCommandArgs, attemptTimeoutMs: 2000 },
+        ),
+      ).toThrow(/ossutil failed after 3 attempts/);
+      const uploadAttempts = fs
+        .readFileSync(logPath, 'utf8')
+        .split(/\r?\n/)
+        .filter((line) => line === assetPath);
+      expect(uploadAttempts).toHaveLength(3);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('succeeds within the attempt bound when the upload is fast', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-fast-'));
+    try {
+      const { ossutilCommand, ossutilCommandArgs } = makeOssutilShim(tmp);
+      const assetPath = path.join(tmp, 'asset.tar.gz');
+      fs.writeFileSync(assetPath, 'asset');
+      const configPath = path.join(tmp, '.ossutilconfig');
+      fs.writeFileSync(configPath, '[Credentials]\n');
+
+      expect(() =>
+        uploadAssets(
+          {
+            assets: [assetPath],
+            bucket: 'qwen-test-bucket',
+            config: configPath,
+            prefix: 'releases/qwen-code/v0.0.0',
+          },
+          { ossutilCommand, ossutilCommandArgs, attemptTimeoutMs: 5000 },
+        ),
+      ).not.toThrow();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe('resolveAttemptTimeoutMs', () => {
+  const KEY = 'OSS_UPLOAD_ATTEMPT_TIMEOUT_MS';
+
+  it('defaults to unbounded when the env var is unset', () => {
+    delete process.env[KEY];
+    expect(resolveAttemptTimeoutMs()).toBe(0);
+  });
+
+  it('reads a millisecond bound from the environment', () => {
+    process.env[KEY] = '120000';
+    try {
+      expect(resolveAttemptTimeoutMs()).toBe(120000);
+    } finally {
+      delete process.env[KEY];
+    }
+  });
+
+  it('rejects a non-integer or negative bound', () => {
+    for (const bad of ['soon', '-5', '1.5']) {
+      process.env[KEY] = bad;
+      try {
+        expect(() => resolveAttemptTimeoutMs()).toThrow(
+          /non-negative integer of milliseconds/,
+        );
+      } finally {
+        delete process.env[KEY];
+      }
+    }
+  });
 });

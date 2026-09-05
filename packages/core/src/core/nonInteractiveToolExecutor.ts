@@ -4,12 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  ToolCallRequestInfo,
-  ToolCallResponseInfo,
-  Config,
-  RuntimeContentGeneratorView,
-} from '../index.js';
+import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
+import type { Config } from '../config/config.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   CoreToolScheduler,
   type AllToolCallsCompleteHandler,

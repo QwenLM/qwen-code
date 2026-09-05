@@ -11,7 +11,7 @@ import {
   type GitOperation,
   type GitWorkingTreeStatus,
 } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { WorkspaceEventPublisher } from './acp-session-bridge.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 export interface WorkspaceGitStatus {
@@ -107,7 +107,7 @@ export class WorkspaceGitState {
    */
   async getStatus(
     workspaceCwd: string,
-    bridge: AcpSessionBridge,
+    bridge: WorkspaceEventPublisher,
     opts?: { wait?: boolean },
   ): Promise<WorkspaceGitStatus> {
     const entry = await this.getOrCreateEntry(workspaceCwd, bridge);
@@ -183,7 +183,7 @@ export class WorkspaceGitState {
   private startRefresh(
     workspaceCwd: string,
     entry: WorkspaceGitEntry,
-    bridge: AcpSessionBridge,
+    bridge: WorkspaceEventPublisher,
     force: boolean,
   ): Promise<void> | undefined {
     if (entry.statusPromise) return entry.statusPromise;
@@ -232,7 +232,7 @@ export class WorkspaceGitState {
 
   private getOrCreateEntry(
     workspaceCwd: string,
-    bridge: AcpSessionBridge,
+    bridge: WorkspaceEventPublisher,
   ): Promise<WorkspaceGitEntry> {
     const existing = this.entries.get(workspaceCwd);
     if (existing) return existing;
@@ -249,7 +249,7 @@ export class WorkspaceGitState {
 
   private async createEntry(
     workspaceCwd: string,
-    bridge: AcpSessionBridge,
+    bridge: WorkspaceEventPublisher,
   ): Promise<WorkspaceGitEntry> {
     const entry: WorkspaceGitEntry = {
       branch: await resolveBranchName(workspaceCwd),

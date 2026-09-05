@@ -22,7 +22,7 @@ import {
   cleanupSettingsBackup,
   restoreSettingsFromBackup,
   getNestedProperty,
-} from '../utils/settingsUtils.js';
+} from './settingsUtils.js';
 
 export function createLoadedSettingsAdapter(
   settings: LoadedSettings,

@@ -16,7 +16,7 @@
 import {
   VISION_BRIDGE_MAX_IMAGE_BASE64_BYTES,
   VISION_BRIDGE_MAX_IMAGES,
-} from './vision-bridge-constants.js';
+} from '../../utils/vision-bridge-constants.js';
 
 export const IMAGE_CAPABILITY = Object.freeze({
   /** Text-only active models are handled by the vision bridge when configured. */

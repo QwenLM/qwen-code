@@ -76,6 +76,11 @@ export interface UsageSummaryRecord {
   };
 }
 
+export interface PreparedUsageBeforeTranscriptDeletion {
+  usagePath: string;
+  record: UsageSummaryRecord;
+}
+
 export type TimeRange = 'today' | 'week' | 'month' | 'all';
 
 export interface AggregatedReport {
@@ -270,32 +275,20 @@ function summarizeTranscript(
   };
 }
 
-/**
- * Salvages a session's usage summary into `usage_record.jsonl` right before
- * its transcript is deleted (#7384): the usage-history rebuild reads
- * transcripts, so deleting a session that was never `/clear`ed or cleanly
- * exited previously erased its usage from the records forever.
- *
- * Never throws — deletion must proceed even when salvage fails — and skips
- * the write when the persisted history already carries a record for the
- * session (a `/clear` or exit already wrote the authoritative summary;
- * duplicating it would re-open #4994). Returns true when a record was
- * written.
- */
-export async function persistUsageBeforeTranscriptDeletion(
+export async function prepareUsageBeforeTranscriptDeletion(
   transcriptPath: string,
-): Promise<boolean> {
+): Promise<PreparedUsageBeforeTranscriptDeletion | null> {
   try {
     const records = await jsonl.read<ChatRecord>(transcriptPath);
     const summarized = summarizeTranscript(records);
-    if (!summarized?.record) return false;
+    if (!summarized?.record) return null;
 
     const usagePath = getUsageHistoryPath();
     try {
       if (fs.existsSync(usagePath)) {
         const existing = await jsonl.read<UsageSummaryRecord>(usagePath);
         if (existing.some((r) => r?.sessionId === summarized.sessionId)) {
-          return false;
+          return null;
         }
       }
     } catch (e) {
@@ -306,12 +299,52 @@ export async function persistUsageBeforeTranscriptDeletion(
         `persistUsageBeforeTranscriptDeletion: cannot read history: ${e}`,
       );
     }
-    jsonl.writeLineSync(usagePath, summarized.record);
+    return { usagePath, record: summarized.record };
+  } catch (e) {
+    debugLogger.debug(`prepareUsageBeforeTranscriptDeletion: ${e}`);
+    return null;
+  }
+}
+
+export function commitUsageBeforeTranscriptDeletion(
+  prepared: PreparedUsageBeforeTranscriptDeletion,
+): boolean {
+  try {
+    if (fs.existsSync(prepared.usagePath)) {
+      const alreadyPersisted = fs
+        .readFileSync(prepared.usagePath, 'utf8')
+        .split(/\r?\n/)
+        .some((line) => {
+          const trimmed = line.trim();
+          return (
+            trimmed.length > 0 &&
+            jsonl
+              .parseLineTolerant<UsageSummaryRecord>(
+                trimmed,
+                prepared.usagePath,
+              )
+              .some((record) => record.sessionId === prepared.record.sessionId)
+          );
+        });
+      if (alreadyPersisted) return false;
+    }
+    jsonl.writeLineSync(prepared.usagePath, prepared.record);
     return true;
   } catch (e) {
-    debugLogger.debug(`persistUsageBeforeTranscriptDeletion: ${e}`);
+    debugLogger.debug(`commitUsageBeforeTranscriptDeletion: ${e}`);
     return false;
   }
+}
+
+/**
+ * Salvages a session's usage before transcript deletion (#7384). Never throws,
+ * and skips sessions that already have a persisted authoritative summary.
+ */
+export async function persistUsageBeforeTranscriptDeletion(
+  transcriptPath: string,
+): Promise<boolean> {
+  const prepared = await prepareUsageBeforeTranscriptDeletion(transcriptPath);
+  return prepared ? commitUsageBeforeTranscriptDeletion(prepared) : false;
 }
 
 interface RebuildFromSessionJsonlOptions {
@@ -370,7 +403,11 @@ async function rebuildFromSessionJsonl(
     const chatsDir = path.join(projectsDir, projDir, 'chats');
     let files: string[];
     try {
-      files = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.jsonl'));
+      // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not a
+      // transcript — only real session JSONL files carry usage evidence.
+      files = fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.ledger.jsonl'));
     } catch (e) {
       debugLogger.debug(
         `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,
@@ -382,20 +419,29 @@ async function rebuildFromSessionJsonl(
       try {
         const filePath = path.join(chatsDir, file);
 
+        let stats: fs.Stats;
+        try {
+          stats = fs.statSync(filePath);
+        } catch (e) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
+          );
+          continue;
+        }
+        // Only regular files are readable transcripts: a FIFO (or any other
+        // special file) passing the name filter would block open() forever
+        // and wedge the whole rebuild — the daemon's usage dashboard serves
+        // from this path.
+        if (!stats.isFile()) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,
+          );
+          continue;
+        }
+
         // Bound the scan when merging live sessions into a persisted history:
         // skip transcripts untouched before `sinceMs`.
-        if (sinceMs !== undefined) {
-          let mtimeMs: number;
-          try {
-            mtimeMs = fs.statSync(filePath).mtimeMs;
-          } catch (e) {
-            debugLogger.debug(
-              `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
-            );
-            continue;
-          }
-          if (mtimeMs < sinceMs) continue;
-        }
+        if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
 
         // Skip sessions the persisted history already records, before any file
         // read: the transcript filename is `{sessionId}.jsonl`

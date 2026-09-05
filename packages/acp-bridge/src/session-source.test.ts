@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { parseSessionSource } from './session-source.js';
+import {
+  isReservedStandaloneSessionSourceType,
+  parseSessionSource,
+} from './session-source.js';
 
 describe('parseSessionSource', () => {
   it('accepts an absent source or a valid source pair', () => {
@@ -39,4 +42,10 @@ describe('parseSessionSource', () => {
       });
     },
   );
+
+  it('identifies only the reserved standalone source type', () => {
+    expect(isReservedStandaloneSessionSourceType('standalone')).toBe(true);
+    expect(isReservedStandaloneSessionSourceType('default')).toBe(false);
+    expect(isReservedStandaloneSessionSourceType(undefined)).toBe(false);
+  });
 });

@@ -11,6 +11,9 @@ export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
+export const WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY =
+  'qwen.workspace.sizeBytes';
+export const PUBLISHED_CONTENT_SHA256_METADATA_KEY = 'qwen.published.sha256';
 const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
@@ -49,6 +52,7 @@ export type PersistedSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type PersistedSessionArtifactStorage =
@@ -159,6 +163,84 @@ export function isSessionArtifactRecord(
   return isTranscriptArtifactRecord(record);
 }
 
+export function selectActiveSideArtifactRecordUuids(
+  records: ReadonlyArray<
+    SessionArtifactChatRecordLike & {
+      uuid: string;
+      parentUuid: string | null;
+    }
+  >,
+  activeRecordUuids: readonly string[],
+): string[] {
+  const activeUuids = new Set(activeRecordUuids);
+  const firstActiveUuid = activeRecordUuids[0];
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const nextActiveUuidByIndex = new Map<number, string>();
+  const nextBlockingUuidByIndex = new Map<number, string>();
+  let nextActiveUuid: string | undefined;
+  let nextBlockingUuid: string | undefined;
+  for (let index = records.length - 1; index >= 0; index--) {
+    if (nextActiveUuid !== undefined) {
+      nextActiveUuidByIndex.set(index, nextActiveUuid);
+    }
+    if (nextBlockingUuid !== undefined) {
+      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
+    }
+    const record = records[index]!;
+    if (activeUuids.has(record.uuid)) {
+      nextActiveUuid = record.uuid;
+      nextBlockingUuid = undefined;
+    } else if (
+      !isSessionArtifactRecord(record) &&
+      !(record.type === 'system' && record.subtype === 'custom_title')
+    ) {
+      nextBlockingUuid = record.uuid;
+    }
+  }
+
+  const selected: string[] = [];
+  const includedSideArtifactUuids = new Set<string>();
+  let previousActiveUuid: string | undefined;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    if (activeUuids.has(record.uuid)) {
+      previousActiveUuid = record.uuid;
+      continue;
+    }
+    if (!isSessionArtifactRecord(record)) continue;
+
+    const nextUuid = nextActiveUuidByIndex.get(index);
+    const isInActiveSegment =
+      !nextBlockingUuidByIndex.has(index) &&
+      (nextUuid !== undefined
+        ? activeUuids.has(nextUuid)
+        : previousActiveUuid !== undefined &&
+          activeUuids.has(previousActiveUuid));
+    if (
+      record.parentUuid !== null &&
+      (activeUuids.has(record.parentUuid) ||
+        includedSideArtifactUuids.has(record.parentUuid)) &&
+      isInActiveSegment &&
+      (record.parentUuid === previousActiveUuid ||
+        includedSideArtifactUuids.has(record.parentUuid))
+    ) {
+      selected.push(record.uuid);
+      includedSideArtifactUuids.add(record.uuid);
+    } else if (
+      record.parentUuid === null &&
+      index < firstActiveIndex &&
+      isInActiveSegment
+    ) {
+      selected.push(record.uuid);
+      includedSideArtifactUuids.add(record.uuid);
+    }
+  }
+  return selected;
+}
+
 export function stableSessionArtifactId(
   sessionId: string,
   identityKey: string,
@@ -181,80 +263,90 @@ export function sessionArtifactIdentityKey(
   return undefined;
 }
 
-export function rebuildSessionArtifactSnapshot(
-  records: readonly SessionArtifactChatRecordLike[],
-  fallbackSessionId?: string,
-): RebuiltSessionArtifactSnapshot | undefined {
-  const artifacts = new Map<string, PersistedSessionArtifact>();
-  const tombstonedIds = new Set<string>();
-  const stickyEphemeralIds = new Set<string>();
-  const markerArtifacts = new Map<string, PersistedSessionArtifact>();
-  const warnings: string[] = [];
-  let sequence = 0;
-  let lastSnapshotSequence = 0;
-  let sessionId = fallbackSessionId;
-  let sawRecord = false;
+export class SessionArtifactSnapshotAccumulator {
+  private readonly artifacts = new Map<string, PersistedSessionArtifact>();
+  private readonly tombstonedIds = new Set<string>();
+  private readonly stickyEphemeralIds = new Set<string>();
+  private readonly markerArtifacts = new Map<
+    string,
+    PersistedSessionArtifact
+  >();
+  private readonly warnings: string[] = [];
+  private sequence = 0;
+  private lastSnapshotSequence = 0;
+  private sessionId: string | undefined;
+  private sawRecord = false;
 
-  for (const record of records) {
-    if (!isSessionArtifactRecord(record)) continue;
+  constructor(fallbackSessionId?: string) {
+    this.sessionId = fallbackSessionId;
+  }
+
+  add(record: SessionArtifactChatRecordLike): void {
+    if (!isSessionArtifactRecord(record)) return;
     if (record.subtype === 'session_artifact_snapshot') {
-      const payload = normalizeSnapshotPayload(record.systemPayload, warnings);
-      if (!payload) continue;
-      sawRecord = true;
-      sessionId = payload.sessionId;
-      sequence = Math.max(sequence, payload.sequence);
-      lastSnapshotSequence = payload.sequence;
-      artifacts.clear();
-      tombstonedIds.clear();
-      stickyEphemeralIds.clear();
-      markerArtifacts.clear();
-      for (const id of payload.tombstonedIds ?? []) tombstonedIds.add(id);
+      const payload = normalizeSnapshotPayload(
+        record.systemPayload,
+        this.warnings,
+      );
+      if (!payload) return;
+      this.sawRecord = true;
+      this.sessionId = payload.sessionId;
+      this.sequence = Math.max(this.sequence, payload.sequence);
+      this.lastSnapshotSequence = payload.sequence;
+      this.artifacts.clear();
+      this.tombstonedIds.clear();
+      this.stickyEphemeralIds.clear();
+      this.markerArtifacts.clear();
+      for (const id of payload.tombstonedIds ?? []) this.tombstonedIds.add(id);
       for (const id of payload.stickyEphemeralIds ?? []) {
-        stickyEphemeralIds.add(id);
+        this.stickyEphemeralIds.add(id);
       }
-      const markerIds = new Set([...tombstonedIds, ...stickyEphemeralIds]);
+      const markerIds = new Set([
+        ...this.tombstonedIds,
+        ...this.stickyEphemeralIds,
+      ]);
       for (const artifact of payload.markerArtifacts ?? []) {
         if (markerIds.has(artifact.id)) {
-          markerArtifacts.set(artifact.id, artifact);
+          this.markerArtifacts.set(artifact.id, artifact);
         }
       }
       for (const artifact of payload.artifacts) {
         if (artifact.retention === 'ephemeral') continue;
-        artifacts.set(artifact.id, artifact);
-        markerArtifacts.delete(artifact.id);
+        this.artifacts.set(artifact.id, artifact);
+        this.markerArtifacts.delete(artifact.id);
       }
-      continue;
+      return;
     }
 
-    const payload = normalizeEventPayload(record.systemPayload, warnings);
-    if (!payload) continue;
-    sawRecord = true;
-    sessionId = payload.sessionId;
-    if (payload.sequence <= lastSnapshotSequence) {
-      warnings.push(
-        `skipped stale event sequence ${payload.sequence} at or before snapshot sequence ${lastSnapshotSequence}`,
+    const payload = normalizeEventPayload(record.systemPayload, this.warnings);
+    if (!payload) return;
+    this.sawRecord = true;
+    this.sessionId = payload.sessionId;
+    if (payload.sequence <= this.lastSnapshotSequence) {
+      this.warnings.push(
+        `skipped stale event sequence ${payload.sequence} at or before snapshot sequence ${this.lastSnapshotSequence}`,
       );
-      continue;
+      return;
     }
-    sequence = Math.max(sequence, payload.sequence);
+    this.sequence = Math.max(this.sequence, payload.sequence);
     for (const change of payload.changes) {
       if (change.action === 'removed') {
-        artifacts.delete(change.artifactId);
+        this.artifacts.delete(change.artifactId);
         if (change.reason === 'explicit') {
-          tombstonedIds.add(change.artifactId);
-          stickyEphemeralIds.delete(change.artifactId);
+          this.tombstonedIds.add(change.artifactId);
+          this.stickyEphemeralIds.delete(change.artifactId);
           if (change.artifact) {
-            markerArtifacts.set(change.artifactId, change.artifact);
+            this.markerArtifacts.set(change.artifactId, change.artifact);
           }
         }
         if (change.reason === 'eviction') {
-          stickyEphemeralIds.delete(change.artifactId);
-          markerArtifacts.delete(change.artifactId);
+          this.stickyEphemeralIds.delete(change.artifactId);
+          this.markerArtifacts.delete(change.artifactId);
         }
         if (change.reason === 'unpin_to_ephemeral') {
-          stickyEphemeralIds.add(change.artifactId);
+          this.stickyEphemeralIds.add(change.artifactId);
           if (change.artifact) {
-            markerArtifacts.set(change.artifactId, change.artifact);
+            this.markerArtifacts.set(change.artifactId, change.artifact);
           }
         }
         continue;
@@ -262,29 +354,38 @@ export function rebuildSessionArtifactSnapshot(
       if (!change.artifact || change.artifact.retention === 'ephemeral') {
         continue;
       }
-      artifacts.set(change.artifact.id, change.artifact);
-      tombstonedIds.delete(change.artifact.id);
-      stickyEphemeralIds.delete(change.artifact.id);
-      markerArtifacts.delete(change.artifact.id);
+      this.artifacts.set(change.artifact.id, change.artifact);
+      this.tombstonedIds.delete(change.artifact.id);
+      this.stickyEphemeralIds.delete(change.artifact.id);
+      this.markerArtifacts.delete(change.artifact.id);
     }
   }
 
-  if (!sawRecord || !sessionId) {
-    return undefined;
-  }
+  finish(): RebuiltSessionArtifactSnapshot | undefined {
+    if (!this.sawRecord || !this.sessionId) return undefined;
 
-  return {
-    v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-    sessionId,
-    sequence,
-    artifacts: Array.from(artifacts.values()),
-    tombstonedIds: Array.from(tombstonedIds),
-    stickyEphemeralIds: Array.from(stickyEphemeralIds),
-    ...(markerArtifacts.size > 0
-      ? { markerArtifacts: Array.from(markerArtifacts.values()) }
-      : {}),
-    warnings,
-  };
+    return {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: this.sessionId,
+      sequence: this.sequence,
+      artifacts: Array.from(this.artifacts.values()),
+      tombstonedIds: Array.from(this.tombstonedIds),
+      stickyEphemeralIds: Array.from(this.stickyEphemeralIds),
+      ...(this.markerArtifacts.size > 0
+        ? { markerArtifacts: Array.from(this.markerArtifacts.values()) }
+        : {}),
+      warnings: this.warnings,
+    };
+  }
+}
+
+export function rebuildSessionArtifactSnapshot(
+  records: readonly SessionArtifactChatRecordLike[],
+  fallbackSessionId?: string,
+): RebuiltSessionArtifactSnapshot | undefined {
+  const accumulator = new SessionArtifactSnapshotAccumulator(fallbackSessionId);
+  for (const record of records) accumulator.add(record);
+  return accumulator.finish();
 }
 
 export function remapSessionArtifactPayloadForFork(
@@ -759,6 +860,7 @@ function normalizePersistedArtifact(
     'audio',
     'pdf',
     'notebook',
+    'document',
     'other',
   ]);
   const storage = normalizeLiteral<PersistedSessionArtifactStorage>(
@@ -895,8 +997,8 @@ function normalizeMetadata(
       typeof item === 'boolean'
     ) {
       if (
-        isReservedWorkspaceMetadataKey(key) &&
-        !isWorkspaceContentMetadataEntry(key, item)
+        isAdoptableContentFingerprintKey(key) &&
+        !isContentFingerprintMetadataEntry(key, item)
       ) {
         continue;
       }
@@ -924,7 +1026,15 @@ export function isPrototypeMetadataKey(key: string): boolean {
 export function isReservedWorkspaceMetadataKey(key: string): boolean {
   return (
     key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
+    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY ||
+    key === WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY
+  );
+}
+
+export function isAdoptableContentFingerprintKey(key: string): boolean {
+  return (
+    isReservedWorkspaceMetadataKey(key) ||
+    key === PUBLISHED_CONTENT_SHA256_METADATA_KEY
   );
 }
 
@@ -964,7 +1074,7 @@ export function metadataBudgetBytes(
   }
   const userMetadata = Object.fromEntries(
     Object.entries(metadata).filter(
-      ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
+      ([key, value]) => !isContentFingerprintMetadataEntry(key, value),
     ),
   );
   return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
@@ -980,7 +1090,24 @@ export function isWorkspaceContentMetadataEntry(
   if (key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) {
     return typeof value === 'number' && Number.isFinite(value);
   }
+  if (key === WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  }
   return false;
+}
+
+export function isContentFingerprintMetadataEntry(
+  key: string,
+  value: string | number | boolean | null,
+): boolean {
+  if (isWorkspaceContentMetadataEntry(key, value)) {
+    return true;
+  }
+  return (
+    key === PUBLISHED_CONTENT_SHA256_METADATA_KEY &&
+    typeof value === 'string' &&
+    /^[0-9a-f]{64}$/.test(value)
+  );
 }
 
 function normalizeLiteral<T extends string>(

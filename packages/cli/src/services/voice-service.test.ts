@@ -14,6 +14,7 @@ import type { Settings } from '../config/settingsSchema.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   hasConfiguredBatchVoiceTranscriptionModel,
+  listAvailableVoiceModels,
   transcribeWorkspaceVoiceAudio,
   validateWorkspaceVoiceConfig,
   validateWorkspaceVoiceModel,
@@ -242,6 +243,32 @@ describe('voice service', () => {
     });
 
     expect(hasConfiguredBatchVoiceTranscriptionModel(settings)).toBe(true);
+  });
+
+  it('resolves voice models in providerProtocol-mapped custom provider groups', () => {
+    // Managed deployments can place a gateway under a custom provider-group
+    // id; with a providerProtocol mapping the voice surface must see the
+    // model exactly like the rest of the CLI model surface does.
+    const settings = makeSettings({
+      user: {
+        modelProviders: {
+          'internal-asr': [
+            {
+              id: 'qwen3-asr-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+        providerProtocol: { 'internal-asr': 'openai' },
+        env: { DASHSCOPE_API_KEY: 'sk-secret' },
+      },
+    });
+
+    expect(hasConfiguredBatchVoiceTranscriptionModel(settings)).toBe(true);
+    expect(
+      listAvailableVoiceModels(settings).map((model) => model.id),
+    ).toContain('qwen3-asr-flash');
   });
 
   it('rejects unknown, duplicate, and unsupported voice model selections', () => {

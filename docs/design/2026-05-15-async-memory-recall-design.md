@@ -5,6 +5,14 @@
 **Related issues:** #3761, #3759
 **Related PRs:** #3814, #3866
 
+> **Updated 2026-08-08:** The UserQuery consume point now waits for at most
+> 100 ms. If the recall settles inside that budget it is delivered initially;
+> if it does not, a deterministic fast result is delivered instead of nothing,
+> and the pending model-selected result is preserved for ToolResult delivery
+> with the fast-delivered documents excluded. The zero-wait UserQuery
+> statements and behavior-table rows below describe the original design and are
+> superseded by `2026-08-08-native-memory-recall-reliability.md`.
+
 ---
 
 ## Problem

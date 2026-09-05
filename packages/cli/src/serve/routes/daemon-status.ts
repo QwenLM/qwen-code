@@ -28,6 +28,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { TotalSessionAdmissionSnapshot } from '../total-session-admission.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 
 interface RegisterDaemonStatusRoutesDeps {
   opts: ServeOptions;
@@ -52,6 +53,7 @@ interface RegisterDaemonStatusRoutesDeps {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
 }
 
 export function registerDaemonStatusRoutes(
@@ -92,6 +94,7 @@ export function registerDaemonStatusRoutes(
           getMetricsSeries: deps.getMetricsSeries,
           getTotalSessionAdmissionSnapshot:
             deps.getTotalSessionAdmissionSnapshot,
+          getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
         }),
       );
     } catch (err) {

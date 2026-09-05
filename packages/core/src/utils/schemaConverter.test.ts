@@ -399,7 +399,8 @@ describe('relaxSchemaForFunctionCalling', () => {
 
   it('never treats property names as schema keywords', () => {
     // `properties` keys are names, not keywords: a property literally
-    // called $schema / $id / additionalProperties must survive the walk.
+    // called $schema / $id / uniqueItems / additionalProperties must survive
+    // the walk.
     const schema = {
       $schema: 'http://json-schema.org/draft-07/schema#',
       $id: 'https://example.com/tool.schema.json',
@@ -407,9 +408,10 @@ describe('relaxSchemaForFunctionCalling', () => {
       properties: {
         $schema: { type: 'string' },
         $id: { type: 'string' },
+        uniqueItems: { type: 'boolean' },
         additionalProperties: { type: 'boolean' },
       },
-      required: ['$schema', '$id', 'additionalProperties'],
+      required: ['$schema', '$id', 'uniqueItems', 'additionalProperties'],
       additionalProperties: false,
       $defs: {
         $schema: { type: 'number' },
@@ -429,17 +431,107 @@ describe('relaxSchemaForFunctionCalling', () => {
     expect(Object.keys(relaxed.properties)).toEqual([
       '$schema',
       '$id',
+      'uniqueItems',
       'additionalProperties',
     ]);
     expect(relaxed.required).toEqual([
       '$schema',
       '$id',
+      'uniqueItems',
       'additionalProperties',
     ]);
     // All properties required -> the constraint keyword stays.
     expect(relaxed.additionalProperties).toBe(false);
     // $defs is a name map too.
     expect(Object.keys(relaxed.$defs)).toEqual(['$schema']);
+  });
+
+  it('removes uniqueItems recursively', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        evidenceRefs: {
+          type: 'array',
+          uniqueItems: true,
+          items: { type: 'string' },
+        },
+        todos: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              blockedBy: {
+                type: 'array',
+                uniqueItems: true,
+                items: { type: 'string' },
+              },
+            },
+          },
+        },
+        disabled: {
+          type: 'array',
+          uniqueItems: false,
+          items: { type: 'string' },
+        },
+      },
+    };
+
+    expect(relaxSchemaForFunctionCalling(schema)).toEqual({
+      type: 'object',
+      properties: {
+        evidenceRefs: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        todos: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              blockedBy: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+          },
+        },
+        disabled: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+    });
+  });
+
+  it('never treats schema-map keys as schema keywords', () => {
+    const namedUniqueItems = { uniqueItems: { type: 'string' } };
+    const schema = {
+      type: 'object',
+      patternProperties: namedUniqueItems,
+      dependencies: namedUniqueItems,
+      dependentSchemas: namedUniqueItems,
+      dependentRequired: { uniqueItems: ['value'] },
+    };
+
+    expect(relaxSchemaForFunctionCalling(schema)).toEqual(schema);
+  });
+
+  it('does not treat JSON literal values as nested schemas', () => {
+    const literal = { uniqueItems: true, $schema: 'literal' };
+    const schema = {
+      type: 'object',
+      const: literal,
+      default: literal,
+      enum: [literal],
+      example: literal,
+      examples: [literal],
+    };
+
+    const relaxed = relaxSchemaForFunctionCalling(schema) as {
+      const: Record<string, unknown>;
+    };
+    expect(relaxed).toEqual(schema);
+    expect(relaxed.const).not.toBe(schema.const);
   });
 
   it('does not mutate the input schema', () => {

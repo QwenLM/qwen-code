@@ -53,7 +53,7 @@ export function sanitizeDisplayText(raw: string): string | null {
   return stripped.length > 0 ? stripped : null;
 }
 
-export function getExtensionDisplayName(extension: Extension): string {
+export function getSanitizedExtensionDisplayName(extension: Extension): string {
   return (
     sanitizeDisplayText(extension.displayName || extension.name) ||
     extension.name
@@ -61,7 +61,7 @@ export function getExtensionDisplayName(extension: Extension): string {
 }
 
 export function buildExtensionContextText(extension: Extension): string {
-  const displayName = getExtensionDisplayName(extension);
+  const displayName = getSanitizedExtensionDisplayName(extension);
   const lines: string[] = [];
 
   lines.push(

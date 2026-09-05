@@ -1,0 +1,21 @@
+{
+  "overall": "fail",
+  "selectedVscodePath": null,
+  "candidates": {
+    "directDaemon": {
+      "status": "pass",
+      "stableUnderPartialPrepend": true,
+      "unstableBlockKinds": [],
+      "missingNativeTextIdentity": []
+    },
+    "acp": {
+      "status": "pass",
+      "stableUnderPartialPrepend": true,
+      "unstableBlockKinds": [],
+      "missingNativeTextIdentity": []
+    }
+  },
+  "blockers": [
+    "VS Code product path selection, live timeline migration, host-action parity, VSIX, and packaged artifact gates move to MR2B"
+  ]
+}

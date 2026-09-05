@@ -5,8 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Config } from '../config/config.js';
 import {
   REASONING_EFFORT_TIERS,
+  applyReasoningEffort,
   clampReasoningEffort,
   normalizeReasoningEffort,
   type ReasoningEffort,
@@ -84,5 +86,43 @@ describe('clampReasoningEffort', () => {
 
   it('handles an empty supported list as no clamping', () => {
     expect(clampReasoningEffort('xhigh', [])).toBe('xhigh');
+  });
+});
+
+describe('applyReasoningEffort', () => {
+  function makeConfig(thinkingDisabled = false) {
+    let stored: ReasoningEffort | undefined;
+    return {
+      setReasoningEffort(effort: ReasoningEffort | undefined) {
+        // Mirrors Config: a no-op when thinking is explicitly disabled.
+        if (thinkingDisabled) return;
+        stored = effort;
+      },
+      getReasoningEffort() {
+        return stored;
+      },
+    } as unknown as Config;
+  }
+
+  it('applies the tier and reports true when the config accepts it', () => {
+    const config = makeConfig();
+    expect(applyReasoningEffort(config, 'high')).toBe(true);
+    expect(config.getReasoningEffort()).toBe('high');
+  });
+
+  it('reports false when setReasoningEffort no-ops (thinking disabled)', () => {
+    const config = makeConfig(true);
+    expect(applyReasoningEffort(config, 'high')).toBe(false);
+    expect(config.getReasoningEffort()).toBeUndefined();
+  });
+
+  it('clearing the override always reports true', () => {
+    const active = makeConfig();
+    applyReasoningEffort(active, 'max');
+    expect(applyReasoningEffort(active, undefined)).toBe(true);
+    expect(active.getReasoningEffort()).toBeUndefined();
+
+    const disabled = makeConfig(true);
+    expect(applyReasoningEffort(disabled, undefined)).toBe(true);
   });
 });

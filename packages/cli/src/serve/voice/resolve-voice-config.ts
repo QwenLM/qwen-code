@@ -62,6 +62,7 @@ function buildModelsConfig(
   return new ModelsConfig({
     initialAuthType: selectedAuthType,
     modelProvidersConfig: merged.modelProviders,
+    providerProtocolConfig: merged.providerProtocol,
     generationConfig: resolvedCliConfig.generationConfig,
     generationConfigSources: resolvedCliConfig.sources,
   });

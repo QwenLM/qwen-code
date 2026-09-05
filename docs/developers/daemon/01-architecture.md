@@ -13,7 +13,7 @@ This doc gives the **system-level picture** that the rest of this documentation 
 ```mermaid
 flowchart LR
     subgraph clients["Clients"]
-        WUI["Web UI<br/>(packages/webui/src/daemon)"]
+        WUI["Web Shell<br/>(packages/web-shell/client/daemon)"]
         TUI["CLI TUI<br/>(packages/cli/src/ui/daemon)"]
         IDE["VS Code IDE<br/>(packages/vscode-ide-companion)"]
         CH["Channel bots<br/>(DingTalk / WeChat / Telegram / Feishu)"]
@@ -98,7 +98,7 @@ flowchart TB
     end
 
     subgraph adapters["Adapters"]
-        WUIP["webui/src/daemon/<br/>DaemonSessionProvider.tsx"]
+        WUIP["web-shell/client/daemon/<br/>DaemonSessionProvider.tsx"]
         TUIA["cli/src/ui/daemon/<br/>daemon-tui-adapter.ts"]
         CHB["channels/base/<br/>DaemonChannelBridge.ts"]
         DT["channels/dingtalk"]
@@ -154,7 +154,7 @@ sequenceDiagram
     participant CH as ACP child
 
     C->>MW: POST /session/:id/prompt<br/>Authorization: Bearer …<br/>X-Qwen-Client-Id: …
-    MW->>MW: denyBrowserOriginCors
+    MW->>MW: allowOriginCors (mutable allowlist; unmatched Origin -> 403)
     MW->>MW: hostAllowlist (DNS rebinding guard)
     MW->>MW: access-log hook
     MW->>MW: bearerAuth (constant-time compare)

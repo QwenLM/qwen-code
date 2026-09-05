@@ -8,7 +8,10 @@ import OpenAI from 'openai';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { resolveRequestTimeout } from '../core/openaiContentGenerator/constants.js';
+import {
+  DEFAULT_DASHSCOPE_BASE_URL,
+  resolveRequestTimeout,
+} from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
 import {
   buildRuntimeFetchOptions,
@@ -170,7 +173,22 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     return {
       ok: false,
       notice:
-        'WebSearch is enabled but no search model is configured. Set tools.webSearch.model (or WEB_SEARCH_MODEL) to a model declared under modelProviders.',
+        'WebSearch is enabled but no search model is configured.\n' +
+        'Add a search model to settings.json (recommended: qwen3.6-plus):\n' +
+        '  {\n' +
+        '    "tools": { "webSearch": { "enabled": true, "model": "qwen3.6-plus" } },\n' +
+        '    "modelProviders": {\n' +
+        '      "openai": [{ "id": "qwen3.6-plus",\n' +
+        '        "baseUrl": "' +
+        DEFAULT_DASHSCOPE_BASE_URL +
+        '",\n' +
+        '        "envKey": "DASHSCOPE_API_KEY" }]\n' +
+        '    }\n' +
+        '  }\n' +
+        'Or via env: ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=qwen3.6-plus\n' +
+        'WEB_SEARCH_BASE_URL=' +
+        DEFAULT_DASHSCOPE_BASE_URL +
+        ' (plus WEB_SEARCH_API_KEY).',
     };
   }
 

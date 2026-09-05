@@ -179,10 +179,12 @@ export default {
   'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.Goal': '目標',
   'toolDisplayName.UpdateGoal': '更新目標',
+  'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
@@ -206,6 +208,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
@@ -692,6 +695,7 @@ export default {
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',
   'Hide Tips': '隱藏提示',
+  'Show Tool Call Arguments': '顯示工具呼叫參數',
   'Show Line Numbers in Code': '在代碼中顯示行號',
   'Show Citations': '顯示引用',
   'Custom Witty Phrases': '自定義詼諧短語',
@@ -724,6 +728,7 @@ export default {
   'Tool Output Truncation Lines': '工具輸出截斷行數',
   'Folder Trust': '檔案夾信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未設定',
   'Auto (detect from system)': '自動（從系統檢測）',
   'Auto (follow user input)': '自動（跟隨使用者輸入）',
   'Auto (detect terminal theme)': '自動（檢測終端主題）',
@@ -1421,6 +1426,12 @@ export default {
     '聊天歷史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
   'Could not compress chat history due to a token counting error.':
     '由於 token 計數錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由於壓縮摘要為空，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
+  'Could not compress chat history due to an API error.':
+    '由於 API 錯誤，無法壓縮聊天歷史。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -1660,6 +1671,7 @@ export default {
     'Ctrl+Q 排到下一輪 · ↑ 編輯排隊消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到目前任務 · Ctrl+Q 排到下一輪',
+  '{{count}} queued': '{{count}} 條已排隊',
   'Queue message for the next turn': '將消息排到下一輪',
   'No MCP servers configured.': '未配置 MCP servers',
   '◌ MCP servers are starting up ({{count}} initializing)...':
@@ -2016,6 +2028,10 @@ export default {
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
+  'It is saved but does not apply while this workspace is untrusted.':
+    '已儲存，但此工作區不受信任時不會生效。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
@@ -2059,6 +2075,17 @@ export default {
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '讓審查模型對目前對話給出第二意見',
+  'Consulting advisor...': '正在諮詢審查模型...',
+  'Advisor review failed: {{error}}': '審查失敗：{{error}}',
+  'No conversation context available for /advisor':
+    '沒有可供 /advisor 使用的對話上下文',
+  'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一個操作正在進行中，請等待其完成後再執行 /advisor',
+  'No response received.': '未收到回覆。',
+  'No model configured.': '未設定模型。',
   'Manage Arena sessions': '管理 Arena 會話',
   'Start an Arena session with multiple models competing on the same task':
     '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',
@@ -2115,8 +2142,18 @@ export default {
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
+  'from nested agent': '來自嵌套 agent',
   Running: '執行中',
+  Pausing: '暫停中',
   Paused: '已暫停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '暫停是協作式的；在工作流暫停之前，進行中的工作可能會先完成。等待工具審批的 agent 呼叫會讓執行保持在此狀態，且在審批得到回應前仍會計入活躍時間上限。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '已暫停：不會啟動新的 agent；agent 呼叫之間的指令碼會繼續執行。按 p 恢復。/clear、/branch 以及切換會話會取消已暫停的執行。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暫停/恢復被拒絕；工作流狀態已變更。請重試。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在背景任務中按 p 協作暫停/恢復；使用 `/workflows <runId>` 檢視詳情。',
   Completed: '已完成',
   Failed: '失敗',
   Stopped: '已停止',
@@ -2396,4 +2433,7 @@ export default {
     '安全模式下禁止變更自動技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
+  'Kept model as {{model}}': '模型保持為 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
 };

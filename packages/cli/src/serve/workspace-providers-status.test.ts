@@ -131,6 +131,36 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('treats a non-positive contextWindowSize as unset in the catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'model-zero' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'model-zero',
+            name: 'Model Zero',
+            generationConfig: { contextWindowSize: 0 },
+          },
+          {
+            id: 'model-big',
+            name: 'Model Big',
+            generationConfig: { contextWindowSize: 8192 },
+          },
+        ],
+      },
+    });
+
+    const status = await provider(workspace, false);
+    const models = status.providers.flatMap((entry) => entry.models);
+    const zero = models.find((model) => model.baseModelId === 'model-zero');
+    const big = models.find((model) => model.baseModelId === 'model-big');
+
+    expect(zero?.contextLimit).toBeGreaterThan(0);
+    expect(big?.contextLimit).toBe(8192);
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -271,6 +301,139 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(modelIds).toContain('main-model(openai)');
     expect(modelIds).not.toContain('fast-model(openai)');
     expect(modelIds).not.toContain('voice-model(openai)');
+  });
+
+  it('projects reasoning preview only for the exact stable qwen3.8-max model', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            generationConfig: { thinkingMandatory: true },
+          },
+          { id: 'qwen3.8-max-preview', name: 'Qwen 3.8 Max Preview' },
+          { id: 'qwen3.8-max-latest', name: 'Qwen 3.8 Max Alias' },
+          { id: 'qwen-plus', name: 'Qwen Plus' },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const stable = models.find((model) => model.baseModelId === 'qwen3.8-max');
+
+    expect(stable?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'xhigh',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
+    expect(
+      models
+        .filter((model) => model !== stable)
+        .every((model) => model.configOptions === undefined),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      persisted: 'medium' as const,
+      thinkingMandatory: false,
+      currentValue: 'medium',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: false,
+      currentValue: 'none',
+    },
+    {
+      persisted: 'max' as const,
+      thinkingMandatory: false,
+      currentValue: 'xhigh',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: true,
+      currentValue: 'xhigh',
+    },
+  ])(
+    'projects persisted reasoning $persisted as $currentValue when mandatory=$thinkingMandatory',
+    async ({ persisted, thinkingMandatory, currentValue }) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'qwen3.8-max', reasoningEffort: persisted },
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3.8-max',
+              name: 'Qwen 3.8 Max',
+              generationConfig: { thinkingMandatory },
+            },
+          ],
+        },
+      });
+
+      const result = await provider(workspace, false);
+      const stable = result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'qwen3.8-max');
+      expect(stable?.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue,
+          }),
+        ]),
+      );
+    },
+  );
+
+  it('does not project reasoning preview onto opaque route models', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'qwen3.8-max',
+        baseUrl: 'https://one.example/v1',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max One',
+            baseUrl: 'https://one.example/v1',
+          },
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max Two',
+            baseUrl: 'https://two.example/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const routeModels = models.filter((model) =>
+      model.modelId.startsWith('qwen-route:v1:'),
+    );
+
+    expect(routeModels).toHaveLength(2);
+    expect(
+      routeModels.every((model) => model.configOptions === undefined),
+    ).toBe(true);
   });
 
   it('reports custom providerProtocol models under their resolved auth type', async () => {

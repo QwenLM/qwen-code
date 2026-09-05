@@ -346,6 +346,7 @@ export function writeCodingPlanConfig(
   const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
   providerMetadata['coding-plan'] = {
     region: codingRegion,
+    baseUrl: planConfig.baseUrl,
     version: planConfig.version,
   };
   delete settings.codingPlan;

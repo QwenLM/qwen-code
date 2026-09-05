@@ -6,12 +6,21 @@
 
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
+import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
 import {
   CompressionStatus,
   getStartupContextLength,
-  isSystemReminderContent,
+  isApiUserPrompt,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
+
+/**
+ * TUI rewind's binding of the shared user-prompt classifier. Exported so the
+ * OpenTUI parity path counts prompts under the exact same rule.
+ */
+export const TUI_API_USER_PROMPT_OPTIONS: ApiUserPromptOptions = {
+  excludeClearedMediaPlaceholders: true,
+};
 
 /**
  * Returns true when the history item represents a real user prompt that was
@@ -38,32 +47,33 @@ export function isRealUserTurn(
 /**
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
+ *
+ * Thin binding of the shared classifier: TUI rewind excludes microcompaction
+ * media-clear placeholders because a cleared media-only entry never produced
+ * a visible user turn, so counting it would desynchronize the API prompt
+ * count from the UI turn count and truncate one turn early. See
+ * `ApiUserPromptOptions` in core for why that exclusion is an option rather
+ * than part of the shared rule (ACP must keep those entries counted), and for
+ * the exact-match collision this leaves behind — which is what prompt
+ * identity resolves.
  */
-function isUserTextContent(content: Content): boolean {
-  if (content.role !== 'user') return false;
-  if (!content.parts || content.parts.length === 0) return false;
-
-  const hasFunctionResponse = content.parts.some(
-    (part) => 'functionResponse' in part,
-  );
-  if (hasFunctionResponse) return false;
-
-  // Exclude pure <system-reminder> entries (the startup prelude and the
-  // mid-history MCP added-tool reminders). They are structural, not real user
-  // prompts; counting them here would shift the rewind truncation index and
-  // silently drop a real turn's context. A genuine user turn that merely has
-  // a per-turn reminder prepended still has a non-reminder prompt part, so it
-  // is NOT excluded.
-  if (isSystemReminderContent(content)) return false;
-
-  return content.parts.some((part) => 'text' in part && part.text);
+export function isUserTextContent(content: Content): boolean {
+  return isApiUserPrompt(content, TUI_API_USER_PROMPT_OPTIONS);
 }
 
+/**
+ * Finds the last successful *summarizing* compression marker. Fast
+ * (rule-based) compression markers are excluded: `/compress-fast` removes no
+ * user prompts from the API history and inserts no summary prefix, so its
+ * marker is not a truncation boundary — treating it as one collapses the
+ * rewind anchor and silently drops the pre-marker history.
+ */
 function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
   return history.findLastIndex(
     (item) =>
       item.type === 'compression' &&
-      item.compression.compressionStatus === CompressionStatus.COMPRESSED,
+      item.compression.compressionStatus === CompressionStatus.COMPRESSED &&
+      item.compression.compressionKind !== 'fast',
   );
 }
 
@@ -124,6 +134,16 @@ export function computeApiTruncationIndex(
   });
 
   if (uiUserTurnCount === 0) {
+    // Marker-less auto-compaction (entrance 3): the API history carries a
+    // compressed prefix but the UI has no summarizing compression boundary.
+    // Rewinding to the first turn would silently truncate to
+    // [prelude, summary, ack] and drop every real turn — fail loud instead.
+    if (
+      compressionIndex === -1 &&
+      startIndex > getStartupContextLength(apiHistory)
+    ) {
+      return -1;
+    }
     // Rewinding to the first user turn: keep only startup context (if any)
     return startIndex;
   }

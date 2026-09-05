@@ -23,3 +23,55 @@ export class DaemonHttpError extends Error {
     this.body = body;
   }
 }
+
+// Kept local (instead of reusing `isRecord` from `acpTransportUtils.ts` or
+// `ui/utils.ts`) so this leaf module stays dependency-free: those modules
+// pull the ACP route table / UI helpers into the budgeted browser bundles.
+function getErrorBodyRecord(
+  body: unknown,
+): Record<string, unknown> | undefined {
+  return typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Type guard for the daemon's `GET /session/:id/subagents/:toolCallId` 404
+ * contract: `{ code: 'session_not_found', sessionId, toolCallId? }`. Pass
+ * `toolCallId` to require the body to identify that specific missing agent
+ * (a session-level 404 carries no identifying `toolCallId`); omit it to
+ * accept both.
+ */
+export function isSubagentSessionNotFound(
+  error: unknown,
+  toolCallId?: string,
+): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 404) {
+    return false;
+  }
+  const body = getErrorBodyRecord(error.body);
+  if (body?.['code'] !== 'session_not_found') return false;
+  return toolCallId === undefined || body['toolCallId'] === toolCallId;
+}
+
+/**
+ * Type guard for the session-level variant of that same 404 contract: the
+ * daemon could not find the parent session itself, so the body carries
+ * `code: 'session_not_found'` with no identifying `toolCallId` (an
+ * explicitly `null` id is treated the same as an absent one).
+ *
+ * A missing parent session is not the only producer: a multi-workspace
+ * daemon answers this same shape while the owning workspace entry is
+ * merely not active (for example draining before removal, or transitioning
+ * to a replacement runtime), which the daemon treats as reversible. Treat
+ * this error as recoverable, not as proof the session is permanently gone.
+ */
+export function isSessionLevelNotFound(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 404) {
+    return false;
+  }
+  const body = getErrorBodyRecord(error.body);
+  if (body?.['code'] !== 'session_not_found') return false;
+  const toolCallId = body['toolCallId'];
+  return toolCallId === undefined || toolCallId === null;
+}

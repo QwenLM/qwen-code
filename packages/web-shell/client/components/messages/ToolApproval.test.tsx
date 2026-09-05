@@ -137,6 +137,64 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  it('localizes Workflow approval without changing ordinary approvals', () => {
+    const planTodos = [
+      { id: 'review', content: 'Review', status: 'pending' as const },
+    ];
+    render(undefined, planRequest, planTodos, 'zh-CN');
+
+    expect(container!.textContent).toContain('计划并审阅');
+    expect(container!.textContent).toContain('确认计划并开始协作？');
+    expect(optionLabels()).toEqual(['继续完善计划', '确认并开始']);
+
+    rerender(undefined, planRequest, planTodos, 'en');
+    expect(container!.textContent).toContain('Plan & Review');
+    expect(container!.textContent).toContain(
+      'Confirm the plan and start collaboration?',
+    );
+    expect(optionLabels()).toEqual(['Continue planning', 'Confirm and start']);
+
+    rerender(undefined, request, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('是否继续？');
+    expect(container!.textContent).not.toContain('确认计划并开始协作？');
+  });
+
+  it('keeps restore_previous distinct from confirm in a Workflow approval', () => {
+    // The production exit_plan_mode option set: two `allow_once` options whose
+    // outcomes differ materially, so they must never share one label.
+    const productionPlanRequest: PermissionRequest = {
+      ...planRequest,
+      options: [
+        {
+          id: 'restore_previous',
+          label: 'Yes, restore previous mode (yolo)',
+          kind: 'allow_once',
+        },
+        {
+          id: 'proceed_always',
+          label: 'Yes, and auto-accept edits',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_once',
+          label: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        { id: 'cancel', label: 'No, keep planning (esc)', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, productionPlanRequest, [
+      { id: 'review', content: 'Review', status: 'pending' },
+    ]);
+
+    const labels = optionLabels();
+    expect(labels).toContain('Confirm and start');
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(
+      labels.filter((label) => label === 'Confirm and start'),
+    ).toHaveLength(1);
+  });
+
   it('keeps the text-only Plan Mode approval when there are no Todos', () => {
     render(undefined, planRequest);
 
@@ -266,6 +324,112 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  describe('yielding to active typing (#9571)', () => {
+    let composer: HTMLTextAreaElement;
+
+    beforeEach(() => {
+      // The user is typing in the composer when the approval arrives. In the
+      // app the overlay commit hides the composer in the same render, so the
+      // editable target still holds focus when the focus effect runs (jsdom
+      // mirrors that: display:none never blurs).
+      composer = document.createElement('textarea');
+      document.body.appendChild(composer);
+      composer.focus();
+    });
+
+    afterEach(() => {
+      composer.remove();
+    });
+
+    it('does not grab focus to the default option while an editable target is focused', () => {
+      expect(document.activeElement).toBe(composer);
+      render(undefined);
+      // Stealing focus here redirects the in-progress keystroke (Enter to
+      // send, Space, digits) onto the safe-default option and can confirm it.
+      expect(document.activeElement).toBe(composer);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+    });
+
+    it('does not re-grab focus when a new request arrives mid-typing', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      rerender(true, { ...request, id: 'req-2' });
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('does not grab focus on re-activation while typing', () => {
+      render(false);
+      expect(document.activeElement).toBe(composer);
+      rerender(true);
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('still operates by keyboard once the user tabs in', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      // Explicit tab-in: focusing an option engages the usual roving behavior.
+      const opts = optionButtons();
+      act(() => {
+        opts[0]!.focus();
+      });
+      pressKey(opts[0]!, 'ArrowDown');
+      expect(document.activeElement).toBe(opts[1]);
+    });
+
+    it('yields to a contenteditable composer (CodeMirror shape)', () => {
+      // The production composer is a CodeMirror EditorView — a contenteditable
+      // div inside `.cm-editor` (the textarea backend is touch devices only).
+      // The textarea cases above never exercise isEditableTarget's
+      // contenteditable branches; pin them so simplifying the helper to bare
+      // form controls cannot silently re-open #9571.
+      const editor = document.createElement('div');
+      editor.className = 'cm-editor';
+      const editable = document.createElement('div');
+      editable.setAttribute('contenteditable', 'true');
+      editor.appendChild(editable);
+      document.body.appendChild(editor);
+      act(() => {
+        editable.focus();
+      });
+      expect(document.activeElement).toBe(editable);
+      render(undefined);
+      expect(document.activeElement).toBe(editable);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+      editor.remove();
+    });
+
+    it('yields in shadow-DOM (portal) mode, where document.activeElement retargets', () => {
+      // Portal mode mounts the shell inside a shadow root, where
+      // document.activeElement retargets to the non-editable host; the guard
+      // must resolve the active element from the panel's own root instead.
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const shadowComposer = document.createElement('textarea');
+      shadowRoot.appendChild(shadowComposer);
+      const shadowContainer = document.createElement('div');
+      shadowRoot.appendChild(shadowContainer);
+      act(() => {
+        shadowComposer.focus();
+      });
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+
+      container = shadowContainer;
+      root = createRoot(container);
+      rerender(undefined);
+
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+      expect(optionButtons().some((o) => o === shadowRoot.activeElement)).toBe(
+        false,
+      );
+      host.remove();
+    });
+  });
+
   it('confirms the clicked option', () => {
     render(undefined);
     act(() => {
@@ -387,6 +551,68 @@ describe('ToolApproval accessibility', () => {
     // (which could map to a more permissive option in the new request).
     rerender(true, { ...request, id: 'req-2' });
     expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
+  it('defaults an agent-launch dialog to the one-shot allow, not Reject', () => {
+    render(undefined, {
+      id: 'req-agent-launch',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+      'cancel',
+      'proceed_always_user',
+      'proceed_always_project',
+      'proceed_once',
+    ]);
+    // Launching the agent is the proposed next action: focus and initial
+    // selection land on the one-shot allow instead of the reject button.
+    expect(document.activeElement).toBe(opts[3]);
+    expect(opts[3]!.tabIndex).toBe(0);
+  });
+
+  it('defaults an agent-launch dialog to Reject when no one-shot allow exists', () => {
+    render(undefined, {
+      id: 'req-agent-no-once',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    // No one-shot allow: the default must be the reject, never a permanent
+    // allow rule.
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('cancel');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
   });
 
   it('leaves Enter to native button activation (no double-press guard)', () => {
@@ -529,6 +755,56 @@ describe('ToolApproval accessibility', () => {
     act(() => optionButtons()[1]!.click());
     expect(onConfirm).toHaveBeenCalledTimes(2);
     expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+  });
+
+  it('re-enables confirmation when submission rejects', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('submit failed'))
+      .mockResolvedValueOnce(undefined);
+    render(undefined);
+
+    act(() => optionButtons()[1]!.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[1]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-arm the submit guard on a stale rejection from a previous request', async () => {
+    let rejectStale: ((err: Error) => void) | undefined;
+    const staleSubmission = new Promise<void>((_resolve, reject) => {
+      rejectStale = reject;
+    });
+    const successorSubmission = new Promise<void>(() => {});
+    onConfirm
+      .mockReturnValueOnce(staleSubmission)
+      .mockReturnValueOnce(successorSubmission);
+    render(undefined);
+
+    // Confirm request A; its submission stays in flight.
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    // The daemon replaces A with request B (this instance is reused — no key
+    // at the mount sites); the id-keyed reset effect re-arms the guard, and
+    // confirming B arms it again while B's submission is in flight.
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+
+    // A's stale submission rejects late (the daemon answers duplicates with
+    // "No pending permission request"). It must not disarm B's guard.
+    await act(async () => {
+      rejectStale?.(new Error('No pending permission request'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[0]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
   });
 
   it('does not re-arm the submit guard when the same request changes options', () => {

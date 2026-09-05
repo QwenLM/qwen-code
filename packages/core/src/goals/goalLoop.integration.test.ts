@@ -7,7 +7,7 @@
 /**
  * Integration test for the /goal Stop hook loop.
  *
- * This intentionally does NOT boot `GeminiClient` or the full hook runner.
+ * This intentionally does NOT boot `LlmClient` or the full hook runner.
  * It exercises the seam that matters for the spec criterion:
  *
  *   "after `/goal <condition>`, a normal attempt to stop must be intercepted

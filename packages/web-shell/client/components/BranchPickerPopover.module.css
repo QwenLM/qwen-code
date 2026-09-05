@@ -235,13 +235,84 @@
   );
 }
 
+.statusBarWarning {
+  color: var(--warning-color, #f59e0b);
+  background: color-mix(
+    in srgb,
+    var(--warning-color, #f59e0b) 12%,
+    transparent
+  );
+  white-space: normal;
+}
+
+.pullBlocked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  background: color-mix(in srgb, var(--destructive, #ef4444) 8%, transparent);
+}
+
+.pullBlockedMessage {
+  color: var(--destructive, #ef4444);
+}
+
+.pullBlockedHint {
+  color: var(--muted-foreground, #888);
+}
+
+.pullBlockedActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pullBlockedButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.pullBlockedButton:hover,
+.pullBlockedButton:focus-visible {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+  outline: none;
+}
+
+.pullBlockedButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pullBlockedButtonDanger {
+  color: var(--destructive, #ef4444);
+  border-color: color-mix(
+    in srgb,
+    var(--destructive, #ef4444) 40%,
+    transparent
+  );
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .empty {
@@ -264,4 +335,28 @@
   text-align: center;
   font-size: 12px;
   color: var(--muted-foreground, #888);
+}
+
+.actionItemMuted .actionLabel {
+  color: var(--muted-foreground, #888);
+}
+
+.actionHint {
+  flex-shrink: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground, #888);
+}
+
+.actionHint[data-tone='info'] {
+  color: var(--foreground, #e0e0e0);
+  opacity: 0.8;
+}
+
+.actionHint[data-tone='warning'] {
+  color: var(--warning-color, #f59e0b);
 }

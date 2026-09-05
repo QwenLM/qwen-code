@@ -11,7 +11,7 @@ import type {
   SlashCommand,
   SlashCommandActionReturn,
 } from './types.js';
-import { getCurrentGeminiMdFilename } from '@qwen-code/qwen-code-core';
+import { getCurrentMemoryFilename } from '@qwen-code/qwen-code-core';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 
@@ -34,7 +34,7 @@ export const initCommand: SlashCommand = {
       };
     }
     const targetDir = context.services.config.getTargetDir();
-    const contextFileName = getCurrentGeminiMdFilename();
+    const contextFileName = getCurrentMemoryFilename();
     const contextFilePath = path.join(targetDir, contextFileName);
 
     try {

@@ -176,6 +176,38 @@ describe('UiTelemetryService', () => {
   });
 
   describe('API Response Event Processing', () => {
+    it('applies cached-input fallback per session event without changing global metrics', () => {
+      const sessionId = 'session-mixed-cache';
+      const addResponse = (input: number, cached: number, total: number) =>
+        service.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'qwen',
+            duration_ms: 1,
+            input_token_count: input,
+            output_token_count: 20,
+            total_token_count: total,
+            cached_content_token_count: cached,
+            thoughts_token_count: 0,
+          } as ApiResponseEvent & {
+            'event.name': typeof EVENT_API_RESPONSE;
+          },
+          sessionId,
+        );
+
+      addResponse(100, 80, 120);
+      addResponse(0, 200, 220);
+
+      expect(
+        service.getMetricsForSession(sessionId).models['qwen'].tokens.prompt,
+      ).toBe(100);
+      expect(
+        service.getMetricsForSession(sessionId).statsModels?.['qwen'].tokens
+          .prompt,
+      ).toBe(300);
+      expect(service.getMetrics().models['qwen'].tokens.prompt).toBe(100);
+    });
+
     it('should process a single ApiResponseEvent', () => {
       const event = {
         'event.name': EVENT_API_RESPONSE,
@@ -570,6 +602,355 @@ describe('UiTelemetryService', () => {
       expect(modelMetrics.bySource['bravo'].api.totalRequests).toBe(1);
       // Main bucket should NOT be created when no main-origin event arrived
       expect(modelMetrics.bySource[MAIN_SOURCE]).toBeUndefined();
+    });
+
+    it('preserves name buckets and records metrics by invocation id', () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const makeEvent = (
+        subagentId: string,
+        subagentName: string,
+        subagentType: string,
+        prompt: number,
+      ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+        ({
+          'event.name': EVENT_API_RESPONSE,
+          model: 'glm-5',
+          duration_ms: 10,
+          input_token_count: prompt,
+          output_token_count: 0,
+          total_token_count: prompt,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          subagent_name: subagentType,
+          subagent_id: subagentId,
+          subagent_type: subagentType,
+          subagent_task_name: subagentName,
+        }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      service.addEvent(
+        makeEvent('id-1', 'query weather', 'general-purpose', 40),
+        sessionId,
+      );
+      service.addEvent(
+        makeEvent('id-2', 'query weather', 'general-purpose', 60),
+        sessionId,
+      );
+
+      const modelMetrics = service.getMetrics().models['glm-5'];
+      expect(Object.keys(modelMetrics.bySource)).toEqual(['general-purpose']);
+      expect(modelMetrics.bySource['general-purpose'].tokens.prompt).toBe(100);
+      expect(service.getMetrics().sourceMetrics).toBeUndefined();
+      const sessionMetrics = service.getMetricsForSession(sessionId);
+      expect(sessionMetrics.sourceMetrics?.['id-1'].tokens.prompt).toBe(40);
+      expect(sessionMetrics.sourceMetrics?.['id-2'].tokens.prompt).toBe(60);
+      expect(sessionMetrics.sourceMeta).toEqual({
+        'id-1': { name: 'query weather', type: 'general-purpose' },
+        'id-2': { name: 'query weather', type: 'general-purpose' },
+      });
+    });
+
+    it('keeps invocation maps prototype-free after snapshot restore', () => {
+      const sessionId = 'session-snapshot';
+      const event = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'qwen',
+        duration_ms: 1,
+        input_token_count: 1,
+        output_token_count: 0,
+        total_token_count: 1,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_id: 'constructor',
+        subagent_type: 'Explore',
+        subagent_task_name: 'inspect',
+      } as ApiResponseEvent & {
+        'event.name': typeof EVENT_API_RESPONSE;
+      };
+
+      service.addEvent(event, sessionId);
+      const snapshot = service.snapshotForReplay(sessionId);
+      service.restoreFromReplaySnapshot(snapshot);
+      service.addEvent(event, sessionId);
+
+      const metrics = service.getMetricsForSession(sessionId);
+      expect(metrics.sourceMetrics?.['constructor'].tokens.prompt).toBe(2);
+      expect(Object.getPrototypeOf(metrics.sourceMetrics)).toBeNull();
+      expect(Object.getPrototypeOf(metrics.sourceMeta)).toBeNull();
+      expect(Object.getPrototypeOf(metrics.statsModels)).toBeNull();
+    });
+
+    it('restores legacy invocation ids from session-scoped prompt ids', () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const addResponse = (
+        subagentId: string,
+        round: number,
+        prompt: number,
+        subagentName = 'general-purpose',
+      ) =>
+        service.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'glm-5',
+            duration_ms: 10,
+            input_token_count: prompt,
+            output_token_count: 0,
+            total_token_count: prompt,
+            cached_content_token_count: 0,
+            thoughts_token_count: 0,
+            prompt_id: `${sessionId}#${subagentId}#${round}`,
+            subagent_name: subagentName,
+          } as ApiResponseEvent & {
+            'event.name': typeof EVENT_API_RESPONSE;
+          },
+          sessionId,
+        );
+
+      addResponse('general-purpose-a83536b9', 1, 40);
+      addResponse('general-purpose-a83536b9', 2, 60);
+      addResponse('Explore-8384d783', 1, 20, 'query weather');
+      service.addEvent(
+        {
+          'event.name': EVENT_API_ERROR,
+          model: 'glm-5',
+          duration_ms: 10,
+          error_message: 'boom',
+          prompt_id: `${sessionId}#Explore-8384d783#2`,
+          subagent_name: 'query weather',
+        } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR },
+        sessionId,
+      );
+
+      const metrics = service.getMetricsForSession(sessionId);
+      expect(metrics.sourceMetrics?.['general-purpose-a83536b9']).toMatchObject(
+        {
+          api: { totalRequests: 2, totalErrors: 0 },
+          tokens: { prompt: 100, total: 100 },
+        },
+      );
+      expect(metrics.sourceMetrics?.['Explore-8384d783']).toMatchObject({
+        api: { totalRequests: 2, totalErrors: 1 },
+        tokens: { prompt: 20, total: 20 },
+      });
+      expect(metrics.sourceMeta).toEqual({
+        'general-purpose-a83536b9': {
+          name: 'general-purpose',
+          type: 'general-purpose',
+        },
+        'Explore-8384d783': {
+          name: 'query weather',
+          type: 'query weather',
+        },
+      });
+      expect(service.getMetrics().sourceMetrics).toBeUndefined();
+    });
+
+    it('prefers an explicit invocation id over the legacy prompt id', () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      service.addEvent(
+        {
+          'event.name': EVENT_API_RESPONSE,
+          model: 'glm-5',
+          duration_ms: 10,
+          input_token_count: 40,
+          output_token_count: 0,
+          total_token_count: 40,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          prompt_id: `${sessionId}#legacy-id#1`,
+          subagent_name: 'general-purpose',
+          subagent_id: 'explicit-id',
+        } as ApiResponseEvent & {
+          'event.name': typeof EVENT_API_RESPONSE;
+        },
+        sessionId,
+      );
+
+      expect(
+        Object.keys(
+          service.getMetricsForSession(sessionId).sourceMetrics ?? {},
+        ),
+      ).toEqual(['explicit-id']);
+    });
+
+    it.each([
+      { promptId: '11111111-1111-1111-1111-111111111111#agent-id#1' },
+      { promptId: 'other-session#agent-id#1', subagentName: 'agent' },
+      {
+        promptId: '11111111-1111-1111-1111-111111111111##1',
+        subagentName: 'agent',
+      },
+      {
+        promptId: '11111111-1111-1111-1111-111111111111#agent-id#x',
+        subagentName: 'agent',
+      },
+      { promptId: 'prompt_suggestion', subagentName: 'agent' },
+    ])(
+      'does not infer an invocation id from unrelated prompt id $promptId',
+      ({ promptId, subagentName }) => {
+        const sessionId = '11111111-1111-1111-1111-111111111111';
+        service.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'glm-5',
+            duration_ms: 10,
+            input_token_count: 40,
+            output_token_count: 0,
+            total_token_count: 40,
+            cached_content_token_count: 0,
+            thoughts_token_count: 0,
+            prompt_id: promptId,
+            subagent_name: subagentName,
+          } as ApiResponseEvent & {
+            'event.name': typeof EVENT_API_RESPONSE;
+          },
+          sessionId,
+        );
+
+        expect(
+          service.getMetricsForSession(sessionId).sourceMetrics,
+        ).toBeUndefined();
+      },
+    );
+
+    it.each([
+      { prompt: 40, cached: 5, candidates: 10, thoughts: 2, expected: 52 },
+      { prompt: 40, cached: 5, candidates: 10, thoughts: 20, expected: 70 },
+      { prompt: 0, cached: 40, candidates: 10, thoughts: 2, expected: 52 },
+    ])(
+      'falls back when total tokens are omitted ($candidates candidates, $thoughts thoughts)',
+      ({ prompt, cached, candidates, thoughts, expected }) => {
+        const sessionId = '11111111-1111-1111-1111-111111111111';
+        service.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'glm-5',
+            duration_ms: 10,
+            input_token_count: prompt,
+            output_token_count: candidates,
+            total_token_count: 0,
+            cached_content_token_count: cached,
+            thoughts_token_count: thoughts,
+            subagent_name: 'general-purpose',
+            subagent_id: 'id-1',
+          } as ApiResponseEvent & {
+            'event.name': typeof EVENT_API_RESPONSE;
+          },
+          sessionId,
+        );
+
+        const metrics = service.getMetrics();
+        expect(metrics.models['glm-5'].tokens.total).toBe(0);
+        expect(
+          metrics.models['glm-5'].bySource['general-purpose'].tokens.total,
+        ).toBe(0);
+        expect(metrics.sourceMetrics).toBeUndefined();
+        expect(
+          service.getMetricsForSession(sessionId).models['glm-5'].tokens.total,
+        ).toBe(0);
+        expect(
+          service.getMetricsForSession(sessionId).models['glm-5'].bySource[
+            'general-purpose'
+          ].tokens.total,
+        ).toBe(0);
+        expect(
+          service.getMetricsForSession(sessionId).statsModels?.['glm-5'].tokens
+            .total,
+        ).toBe(expected);
+        expect(
+          service.getMetricsForSession(sessionId).sourceMetrics?.['id-1'].tokens
+            .total,
+        ).toBe(expected);
+      },
+    );
+
+    it.each(['openai', 'qwen-oauth'])(
+      'does not double-count reasoning for %s events',
+      (authType) => {
+        const sessionId = '11111111-1111-1111-1111-111111111111';
+        service.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'openai-model',
+            duration_ms: 10,
+            input_token_count: 40,
+            output_token_count: 10,
+            total_token_count: 0,
+            cached_content_token_count: 0,
+            thoughts_token_count: 2,
+            auth_type: authType,
+          } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE },
+          sessionId,
+        );
+
+        expect(service.getMetrics().models['openai-model'].tokens.total).toBe(
+          0,
+        );
+        expect(
+          service.getMetricsForSession(sessionId).statsModels?.['openai-model']
+            .tokens.total,
+        ).toBe(50);
+      },
+    );
+
+    it('preserves richer invocation metadata from earlier events', () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const base = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'glm-5',
+        duration_ms: 10,
+        input_token_count: 10,
+        output_token_count: 0,
+        total_token_count: 10,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_name: 'general-purpose',
+        subagent_id: 'id-1',
+      };
+
+      service.addEvent(
+        {
+          ...base,
+          subagent_type: 'code-reviewer',
+          subagent_task_name: 'review the diff',
+        } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE },
+        sessionId,
+      );
+      service.addEvent(
+        base as ApiResponseEvent & {
+          'event.name': typeof EVENT_API_RESPONSE;
+        },
+        sessionId,
+      );
+
+      expect(
+        service.getMetricsForSession(sessionId).sourceMeta?.['id-1'],
+      ).toEqual({ name: 'review the diff', type: 'code-reviewer' });
+    });
+
+    it('keeps API error invocation details scoped to the session', () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      service.addEvent(
+        {
+          'event.name': EVENT_API_ERROR,
+          model: 'glm-5',
+          duration_ms: 10,
+          error_message: 'failed',
+          subagent_name: 'general-purpose',
+          subagent_id: 'error-id',
+        } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR },
+        sessionId,
+      );
+
+      expect(service.getMetrics().sourceMetrics).toBeUndefined();
+      expect(service.getMetrics().sourceMeta).toBeUndefined();
+      expect(
+        service.getMetricsForSession(sessionId).sourceMetrics?.['error-id'].api,
+      ).toMatchObject({ totalRequests: 1, totalErrors: 1 });
+
+      service.removeSession(sessionId);
+      expect(
+        service.getMetricsForSession(sessionId).sourceMetrics,
+      ).toBeUndefined();
     });
 
     it('handles a subagent named after an Object.prototype member without crashing', () => {
@@ -1318,6 +1699,169 @@ describe('UiTelemetryService', () => {
       service.addEvent(makeApiEvent('m', 99), 'session-0');
       const metrics = service.getMetricsForSession('session-0');
       expect(metrics.models['m']?.tokens.prompt).toBe(99);
+    });
+  });
+
+  describe('Replay snapshot / restore (session-swap undo, #9833)', () => {
+    const SESSION_A = 'session-aaa';
+    const SESSION_B = 'session-bbb';
+    const SESSION_C = 'session-ccc';
+
+    const makeApiEvent = (
+      model: string,
+      inputTokens: number,
+      subagent?: string,
+    ) =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model,
+        duration_ms: 100,
+        input_token_count: inputTokens,
+        output_token_count: 10,
+        total_token_count: inputTokens + 10,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_name: subagent,
+      }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+    const makeToolEvent = (name: string) =>
+      ({
+        'event.name': EVENT_TOOL_CALL,
+        function_name: name,
+        duration_ms: 50,
+        success: true,
+        decision: ToolCallDecision.AUTO_ACCEPT,
+        prompt_id: 'p1',
+      }) as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+    it('round-trips the whole observable surface', () => {
+      // Rich pre-swap state: two models, a per-source breakdown, tool and
+      // skill calls, two live buckets, token counts.
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-b', 200, 'sub-1'), SESSION_A);
+      service.addEvent(makeToolEvent('read_file'), SESSION_A);
+      service.recordSkillInvocation('skill-a', true, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 300), SESSION_B);
+      service.setLastPromptTokenCount(42);
+      service.setLastCachedContentTokenCount(7);
+      const preGlobal = structuredClone(service.getMetrics());
+      const preA = structuredClone(service.getMetricsForSession(SESSION_A));
+      const preB = structuredClone(service.getMetricsForSession(SESSION_B));
+
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // The replay + its fallout: new events into the aggregate and both
+      // buckets, token counts moved, the outgoing bucket wiped by the
+      // rollback's resetSession, a replay-created phantom state.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('model-c', 999), SESSION_B);
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('model-c', 111), SESSION_A);
+      service.setLastPromptTokenCount(999);
+      service.setLastCachedContentTokenCount(999);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getMetrics()).toEqual(preGlobal);
+      expect(service.getMetricsForSession(SESSION_A)).toEqual(preA);
+      expect(service.getMetricsForSession(SESSION_B)).toEqual(preB);
+      expect(service.getLastPromptTokenCount()).toBe(42);
+      expect(service.getLastCachedContentTokenCount()).toBe(7);
+    });
+
+    it('drops a bucket the replay created and restores the closed flag', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      // SESSION_B has no bucket yet and is marked closed — exactly the state
+      // a resume of a finished session starts from.
+      service.removeSession(SESSION_B);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // The replay creates B's bucket and reopens it.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('model-a', 50), SESSION_B);
+      expect(service.getMetricsForSession(SESSION_B).models).not.toEqual({});
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      // No leftover bucket reading as a live session; closed flag restored —
+      // a fresh event for B must NOT land in a per-session bucket (closed
+      // sessions are excluded from per-session accumulation).
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+      service.addEvent(makeApiEvent('model-a', 77), SESSION_B);
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+      // ...but the aggregate still counts it.
+      expect(service.getMetrics().models['model-a']?.api.totalRequests).toBe(2);
+    });
+
+    it('keeps the bySource null prototype across restore', () => {
+      // The bySource maps are prototype-free (crash guard for subagent names
+      // like "constructor"); structuredClone silently re-arms the prototype,
+      // so snapshot/restore must re-null it.
+      service.addEvent(makeApiEvent('model-a', 100, 'constructor'), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_B);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      const bySource =
+        service.getMetrics().models['model-a']?.bySource ??
+        service.getMetricsForSession(SESSION_A).models['model-a']?.bySource;
+      expect(bySource).toBeDefined();
+      expect(Object.getPrototypeOf(bySource)).toBeNull();
+      expect(bySource!['constructor']?.api.totalRequests).toBe(1);
+      // The live accumulation path must keep working after the restore.
+      service.addEvent(makeApiEvent('model-a', 5, 'constructor'), SESSION_A);
+      expect(bySource!['constructor']?.api.totalRequests).toBe(2);
+    });
+
+    it('does not touch unrelated sessions', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 55), SESSION_C);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 999), SESSION_B);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(
+        service.getMetricsForSession(SESSION_C).models['model-a']?.tokens
+          .prompt,
+      ).toBe(55);
+    });
+
+    it('emits update so keyed displays re-render', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 999), SESSION_B);
+
+      const spy = vi.fn();
+      service.on('update', spy);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(spy).toHaveBeenCalledOnce();
+      expect(
+        spy.mock.calls[0][0].metrics.models['model-a']?.tokens.prompt,
+      ).toBe(100);
+    });
+
+    it('restore is overwrite-safe after another replay landed on top', () => {
+      // The /branch rollback re-initializes the parent BEFORE the undo runs:
+      // restore must supersede that second replay, not subtract from it.
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // Forward replay of the abandoned session...
+      service.addEvent(makeApiEvent('model-a', 200), SESSION_B);
+      // ...then the rollback's own replay of the parent on top.
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getMetrics().models['model-a']?.tokens.prompt).toBe(100);
+      expect(
+        service.getMetricsForSession(SESSION_A).models['model-a']?.tokens
+          .prompt,
+      ).toBe(100);
     });
   });
 });

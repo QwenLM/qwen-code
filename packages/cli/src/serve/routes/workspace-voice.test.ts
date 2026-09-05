@@ -65,7 +65,12 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 }
 
 async function makeHarness(
-  opts: { persistSetting?: boolean; token?: string; trusted?: boolean } = {},
+  opts: {
+    persistSetting?: boolean;
+    token?: string;
+    trusted?: boolean;
+    hostname?: string;
+  } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -106,6 +111,7 @@ async function makeHarness(
     transport: 'qwen-asr-chat',
   }));
   const serveOpts: ServeOptions = { ...baseOpts };
+  serveOpts.hostname = opts.hostname ?? baseOpts.hostname;
   if ('token' in opts) {
     serveOpts.token = opts.token;
   }
@@ -758,6 +764,75 @@ describe('workspace voice routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it('POST accepts an exactly allowlisted private voice provider', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    await writeJson(path.join(h.home, 'settings.json'), {
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            baseUrl,
+            envKey: 'PRIVATE_ASR_KEY',
+          },
+        ],
+      },
+      env: { PRIVATE_ASR_KEY: 'sk-secret' },
+      security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'general.voice.enabled',
+      true,
+      expect.any(Function),
+    );
+  });
+
+  it('POST rejects a private voice provider allowlisted only in workspace scope', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: true });
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    // A cloned repo must not be able to self-grant HTTP/private-network voice
+    // egress: security.allowedInsecureVoiceBaseUrls is stripped from workspace
+    // scope, so the resolver still rejects the cleartext endpoint.
+    await writeJson(path.join(h.workspace, '.qwen', 'settings.json'), {
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            baseUrl,
+            envKey: 'PRIVATE_ASR_KEY',
+          },
+        ],
+      },
+      env: { PRIVATE_ASR_KEY: 'sk-secret' },
+      security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_voice_model');
+    expect(res.body.error).toContain('must use an https baseUrl');
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
   it('POST allows disabling voice without a selected model', async () => {
     const res = await request(h.app)
       .post('/workspace/voice')
@@ -885,7 +960,7 @@ describe('workspace voice routes', () => {
     expect(h.transcribe).not.toHaveBeenCalled();
   });
 
-  it('POST /workspace/voice/transcribe requires a configured token on loopback defaults', async () => {
+  it('POST /workspace/voice/transcribe runs on trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness({ token: '' });
     await writeVoiceModelSettings(h);
@@ -893,6 +968,20 @@ describe('workspace voice routes', () => {
     const res = await request(h.app)
       .post('/workspace/voice/transcribe?voiceModel=qwen3-asr-flash')
       .set('Host', hostHeader)
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3, 4]));
+
+    expect(res.status).toBe(200);
+    expect(res.body.text).toBe('hello from audio');
+    expect(h.transcribe).toHaveBeenCalledOnce();
+  });
+
+  it('POST /workspace/voice/transcribe denies a non-trusted tokenless embed', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: '', hostname: '192.0.2.1' });
+
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe')
       .set('Content-Type', 'audio/wav')
       .send(Buffer.from([1, 2, 3, 4]));
 

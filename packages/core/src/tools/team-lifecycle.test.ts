@@ -35,6 +35,7 @@ import type { TeamContext } from '../agents/team/types.js';
 import type { FakeBackend } from '../agents/team/test-utils/fake-backend.js';
 import type { FakeAgent } from '../agents/team/test-utils/fake-agent.js';
 import { formatAgentId } from '../agents/team/teamHelpers.js';
+import { updateTask } from '../agents/team/tasks.js';
 
 // ─── Mock Storage ──────────────────────────────────────────
 
@@ -211,35 +212,33 @@ describe('Team lifecycle E2E', () => {
     expect(display.type).toBe('task_list');
     expect(display.tasks).toHaveLength(3);
 
-    // ── Step 4: Update task status and ownership ─────────
+    // ── Step 4: Block task2/task3 on task1, then spawn ───
+    // The status/ownership updates in the next step each notify the
+    // task-list listeners; if task2/3 were claimable, the idle
+    // teammates would auto-claim them before the status-filter
+    // assertions run. Edges are added while no members exist, so
+    // nothing can race the blocking. Completing task1 below clears
+    // the edges (completion-unblock) and hands task2/3 to
+    // auto-claim, which the settle after it observes.
     const taskUpdateTool = new TaskUpdateTool(config);
-
-    const updateResult = await exec(taskUpdateTool, {
-      taskId: task1Id,
+    const task2Id = task2Result.llmContent.match(/Task #(\d+)/)![1];
+    for (const blockedId of [task2Id, task3Id]) {
+      const blockResult = await exec(taskUpdateTool, {
+        taskId: blockedId,
+        addBlockedBy: [task1Id],
+      });
+      expect(blockResult.error).toBeUndefined();
+    }
+    await updateTask('lifecycle', task1Id, {
       status: 'in_progress',
-      owner: 'alice',
+      owner: 'leader',
     });
-    expect(updateResult.error).toBeUndefined();
-    expect(updateResult.llmContent).toContain('in_progress');
-    expect(updateResult.llmContent).toContain('alice');
 
-    // Verify status filter works.
-    const inProgressList = await exec(taskListTool, {
-      status: 'in_progress',
-    });
-    expect(inProgressList.llmContent).toContain('Fix login bug');
-    expect(inProgressList.llmContent).not.toContain('Add unit tests');
-    expect(inProgressList.llmContent).not.toContain('Write docs');
-
-    // Complete task 1.
-    const completeResult = await exec(taskUpdateTool, {
-      taskId: task1Id,
-      status: 'completed',
-    });
-    expect(completeResult.error).toBeUndefined();
-    expect(completeResult.llmContent).toContain('completed');
-
-    // ── Step 5: Spawn teammates ──────────────────────────
+    // Teammates are spawned BEFORE the ownership update below: since
+    // #9282, task_update refuses to assign to a teammate that does
+    // not exist — an owned in_progress task has no delivery path
+    // other than the direct dispatch, so persisting an assignment to
+    // a nonexistent owner would be a dead end.
     const backend = capturedBackend!;
     expect(backend).not.toBeNull();
 
@@ -257,6 +256,36 @@ describe('Team lifecycle E2E', () => {
     const bob = backend.getAgent(bobId) as FakeAgent;
     expect(alice).toBeDefined();
     expect(bob).toBeDefined();
+
+    // ── Step 5: Update task status and ownership ─────────
+    const updateResult = await exec(taskUpdateTool, {
+      taskId: task1Id,
+      status: 'in_progress',
+      owner: 'alice',
+    });
+    expect(updateResult.error).toBeUndefined();
+    expect(updateResult.llmContent).toContain('in_progress');
+    expect(updateResult.llmContent).toContain('alice');
+
+    // The assignment dispatched one task prompt to alice (#9282).
+    await alice.waitForMessageCount(1);
+    expect(alice.getReceivedMessages()[0]).toContain('Fix login bug');
+
+    // Verify status filter works.
+    const inProgressList = await exec(taskListTool, {
+      status: 'in_progress',
+    });
+    expect(inProgressList.llmContent).toContain('Fix login bug');
+    expect(inProgressList.llmContent).not.toContain('Add unit tests');
+    expect(inProgressList.llmContent).not.toContain('Write docs');
+
+    // Complete task 1.
+    const completeResult = await exec(taskUpdateTool, {
+      taskId: task1Id,
+      status: 'completed',
+    });
+    expect(completeResult.error).toBeUndefined();
+    expect(completeResult.llmContent).toContain('completed');
 
     // Let auto-claiming settle — idle agents will claim
     // pending tasks in the background.

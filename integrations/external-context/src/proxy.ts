@@ -7,9 +7,11 @@
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { ConfigurationError } from './config.js';
 
-export function installEnvironmentProxy(): void {
+export function installEnvironmentProxy(): EnvHttpProxyAgent {
   try {
-    setGlobalDispatcher(new EnvHttpProxyAgent());
+    const dispatcher = new EnvHttpProxyAgent();
+    setGlobalDispatcher(dispatcher);
+    return dispatcher;
   } catch {
     throw new ConfigurationError(
       'Proxy environment configuration is invalid. Check HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.',
