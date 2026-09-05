@@ -11,6 +11,15 @@
  * unchanged across locales.
  */
 export const MUST_TRANSLATE_KEYS = [
+  'toggle focus mode (hide reasoning and tool call noise)',
+  'Focus mode is not supported by this renderer.',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.',
+  'Focus mode disabled.',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.',
+  '1 tool call hidden (Ctrl+O for details)',
+  '{{count}} tool calls hidden (Ctrl+O for details)',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)',
+  'Memory: {{read}} read, {{written}} written',
   'View or change the language setting',
   'List background tasks (text dump — interactive dialog opens via the footer pill)',
   'Delete a previous session',

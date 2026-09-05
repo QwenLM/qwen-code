@@ -786,14 +786,19 @@ export default {
   'Focus mode is not supported by this renderer.': '当前界面不支持专注模式。',
   'toggle focus mode (hide reasoning and tool call noise)':
     '切换专注模式（隐藏推理内容和工具调用噪音）',
-  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
-    '专注模式已开启。推理内容和已完成的工具调用将被隐藏。再次运行 /focus 可关闭，或按 Ctrl+O 查看完整记录。',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
+    '专注模式已开启。Ctrl+O 显示完整详情；关闭详情视图后即可应用专注模式。再次运行 /focus 可关闭专注模式。',
   'Focus mode disabled.': '专注模式已关闭。',
-  '1 tool call hidden (/focus to show)': '已隐藏 1 个工具调用（/focus 显示）',
+  '1 tool call hidden (Ctrl+O for details)':
+    '已隐藏 1 个工具调用（Ctrl+O 查看详情）',
   'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
     '工具：{{count}}，失败：{{failed}}（Ctrl+O 查看详情）',
-  '{{count}} tool calls hidden (/focus to show)':
-    '已隐藏 {{count}} 个工具调用（/focus 显示）',
+  '{{count}} tool calls hidden (Ctrl+O for details)':
+    '已隐藏 {{count}} 个工具调用（Ctrl+O 查看详情）',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    '专注模式由工作区或系统设置控制。请修改优先级更高的设置以切换专注模式。',
+  'Memory: {{read}} read, {{written}} written':
+    '记忆：读取 {{read}} 次，写入 {{written}} 次',
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',

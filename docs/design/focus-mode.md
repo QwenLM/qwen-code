@@ -11,10 +11,12 @@ history for the full transcript and exports.
 
 The interactive Ink UI exposes `/focus` and the boolean `ui.focusMode` setting,
 disabled by default. A provider supplies the current state to history rows and
-the toggle action to the slash-command processor. Changes persist at User
-scope. Settings-dialog changes and command changes must agree at runtime.
-The effective merged setting remains authoritative: a workspace override takes
-precedence over the saved User preference. Failed command writes preserve both
+the toggle action to the slash-command processor. Command changes persist at
+User scope unless an active workspace or system override controls the setting.
+In that case, `/focus` warns without changing the saved User preference. An
+untrusted workspace setting does not override the User preference. Settings-dialog
+changes and command changes must agree at runtime. The effective merged setting
+remains authoritative. Failed command writes preserve both
 the previous in-memory setting and the displayed view. Restoring defaults in
 the settings dialog updates the view just like an ordinary toggle. The app also
 synchronizes the provider when `/config` changes the effective setting.
@@ -22,11 +24,16 @@ synchronizes the provider when `/config` changes the effective setting.
 History rendering hides thought headers and thought continuation rows in focus
 mode. A committed, nonempty tool group becomes one translated summary line only
 when all tools succeeded or failed, the group was not user initiated, and no tool
-contains a subagent execution result. Failed groups show total and failure counts
-without commands, arguments or output. Running, cancelled and confirmation-waiting
-tools remain visible. User messages and assistant answers are unchanged.
+contains a subagent execution result, inline images, or omitted-image metadata.
+Failed groups show total and failure counts without commands, arguments or output.
+Memory read/write counters remain on the same summary line. Running, cancelled and
+confirmation-waiting tools remain visible. User messages and assistant answers are
+unchanged.
 
-Ctrl+O uses `fullDetail` and displays the original thoughts and tool groups.
+Ctrl+O uses `fullDetail` and displays the original thoughts and tool groups,
+as do session previews. Full detail takes precedence over focus: enabling focus
+while that view is open changes the preference, but filtering applies only after
+closing it.
 Toggling the reading view must redraw existing history, including the legacy
 Ink static-history renderer. The virtual viewport keeps ownership of its screen
 and uses the existing refresh mechanism.

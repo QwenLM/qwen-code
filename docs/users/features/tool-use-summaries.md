@@ -45,13 +45,13 @@ In the Ink terminal UI, `/focus` hides reasoning rows and replaces completed too
 Tools: 1, failed: 1 (Ctrl+O for details)
 ```
 
-Unlike the default view, focus hides completed error arguments and output. Press `Ctrl+O` to inspect details, or run `/focus` again to restore the ordinary view. Existing history updates immediately in both Ink history modes.
+Unlike the default view, focus hides completed error arguments and output. Press `Ctrl+O` to inspect details, or run `/focus` again to restore the ordinary view. Existing history updates in both Ink history modes. Full detail takes precedence: if you enable focus while that view is open, close it to see the filtered history. Session previews also show full detail.
 
 For summarized groups, focus takes precedence over `ui.showToolCallArgs`.
 
-Running tools, approval prompts, cancelled groups, user-initiated groups and groups containing subagent results stay visible.
+Running tools, approval prompts, cancelled groups, user-initiated groups and groups containing subagent results or image output (including omitted-image notices) stay visible. Memory read/write counts remain on the summary line.
 
-Focus is off by default. `/focus` saves `ui.focusMode` at User scope for future sessions; workspace overrides still take precedence. You can also change or reset it through `/settings` or `/config`.
+Focus is off by default. `/focus` saves `ui.focusMode` at User scope for future sessions. If an active workspace or system setting overrides it, the command warns and does not change your saved preference. Edit the overriding setting to change focus. Untrusted workspace settings do not override your preference. You can also manage the preference through `/settings` or `/config`.
 
 These count summaries need no fast model. Focus does not change label generation, tool execution or stored history. OpenTUI and Web Shell do not support this view.
 

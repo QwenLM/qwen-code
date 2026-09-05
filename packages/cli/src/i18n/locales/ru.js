@@ -481,15 +481,19 @@ export default {
     'Режим фокусировки не поддерживается этим интерфейсом.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'переключить режим фокуса (скрыть рассуждения и шум вызовов инструментов)',
-  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
-    'Режим фокуса включён. Рассуждения и завершённые вызовы инструментов скрыты. Запустите /focus ещё раз, чтобы отключить, или нажмите Ctrl+O для полной стенограммы.',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
+    'Режим фокуса включён. Ctrl+O показывает все подробности; закройте этот вид, чтобы применить фокус. Запустите /focus ещё раз для отключения.',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'Режим фокуса управляется настройками рабочей области или системы. Измените настройку с более высоким приоритетом, чтобы переключить режим.',
+  'Memory: {{read}} read, {{written}} written':
+    'Память: {{read}} чтений, {{written}} записей',
   'Focus mode disabled.': 'Режим фокуса отключён.',
-  '1 tool call hidden (/focus to show)':
-    'Скрыт 1 вызов инструмента (/focus — показать)',
+  '1 tool call hidden (Ctrl+O for details)':
+    'Скрыт 1 вызов инструмента (Ctrl+O для подробностей)',
   'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
     'Инструменты: {{count}}, ошибки: {{failed}} (Ctrl+O для подробностей)',
-  '{{count}} tool calls hidden (/focus to show)':
-    'Скрыто вызовов инструментов: {{count}} (/focus — показать)',
+  '{{count}} tool calls hidden (Ctrl+O for details)':
+    'Скрыто вызовов инструментов: {{count}} (Ctrl+O для подробностей)',
   'Show model-specific usage statistics.':
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':

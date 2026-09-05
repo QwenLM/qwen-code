@@ -486,15 +486,19 @@ export default {
     'O modo foco não é compatível com esta interface.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'alternar modo foco (ocultar raciocínio e ruído de chamadas de ferramentas)',
-  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
-    'Modo foco ativado. Raciocínio e chamadas de ferramentas concluídas ficam ocultos. Execute /focus novamente para desativar, ou pressione Ctrl+O para ver a transcrição completa.',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
+    'Modo foco ativado. Ctrl+O mostra todos os detalhes; feche essa visualização para aplicar o foco. Execute /focus novamente para desativar.',
   'Focus mode disabled.': 'Modo foco desativado.',
-  '1 tool call hidden (/focus to show)':
-    '1 chamada de ferramenta oculta (/focus para mostrar)',
+  '1 tool call hidden (Ctrl+O for details)':
+    '1 chamada de ferramenta oculta (Ctrl+O para detalhes)',
   'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
     'Ferramentas: {{count}}, falhas: {{failed}} (Ctrl+O para detalhes)',
-  '{{count}} tool calls hidden (/focus to show)':
-    '{{count}} chamadas de ferramentas ocultas (/focus para mostrar)',
+  '{{count}} tool calls hidden (Ctrl+O for details)':
+    '{{count}} chamadas de ferramentas ocultas (Ctrl+O para detalhes)',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'O modo foco é controlado pelas configurações do espaço de trabalho ou do sistema. Altere a configuração que tem precedência para alternar o foco.',
+  'Memory: {{read}} read, {{written}} written':
+    'Memória: {{read}} leituras, {{written}} gravações',
   'Show model-specific usage statistics.':
     'Mostrar estatísticas de uso específicas do modelo.',
   'Show tool-specific usage statistics.':
