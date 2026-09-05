@@ -90,14 +90,17 @@ export function timeoutOption(args: Args): { timeout: number } {
   return { timeout: timeoutArg(args) };
 }
 
-export function clickOptions(args: Args): {
+export function clickOptions(
+  args: Args,
+  fallback = DEFAULT_TIMEOUT_MS,
+): {
   timeout: number;
   button: MouseButton;
   modifiers: KeyboardModifier[];
   force?: boolean;
 } {
   return {
-    timeout: timeoutArg(args),
+    timeout: timeoutArg(args, fallback),
     button: mouseButton(args.button),
     modifiers: modifiers(args.modifiers),
     ...(args.force === true ? { force: true } : {}),

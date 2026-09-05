@@ -145,6 +145,37 @@ describe('PlaywrightRuntime command contracts', () => {
     ).rejects.toMatchObject({ code: 'INPUT_BLOCKED' });
   });
 
+  it('uses short locator action defaults without shortening explicit waits', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const steps = [{ kind: 'locator' as const, selector: '#target' }];
+
+    await fixture.runtime.dispatch('locator.click', { tabId: tab.id, steps });
+    await fixture.runtime.dispatch('locator.getAttribute', {
+      tabId: tab.id,
+      steps,
+      name: 'aria-label',
+    });
+    await fixture.runtime.dispatch('locator.waitFor', {
+      tabId: tab.id,
+      steps,
+      state: 'visible',
+    });
+
+    expect(fixture.locator.click).toHaveBeenCalledWith({
+      button: 'left',
+      modifiers: [],
+      timeout: 5_000,
+    });
+    expect(fixture.locator.getAttribute).toHaveBeenCalledWith('aria-label', {
+      timeout: 1_000,
+    });
+    expect(fixture.locator.waitFor).toHaveBeenCalledWith({
+      state: 'visible',
+      timeout: 30_000,
+    });
+  });
+
   it('brings the target page forward and drains renderer input tasks', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);

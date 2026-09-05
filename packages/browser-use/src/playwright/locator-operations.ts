@@ -20,8 +20,9 @@ import {
 } from './runtime-helpers.js';
 import type { Args, TabState } from './runtime-state.js';
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_ACTION_TIMEOUT_MS = 5_000;
 const DEFAULT_READ_TIMEOUT_MS = 1_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 
 export async function executeLocatorOperation(
   method: SupportedCommand,
@@ -29,12 +30,7 @@ export async function executeLocatorOperation(
   tab: TabState,
 ): Promise<DispatchResult> {
   const locator = buildLocator(tab.page, args.steps as LocatorStep[]);
-  const timeout = timeoutArg(
-    args,
-    method === 'locator.count' || method.startsWith('locator.is')
-      ? DEFAULT_READ_TIMEOUT_MS
-      : DEFAULT_TIMEOUT_MS,
-  );
+  const timeout = timeoutArg(args, defaultLocatorTimeout(method));
   const options = { timeout };
   switch (method) {
     case 'locator.count':
@@ -70,10 +66,10 @@ export async function executeLocatorOperation(
     case 'locator.isVisible':
       return await locator.isVisible(options);
     case 'locator.click':
-      await locator.click(clickOptions(args));
+      await locator.click(clickOptions(args, DEFAULT_ACTION_TIMEOUT_MS));
       return null;
     case 'locator.dblclick':
-      await locator.dblclick(clickOptions(args));
+      await locator.dblclick(clickOptions(args, DEFAULT_ACTION_TIMEOUT_MS));
       return null;
     case 'locator.downloadMedia':
       await locator.evaluate(
@@ -150,6 +146,25 @@ export async function executeLocatorOperation(
         'UNKNOWN_METHOD',
         `Unknown locator method: ${method}`,
       );
+  }
+}
+
+function defaultLocatorTimeout(method: SupportedCommand): number {
+  switch (method) {
+    case 'locator.evaluate':
+    case 'locator.evaluateAll':
+    case 'locator.waitFor':
+      return DEFAULT_WAIT_TIMEOUT_MS;
+    case 'locator.count':
+    case 'locator.allTextContents':
+    case 'locator.innerText':
+    case 'locator.textContent':
+    case 'locator.getAttribute':
+    case 'locator.isEnabled':
+    case 'locator.isVisible':
+      return DEFAULT_READ_TIMEOUT_MS;
+    default:
+      return DEFAULT_ACTION_TIMEOUT_MS;
   }
 }
 
