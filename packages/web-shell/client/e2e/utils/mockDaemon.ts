@@ -693,19 +693,66 @@ function readRequestBody(raw: string | null): unknown {
 function filterScenarioSessions(
   scenario: WebShellDaemonScenario,
   searchParams: URLSearchParams,
+  workspaceCwd: string,
 ): DaemonSessionSummary[] {
   const group = searchParams.get('group');
   const sourceType = searchParams.get('sourceType');
+  const workspaceSessions = scenario.sessions.filter(
+    (session) => session.workspaceCwd === workspaceCwd,
+  );
   const sourceSessions = sourceType
-    ? scenario.sessions.filter(
+    ? workspaceSessions.filter(
         (session) =>
           session.sourceType === sourceType ||
           (sourceType === 'default' && session.sourceType === undefined),
       )
-    : scenario.sessions;
+    : workspaceSessions;
   return group === 'pinned'
     ? sourceSessions.filter((session) => Boolean(session.isPinned))
     : sourceSessions;
+}
+
+type WorkspaceSessionsRouteMatch = {
+  workspaceCwd: string;
+  liveState: boolean;
+};
+
+function decodeRouteSegment(segment: string): string | undefined {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
+function matchWorkspaceSessionsRoute(
+  path: string,
+): WorkspaceSessionsRouteMatch | undefined {
+  const liveStateMatch = path.match(
+    /^\/workspaces\/([^/]+)\/sessions\/live-state\/?$/,
+  );
+  if (liveStateMatch) {
+    const workspaceCwd = decodeRouteSegment(liveStateMatch[1]);
+    if (workspaceCwd === undefined) return undefined;
+    return {
+      workspaceCwd,
+      liveState: true,
+    };
+  }
+
+  const sessionsMatch =
+    path.match(/^\/workspaces\/([^/]+)\/sessions\/?$/) ??
+    path.match(/^\/workspace\/([^/]+)\/sessions\/?$/);
+  if (!sessionsMatch) {
+    return undefined;
+  }
+  const workspaceCwd = decodeRouteSegment(sessionsMatch[1]);
+  if (workspaceCwd === undefined) return undefined;
+
+  return {
+    workspaceCwd,
+    liveState: false,
+  };
 }
 
 function isDaemonPath(path: string): boolean {
@@ -734,11 +781,9 @@ function isDaemonPath(path: string): boolean {
     ) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
-    /^\/workspace\/.+\/sessions\/?$/.test(path) ||
-    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    Boolean(matchWorkspaceSessionsRoute(path)) ||
     /^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path) ||
-    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
@@ -834,17 +879,8 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (
-    method === 'GET' &&
-    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
-  ) {
-    return true;
-  }
-  if (
-    method === 'GET' &&
-    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
-      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
-  ) {
+  const workspaceSessionsRoute = matchWorkspaceSessionsRoute(path);
+  if (method === 'GET' && workspaceSessionsRoute) {
     return true;
   }
   if (
@@ -1192,14 +1228,14 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (
-    method === 'GET' &&
-    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
-  ) {
+  const workspaceSessionsRoute = matchWorkspaceSessionsRoute(path);
+  if (method === 'GET' && workspaceSessionsRoute?.liveState) {
+    const { workspaceCwd } = workspaceSessionsRoute;
     await json(route, {
       v: 1,
       catalogVersion: scenario.sessionCatalogVersion,
       sessions: scenario.sessions
+        .filter((session) => session.workspaceCwd === workspaceCwd)
         .filter(
           (session) =>
             (session.clientCount ?? 0) > 0 ||
@@ -1228,13 +1264,21 @@ async function handleDaemonRoute(
     await json(route, { results: [] });
     return;
   }
-  if (
-    method === 'GET' &&
-    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
-      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
-  ) {
+  if (method === 'GET' && workspaceSessionsRoute) {
+    const { workspaceCwd } = workspaceSessionsRoute;
+    if (searchParams.has('group') && searchParams.get('view') !== 'organized') {
+      await json(
+        route,
+        {
+          error: '`group` requires `view=organized`',
+          code: 'invalid_session_group_filter',
+        },
+        400,
+      );
+      return;
+    }
     await json(route, {
-      sessions: filterScenarioSessions(scenario, searchParams),
+      sessions: filterScenarioSessions(scenario, searchParams, workspaceCwd),
     });
     return;
   }
