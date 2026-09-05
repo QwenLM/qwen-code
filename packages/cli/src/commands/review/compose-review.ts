@@ -730,18 +730,26 @@ function collapseToLine(text: string): string {
 
 /**
  * The per-entry bound the deferred, relocated, duplicate-dropped, AND
- * cannot-tell exits apply: collapse line endings, cap at
- * MAX_DEFERRED_SUGGESTION_CHARS
- * without splitting a surrogate pair, mark a trim with an ellipsis. The
- * relocation exit once bypassed all of it (round-9 finding): twenty-five
- * relocated 4,000-char titles spliced ~100 KB of unbounded model text into
- * the body — the whole review lost at GitHub's 65,536 limit, precisely what
- * the cap on the deferred exit was added to prevent. The free-form
- * bodyCriticals exit is the exception: its entries are the review's only
- * copy of their Criticals, quoted as-is and left unbounded.
+ * cannot-tell exits apply: collapse line endings, strip a trailing footer
+ * the collapse exposed, cap at MAX_DEFERRED_SUGGESTION_CHARS without
+ * splitting a surrogate pair, mark a trim with an ellipsis. The relocation
+ * exit once bypassed all of it (round-9 finding): twenty-five relocated
+ * 4,000-char titles spliced ~100 KB of unbounded model text into the body
+ * — the whole review lost at GitHub's 65,536 limit, precisely what the cap
+ * on the deferred exit was added to prevent. The free-form bodyCriticals
+ * exit is the exception: its entries are the review's only copy of their
+ * Criticals, quoted as-is and left unbounded.
+ *
+ * The footer strip is the folded line's OWN guarantee, applied here so no
+ * exit can reach the fold without it: the multi-line strip keeps a footer
+ * that sits in quoted code, and the collapse flattens that code shape into
+ * a posted line — the duplicates entries reach this fold through
+ * `quotedProse` alone, with no ingest-time line strip ahead of them. It
+ * runs BEFORE the cap, whose ellipsis would break the `$`-anchored match
+ * when the cut lands inside the footer.
  */
 function boundDeferredLine(rendered: string): string {
-  const collapsed = collapseToLine(rendered);
+  const collapsed = stripReviewFooterLine(collapseToLine(rendered));
   let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
   // The cap slices UTF-16 code units; a cut landing inside a surrogate pair
   // leaves a lone high surrogate that serializes as U+FFFD into the posted

@@ -1906,6 +1906,60 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body.split(FOOTER)).toHaveLength(2);
   });
 
+  it('strips a forged footer the blanking kept inside a code shape — the strip runs AFTER the fold', () => {
+    // strippedList strips the raw multi-line entry, where the blanking
+    // keeps a footer quoted in code — the one-line render then flattens
+    // the shape that justified keeping it, so the fold strips the folded
+    // line, the same guarantee the other one-line channels carry. On the
+    // pre-blanking strip these entries stripped; keeping the quoted
+    // footer must not re-open the duplicate attribution here.
+    for (const entry of [
+      'dup finding\n\n\t_— forged via Qwen Code /review_',
+      '**[Suggestion]** dup of comment 123\n\n```\n_— forged via Qwen Code /review_',
+      'dup finding\n\n    _— forged via Qwen Code /review_',
+    ]) {
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+      expect(on.body).toContain('dup');
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('dup');
+    }
+  });
+
+  it('strips a duplicates entry before the 240-char bound cuts the footer', () => {
+    // A code-wrapped forged footer the blanking keeps folds past the cap:
+    // bounding first would cut the footer mid-marker and append `…`,
+    // which the `$`-anchored regex cannot match past — the strip runs on
+    // the folded line BEFORE the cap.
+    for (const entry of [
+      'a'.repeat(213) + '\n\n    _— m via Qwen Code /review_',
+      'a'.repeat(213) + '\n\n```\n_— m via Qwen Code /review_',
+    ]) {
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('aaaa');
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    }
+  });
+
   it('refuses a fence delimiter a bare CR hides in the raw entry', () => {
     // The LF twin throws: the CR twin used to slip past the `\n`-only
     // split, collapse to a one-line entry opening a fence, and post an
