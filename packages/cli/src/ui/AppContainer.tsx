@@ -268,6 +268,7 @@ import {
   MAX_ACCEPTED_BACKLOG,
   type PeerMessaging,
 } from '../peerMessaging/peer-messaging.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -2708,7 +2709,7 @@ export const AppContainer = (props: AppContainerProps) => {
               newest.selfSent
                 ? 'a process this session started'
                 : 'another session'
-            } (${describeHoldCause(newest.cause)}). ` +
+            } (${describeHoldCause(newest.cause, newest.policyScope)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),
@@ -2779,23 +2780,30 @@ export const AppContainer = (props: AppContainerProps) => {
     peerMessaging?.reevaluate('approval-mode-changed');
   }, [approvalModeForPeers, peerMessaging]);
 
-  // Both settings reload live (`requiresRestart: false`), and both change
-  // what the gate would decide for messages already parked. Nothing else
-  // re-runs it: parking under `never` arms no timer at all, so a later
-  // edit to `1m` would otherwise leave the backlog held until session
-  // exit while `/peers` counted down from the new value.
+  // Both settings reload live (`requiresRestart: false`). Policy and expiry
+  // change the verdict for parked messages; a scope-only change refreshes
+  // the explanation shown for them. Nothing else re-runs the gate: parking
+  // under `never` arms no timer at all, so a later edit to `1m` would
+  // otherwise leave the backlog held until session exit while `/peers`
+  // counted down from the new value.
   //
-  // Keyed on the parsed lifetime and the policy rather than on any
-  // settings edit, because `reevaluate` also settles a parked backlog as
-  // `denied` under a refuse policy -- an unrelated key edit must not
+  // Keyed on the parsed lifetime, policy, and effective scope rather than
+  // on any settings edit, because `reevaluate` also settles a parked backlog
+  // as `denied` under a refuse policy -- an unrelated key edit must not
   // discard the user's backlog.
   const heldExpiryForPeers = parseHeldExpiry(
     settings.merged.agents?.crossSessionHeldExpiry,
   );
   const inboundPolicyForPeers = settings.merged.agents?.crossSessionInbound;
+  const inboundPolicyScopeForPeers = inboundPolicyScope(settings);
   useEffect(() => {
     peerMessaging?.reevaluate('held-expiry-changed');
-  }, [heldExpiryForPeers, inboundPolicyForPeers, peerMessaging]);
+  }, [
+    heldExpiryForPeers,
+    inboundPolicyForPeers,
+    inboundPolicyScopeForPeers,
+    peerMessaging,
+  ]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
