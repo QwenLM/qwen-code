@@ -725,6 +725,51 @@ describe('PlanExecutionView', () => {
         ?.querySelector(`.${styles.nodeStatusText}`)
         ?.textContent?.trim(),
     ).toBe('Running, Needs attention');
+    // The attribute is the hook the `.node[data-attention='true']` colour
+    // rule selects on; dropping it keeps the word but silently loses the
+    // attention tone the stylesheet derives from this state.
+    expect(buildNode?.getAttribute('data-attention')).toBe('true');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('pluralizes the agent count when two agents share one node', () => {
+    // Every other fixture links a single agent per node, so the EN
+    // template's plural branch ships unobserved: a template that always
+    // emits `${count} agent` renders "2 agent" and nothing turns red.
+    // Link two root agents to one step and pin the plural rendering.
+    const secondBuildTool: ACPToolCall = {
+      ...agentTool('build'),
+      callId: 'call-build-2',
+      title: 'Agent build 2',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[agentTool('build'), secondBuildTool]}
+            tasks={[
+              task('running'),
+              task('running', {
+                id: 'agent-second',
+                label: 'Second agent',
+                toolUseId: 'call-build-2',
+              }),
+            ]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('2 agents');
 
     act(() => root.unmount());
     container.remove();
