@@ -32,13 +32,15 @@ export interface WorkflowResumeTarget {
   scriptPath?: string;
   /** The structured value the original run was launched with. */
   args?: unknown;
+  /** Preserve background execution when the current surface accepts it. */
+  resumeInBackground?: boolean;
 }
 
 /**
- * Told to the model when `args` were too large to inline. The cache is keyed
- * on each agent() call's prompt and opts, and a script that reads `args`
- * bakes them into those prompts — so resuming without them silently misses
- * every key.
+ * Told to the model when `args` were too large to inline. The cache replays
+ * only the longest unchanged prefix, and a script that reads `args` bakes
+ * them into that rolling key chain — so resuming without them misses every
+ * key.
  */
 export const RESUME_ARGS_TOO_LARGE_NOTE =
   'The original run also had `args`, too large to inline here; pass the same ' +
@@ -74,5 +76,8 @@ export function buildResumeCall(target: WorkflowResumeTarget): string | null {
   const runId = stripAnsiAndControl(target.runId);
   const args = serializeResumeArgs(target.args);
   const argsPart = args === null ? '' : `, args: ${args}`;
-  return `Workflow({ scriptPath: "${scriptPath}", resumeFromRunId: "${runId}"${argsPart} })`;
+  const backgroundPart = target.resumeInBackground
+    ? ', run_in_background: true'
+    : '';
+  return `Workflow({ scriptPath: ${JSON.stringify(scriptPath)}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${backgroundPart} })`;
 }

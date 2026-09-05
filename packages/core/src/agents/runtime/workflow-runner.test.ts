@@ -30,6 +30,7 @@ const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  persistInlineWorkflowScriptMock,
   resolveSavedWorkflowScriptMock,
   writeLineMock,
   writeWorkflowSnapshotMock,
@@ -37,6 +38,7 @@ const {
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  persistInlineWorkflowScriptMock: vi.fn(),
   resolveSavedWorkflowScriptMock: vi.fn(),
   writeLineMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
@@ -67,8 +69,12 @@ vi.mock('./workflow-orchestrator.js', async (importOriginal) => {
 
 vi.mock('./workflow-saved.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./workflow-saved.js')>();
+  persistInlineWorkflowScriptMock.mockImplementation(
+    actual.persistInlineWorkflowScript,
+  );
   return {
     ...actual,
+    persistInlineWorkflowScript: persistInlineWorkflowScriptMock,
     resolveSavedWorkflowScript: resolveSavedWorkflowScriptMock,
   };
 });
@@ -140,6 +146,7 @@ describe('WorkflowRunner', () => {
     createProductionDispatchMock.mockReset();
     journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
+    persistInlineWorkflowScriptMock.mockClear();
     resolveSavedWorkflowScriptMock.mockReset();
     writeLineMock.mockReset();
     writeLineMock.mockResolvedValue(undefined);
@@ -332,7 +339,8 @@ describe('WorkflowRunner', () => {
   it('cancels a pending background resume before registration', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';
-    stubStorage(config, await makeStorageRoot());
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
     let resolveLoad: ((replay: JournalReplay) => void) | undefined;
     const loadSpy = vi
       .spyOn(WorkflowJournal.prototype, 'load')
@@ -356,17 +364,64 @@ describe('WorkflowRunner', () => {
       await vi.waitFor(() => expect(registry.isStarting(runId)).toBe(true));
       expect(registry.get(runId)).toBeUndefined();
 
+      await vi.waitFor(() => expect(resolveLoad).toBeDefined());
       registry.abortAll();
-      resolveLoad?.({ results: new Map(), started: new Map() });
+      resolveLoad!({ results: new Map(), started: new Map() });
 
       await expect(start).rejects.toThrow('Workflow start was cancelled.');
       expect(registry.isStarting(runId)).toBe(false);
       expect(registry.get(runId)).toBeUndefined();
+      await expect(
+        fs.readdir(path.join(root, 'generated', 'inline')),
+      ).rejects.toThrow();
     } finally {
       resolveLoad?.({ results: new Map(), started: new Map() });
       await start.catch(() => undefined);
       loadSpy.mockRestore();
     }
+  });
+
+  it('rejects a cancellation that lands while the inline script is persisted', async () => {
+    const { config, registry } = configWithRegistry();
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
+    let releasePersist: (() => void) | undefined;
+    persistInlineWorkflowScriptMock.mockImplementationOnce(
+      async (_config: Config, runId: string, script: string) => {
+        await new Promise<void>((resolve) => {
+          releasePersist = resolve;
+        });
+        const file = path.join(root, 'generated', 'inline', `${runId}.js`);
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, script, 'utf8');
+        return file;
+      },
+    );
+    const start = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "done"',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await vi.waitFor(() =>
+      expect(registry.listStartingRunIds()).toHaveLength(1),
+    );
+    const runId = registry.listStartingRunIds()[0]!;
+    await vi.waitFor(() => expect(releasePersist).toBeDefined());
+    expect(registry.cancelStarting(runId)).toBe(true);
+    releasePersist!();
+
+    await expect(start).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+    expect(registry.get(runId)).toBeUndefined();
+    await expect(
+      fs.access(path.join(root, 'generated', 'inline', `${runId}.js`)),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(root, runId, 'journal.jsonl')),
+    ).rejects.toThrow();
   });
 
   it('cancels a pending background script load before registration', async () => {
@@ -1416,8 +1471,10 @@ describe('WorkflowRunner', () => {
         path.join(root, handle.runId, 'journal.jsonl'),
       );
       await expect(fs.readFile(expected, 'utf8')).resolves.toBe(script);
-      const stat = await fs.stat(expected);
-      expect(stat.mode & 0o777).toBe(0o600);
+      if (process.platform !== 'win32') {
+        const stat = await fs.stat(expected);
+        expect(stat.mode & 0o777).toBe(0o600);
+      }
       // The registry entry carries both too: the terminal notification is
       // built from the entry, long after the handle is out of scope.
       const entry = registry.get(handle.runId);
@@ -1439,6 +1496,27 @@ describe('WorkflowRunner', () => {
       const handle = await WorkflowRunner.start({
         config,
         signal: new AbortController().signal,
+        scriptPath: '/tmp/review.js',
+        args: undefined,
+        dispatch: async () => 'unused',
+      });
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+      expect(handle.scriptPath).toBe('/tmp/review.js');
+      await expect(
+        fs.readdir(path.join(root, 'generated', 'inline')),
+      ).rejects.toThrow();
+    });
+
+    it('does not replace an existing script path with a generated copy', async () => {
+      const { config } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return "loaded"',
         scriptPath: '/tmp/review.js',
         args: undefined,
         dispatch: async () => 'unused',

@@ -279,6 +279,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Whether a model-visible resume may preserve background execution. */
+  resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
   currentPhase: string | null;
   /**
@@ -337,10 +339,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Original structured arguments, retained so a failed run can resume the same journal prefix. */
   args?: unknown;
   /**
-   * P7b: the path the script was loaded from, when the run was launched
-   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
-   * slash command). `undefined` for inline scripts. Recorded as run
-   * provenance (e.g. for the snapshot).
+   * The loaded saved-workflow path or the persisted copy of an inline script.
+   * `undefined` only when an inline script could not be persisted.
    */
   scriptPath?: string;
   /**
@@ -1735,10 +1735,11 @@ function buildUsageLine(entry: WorkflowTask): string {
     (entry.endTime ?? entry.startTime) - entry.startTime,
   );
   return [
-    `agents_dispatched=${entry.agentsDispatched}`,
-    `agents_completed=${entry.agentsCompleted}`,
+    `agents_dispatched=${entry.dispatches.length}`,
+    `agents_completed=${countByStatus('completed')}`,
     `agents_cached=${countByStatus('cached')}`,
     `agents_failed=${countByStatus('failed')}`,
+    `agents_cancelled=${countByStatus('cancelled')}`,
     `tokens_spent=${entry.tokensSpent}`,
     `duration_ms=${durationMs}`,
   ].join(' ');
@@ -1750,7 +1751,7 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
   const resume = buildResumeCall(entry);
   if (resume) {
     lines.push(
-      `Resume after editing the script: ${resume} — agent() calls whose prompt and opts are unchanged replay from the journal.`,
+      `Resume after editing the script: ${resume} — the journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.`,
     );
     if (hasUninlinableResumeArgs(entry)) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
@@ -1773,6 +1774,9 @@ function buildDiagnosticsLines(entry: WorkflowTask): string[] {
   const resume = buildResumeCall(entry);
   if (resume) {
     lines.push(`Re-run after editing the script: ${resume}`);
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
   }
   return lines;
 }

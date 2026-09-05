@@ -1672,11 +1672,13 @@ await agent('scan package.json')
     let runtimeDir: string;
     let projectRoot: string;
     let previousRuntimeDir: string | undefined;
+    let previousTokenCap: string | undefined;
 
     beforeEach(async () => {
       runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-rt-'));
       projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-proj-'));
       previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      previousTokenCap = process.env[MAX_TOKENS_PER_WORKFLOW_ENV];
       process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     });
 
@@ -1685,6 +1687,11 @@ await agent('scan package.json')
         delete process.env['QWEN_RUNTIME_DIR'];
       } else {
         process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      if (previousTokenCap === undefined) {
+        delete process.env[MAX_TOKENS_PER_WORKFLOW_ENV];
+      } else {
+        process.env[MAX_TOKENS_PER_WORKFLOW_ENV] = previousTokenCap;
       }
       await fs.rm(runtimeDir, { recursive: true, force: true });
       await fs.rm(projectRoot, { recursive: true, force: true });
@@ -1721,7 +1728,7 @@ await agent('scan package.json')
         `journal: ${storage.getWorkflowRunJournalPath(runId)}`,
       );
       expect(trailer).toContain(
-        'agents: 1 dispatched · 1 completed · 0 cached',
+        'agents: 1 dispatched · 1 completed · 0 cached · 0 failed · 0 cancelled',
       );
       expect(trailer).toContain('tokens: 0 spent (no cap)');
       expect(trailer).toContain(
@@ -1731,6 +1738,16 @@ await agent('scan package.json')
       await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
         'await agent("one"); return "done";',
       );
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+      expect(trailer).toContain('longest unchanged prefix');
+    });
+
+    it('creates the journal before a dispatch-free result names it', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config)
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+
       await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
     });
 
@@ -1775,6 +1792,55 @@ await agent('scan package.json')
       expect(parts[1].text).toContain('script: ');
       expect(parts[1].text).toContain('logs (last ');
       expect(parts[1].text).toContain('about to fail');
+      expect(result.error?.message).toContain('--- workflow run ---');
+    });
+
+    it('keeps only the bounded tail of failure logs', async () => {
+      const { config } = storedConfig();
+      const logs = Array.from(
+        { length: 25 },
+        (_, index) => `log("progress ${index + 1}");`,
+      ).join('');
+      const result = await new WorkflowTool(config)
+        .build({ script: `${logs}throw new Error("boom");` })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('logs (last 20):');
+      expect(trailer).toContain('progress 25');
+      expect(trailer).toContain('progress 6');
+      expect(trailer).not.toContain('progress 5\n');
+    });
+
+    it('reports disjoint failed dispatch counts', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async (prompt) => {
+          if (prompt === 'bad') throw new Error('failed');
+          return 'fine';
+        },
+      })
+        .build({
+          script:
+            'return await parallel([() => agent("good"), () => agent("bad")]);',
+        })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain(
+        'agents: 2 dispatched · 1 completed · 0 cached · 1 failed · 0 cancelled',
+      );
+    });
+
+    it('reports the configured token cap in spent-over-total order', async () => {
+      process.env[MAX_TOKENS_PER_WORKFLOW_ENV] = '1000';
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config)
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('tokens: 0 / 1000 spent');
     });
 
     it('names the script and journal on a background launch', async () => {
@@ -1803,6 +1869,7 @@ await agent('scan package.json')
         `Journal: ${storage.getWorkflowRunJournalPath(runId)}`,
       );
       expect(text).toContain(`Use /workflows ${runId}`);
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
 
       resolveDispatch?.('done');
       await config.getWorkflowRunRegistry!()!.getHandle(runId)!.completion;
@@ -1838,6 +1905,9 @@ await agent('scan package.json')
       expect(dispatch).not.toHaveBeenCalled();
       expect((second.llmContent as Array<{ text: string }>)[0].text).toBe(
         'FROM THE AGENT',
+      );
+      expect((second.llmContent as Array<{ text: string }>)[1].text).toContain(
+        '1 cached',
       );
     });
     it('carries the original args in the resume call', async () => {
@@ -1912,14 +1982,8 @@ await agent('scan package.json')
         .execute(new AbortController().signal);
 
       const parts = result.llmContent as Array<{ text: string }>;
-      const [response] = convertToFunctionResponse(
-        'Workflow',
-        'call-2',
-        result.llmContent,
-      );
-      const output = response.functionResponse?.response?.['output'];
-      expect(output).toBe(`${parts[0].text}\n${parts[1].text}`);
-      expect(String(output)).toMatch(
+      expect(result.error?.message).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(result.error?.message).toMatch(
         /^Workflow failed: boom\n--- workflow run ---/,
       );
     });

@@ -641,6 +641,23 @@ describe('workflow-saved', () => {
       }
     });
 
+    it('refuses a symlinked inline root and writes nothing through it', async () => {
+      const config = fakeConfig(projectDir);
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-ext-'));
+      const generated = config.storage.getGeneratedWorkflowsDir();
+      await fs.mkdir(generated, { recursive: true });
+      await fs.symlink(external, path.join(generated, 'inline'), 'dir');
+
+      try {
+        await expect(
+          persistInlineWorkflowScript(config, RUN_ID, 'return 1'),
+        ).resolves.toBeNull();
+        await expect(fs.readdir(external)).resolves.toEqual([]);
+      } finally {
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    });
+
     it('returns null rather than throwing when the config has no storage', async () => {
       await expect(
         persistInlineWorkflowScript(
@@ -648,6 +665,18 @@ describe('workflow-saved', () => {
           RUN_ID,
           'return 1',
         ),
+      ).resolves.toBeNull();
+    });
+
+    it('returns null when a partial storage lacks the inline accessor', async () => {
+      const config = {
+        storage: {
+          getWorkflowRunJournalPath: () => '/tmp/journal.jsonl',
+        },
+      } as unknown as Config;
+
+      await expect(
+        persistInlineWorkflowScript(config, RUN_ID, 'return 1'),
       ).resolves.toBeNull();
     });
   });

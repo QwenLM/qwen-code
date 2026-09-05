@@ -67,7 +67,10 @@ import {
 import { isSymlinkedRoot } from '../../agents/runtime/workflow-saved.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
+import type {
+  WorkflowDispatchTraceStatus,
+  WorkflowTask,
+} from '../../agents/workflow-run-registry.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
@@ -513,7 +516,9 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // newline, so the model reads `<return value>\n--- workflow run ---…`
         // as one string. Keeping them apart is still what makes the return
         // value untouched at the tool boundary, keeps `returnDisplay` clean,
-        // and puts the trailer in the tail that result truncation preserves.
+        // and gives the per-tool head/tail truncator a distinct trailer part.
+        // The scheduler-wide persistence gate may still fold both parts into
+        // one head-only preview when their combined text crosses its limit.
         llmContent: [
           { text: llmText },
           { text: buildRunTrailer(handle, this.params.args) },
@@ -530,6 +535,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // their "Error: <msg>" toString() form.
       const { message, details } = settlement;
       const { phases, logs, meta } = details ?? {};
+      const failureText = `Workflow failed: ${clampForDisplay(
+        sanitizeBlock(message),
+        TRAILER_ERROR_CHARS,
+      )}`;
+      const trailer = buildRunTrailer(handle, this.params.args, logs);
       // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
       // accumulated before the failure, include them in the display so
       // the user can see what ran before the error.
@@ -564,17 +574,17 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // the logs the runtime already mirrored (`dispatch failed (result not
         // consumed)` and friends) only reached `returnDisplay`, which the
         // scheduler overwrites with `error.message` — so the model never saw
-        // them. The trailer part carries them, and the run handle, to it;
-        // both parts reach the model joined by a newline.
-        llmContent: [
-          { text: `Workflow failed: ${message}` },
-          { text: buildRunTrailer(handle, this.params.args, logs) },
-        ],
+        // them. Mirror the two content parts into the error message because
+        // that is the only text the non-timeout scheduler branch delivers.
+        llmContent: [{ text: failureText }, { text: trailer }],
         returnDisplay: display,
         // FIX-10 (REUSE-I1): use the standard ToolErrorType.EXECUTION_FAILED
         // code so error routing / dashboards can classify workflow failures
         // the same way as other execution-time tool errors.
-        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+        error: {
+          message: `${failureText}\n${trailer}`,
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
       };
     }
   }
@@ -582,6 +592,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 
 /** Log lines carried back to the model on the failure path. */
 const TRAILER_LOG_LINES = 20;
+/** Per-line bound that keeps the recovery handle below the scheduler gate. */
+const TRAILER_LOG_LINE_CHARS = 400;
+/** Bound for the thrown message before the recovery handle is appended. */
+const TRAILER_ERROR_CHARS = 4000;
 
 /**
  * The run handle, as plain text for the model: run id, the script on disk,
@@ -619,12 +633,13 @@ function buildRunTrailer(
   }
   const entry = handle.registry?.get(handle.runId);
   if (entry) {
-    const cached = entry.dispatches.reduce(
-      (n, dispatch) => (dispatch.status === 'cached' ? n + 1 : n),
-      0,
-    );
+    const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
+      entry.dispatches.reduce(
+        (n, dispatch) => (dispatch.status === status ? n + 1 : n),
+        0,
+      );
     lines.push(
-      `agents: ${entry.agentsDispatched} dispatched · ${entry.agentsCompleted} completed · ${cached} cached`,
+      `agents: ${entry.dispatches.length} dispatched · ${countByStatus('completed')} completed · ${countByStatus('cached')} cached · ${countByStatus('failed')} failed · ${countByStatus('cancelled')} cancelled`,
     );
   }
   const spent = handle.budget.spent();
@@ -646,8 +661,8 @@ function buildRunTrailer(
   if (resume) {
     lines.push(
       `resume: ${resume} — edit that file first if the script needs to ` +
-        'change; agent() calls whose prompt and opts are unchanged replay ' +
-        'from the journal.',
+        'change; the journal replays the longest unchanged prefix of ' +
+        'agent() calls, and the first changed call onward runs live.',
     );
     if (hasUninlinableResumeArgs({ runId: handle.runId, args })) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
@@ -657,7 +672,9 @@ function buildRunTrailer(
   if (tail.length > 0) {
     lines.push(
       `logs (last ${tail.length}):`,
-      ...tail.map((line) => sanitizeLine(line)),
+      ...tail.map((line) =>
+        clampForDisplay(sanitizeLine(line), TRAILER_LOG_LINE_CHARS),
+      ),
     );
   }
   return lines.join('\n');

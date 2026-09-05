@@ -416,9 +416,9 @@ export async function persistInlineWorkflowScript(
   }
   const storage = config.storage;
   if (!storage) return null;
-  const filePath = storage.getInlineWorkflowScriptPath(runId);
-  const dir = path.dirname(filePath);
   try {
+    const filePath = storage.getInlineWorkflowScriptPath(runId);
+    const dir = path.dirname(filePath);
     // Same refusal the loader makes: a symlinked generated root (or a
     // symlinked `inline/` inside it) would carry the write outside the
     // trusted root, and the loader would refuse to read back what we wrote.
@@ -444,5 +444,22 @@ export async function persistInlineWorkflowScript(
       `failed to persist inline workflow script for ${runId}: ${error}`,
     );
     return null;
+  }
+}
+
+/** Best-effort cleanup for a persisted inline workflow script. */
+export async function deleteInlineWorkflowScript(
+  config: Config,
+  runId: string,
+): Promise<void> {
+  if (!INLINE_RUN_ID_PATTERN.test(runId)) return;
+  const storage = config.storage;
+  if (!storage) return;
+  try {
+    await fs.rm(storage.getInlineWorkflowScriptPath(runId), { force: true });
+  } catch (error) {
+    debugLogger.warn(
+      `failed to delete inline workflow script for ${runId}: ${error}`,
+    );
   }
 }
