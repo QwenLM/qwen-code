@@ -391,6 +391,7 @@ export {
   type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './daemon/index.js';
 
 export {

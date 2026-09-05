@@ -39,7 +39,7 @@ import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
-import { SessionRouter } from './SessionRouter.js';
+import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
 import {
   NamedSessionManager,
   type NamedSessionOwnerInput,
@@ -3445,6 +3445,25 @@ export abstract class ChannelBase {
     this.releaseQueuedTurn(binding.sessionId);
   }
 
+  /**
+   * Follow a task onto the session its reload healed to (a superseded
+   * redirect). The queue reservation and the staleness generation are keyed
+   * by session id, so both must move with the binding: leaving them behind
+   * keeps the stale id "busy" forever and drops the turn on a generation the
+   * replacement never had.
+   */
+  private moveNamedTurnBinding(
+    binding: NamedTurnBinding,
+    sessionId: string,
+  ): void {
+    if (binding.sessionId !== null) {
+      this.releaseQueuedTurn(binding.sessionId);
+    }
+    binding.sessionId = sessionId;
+    binding.generation = this.sessionGenerations.get(sessionId) ?? 0;
+    this.reserveQueuedTurn(sessionId);
+  }
+
   private finishNamedTurnBinding(envelope: Envelope): void {
     const binding = this.namedTurnBindings.get(envelope);
     if (!binding) return;
@@ -3510,6 +3529,24 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * The actionable recovery message for a worktree task whose ownership state
+   * the daemon refused to restore. Both codes come from the load/resume route
+   * — the reset route resumes an interrupted transfer itself and reports a
+   * broken marker as invalid state — so they surface on selection and on a
+   * message, wrapped in the manager's generic load failure.
+   */
+  private worktreeRecoveryMessage(error: unknown): string | undefined {
+    switch (readDaemonHttpErrorCode(error)) {
+      case 'worktree_reset_interrupted':
+        return 'The task was interrupted while being reset. Its files were not changed. Clear the task again to finish the reset.';
+      case 'worktree_marker_missing':
+        return 'The task cannot verify its worktree because its ownership marker is missing. Its files were not changed. Clear the task to restart it in the same worktree, or close it.';
+      default:
+        return undefined;
+    }
+  }
+
   private async sendNamedSessionError(
     envelope: Envelope,
     error: unknown,
@@ -3520,9 +3557,10 @@ export abstract class ChannelBase {
       );
     }
     const message =
-      error instanceof Error
+      this.worktreeRecoveryMessage(error) ??
+      (error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
-        : 'Named-session operation failed.';
+        : 'Named-session operation failed.');
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
@@ -3605,7 +3643,8 @@ export abstract class ChannelBase {
               : 'shared';
           if (
             (isolation === 'shared' && parts.length !== 1) ||
-            (isolation === 'worktree' && parts.length !== 2)
+            (isolation === 'worktree' && parts.length !== 2) ||
+            parts[0]?.startsWith('-')
           ) {
             break;
           }
@@ -3709,6 +3748,7 @@ export abstract class ChannelBase {
   private registerSharedCommands(): void {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
+      let resetWorktreeKept = false;
       let removedIds: string[];
       if (this.namedSessions) {
         try {
@@ -3716,8 +3756,25 @@ export abstract class ChannelBase {
             this.namedSessionOwner(envelope),
           );
           resetTaskName = reset?.name;
+          resetWorktreeKept = reset?.worktreeKept ?? false;
           removedIds = reset ? [reset.previousSessionId] : [];
         } catch (error) {
+          // The reset route's busy signal has its own wording; every other
+          // typed failure goes through the shared named-session surface.
+          const code = readDaemonHttpErrorCode(error);
+          if (code !== undefined) {
+            process.stderr.write(
+              `[${sanitizeLogText(this.name, 64)}] worktree reset failed (${sanitizeLogText(code, 64)}): ${this.lifecycleError(error)}\n`,
+            );
+          }
+          if (code === 'worktree_reset_active') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+            );
+            return;
+          }
           await this.sendNamedSessionError(envelope, error);
           return;
         }
@@ -3840,7 +3897,9 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           resetTaskName
-            ? `Task "${resetTaskName}" reset with a fresh conversation.`
+            ? resetWorktreeKept
+              ? `Task "${resetTaskName}" reset with a fresh conversation; its worktree and files were kept.`
+              : `Task "${resetTaskName}" reset with a fresh conversation.`
             : 'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
@@ -6299,11 +6358,13 @@ export abstract class ChannelBase {
         return;
       }
       try {
-        const resumed = await this.namedSessions.resumeReserved(
+        sessionId = await this.namedSessions.resumeReserved(
           this.namedSessionOwner(envelope),
           namedTurn.sessionId,
         );
-        sessionId = resumed ? namedTurn.sessionId : undefined;
+        if (sessionId && sessionId !== namedTurn.sessionId) {
+          this.moveNamedTurnBinding(namedTurn, sessionId);
+        }
       } catch (error) {
         await this.sendNamedSessionError(envelope, error);
         return;

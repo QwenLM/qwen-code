@@ -90,6 +90,11 @@ export interface DaemonChannelSessionFactoryRequest {
   /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
   worktree?: Record<string, never>;
+  /**
+   * Worktree ownership transfer: replace this session with a fresh session
+   * that takes over its worktree (daemon `session_worktree_reset_v1`).
+   */
+  worktreeReset?: { sessionId: string };
 }
 
 export type DaemonChannelSessionFactory = (
@@ -129,6 +134,8 @@ export interface DaemonChannelBridgeOptions {
   sessionPermissionVote?: boolean;
   /** Daemon guarantees durable worktree create/restore attestation. */
   sessionWorktreePersistence?: boolean;
+  /** Daemon supports worktree ownership transfer (`session_worktree_reset_v1`). */
+  sessionWorktreeReset?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -461,6 +468,46 @@ export class DaemonChannelBridge
       throw new Error(
         `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
       );
+    }
+    this.attachSession(session, bindingToken);
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
+    return session.sessionId;
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (daemon `session_worktree_reset_v1`). The returned id is the
+   * replacement's; the superseded session's clients stay bound to it (and
+   * are forgotten by the caller). Gated on the capability flag so a daemon
+   * without reset support fails before any session is created.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
+    if (!this.options.sessionWorktreeReset) {
+      throw new Error(
+        'The daemon does not support worktree reset for Channel tasks.',
+      );
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const session = await this.options.sessionFactory({
+      workspaceCwd: cwd || this.options.cwd,
+      modelServiceId: this.options.modelServiceId,
+      sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      worktreeReset: { sessionId },
+    });
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
     }
     this.attachSession(session, bindingToken);
     if (options?.enableChannelLoops === false) {

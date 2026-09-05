@@ -705,6 +705,24 @@ export class CdWhilePromptActiveError extends Error {
   }
 }
 
+/**
+ * Prompt admission refusal for a session whose worktree ownership is being
+ * transferred to a replacement session (worktree reset). The daemon arms the
+ * barrier before the transfer's first side effect, so every prompt source
+ * fails closed for its duration; the session id in the message is the
+ * superseded one.
+ */
+export class SessionResetPendingError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} is mid worktree reset; prompt admission is closed until the reset completes`,
+    );
+    this.name = 'SessionResetPendingError';
+    this.sessionId = sessionId;
+  }
+}
+
 export class McpAuthenticationInProgressError extends Error {
   constructor() {
     super('Another MCP authentication is already in progress');

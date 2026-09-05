@@ -226,6 +226,76 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('rejects worktree reset before calling an unsupported daemon factory', async () => {
+    const factory = vi.fn();
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreeReset: false,
+    });
+
+    await expect(
+      bridge.resetWorktreeSession('session-1', '/repo'),
+    ).rejects.toThrow('does not support worktree reset');
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('transfers a worktree session through the factory and registers loop tools for the replacement', async () => {
+    const events = new EventQueue();
+    const session = {
+      ...createFakeSession(events, 'session-2'),
+      worktree: { slug: 'task', path: '/repo-wt', branch: 'task' },
+      worktreeState: 'persisted-v1' as const,
+    };
+    const factory = vi.fn().mockResolvedValue(session);
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn().mockResolvedValue(undefined),
+      unregister: vi.fn().mockResolvedValue(undefined),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreeReset: true,
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(async () => ({ text: 'created' })),
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    const replacementId = await bridge.resetWorktreeSession(
+      'session-1',
+      '/repo',
+      { sourceId: 'feishu-main' },
+    );
+
+    expect(replacementId).toBe('session-2');
+    expect(factory).toHaveBeenCalledWith({
+      workspaceCwd: '/repo',
+      modelServiceId: undefined,
+      sessionScope: 'thread',
+      sourceId: 'feishu-main',
+      worktreeReset: { sessionId: 'session-1' },
+    });
+    expect(bridge.listSessions()[0]).toMatchObject({
+      sessionId: 'session-2',
+      worktree: session.worktree,
+      worktreeState: 'persisted-v1',
+    });
+    // The replacement must get the same loop-tool registration a loaded
+    // session gets, or channel loops silently stop working after a reset.
+    await waitFor(() =>
+      expect(host.register).toHaveBeenCalledWith(
+        'session-2',
+        expect.any(Function),
+      ),
+    );
+    events.close();
+    bridge.stop();
+  });
+
   it('deletes an internal session through its owning workspace', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

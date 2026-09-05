@@ -676,6 +676,21 @@ export interface RestoreSessionRequest {
   timeoutMs?: number;
 }
 
+export interface WorktreeResetSessionRequest {
+  /**
+   * Workspace path the daemon must have registered. Omit to let the daemon use
+   * its advertised primary workspace, mirroring restores — pass the session's
+   * workspace path for sessions on other workspaces.
+   */
+  workspaceCwd?: string;
+  modelServiceId?: string;
+  approvalMode?: string;
+  /** Attribution stamped on the replacement session. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
+}
+
 export interface PromptRequest {
   prompt: PromptContentBlock[];
   /** Deliver the successful final answer directly through a channel worker. */
@@ -3306,6 +3321,58 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (`POST /session/:id/worktree-reset`, capability
+   * `session_worktree_reset_v1`). Resolves 200 with the replacement
+   * session's create-shape response, which carries no client registration
+   * for the caller — the route never reads a client id, so this method takes
+   * none. Typed 409 bodies carry the reset taxonomy:
+   * `worktree_reset_unsupported` (not a worktree session),
+   * `worktree_reset_active` (a session involved is busy), and
+   * `worktree_reset_invalid_state` (corrupt or ambiguous ownership state; a
+   * partial transfer this request started is rolled back, while a
+   * pre-existing interrupted state is left untouched for operator repair).
+   * A previous transfer that crashed is self-healed here rather than
+   * reported: the route rolls it back and completes a fresh one, or resumes
+   * the committed replacement as a no-op. `worktree_reset_interrupted`,
+   * `worktree_session_superseded`, and `worktree_marker_missing` belong to
+   * the restore surface (`loadSession` / `resumeSession`) instead; the repair
+   * for an interrupted transfer is retrying this reset against the superseded
+   * session.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    req: WorktreeResetSessionRequest = {},
+  ): Promise<DaemonSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-reset`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+          ...(req.modelServiceId !== undefined
+            ? { modelServiceId: req.modelServiceId }
+            : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/worktree-reset');
+        }
+        return (await res.json()) as DaemonSession;
+      },
+    );
   }
 
   async branchSession(

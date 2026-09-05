@@ -3436,6 +3436,47 @@ describe('DaemonSessionClient clientId self-heal', () => {
     },
   );
 
+  it('heals the cached worktree claim when the daemon resumes with no worktree object', async () => {
+    let promptCalls = 0;
+    let detachCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        // The worktree was legitimately exited (its sidecar is gone), so the
+        // daemon's own restore gate resumed the session without one.
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/detach')) {
+        detachCalls++;
+        return new Response(null, { status: 204 });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        return promptCalls === 1
+          ? invalidClientIdResponse()
+          : jsonResponse(200, { stopReason: 'end_turn' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newWorktreeSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(promptCalls).toBe(2);
+    expect(detachCalls).toBe(0);
+    expect(session.clientId).toBe('client-2');
+    expect(session.worktreeState).toBeUndefined();
+    expect(session.worktree).toBeUndefined();
+  });
+
   it('re-registers and retries once when the blocking prompt is rejected with invalid_client_id', async () => {
     let promptCalls = 0;
     let resumeCalls = 0;
