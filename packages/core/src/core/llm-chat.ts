@@ -4888,7 +4888,9 @@ export class LlmChat {
             );
             const truncatedDeferredRecords = [...self.deferredMaxTokensRecords];
             let yieldedVisibleEscalatedOutput = false;
-            const restoreTruncatedTurnOnAbort = () => {
+            const restoreTruncatedTurnOnAbort = (
+              redisplayCommittedVisible = false,
+            ) => {
               if (
                 truncatedModelContent?.role !== 'model' ||
                 self.history.includes(truncatedModelContent)
@@ -4901,9 +4903,10 @@ export class LlmChat {
                 self.history.includes(escalatedCommittedModelContent)
               ) {
                 self.settleDeferredMaxTokensRecords();
-                return yieldedVisibleEscalatedOutput
-                  ? []
-                  : makeRecoveryRedisplayEvents();
+                return redisplayCommittedVisible ||
+                  !yieldedVisibleEscalatedOutput
+                  ? makeRecoveryRedisplayEvents()
+                  : [];
               }
               const prefixSurvives = truncatedHistoryPrefix.every(
                 (entry, index) => self.history[index] === entry,
@@ -5042,7 +5045,7 @@ export class LlmChat {
                       escalatedVisibleParts = [];
                       escalatedVisibleTokens = undefined;
                     },
-                    onMutationAbort: restoreTruncatedTurnOnAbort,
+                    onMutationAbort: () => restoreTruncatedTurnOnAbort(true),
                     isCurrent: () =>
                       self.historyMutationVersion ===
                       escalatedHistoryMutationVersion,

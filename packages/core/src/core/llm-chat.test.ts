@@ -18722,46 +18722,51 @@ describe('LlmChat', async () => {
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       const streams = [
         makeStream([makeChunk([{ text: 'truncated' }], 'MAX_TOKENS')]),
-        makeStream([makeChunk([{ text: 'complete' }], 'STOP')]),
+        makeStream([makeChunk([{ text: 'complete' }]), makeChunk([], 'STOP')]),
       ];
       let callIndex = 0;
       vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
         async () => streams[callIndex++]!,
       );
 
-      const stream = await recordingChat.sendMessageStream(
-        'gemini-pro',
-        { message: 'essay' },
-        'escalation-committed-append-mutation',
-      );
-      const iterator = stream[Symbol.asyncIterator]();
-      for (;;) {
-        const result = await iterator.next();
-        expect(result.done).toBe(false);
-        if (
-          result.value?.type === StreamEventType.CHUNK &&
-          result.value.value.candidates?.[0]?.finishReason === FinishReason.STOP
-        ) {
-          break;
-        }
-      }
       const interloper: Content = {
         role: 'user',
         parts: [{ text: 'interloper' }],
       };
-      recordingChat.addHistory(interloper);
-      let continuationRetryAfterAppend = false;
-      for (;;) {
-        const result = await iterator.next();
-        if (result.done) break;
-        if (
-          result.value?.type === StreamEventType.RETRY &&
-          result.value.isContinuation
-        ) {
-          continuationRetryAfterAppend = true;
+      const internalHistory = (
+        recordingChat as unknown as { history: Content[] }
+      ).history;
+      let injectedMutation = false;
+      const pushSpy = vi
+        .spyOn(internalHistory, 'push')
+        .mockImplementation((...entries: Content[]) => {
+          const length = Array.prototype.push.apply(internalHistory, entries);
+          if (
+            !injectedMutation &&
+            entries.some((entry) =>
+              entry.parts?.some((part) => part.text === 'complete'),
+            )
+          ) {
+            injectedMutation = true;
+            recordingChat.addHistory(interloper);
+          }
+          return length;
+        });
+      const events: StreamEvent[] = [];
+      try {
+        const stream = await recordingChat.sendMessageStream(
+          'gemini-pro',
+          { message: 'essay' },
+          'escalation-committed-append-mutation',
+        );
+        for await (const event of stream) {
+          events.push(event);
         }
+      } finally {
+        pushSpy.mockRestore();
       }
 
+      expect(injectedMutation).toBe(true);
       expect(recordingChat.getHistory().map((entry) => entry.role)).toEqual([
         'user',
         'model',
@@ -18772,7 +18777,37 @@ describe('LlmChat', async () => {
       ]);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('complete');
-      expect(continuationRetryAfterAppend).toBe(true);
+      const escalatedOutputIndex = events.findIndex(
+        (event) =>
+          event.type === StreamEventType.CHUNK &&
+          event.value.candidates?.[0]?.content?.parts?.some(
+            (part) => part.text === 'complete',
+          ),
+      );
+      const bareRetryIndex = events.findIndex(
+        (event, index) =>
+          index > escalatedOutputIndex &&
+          event.type === StreamEventType.RETRY &&
+          !event.isContinuation,
+      );
+      const redisplayIndex = events.findIndex(
+        (event, index) =>
+          index > bareRetryIndex &&
+          event.type === StreamEventType.CHUNK &&
+          event.value.candidates?.[0]?.content?.parts?.some(
+            (part) => part.text === 'complete',
+          ),
+      );
+      const terminalStopIndex = events.findIndex(
+        (event, index) =>
+          index > redisplayIndex &&
+          event.type === StreamEventType.CHUNK &&
+          event.value.candidates?.[0]?.finishReason === FinishReason.STOP,
+      );
+      expect(escalatedOutputIndex).toBeGreaterThanOrEqual(0);
+      expect(bareRetryIndex).toBeGreaterThanOrEqual(0);
+      expect(redisplayIndex).toBeGreaterThan(bareRetryIndex);
+      expect(terminalStopIndex).toBeGreaterThan(redisplayIndex);
     });
 
     it('retains a committed escalation after equivalent history replacement', async () => {
