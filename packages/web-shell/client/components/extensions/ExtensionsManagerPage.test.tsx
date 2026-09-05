@@ -71,21 +71,26 @@ async function renderPage(): Promise<void> {
   });
 }
 
-async function disableExtension(scope: 'user' | 'workspace'): Promise<void> {
-  await act(async () => {
-    container
-      .querySelector<HTMLElement>('[aria-label="Demo"]')!
-      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-  });
+async function chooseActivation(
+  scope: 'user' | 'workspace',
+  label: string,
+): Promise<void> {
+  // The detail panel replaces the card list once an extension is selected.
+  const card = container.querySelector<HTMLElement>('[aria-label="Demo"]');
+  if (card) {
+    await act(async () => {
+      card.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  }
   const triggers = container.querySelectorAll<HTMLElement>('[role="combobox"]');
   expect(triggers).toHaveLength(2);
   await act(async () => triggers[scope === 'user' ? 0 : 1]!.click());
-  const disabled = Array.from(
+  const option = Array.from(
     document.body.querySelectorAll<HTMLElement>('[role="option"]'),
-  ).find((option) => option.textContent?.trim() === 'Disabled');
-  expect(disabled).toBeDefined();
+  ).find((candidate) => candidate.textContent?.trim() === label);
+  expect(option).toBeDefined();
   await act(async () => {
-    disabled!.click();
+    option!.click();
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -176,8 +181,12 @@ afterEach(async () => {
 
 describe('ExtensionsManagerPage activation refresh', () => {
   it('submits a workspace refresh without polling or blocking the page', async () => {
+    // A refresh that never settles keeps the page busy if it is awaited.
+    state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
+      new Promise(() => {}),
+    );
     await renderPage();
-    await disableExtension('workspace');
+    await chooseActivation('workspace', 'Disabled');
 
     await vi.waitFor(() => {
       expect(
@@ -196,7 +205,7 @@ describe('ExtensionsManagerPage activation refresh', () => {
 
   it('refreshes only the current workspace after a global activation', async () => {
     await renderPage();
-    await disableExtension('user');
+    await chooseActivation('user', 'Disabled');
 
     expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
       'a'.repeat(64),
@@ -213,11 +222,50 @@ describe('ExtensionsManagerPage activation refresh', () => {
   it('does not submit an extra refresh to an older daemon', async () => {
     state.workspace.capabilities.features = [];
     await renderPage();
-    await disableExtension('workspace');
+    await chooseActivation('workspace', 'Disabled');
 
     expect(
       state.workspaceHandle.refreshExtensionRuntime,
     ).not.toHaveBeenCalled();
+  });
+
+  it('keeps the newer mutation message when an earlier refresh rejects late', async () => {
+    let rejectRefresh: ((error: Error) => void) | undefined;
+    state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectRefresh = reject;
+      }),
+    );
+    await renderPage();
+    await chooseActivation('workspace', 'Disabled');
+    await vi.waitFor(() => {
+      expect(
+        state.workspaceHandle.refreshExtensionRuntime,
+      ).toHaveBeenCalledWith('client-1');
+    });
+
+    state.client.waitForExtensionOperation.mockResolvedValue({
+      v: 1,
+      operationId: 'activate',
+      operation: 'activation',
+      status: 'failed',
+      createdAt: 1,
+      updatedAt: 2,
+      error: 'boom-later-mutation',
+    });
+    await chooseActivation('workspace', 'Enabled');
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('boom-later-mutation');
+    });
+
+    await act(async () => {
+      rejectRefresh!(new Error('boom-stale-refresh'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('boom-later-mutation');
+    expect(container.textContent).not.toContain('session refresh failed');
   });
 
   it('keeps activation successful when refresh submission fails', async () => {
@@ -225,7 +273,7 @@ describe('ExtensionsManagerPage activation refresh', () => {
       new Error('refresh unavailable'),
     );
     await renderPage();
-    await disableExtension('workspace');
+    await chooseActivation('workspace', 'Disabled');
 
     await vi.waitFor(() => {
       expect(container.textContent).toContain(

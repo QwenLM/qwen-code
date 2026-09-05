@@ -297,7 +297,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_info` advertises `GET /workspace/:id/session-info` and its `/workspaces/:workspace/session-info` twin. The response aggregates persisted active and archived session counts without hydrating list metadata. It is an explicit O(n) disk scan and must not be polled; clients should treat `truncated: true` as a lower-bound result.
 
-`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_settings_toggle`, `workspace_skill_settings_batch_toggle`, `extension_batch_activation_v2`, `extension_activation_explicit_refresh`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. Approval-mode control retains its non-strict compatibility gate. The other controls are strict-gated by operator authority: trusted-loopback primary, bearer-authenticated, or paired Local Control requests pass. A token-less primary request that reaches the strict gate without trusted-loopback authority returns 401 `token_required`; missing or invalid configured credentials and unpaired Local Control credentials are rejected earlier by bearer middleware with plain `401 Unauthorized`. Daemons that lack one of these routes return `404`. The settings-specific Skill tags are different: daemons from the retired-tag generation advertise `workspace_skill_toggle` and `workspace_skill_batch_toggle` and serve their catalog-validated contract at the same paths. The retired single-target route can return HTTP `404 skill_not_found` or `409 skill_not_toggleable`; the retired batch route returns HTTP 200 and places catalog-derived failures in `errors[]`. Pre-flight each tag before exposing its affordance, and do not infer the settings-specific Skill contract by probing route reachability. The route paths and request bodies did not change.
+`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_settings_toggle`, `workspace_skill_settings_batch_toggle`, `extension_batch_activation_v2`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. Approval-mode control retains its non-strict compatibility gate. The other controls are strict-gated by operator authority: trusted-loopback primary, bearer-authenticated, or paired Local Control requests pass. A token-less primary request that reaches the strict gate without trusted-loopback authority returns 401 `token_required`; missing or invalid configured credentials and unpaired Local Control credentials are rejected earlier by bearer middleware with plain `401 Unauthorized`. Daemons that lack one of these routes return `404`. The settings-specific Skill tags are different: daemons from the retired-tag generation advertise `workspace_skill_toggle` and `workspace_skill_batch_toggle` and serve their catalog-validated contract at the same paths. The retired single-target route can return HTTP `404 skill_not_found` or `409 skill_not_toggleable`; the retired batch route returns HTTP 200 and places catalog-derived failures in `errors[]`. Pre-flight each tag before exposing its affordance, and do not infer the settings-specific Skill contract by probing route reachability. The route paths and request bodies did not change.
 
 `mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
 
@@ -497,15 +497,15 @@ A durable commit followed by incomplete cleanup or runtime reconciliation is not
 {
   "v": 1,
   "operationId": "<operation-id>",
-  "operation": "activation",
+  "operation": "uninstall",
   "status": "succeeded_with_warnings",
   "createdAt": 1750000000000,
   "updatedAt": 1750000000200,
   "result": {
-    "status": "disabled",
+    "status": "uninstalled",
     "name": "demo",
-    "refreshed": 1,
-    "failed": 1
+    "refreshed": 2,
+    "failed": 0
   },
   "warnings": [
     {

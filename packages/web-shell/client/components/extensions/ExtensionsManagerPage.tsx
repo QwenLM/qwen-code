@@ -480,6 +480,9 @@ export function ExtensionsManagerPage({
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const archiveInputRef = useRef<HTMLInputElement>(null);
   const returnFocusNameRef = useRef<string | null>(null);
+  // Increments whenever a mutation claims the shared message slot, so a late
+  // background refresh cannot overwrite a newer mutation's message.
+  const messageClaimRef = useRef(0);
   const [pendingMutation, setPendingMutation] = useState<{
     operationId: string;
     name: string;
@@ -912,6 +915,7 @@ export function ExtensionsManagerPage({
   const checkUpdates = useCallback(
     (name: string) => {
       setCheckingName(name);
+      messageClaimRef.current += 1;
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('info');
       setMessage(null);
@@ -957,6 +961,7 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
+    messageClaimRef.current += 1;
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);
@@ -1017,6 +1022,7 @@ export function ExtensionsManagerPage({
         uninstallInFlightNameRef.current = name;
       }
       setBusyName(name);
+      messageClaimRef.current += 1;
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1090,6 +1096,8 @@ export function ExtensionsManagerPage({
           : activation === 'disabled'
             ? 'disable'
             : 'inherit';
+      messageClaimRef.current += 1;
+      const messageClaim = messageClaimRef.current;
       setBusyName(extension.name);
       setMessageOwner(extension.name);
       setMessageTone('progress');
@@ -1131,6 +1139,7 @@ export function ExtensionsManagerPage({
             .workspaceByCwd(workspace.workspaceCwd)
             .refreshExtensionRuntime(connection.clientId)
             .catch((error: unknown) => {
+              if (messageClaim !== messageClaimRef.current) return;
               setMessageTone('error');
               setMessage(
                 t('extensions.manage.refreshFailed', {

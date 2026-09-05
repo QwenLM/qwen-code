@@ -1792,6 +1792,8 @@ export function registerWorkspaceExtensionRoutes(
       context?: ExtensionOperationContext,
     ) => Promise<ExtensionMutationEvent>,
     options: {
+      // Also selects the bridges the mutation client id is validated against,
+      // so it stays load-bearing on routes that pass `skipRefresh: true`.
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
         | (() => readonly WorkspaceRuntime[]);
