@@ -48,6 +48,63 @@ async function run(
   await (command.handler as any)(argv);
 }
 
+/**
+ * Drive a parse the way the CLI does. `config.ts` builds its yargs tree
+ * from `hideBin(process.argv)`, and `answer` cuts its text back out of
+ * those same raw args, so a parse test has to give yargs and `process.argv`
+ * the one argv.
+ */
+async function withRawArgs<T>(
+  argv: string[],
+  parse: () => Promise<T>,
+): Promise<T> {
+  const savedArgv = process.argv;
+  process.argv = ['node', 'qwen', ...argv];
+  try {
+    return await parse();
+  } finally {
+    process.argv = savedArgv;
+  }
+}
+
+/**
+ * Parse through a chain that mirrors the real one: the root yargs instance
+ * registers globals (config.ts: --debug/-d, --proxy, --telemetry*,
+ * --version/-v, ...), and the sessions builder disables --version.
+ *
+ * Those globals stay known inside the answer subtree, where
+ * `unknown-options-as-args` cannot see them, so without
+ * forgetInheritedOptions a quoted flag sets the option and is silently
+ * stripped from the text.
+ */
+async function parseWithRootOptions(
+  argv: string[],
+): Promise<Record<string, unknown>> {
+  return (await withRawArgs(argv, () =>
+    yargs(argv)
+      .option('debug', { type: 'boolean', alias: 'd', default: false })
+      .option('proxy', { type: 'string' })
+      .version('x')
+      .alias('v', 'version')
+      .command({
+        command: 'sessions',
+        describe: 'Manage Qwen Code sessions',
+        builder: (y: Argv) =>
+          y.command(answerCommand).demandCommand(1).version(false),
+        handler: () => {},
+      })
+      .strict()
+      .exitProcess(false)
+      .parseAsync(),
+  )) as Record<string, unknown>;
+}
+
+/** What the handler passed to the supervisor as the session id. */
+function deliveredSession(answer: { mock: { calls: unknown[][] } }) {
+  const call = answer.mock.calls[0] ?? [];
+  return call[0];
+}
+
 describe('session control command reporting', () => {
   it('writes a failure to stderr and keeps stdout clean', async () => {
     // No supervisor running: peek fails, and the message must not land
@@ -93,7 +150,9 @@ describe('answer command parsing', () => {
   // variadic tail, so what reaches it — not what the user quoted — is
   // what a dash-leading answer must survive.
   async function parse(argv: string[]): Promise<void> {
-    await yargs(argv).command(answerCommand).strict().parseAsync();
+    await withRawArgs(argv, () =>
+      yargs(argv).command(answerCommand).strict().parseAsync(),
+    );
   }
 
   function mockDelivered() {
@@ -135,30 +194,7 @@ describe('answer command parsing', () => {
 });
 
 describe('answer command parsing with the root options registered', () => {
-  // The real chain registers globals on the root yargs instance
-  // (config.ts: --debug/-d, --proxy, --telemetry*, --version/-v, ...).
-  // They stay known inside the answer subtree, where
-  // `unknown-options-as-args` cannot see them, so without
-  // forgetInheritedOptions a quoted flag sets the option and is silently
-  // stripped from the text. Mirror that chain, including the way
-  // config.ts registers --version and the sessions builder disables it.
-  async function parse(argv: string[]): Promise<Record<string, unknown>> {
-    return (await yargs(argv)
-      .option('debug', { type: 'boolean', alias: 'd', default: false })
-      .option('proxy', { type: 'string' })
-      .version('x')
-      .alias('v', 'version')
-      .command({
-        command: 'sessions',
-        describe: 'Manage Qwen Code sessions',
-        builder: (y: Argv) =>
-          y.command(answerCommand).demandCommand(1).version(false),
-        handler: () => {},
-      })
-      .strict()
-      .exitProcess(false)
-      .parseAsync()) as Record<string, unknown>;
-  }
+  const parse = parseWithRootOptions;
 
   function mockDelivered() {
     const answer = vi
@@ -252,5 +288,75 @@ describe('answer command parsing with the root options registered', () => {
     const answer = mockDelivered();
     await parse(['sessions', 'answer', SESSION, 'yes, go ahead']);
     expect(answer).toHaveBeenCalledWith(SESSION, 'yes, go ahead');
+  });
+});
+
+describe('answer text yargs cannot hand over intact', () => {
+  // `--help` has to stay a known boolean so a bare `--help` still shows
+  // help, and yargs-parser counts every `--no-<known flag>` as a negated
+  // boolean rather than an unknown option; separately, the variadic
+  // positional is re-parsed as argv by yargs' postProcessPositionals. Both
+  // edit an answer while the command still reports success, so the handler
+  // takes the tail from the raw args instead.
+  const parse = parseWithRootOptions;
+
+  function mockDelivered(sessionId: string = SESSION) {
+    const answer = vi.fn().mockResolvedValue({ sessionId, answered: true });
+    connectExistingAgentViewSupervisor.mockResolvedValue({ answer });
+    return answer;
+  }
+
+  it('keeps a negated --help in the answer text', async () => {
+    // Without the raw tail this delivered "please me": yargs-parser folded
+    // `--no-help` into the kept `help` boolean and dropped it from the
+    // variadic positional, then printed "Answer delivered." anyway.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'please', '--no-help', 'me']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'please --no-help me');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('keeps --help=false in the answer text', async () => {
+    // The `=` form of the same negation: known option, so it set help and
+    // vanished from the text.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'go', '--help=false', 'on']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'go --help=false on');
+    expect(stdout).toEqual(['Answer delivered.']);
+  });
+
+  it('keeps a quoted --text in the answer text', async () => {
+    // `text` is registered after forgetInheritedOptions, so yargs still
+    // knows it as an option: both tokens were consumed and the command
+    // refused an answer it had been given.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, '--text', 'hello']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--text hello');
+    expect(stderr).toEqual([]);
+    expect(stdout).toEqual(['Answer delivered.']);
+  });
+
+  it('does not let a quoted --session= re-bind the session id', async () => {
+    // postProcessPositionals re-parses the positional values as argv, so
+    // `--session=zzz` bound a second time and turned the id into an array
+    // the supervisor's requireSessionId would reject — after dropping the
+    // token from the text and reporting success.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'use', '--session=zzz']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'use --session=zzz');
+    const sessionId = deliveredSession(answer);
+    expect(typeof sessionId).toBe('string');
+    expect(sessionId).toBe(SESSION);
+    expect(stdout).toEqual(['Answer delivered.']);
+  });
+
+  it('keeps an all-digit session id a string', async () => {
+    // requireSessionId demands a string, and yargs coerces an all-digit
+    // positional to a number.
+    const answer = mockDelivered('12345');
+    await parse(['sessions', 'answer', '12345', 'hi']);
+    expect(answer).toHaveBeenCalledWith('12345', 'hi');
+    expect(typeof deliveredSession(answer)).toBe('string');
   });
 });

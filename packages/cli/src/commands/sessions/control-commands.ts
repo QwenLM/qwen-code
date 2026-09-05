@@ -15,6 +15,7 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+import { hideBin } from 'yargs/helpers';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   answerManagedSession,
@@ -125,6 +126,65 @@ function forgetInheritedOptions(built: Argv): Argv {
   return built;
 }
 
+/**
+ * Cut `<session> <text...>` back out of the args this process was invoked
+ * with, anchored on the command tokens yargs matched (`argv._`).
+ *
+ * yargs cannot hand the answer over intact, and both ways it loses one are
+ * silent — the command still prints `Answer delivered.`:
+ *
+ * - `--help` has to stay a known boolean for a bare `--help` to work, and
+ *   yargs-parser counts every `--no-<known flag>` as a negated boolean
+ *   rather than an unknown option, so `answer <id> please --no-help me`
+ *   delivers "please me". Turning `boolean-negation` off only trades that
+ *   silent edit for a strict-mode `Unknown arguments: no-help, noHelp`.
+ * - The variadic positional is re-parsed as argv by yargs'
+ *   `postProcessPositionals`, where a quoted `--session=zzz` re-binds the
+ *   session id (into an array) and a quoted `--text` swallows its own
+ *   token.
+ *
+ * Reading the session id here instead of taking `argv.session` also keeps
+ * it the string the supervisor's `requireSessionId` asks for: yargs coerces
+ * an all-digit positional to a number.
+ *
+ * Returns `undefined` when the raw args do not line up with this parse — a
+ * handler called programmatically, say — so the caller falls back to what
+ * yargs produced.
+ */
+function rawAnswerTail(argv: {
+  _?: unknown[];
+}): { session: string; text: string } | undefined {
+  const commands = (argv._ ?? []).map(String);
+  // `argv._` is the matched command chain, so an empty one means this argv
+  // did not come out of a parse and there is nothing to anchor on.
+  if (commands.length === 0) return undefined;
+  // `config.ts` builds its yargs tree from `hideBin(process.argv)`, so this
+  // is the argv the parse came from — including the entry-point token
+  // config.ts sometimes strips off the front, which anchoring on a run of
+  // command tokens instead of a fixed offset makes harmless.
+  const raw = hideBin(process.argv);
+  const at = findRun(raw, commands);
+  if (at === -1) return undefined;
+  const session = raw[at + commands.length];
+  if (typeof session !== 'string') return undefined;
+  const tail = raw.slice(at + commands.length + 1);
+  // `--` marks the verbatim tail the positional's describe promises; the
+  // separator itself is not part of the answer.
+  const separator = tail.indexOf('--');
+  if (separator !== -1) tail.splice(separator, 1);
+  return { session, text: tail.join(' ') };
+}
+
+/** Index of the first adjacent run of `needle` in `haystack`, or -1. */
+function findRun(haystack: string[], needle: string[]): number {
+  for (let at = 0; at + needle.length <= haystack.length; at++) {
+    if (needle.every((token, offset) => haystack[at + offset] === token)) {
+      return at;
+    }
+  }
+  return -1;
+}
+
 export const peekCommand: CommandModule<unknown, SessionIdArgs> = {
   command: 'peek <session>',
   describe: 'Show what a background session is doing or waiting for',
@@ -174,10 +234,13 @@ export const answerCommand: CommandModule<unknown, AnswerArgs> = {
         }
       }) as Argv<AnswerArgs>,
   handler: async (argv) => {
+    // The raw tail wins over what yargs parsed: see rawAnswerTail for the
+    // two ways yargs silently edits an answer.
+    const raw = rawAnswerTail(argv);
     report(
       await answerManagedSession(
-        argv.session,
-        (argv.text ?? []).join(' '),
+        raw?.session ?? argv.session,
+        raw?.text ?? (argv.text ?? []).join(' '),
         connectSupervisor,
       ),
     );
