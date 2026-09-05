@@ -124,4 +124,4 @@ scenarios/screenshots/
 
 1. **Visual Regression** — Integrate Playwright `toHaveScreenshot()` for pixel-level baseline comparison, CI auto-detects terminal UI changes
 2. **PR Workflow Integration** — Drive Agent via Cursor Skill to auto-checkout branch → build → screenshot → attach to review comment
-3. **Complement to Chromatic** — Chromatic covers Web UI, terminal-capture covers CLI terminal UI
+3. **Complement to Web Shell visual tests** — Playwright visual tests cover the Web Shell browser UI, terminal-capture covers CLI terminal UI

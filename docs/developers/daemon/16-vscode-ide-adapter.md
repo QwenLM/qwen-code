@@ -85,7 +85,7 @@ exception paths call `onEndTurn('error')`.
 
 ### Webview bridging
 
-The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview embeds Web Shell for rendering — see Adapter Matrix in [`01-architecture.md`](./01-architecture.md).
+The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview embeds Web Shell for rendering.
 
 ### Connect serialization
 
