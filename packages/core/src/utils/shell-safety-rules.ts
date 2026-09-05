@@ -335,5 +335,10 @@ export function hasShellBraceExpansion(text: string): boolean {
 }
 
 export function hasShellPatternExpansion(text: string): boolean {
-  return /[[*?]/.test(text) || hasShellBraceExpansion(text);
+  return (
+    /[[*?]/.test(text) ||
+    /\\./.test(text) ||
+    /%G/.test(text) ||
+    hasShellBraceExpansion(text)
+  );
 }

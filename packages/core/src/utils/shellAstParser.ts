@@ -139,7 +139,7 @@ const WRITE_GIT_SUBCOMMAND =
 const WRITE_GIT_REMOTE_ACTION =
   /^(add|remove|rm|rename|set-branches|set-head|set-url|update)$/;
 const GIT_EXTERNAL_HELPER_OPTION =
-  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager)(?:=|$)/;
+  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager|remerge-diff)(?:=|$)|^--diff-merges=(?:remerge|r)$/;
 const GIT_COMMIT_VALUE_OPTION =
   /^(?:-[CcFmt]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
 /** git branch flags that mutate state. */
@@ -828,17 +828,25 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
   if (subcommand === 'remote') {
     const action = rest.find((arg) => !arg.startsWith('-'))?.toLowerCase();
     if (!action) return invokesHelper ? 'unknown' : 'read-only';
-    if (['show', 'get-url'].includes(action))
-      return rest.some((arg) =>
-        /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
-          arg,
-        ),
-      ) || invokesHelper
-        ? 'unknown'
-        : 'read-only';
+    const remoteOptions = beforeTerminator(rest);
+    const hasBlockedAction = remoteOptions.some((arg) =>
+      /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
+        arg,
+      ),
+    );
+    if (action === 'show') {
+      const noQuery = remoteOptions.some((arg) =>
+        ['-n', '--no-query'].includes(arg.toLowerCase()),
+      );
+      return noQuery && !hasBlockedAction && !invokesHelper
+        ? 'read-only'
+        : 'unknown';
+    }
+    if (action === 'get-url')
+      return hasBlockedAction || invokesHelper ? 'unknown' : 'read-only';
     if (WRITE_GIT_REMOTE_ACTION.test(action)) return 'write';
     if (action === 'prune')
-      return rest.some((arg) => ['-n', '--dry-run'].includes(arg))
+      return remoteOptions.some((arg) => ['-n', '--dry-run'].includes(arg))
         ? 'unknown'
         : 'write';
     return 'unknown';
@@ -1104,20 +1112,31 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
     );
   if (/^variable_assignments?$/.test(node.type))
     return mergeSafety(
-      node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
+      node.parent?.namedChildCount === 1 &&
+        node.parent.type !== 'compound_statement'
+        ? 'read-only'
+        : 'unknown',
       evaluateSubstitutions(node),
     );
   if (node.type === 'function_definition') return 'unknown';
   return childrenSafety(node, 'unknown');
 }
 
+const FS_MONITOR_AND_FILTER_SAFE_SUBCOMMANDS = new Set([
+  'branch',
+  'cat-file',
+  'log',
+  'remote',
+  'rev-parse',
+  'show',
+]);
+
 function localGitConfigMakesCommandUnsafe(
   root: SyntaxNode,
   cwd: string,
 ): boolean {
   let changedDirectory = false;
-  let usesDiff = false;
-  let usesStatus = false;
+  const gitReads: string[] = [];
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1126,28 +1145,65 @@ function localGitConfigMakesCommandUnsafe(
       continue;
     }
     if (name !== 'git') continue;
-    const subcommand = stripOuterQuotes(
-      getArgumentNodes(command)[0]?.text ?? '',
-    ).toLowerCase();
-    if (subcommand !== 'diff' && subcommand !== 'status') continue;
+
+    const args = getArgumentNodes(command).map((node) =>
+      stripOuterQuotes(node.text),
+    );
+    const subcommand = (args[0] ?? '').toLowerCase();
+    if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) continue;
     if (changedDirectory) return true;
-    usesDiff ||= subcommand === 'diff';
-    usesStatus ||= subcommand === 'status';
+    gitReads.push(subcommand);
   }
 
-  if (!usesDiff && !usesStatus) return false;
+  if (gitReads.length === 0) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return (usesDiff && risk.diffExternal) || (usesStatus && risk.fsmonitor);
+
+  // Broad execution mechanisms are fail-closed. Only narrowly proven
+  // non-consumers stay auto-approved; promisor repositories get no exemption
+  // because even resolving HEAD can materialize a missing commit object.
+  if (
+    risk.pager ||
+    risk.promisorRemote ||
+    risk.alternateRefsCommand ||
+    risk.hooksPath
+  )
+    return true;
+
+  return gitReads.some((subcommand) => {
+    if (
+      (risk.diffExternal || risk.diffDriverCommand) &&
+      subcommand === 'diff'
+    )
+      return true;
+    if (
+      risk.diffDriverTextconv &&
+      ['blame', 'diff', 'log', 'show'].includes(subcommand)
+    )
+      return true;
+    if (
+      (risk.fsmonitor || risk.worktreeFilter) &&
+      !FS_MONITOR_AND_FILTER_SAFE_SUBCOMMANDS.has(subcommand)
+    )
+      return true;
+    if (
+      risk.signatureVerifier &&
+      ['log', 'show'].includes(subcommand)
+    )
+      return true;
+    if (risk.mergeDriver && ['log', 'show'].includes(subcommand)) return true;
+    return false;
+  });
 }
 
+// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_* are rejected at the raw shell permission
+// boundary before wrapper stripping; this layer protects on-disk repository config.
 function fallbackGitConfigMakesCommandUnsafe(
   command: string,
   cwd: string,
 ): boolean {
   if (/\b(?:cd|pushd)\b[\s\S]*\bgit\b/i.test(command)) return true;
   if (!/\bgit\b/i.test(command)) return false;
-  const risk = getLocalGitConfigRisk(cwd);
-  return risk.diffExternal || risk.fsmonitor;
+  return Object.values(getLocalGitConfigRisk(cwd)).some(Boolean);
 }
 
 async function classifyInternal(
@@ -1176,6 +1232,7 @@ async function classifyInternal(
     tree.delete();
   }
 }
+
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {

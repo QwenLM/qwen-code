@@ -17,13 +17,18 @@ import type {
 } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  hasShellSubstitution,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getAutoMemoryTrustedAnchor,
   getUserAutoMemoryRoot,
 } from './paths.js';
+
+const LEADING_ENV_ASSIGNMENT_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
 
 type MemoryScopedPermissionManager = Pick<
   PermissionManager,
@@ -299,6 +304,17 @@ async function evaluateScopedDecision(
   switch (ctx.toolName) {
     case ToolNames.SHELL: {
       if (!opts.allowShell || !ctx.command) {
+        return 'deny';
+      }
+      // The scoped permission manager runs under forced-YOLO agents, where an
+      // `ask` decision can still auto-approve. Reject raw substitutions and
+      // leading environment assignments before stripShellWrapper() can erase
+      // them; this mirrors the main shell permission boundary without a second
+      // fail-open path for GIT_CONFIG_* command-scope injection.
+      if (
+        hasShellSubstitution(ctx.command) ||
+        LEADING_ENV_ASSIGNMENT_RE.test(ctx.command)
+      ) {
         return 'deny';
       }
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
