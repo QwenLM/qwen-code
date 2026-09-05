@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useMemo,
   useRef,
@@ -9,7 +10,7 @@ import {
 } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
-import { isEditableTarget } from '../../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
@@ -81,6 +82,7 @@ export function AskUserQuestion({
   // Roving-tabindex refs: option buttons (one per question option) plus the
   // "Other" trigger that reveals the custom input.
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const customRef = useRef<HTMLButtonElement | null>(null);
   const selectedIdxRef = useRef<number | null>(selectedIdx);
   const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({});
@@ -98,8 +100,9 @@ export function AskUserQuestion({
     setSubmitting(false);
     setCollapsed(false);
     setCurrentIdx(0);
-    // Sync the ref too so the focus effect (which runs in this same commit on a
-    // new request) reads the fresh index, not the previous request's selection.
+    // Keep the ref in sync for keyboard navigation and non-request-changed
+    // focus paths. Request changes select index 0 explicitly in the layout
+    // effect before this passive reset runs.
     const firstSelectedIdx = firstQuestion ? 0 : null;
     selectedIdxByQuestionRef.current = { 0: firstSelectedIdx };
     selectedIdxRef.current = firstSelectedIdx;
@@ -582,7 +585,11 @@ export function AskUserQuestion({
   // ToolApproval's matching effect for the prev-flag reasoning.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation before any passive effect runs. Layout
+  // effects still see the editable composer as the active element.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -591,7 +598,21 @@ export function AskUserQuestion({
     if (requestChanged && currentIdx !== 0) return;
     if (wasActive && !requestChanged) return;
     prevRequestIdRef.current = request.id;
-    const idx = selectedIdxRef.current ?? 0;
+    // Yield to a user who is typing outside this panel. Moving focus to an
+    // option could redirect Enter, Space, digits, or typed text into the
+    // question and submit an answer the user never chose. The panel's own
+    // custom input is different: a request swap removes it, so focus must move
+    // into the replacement question instead of being left on document.body.
+    const activeElement = getShadowAwareActiveElement(panelRef.current);
+    if (
+      isEditableTarget(activeElement) &&
+      !panelRef.current?.contains(activeElement)
+    ) {
+      return;
+    }
+    // A new request is reset by a passive effect later in this commit, so use
+    // its first option explicitly instead of reading the previous selection.
+    const idx = requestChanged ? 0 : (selectedIdxRef.current ?? 0);
     if (idx === current.options.length) customRef.current?.focus();
     else optionRefs.current[idx]?.focus();
   }, [current, currentIdx, keyboardActive, request.id]);
@@ -646,6 +667,7 @@ export function AskUserQuestion({
 
   return (
     <div
+      ref={panelRef}
       className={`${styles.question} ${
         variant === 'floating' ? styles.floating : ''
       } ${collapsed ? styles.collapsed : ''}`}

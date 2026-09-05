@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useLayoutEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
@@ -79,7 +79,8 @@ const multipleQuestionsRequest: PermissionRequest = {
 };
 
 let root: Root | null = null;
-let container: HTMLDivElement | null = null;
+let container: HTMLDivElement | ShadowRoot | null = null;
+let shadowHost: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
 let onError: ReturnType<typeof vi.fn>;
 
@@ -90,9 +91,11 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root?.unmount());
-  container?.remove();
+  if (container instanceof HTMLElement) container.remove();
+  shadowHost?.remove();
   root = null;
   container = null;
+  shadowHost = null;
 });
 
 function rerender(
@@ -121,6 +124,24 @@ function render(
   document.body.appendChild(container);
   root = createRoot(container);
   rerender(keyboardActive, req);
+}
+
+function renderInShadowRoot(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
+  shadowHost = document.createElement('div');
+  document.body.appendChild(shadowHost);
+  container = shadowHost.attachShadow({ mode: 'open' });
+  root = createRoot(container);
+  rerender(keyboardActive, req);
+}
+
+function BlurActiveElementInLayoutEffect(): null {
+  useLayoutEffect(() => {
+    (document.activeElement as HTMLElement | null)?.blur();
+  }, []);
+  return null;
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -310,6 +331,66 @@ describe('AskUserQuestion accessibility', () => {
     expect(optionButtons().some((o) => o === document.activeElement)).toBe(
       false,
     );
+  });
+
+  it('yields focus when the question appears while the user is typing', () => {
+    const editor = document.createElement('textarea');
+    document.body.appendChild(editor);
+    editor.focus();
+
+    render(undefined);
+
+    expect(document.activeElement).toBe(editor);
+    editor.remove();
+  });
+
+  it('focuses the replacement question when a request swaps from its custom input', () => {
+    render(undefined);
+    act(() => optionButtons()[2]!.click());
+    expect(document.activeElement).toBe(container!.querySelector('input'));
+
+    rerender(undefined, { ...request, id: 'req-2' });
+
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
+  it('yields focus to an editable target in a shadow root', () => {
+    renderInShadowRoot(false);
+    const editor = document.createElement('textarea');
+    container!.appendChild(editor);
+    editor.focus();
+
+    rerender(true);
+
+    expect(document.activeElement).toBe(shadowHost);
+    expect((container as ShadowRoot).activeElement).toBe(editor);
+  });
+
+  it('checks the typing target before sibling layout effects can blur it', () => {
+    const editor = document.createElement('textarea');
+    document.body.appendChild(editor);
+    editor.focus();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <>
+            <AskUserQuestion
+              request={request}
+              onConfirm={onConfirm}
+              onError={onError}
+            />
+            <BlurActiveElementInLayoutEffect />
+          </>
+        </I18nProvider>,
+      );
+    });
+
+    expect(document.activeElement).toBe(document.body);
+    editor.remove();
   });
 
   it('moves focus between options with arrow keys', () => {
@@ -1063,7 +1144,7 @@ describe('AskUserQuestion multiple questions', () => {
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
 
     act(() => root?.unmount());
-    container?.remove();
+    if (container instanceof HTMLElement) container.remove();
     root = null;
     container = null;
 
