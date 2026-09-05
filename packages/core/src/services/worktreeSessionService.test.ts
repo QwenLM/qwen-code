@@ -329,6 +329,42 @@ describe('writeWorktreeSession', () => {
     await writeWorktreeSession(nestedPath, sample);
     expect(await readWorktreeSession(nestedPath)).toEqual(sample);
   });
+
+  it('round-trips the supersede link fields used by worktree reset', async () => {
+    const linked: WorktreeSession = { ...sample, supersedes: 'session-old' };
+    await writeWorktreeSession(filePath, linked);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'valid',
+      session: linked,
+    });
+
+    const superseded: WorktreeSession = {
+      ...sample,
+      supersededBy: 'session-new',
+    };
+    await writeWorktreeSession(filePath, superseded);
+    await expect(readWorktreeSession(filePath)).resolves.toEqual(superseded);
+  });
+
+  it('rejects sidecars with non-string supersede links', async () => {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, supersededBy: 42 }),
+      'utf-8',
+    );
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, supersedes: null }),
+      'utf-8',
+    );
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
 });
 
 describe('clearWorktreeSession', () => {

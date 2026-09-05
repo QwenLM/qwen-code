@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { NamedSessionManager } from './named-session-manager.js';
 import { canonicalizeWorkspacePath } from './paths.js';
-import { SessionRouter } from './SessionRouter.js';
+import { readDaemonHttpErrorCode, SessionRouter } from './SessionRouter.js';
 
 function createBridge(): ChannelAgentBridge {
   let nextId = 0;
@@ -54,6 +54,25 @@ function createBridge(): ChannelAgentBridge {
       );
       return sessionId;
     }),
+    resetWorktreeSession: vi.fn(
+      async (sessionId: string, workspaceCwd: string) => {
+        // The daemon transfers the checkout: the replacement session owns the
+        // SAME worktree path, and the superseded session leaves the live set.
+        const previous = known.get(sessionId);
+        const replacementId = `session-${++nextId}`;
+        const info = previous?.worktree
+          ? {
+              workspaceCwd,
+              worktree: { ...previous.worktree },
+              worktreeState: 'persisted-v1' as const,
+            }
+          : { workspaceCwd };
+        live.set(replacementId, info);
+        known.set(replacementId, info);
+        live.delete(sessionId);
+        return replacementId;
+      },
+    ),
     prompt: vi.fn().mockResolvedValue(''),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     discardSession: vi.fn(async (sessionId: string) => {
@@ -67,6 +86,17 @@ function createBridge(): ChannelAgentBridge {
       })),
     ),
   };
+}
+
+/** A daemon conflict error by shape (channels/base keeps no SDK dependency). */
+function daemonError(
+  code: string,
+  extraBody: Record<string, unknown> = {},
+): Error {
+  const error = new Error(`daemon rejected with ${code}`);
+  error.name = 'DaemonHttpError';
+  Object.assign(error, { status: 409, body: { code, ...extraBody } });
+  return error;
 }
 
 const alice = {
@@ -102,6 +132,58 @@ describe('NamedSessionManager', () => {
       isBusy,
       now: () => 1_000,
     });
+  }
+
+  /**
+   * Restart harness for superseded-redirect tests: a fresh bridge whose daemon
+   * "moved" the checkout of `oldSessionId` to session-2 (loading the old id
+   * fails with the typed conflict), plus a fresh router and manager on the
+   * same registry file so nothing is live yet.
+   */
+  function supersededRestart(filePath: string, oldSessionId: string) {
+    const restartedBridge = createBridge();
+    vi.mocked(restartedBridge.loadSession).mockImplementation(
+      async (sessionId: string) => {
+        if (sessionId === oldSessionId) {
+          throw daemonError('worktree_session_superseded', {
+            replacementSessionId: 'session-2',
+          });
+        }
+        return sessionId;
+      },
+    );
+    vi.mocked(restartedBridge.listSessions).mockReturnValue([
+      {
+        sessionId: 'session-2',
+        workspaceCwd: '/workspace',
+        hasActivePrompt: false,
+        worktree: {
+          slug: 'feature',
+          path: `/worktrees/${oldSessionId}`,
+          branch: 'feature',
+        },
+        worktreeState: 'persisted-v1',
+      },
+    ]);
+    const restartedRouter = new SessionRouter(
+      restartedBridge,
+      '/workspace',
+      'user',
+      undefined,
+      { recoveryMode: 'lazy' },
+    );
+    const restartedManager = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: '/workspace',
+      filePath,
+      router: restartedRouter,
+      isBusy: () => false,
+    });
+    return {
+      bridge: restartedBridge,
+      router: restartedRouter,
+      manager: restartedManager,
+    };
   }
 
   it('adopts the existing route as default without changing its session', async () => {
@@ -743,15 +825,218 @@ describe('NamedSessionManager', () => {
     });
   });
 
-  it('rejects resetting a worktree task before creating a replacement', async () => {
+  it('resets a worktree task onto a fresh session that keeps the worktree', async () => {
     const named = manager();
-    await named.create(alice, 'feature', 'worktree');
+    const created = await named.create(alice, 'feature', 'worktree');
+    const worktreeCwd = canonicalizeWorkspacePath(
+      `/worktrees/${created.sessionId}`,
+    );
+    const before = JSON.parse(
+      readFileSync(join(dir, 'named-sessions.json'), 'utf8'),
+    ) as { owners: Array<{ tasks: Array<{ createdAt: number }> }> };
+    const createdAt = before.owners[0]?.tasks[0]?.createdAt;
+    vi.mocked(bridge.newSession).mockClear();
+
+    const reset = await named.reset(alice);
+
+    expect(reset).toEqual({
+      name: 'feature',
+      previousSessionId: created.sessionId,
+      sessionId: 'session-2',
+      worktreeKept: true,
+    });
+    expect(bridge.resetWorktreeSession).toHaveBeenCalledWith(
+      created.sessionId,
+      '/workspace',
+      { sourceId: 'channel-a' },
+      expect.anything(),
+    );
+    // The reset is an ownership transfer: no fresh conversation session is
+    // created and nothing is discarded.
+    expect(bridge.newSession).not.toHaveBeenCalled();
+    expect(bridge.discardSession).not.toHaveBeenCalled();
+    // The replacement keeps the same worktree checkout and takes over routing.
+    expect(router.getSessionCwd('session-2')).toBe(worktreeCwd);
+    expect(router.getSession('channel-a', 'alice', 'group-1')).toBe(
+      'session-2',
+    );
+    expect(named.presentation(created.sessionId)).toBeUndefined();
+    expect(named.presentation('session-2')).toEqual(
+      expect.objectContaining({ taskName: 'feature', status: 'open' }),
+    );
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({ name: 'feature', sessionId: 'session-2' }),
+    );
+
+    // The registry swap preserves the task's identity and creation timestamp.
+    const persisted = JSON.parse(
+      readFileSync(join(dir, 'named-sessions.json'), 'utf8'),
+    ) as {
+      owners: Array<{
+        tasks: Array<{ sessionId: string; cwd: string; createdAt: number }>;
+      }>;
+    };
+    expect(persisted.owners[0]?.tasks[0]).toMatchObject({
+      sessionId: 'session-2',
+      cwd: worktreeCwd,
+      createdAt,
+    });
+  });
+
+  it('rejects resetting a busy worktree task before any daemon call', async () => {
+    const named = manager(vi.fn().mockReturnValue(true));
+    const created = await named.create(alice, 'feature', 'worktree');
     vi.mocked(bridge.newSession).mockClear();
 
     await expect(named.reset(alice)).rejects.toThrow(
-      'cannot be cleared or reset yet',
+      'Task "feature" is busy. Wait for the running prompt to finish (or cancel it), then try again.',
     );
+
+    expect(bridge.resetWorktreeSession).not.toHaveBeenCalled();
     expect(bridge.newSession).not.toHaveBeenCalled();
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({
+        name: 'feature',
+        sessionId: created.sessionId,
+      }),
+    );
+  });
+
+  it('retries an interrupted worktree reset exactly once', async () => {
+    const named = manager();
+    await named.create(alice, 'feature', 'worktree');
+    vi.mocked(bridge.resetWorktreeSession).mockRejectedValueOnce(
+      daemonError('worktree_reset_interrupted'),
+    );
+
+    const reset = await named.reset(alice);
+
+    expect(reset).toEqual(
+      expect.objectContaining({
+        name: 'feature',
+        sessionId: 'session-2',
+        worktreeKept: true,
+      }),
+    );
+    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(2);
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({ sessionId: 'session-2' }),
+    );
+  });
+
+  it('propagates a worktree reset that stays interrupted after one retry', async () => {
+    const named = manager();
+    const created = await named.create(alice, 'feature', 'worktree');
+    vi.mocked(bridge.resetWorktreeSession).mockRejectedValue(
+      daemonError('worktree_reset_interrupted'),
+    );
+
+    const error: unknown = await named
+      .reset(alice)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('Could not reset task "feature".');
+    expect(readDaemonHttpErrorCode(error)).toBe('worktree_reset_interrupted');
+    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(2);
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({ sessionId: created.sessionId }),
+    );
+  });
+
+  it('does not retry a worktree reset rejected for another daemon reason', async () => {
+    const named = manager();
+    await named.create(alice, 'feature', 'worktree');
+    vi.mocked(bridge.resetWorktreeSession).mockRejectedValueOnce(
+      daemonError('worktree_marker_missing'),
+    );
+
+    const error: unknown = await named
+      .reset(alice)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('Could not reset task "feature".');
+    expect(readDaemonHttpErrorCode(error)).toBe('worktree_marker_missing');
+    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('detaches the replacement when the registry commit fails after a worktree reset', async () => {
+    const registryDir = join(dir, 'registry');
+    const named = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: '/workspace',
+      filePath: join(registryDir, 'named-sessions.json'),
+      router,
+      isBusy: () => false,
+      now: () => 1_000,
+    });
+    const created = await named.create(alice, 'feature', 'worktree');
+    rmSync(registryDir, { recursive: true, force: true });
+    writeFileSync(registryDir, 'block');
+
+    await expect(named.reset(alice)).rejects.toThrow('Failed to persist');
+
+    // The freshly created replacement is released again; the registry keeps
+    // pointing at the superseded id, which the next load heals via the
+    // superseded redirect.
+    expect(bridge.discardSession).toHaveBeenCalledWith('session-2');
+    expect(router.getTarget('session-2')).toBeUndefined();
+    expect(router.getTarget(created.sessionId)).toBeUndefined();
+    expect(router.getSession('channel-a', 'alice', 'group-1')).toBeUndefined();
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({ sessionId: created.sessionId }),
+    );
+  });
+
+  it('heals the registry when the daemon reports the task session superseded', async () => {
+    const filePath = join(dir, 'named-sessions.json');
+    const firstManager = manager();
+    const created = await firstManager.create(alice, 'feature', 'worktree');
+    const worktreeCwd = canonicalizeWorkspacePath(
+      `/worktrees/${created.sessionId}`,
+    );
+    const restarted = supersededRestart(filePath, created.sessionId);
+
+    const selected = await restarted.manager.use(alice, 'feature');
+
+    // The selection, the registry, and the router all name the replacement.
+    expect(selected.sessionId).toBe('session-2');
+    await expect(restarted.manager.current(alice)).resolves.toEqual(
+      expect.objectContaining({ name: 'feature', sessionId: 'session-2' }),
+    );
+    expect(restarted.manager.presentation(created.sessionId)).toBeUndefined();
+    expect(restarted.manager.presentation('session-2')).toEqual(
+      expect.objectContaining({ taskName: 'feature', status: 'open' }),
+    );
+    expect(restarted.router.getSession('channel-a', 'alice', 'group-1')).toBe(
+      'session-2',
+    );
+    expect(restarted.router.getSessionCwd('session-2')).toBe(worktreeCwd);
+    const persisted = JSON.parse(readFileSync(filePath, 'utf8')) as {
+      owners: Array<{ tasks: Array<{ sessionId: string }> }>;
+    };
+    expect(persisted.owners[0]?.tasks[0]?.sessionId).toBe('session-2');
+  });
+
+  it('moves the resolve reservation to the replacement session', async () => {
+    const filePath = join(dir, 'named-sessions.json');
+    const firstManager = manager();
+    const created = await firstManager.create(alice, 'feature', 'worktree');
+    const restarted = supersededRestart(filePath, created.sessionId);
+    const reserved: string[] = [];
+    const released: string[] = [];
+
+    const sessionId = await restarted.manager.resolve(alice, (id) => {
+      reserved.push(id);
+      return () => {
+        released.push(id);
+      };
+    });
+
+    expect(sessionId).toBe('session-2');
+    expect(reserved).toEqual([created.sessionId, 'session-2']);
+    expect(released).toEqual([created.sessionId]);
   });
 
   it('loads a legacy shared-only v1 registry and writes its workspace root next', async () => {
@@ -802,6 +1087,7 @@ describe('NamedSessionManager', () => {
     const reset = await named.reset(alice);
 
     expect(reset?.previousSessionId).toBe(review.sessionId);
+    expect(reset?.worktreeKept).toBe(false);
     expect(named.presentation(review.sessionId)).toBeUndefined();
     expect(named.presentation(reset!.sessionId)).toEqual(
       expect.objectContaining({ taskName: 'review', status: 'open' }),

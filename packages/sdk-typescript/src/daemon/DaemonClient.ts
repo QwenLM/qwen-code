@@ -676,6 +676,20 @@ export interface RestoreSessionRequest {
   timeoutMs?: number;
 }
 
+export interface WorktreeResetSessionRequest {
+  /**
+   * Workspace path the daemon must have registered. Omit to let the daemon
+   * resolve the owning runtime from the session id, mirroring restores.
+   */
+  workspaceCwd?: string;
+  modelServiceId?: string;
+  approvalMode?: string;
+  /** Attribution stamped on the replacement session. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
+}
+
 export interface PromptRequest {
   prompt: PromptContentBlock[];
   /** Deliver the successful final answer directly through a channel worker. */
@@ -3306,6 +3320,49 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (`POST /session/:id/worktree-reset`, capability
+   * `session_worktree_reset_v1`). Resolves 200 with the replacement
+   * session's create-shape response. Typed 409 bodies carry the reset
+   * taxonomy: `worktree_reset_not_worktree_session`, `worktree_reset_active`
+   * (a session involved is busy), `worktree_reset_interrupted` (a previous
+   * transfer crashed; retry), and `worktree_session_superseded` /
+   * `worktree_marker_missing` on the restore surface.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    req: WorktreeResetSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-reset`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+          ...(req.modelServiceId !== undefined
+            ? { modelServiceId: req.modelServiceId }
+            : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/worktree-reset');
+        }
+        return (await res.json()) as DaemonSession;
+      },
+    );
   }
 
   async branchSession(

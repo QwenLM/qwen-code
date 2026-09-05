@@ -400,6 +400,32 @@ function createBridge(): ChannelAgentBridge {
       );
       return sessionId;
     }),
+    resetWorktreeSession: vi
+      .fn()
+      .mockImplementation(async (sessionId: string, workspaceCwd: string) => {
+        // The daemon transfers the checkout: the replacement session owns the
+        // SAME worktree path, and the superseded session leaves the map.
+        const previous = sessions.get(sessionId);
+        const replacementId = `s-${++sessionCounter}`;
+        sessions.set(
+          replacementId,
+          previous?.worktree
+            ? {
+                sessionId: replacementId,
+                workspaceCwd,
+                hasActivePrompt: false,
+                worktree: previous.worktree,
+                worktreeState: 'persisted-v1' as const,
+              }
+            : {
+                sessionId: replacementId,
+                workspaceCwd,
+                hasActivePrompt: false,
+              },
+        );
+        sessions.delete(sessionId);
+        return replacementId;
+      }),
     prompt: vi.fn().mockResolvedValue('agent response'),
     btw: vi.fn().mockResolvedValue({
       sessionId: 's-1',
@@ -451,6 +477,14 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
     isReplyToBot: false,
     ...overrides,
   };
+}
+
+/** A daemon conflict error by shape (channels/base keeps no SDK dependency). */
+function daemonError(code: string): Error {
+  const error = new Error(`daemon rejected with ${code}`);
+  error.name = 'DaemonHttpError';
+  Object.assign(error, { status: 409, body: { code } });
+  return error;
 }
 
 function pairingCodeOf(result: CreatePairingRequestResult): string {
@@ -4410,7 +4444,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('rejects clearing a selected worktree task before clear side effects', async () => {
+    it('resets a selected worktree task and keeps its worktree', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel({ multiSession: true }, { stateDir });
       try {
@@ -4418,15 +4452,177 @@ describe('ChannelBase', () => {
           envelope({ text: '/session new feature --worktree' }),
         );
         vi.mocked(bridge.newSession).mockClear();
-        vi.mocked(bridge.cancelSession).mockClear();
-        vi.mocked(bridge.discardSession!).mockClear();
 
         await ch.handleInbound(envelope({ text: '/clear' }));
 
-        expect(ch.sent.at(-1)?.text).toContain('cannot be cleared or reset');
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "feature" reset with a fresh conversation; its worktree and files were kept.',
+        );
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledWith(
+          's-1',
+          '/tmp',
+          { sourceId: 'test-chan' },
+          expect.anything(),
+        );
         expect(bridge.newSession).not.toHaveBeenCalled();
-        expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+        // The next turn binds to the replacement session in the kept worktree.
+        await ch.handleInbound(envelope({ text: 'continue the task' }));
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-2',
+          expect.stringContaining('continue the task'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the plain reset message for a shared task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "review" reset with a fresh conversation.',
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects clearing a busy worktree task before any reset call', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        const running = ch.handleInbound(envelope({ text: 'long task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "feature" is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+        );
+        expect(bridge.resetWorktreeSession).not.toHaveBeenCalled();
         expect(bridge.discardSession).not.toHaveBeenCalled();
+
+        finishPrompt('done');
+        await running;
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports a daemon-rejected worktree reset as a busy task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.resetWorktreeSession!).mockRejectedValueOnce(
+          daemonError('worktree_reset_active'),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+        );
+        // The daemon busy signal is not retried.
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(1);
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports an interrupted worktree reset after the automatic retry', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.resetWorktreeSession!).mockRejectedValue(
+          daemonError('worktree_reset_interrupted'),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'A previous reset of this task was interrupted and the automatic retry did not complete it. The task was left on its original session; try again, or close the task if it keeps failing.',
+        );
+        // The named-session manager retried the interrupted reset once.
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(2);
+
+        // The task is left on its original session.
+        await ch.handleInbound(envelope({ text: 'continue the task' }));
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-1',
+          expect.stringContaining('continue the task'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports a missing worktree marker with recovery guidance', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.resetWorktreeSession!).mockRejectedValueOnce(
+          daemonError('worktree_marker_missing'),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          "The task's worktree marker is missing, so its checkout cannot be verified (it may have been cleaned up). Try again; if it keeps failing, close the task and create a new one.",
+        );
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('falls back to the generic named-session error for other reset failures', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.resetWorktreeSession!).mockRejectedValueOnce(
+          daemonError('session_not_found'),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe('Could not reset task "feature".');
+        expect(ch.sent.at(-1)?.text).not.toContain('s-1');
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

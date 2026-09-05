@@ -451,6 +451,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Worktree-backed session create/load responses are durably persisted and
   // carry per-response `persisted-v1` attestation.
   session_worktree_persistence_v1: { since: 'v1' },
+  // Worktree ownership transfer: `POST /session/:id/worktree-reset` moves a
+  // session's checkout ownership to a fresh replacement session, and the
+  // restore surface reports the superseded / interrupted / missing-marker
+  // classifications as typed 409s.
+  session_worktree_reset_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

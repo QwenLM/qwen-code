@@ -39,7 +39,7 @@ import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
-import { SessionRouter } from './SessionRouter.js';
+import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
 import {
   NamedSessionManager,
   type NamedSessionOwnerInput,
@@ -3710,6 +3710,7 @@ export abstract class ChannelBase {
   private registerSharedCommands(): void {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
+      let resetWorktreeKept = false;
       let removedIds: string[];
       if (this.namedSessions) {
         try {
@@ -3717,8 +3718,41 @@ export abstract class ChannelBase {
             this.namedSessionOwner(envelope),
           );
           resetTaskName = reset?.name;
+          resetWorktreeKept = reset?.worktreeKept ?? false;
           removedIds = reset ? [reset.previousSessionId] : [];
         } catch (error) {
+          // Worktree resets carry typed daemon failures; translate them into
+          // the actionable message for that class before the generic one.
+          const code = readDaemonHttpErrorCode(error);
+          if (code !== undefined) {
+            process.stderr.write(
+              `[${sanitizeLogText(this.name, 64)}] worktree reset failed (${sanitizeLogText(code, 64)}): ${this.lifecycleError(error)}\n`,
+            );
+          }
+          if (code === 'worktree_reset_active') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+            );
+            return;
+          }
+          if (code === 'worktree_reset_interrupted') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'A previous reset of this task was interrupted and the automatic retry did not complete it. The task was left on its original session; try again, or close the task if it keeps failing.',
+            );
+            return;
+          }
+          if (code === 'worktree_marker_missing') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              "The task's worktree marker is missing, so its checkout cannot be verified (it may have been cleaned up). Try again; if it keeps failing, close the task and create a new one.",
+            );
+            return;
+          }
           await this.sendNamedSessionError(envelope, error);
           return;
         }
@@ -3841,7 +3875,9 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           resetTaskName
-            ? `Task "${resetTaskName}" reset with a fresh conversation.`
+            ? resetWorktreeKept
+              ? `Task "${resetTaskName}" reset with a fresh conversation; its worktree and files were kept.`
+              : `Task "${resetTaskName}" reset with a fresh conversation.`
             : 'Session cleared. The next message starts a fresh conversation.',
         );
       } else {

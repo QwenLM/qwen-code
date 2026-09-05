@@ -123,6 +123,7 @@ const mockDefaultDaemonClient = vi.hoisted(() =>
 const mockDefaultDaemonSessionClient = vi.hoisted(() => ({
   createOrAttach: vi.fn(),
   resume: vi.fn(),
+  resetWorktree: vi.fn(),
 }));
 
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -369,6 +370,15 @@ function createSdk() {
       setModel: vi.fn(),
       respondToPermission: vi.fn(),
     }),
+    resetWorktree: vi.fn().mockResolvedValue({
+      sessionId: 'reset-session',
+      workspaceCwd: '/workspace',
+      prompt: vi.fn(),
+      events: vi.fn(),
+      cancel: vi.fn(),
+      setModel: vi.fn(),
+      respondToPermission: vi.fn(),
+    }),
   };
   return { client, DaemonClient, DaemonSessionClient, deleteSessionsData };
 }
@@ -579,6 +589,35 @@ describe('createDaemonSessionFactory', () => {
       expect.not.objectContaining({ worktree: expect.anything() }),
       'qwen-channel-worker',
     );
+  });
+
+  it('routes worktree resets through resetWorktree', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({
+      workspaceCwd: '/workspace',
+      sourceId: 'dingtalk-main',
+      worktreeReset: { sessionId: 'old-session' },
+    });
+
+    expect(sdk.DaemonSessionClient.resetWorktree).toHaveBeenCalledWith(
+      sdk.client,
+      'old-session',
+      {
+        workspaceCwd: '/workspace',
+        sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      },
+      'qwen-channel-worker',
+    );
+    expect(sdk.DaemonSessionClient.createOrAttach).not.toHaveBeenCalled();
+    expect(sdk.DaemonSessionClient.resume).not.toHaveBeenCalled();
   });
 });
 

@@ -47,6 +47,7 @@ import {
   SessionLimitExceededError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionResetPendingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceInitConflictError,
@@ -67,6 +68,14 @@ import {
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
+import {
+  WorktreeMarkerMissingError,
+  WorktreeResetActiveError,
+  WorktreeResetInterruptedError,
+  WorktreeResetInvalidStateError,
+  WorktreeResetUnsupportedError,
+  WorktreeSessionSupersededError,
+} from './worktree-reset-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -566,6 +575,70 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'cd_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionResetPendingError) {
+    // The prompt barrier the worktree-reset route arms for the superseded
+    // session. 409 + the shared reset code: callers that know the reset flow
+    // (Channel worker) retry the task; non-Channel callers get a bounded
+    // message with no path or transfer internals.
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeSessionSupersededError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_session_superseded',
+      sessionId: err.sessionId,
+      replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeMarkerMissingError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_marker_missing',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInterruptedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_interrupted',
+      sessionId: err.sessionId,
+      ...(err.replacementSessionId !== undefined
+        ? { replacementSessionId: err.replacementSessionId }
+        : {}),
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInvalidStateError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_invalid_state',
       sessionId: err.sessionId,
     });
     return;

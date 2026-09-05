@@ -16,6 +16,7 @@ import {
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
 import type {
   DaemonForkSessionResult,
@@ -447,6 +448,32 @@ export class DaemonSessionClient {
       state,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
+    });
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session and return a client bound to the replacement. The replacement
+   * is a brand-new conversation; the superseded session keeps its
+   * transcript on the daemon and is never restored again (its restore
+   * surfaces `worktree_session_superseded`). The existing reattach identity
+   * guard applies to the replacement client unchanged.
+   */
+  static async resetWorktree(
+    client: DaemonClient,
+    sessionId: string,
+    req: WorktreeResetSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const session = await client.resetWorktreeSession(sessionId, req, clientId);
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      // The replacement is freshly created: seed from the start of its bus
+      // so events fired during the transfer window are not skipped.
+      lastEventId: 0,
+      eventEpoch: session.eventEpoch,
     });
   }
 

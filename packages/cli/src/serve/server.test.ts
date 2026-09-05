@@ -728,6 +728,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_live_state',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
+  'session_worktree_reset_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -806,6 +807,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
+      f !== 'session_worktree_reset_v1' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
   ),
@@ -872,6 +874,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_live_state',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
+  'session_worktree_reset_v1',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -16688,7 +16691,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps an unlocated restored prompt compatible without attesting isolation', async () => {
+    it('fails closed for an unlocated active restored prompt instead of attesting isolation', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -16728,18 +16731,19 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(200);
-        expect(res.body.worktree).toEqual({
-          slug: 'my-task',
-          path: worktreePath,
-          branch: 'worktree-my-task',
-        });
-        expect(res.body.worktreeState).toBeUndefined();
-        expect(bridge.loadCalls[0]).toMatchObject({
-          suppressWorktreeContextRestore: true,
-        });
+        // An active restored prompt whose cwd the bridge never reported is
+        // unlocated: the restore must fail closed rather than assigning the
+        // worktree without relocation or attestation.
+        expect(res.status).toBe(500);
+        expect(res.body.error).toBe('Active session is outside its worktree');
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
-        expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'wt-session',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
       } finally {
         mockWt.readSidecar = undefined;
         mockWt.readMarker = undefined;
@@ -17198,7 +17202,8 @@ describe('createServeApp', () => {
           second,
         ]);
 
-        expect(firstResponse.status).toBe(500);
+        expect(firstResponse.status).toBe(409);
+        expect(firstResponse.body.code).toBe('worktree_marker_missing');
         expect(secondResponse.status).toBe(200);
         expect(bridge.loadCalls).toHaveLength(2);
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
@@ -17697,7 +17702,8 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(500);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_marker_missing');
         expect(bridge.detachCalls).toEqual([
           { sessionId: 'wt-session', clientId: 'attached-client' },
         ]);

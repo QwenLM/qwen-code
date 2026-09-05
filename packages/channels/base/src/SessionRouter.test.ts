@@ -10,7 +10,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SessionRouter } from './SessionRouter.js';
+import {
+  readDaemonHttpErrorCode,
+  readSupersededReplacementId,
+  SessionRouter,
+} from './SessionRouter.js';
 import {
   DaemonChannelBridge,
   type DaemonChannelSessionClient,
@@ -59,6 +63,17 @@ function writePersistedSession(persistPath: string, key = 'key1'): void {
       },
     }),
   );
+}
+
+/** A `DaemonHttpError` by shape — channels/base keeps no SDK dependency. */
+function daemonHttpError(
+  code: string,
+  extraBody: Record<string, unknown> = {},
+): Error {
+  const error = new Error(`daemon rejected with ${code}`);
+  error.name = 'DaemonHttpError';
+  Object.assign(error, { status: 409, body: { code, ...extraBody } });
+  return error;
 }
 
 function invalidationMetadataSize(router: SessionRouter): number {
@@ -893,11 +908,11 @@ describe('SessionRouter', () => {
       router.activateManagedSession(first, firstTarget, '/tmp');
       await expect(
         router.loadManagedSession(second, secondTarget, '/tmp'),
-      ).resolves.toEqual({ loaded: false });
+      ).resolves.toEqual({ loaded: false, sessionId: second });
       router.activateManagedSession(second, secondTarget, '/tmp');
       await expect(
         router.loadManagedSession(first, firstTarget, '/tmp'),
-      ).resolves.toEqual({ loaded: false });
+      ).resolves.toEqual({ loaded: false, sessionId: first });
       router.activateManagedSession(first, firstTarget, '/tmp');
 
       expect(bridge.loadSession).not.toHaveBeenCalled();
@@ -946,7 +961,7 @@ describe('SessionRouter', () => {
           worktreePath,
           'worktree',
         ),
-      ).resolves.toEqual({ loaded: false });
+      ).resolves.toEqual({ loaded: false, sessionId: 'worktree-session' });
 
       expect(managedBridge.loadSession).not.toHaveBeenCalled();
       expect(router.getSessionCwd('worktree-session')).toBe(worktreePath);
@@ -1033,7 +1048,7 @@ describe('SessionRouter', () => {
       router.setBridge(replacementBridge);
       await expect(
         router.loadManagedSession(second, target, '/tmp'),
-      ).resolves.toEqual({ loaded: true });
+      ).resolves.toEqual({ loaded: true, sessionId: second });
 
       expect(replacementBridge.loadSession).toHaveBeenCalledWith(
         second,
@@ -1066,7 +1081,7 @@ describe('SessionRouter', () => {
       });
       await expect(
         router.loadManagedSession(sessionId, target, '/tmp'),
-      ).resolves.toEqual({ loaded: false });
+      ).resolves.toEqual({ loaded: false, sessionId });
 
       expect(replacementBridge.loadSession).toHaveBeenCalledTimes(1);
     });
@@ -1123,6 +1138,502 @@ describe('SessionRouter', () => {
       );
       expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
       expect(router.getTarget(sessionId)).toBeUndefined();
+    });
+  });
+
+  describe('replaceManagedWorktreeSession', () => {
+    const target = {
+      channelName: 'ch',
+      senderId: 'alice',
+      chatId: 'chat1',
+    };
+
+    function worktreeResetBridge(
+      overrides: Partial<ChannelAgentBridge> & {
+        replacementWorktreePath?: string;
+      } = {},
+    ): ChannelAgentBridge {
+      const { replacementWorktreePath, ...rest } = overrides;
+      return {
+        ...mockBridge(),
+        listSessions: vi.fn().mockReturnValue([
+          {
+            sessionId: 'replacement-session',
+            workspaceCwd: '/tmp',
+            hasActivePrompt: false,
+            worktree: {
+              slug: 'task',
+              path: replacementWorktreePath ?? '/tmp/worktree-task',
+              branch: 'task',
+            },
+            worktreeState: 'persisted-v1' as const,
+          },
+        ]),
+        resetWorktreeSession: vi.fn().mockResolvedValue('replacement-session'),
+        ...rest,
+      };
+    }
+
+    it('fails closed when the bridge does not support worktree reset', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
+        recoveryMode: 'lazy',
+      });
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('Worktree reset is not supported by this bridge');
+      expect(router.getTarget('old-session')).toBeUndefined();
+    });
+
+    it('routes the validated replacement and forgets the superseded session', async () => {
+      const managedBridge = worktreeResetBridge();
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).resolves.toBe('replacement-session');
+
+      expect(managedBridge.resetWorktreeSession).toHaveBeenCalledWith(
+        'old-session',
+        '/tmp',
+        { sourceId: 'ch' },
+        expect.anything(),
+      );
+      expect(router.getTarget('replacement-session')).toEqual(target);
+      expect(router.getSessionCwd('replacement-session')).toBe(
+        '/tmp/worktree-task',
+      );
+      expect(router.isSessionLive('replacement-session')).toBe(true);
+      // The superseded session's route and bookkeeping are gone; the manager
+      // re-activates a route for the replacement itself.
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getTarget('old-session')).toBeUndefined();
+    });
+
+    it('discards the replacement and keeps the old session when attestation fails', async () => {
+      const discardSession = vi.fn().mockResolvedValue(undefined);
+      const managedBridge = worktreeResetBridge({
+        replacementWorktreePath: '/tmp/other-worktree',
+        discardSession,
+      });
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('did not attest');
+
+      expect(discardSession).toHaveBeenCalledWith(
+        'replacement-session',
+        expect.anything(),
+      );
+      expect(router.getTarget('replacement-session')).toBeUndefined();
+      expect(router.getTarget('old-session')).toEqual(target);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+    });
+
+    it('keeps the old session when the daemon reset fails', async () => {
+      const discardSession = vi.fn().mockResolvedValue(undefined);
+      const managedBridge = worktreeResetBridge({
+        resetWorktreeSession: vi
+          .fn()
+          .mockRejectedValue(new Error('daemon unavailable')),
+        discardSession,
+      });
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('daemon unavailable');
+
+      expect(discardSession).not.toHaveBeenCalled();
+      expect(router.getTarget('old-session')).toEqual(target);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+    });
+
+    it('discards a replacement that dies before the reset completes', async () => {
+      const state: { router?: SessionRouter } = {};
+      const discardSession = vi.fn().mockResolvedValue(undefined);
+      const managedBridge = worktreeResetBridge({
+        resetWorktreeSession: vi.fn(async () => {
+          state.router?.removeSessionId('replacement-session');
+          return 'replacement-session';
+        }),
+        discardSession,
+      });
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      state.router = router;
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('died before reset completed');
+
+      expect(discardSession).toHaveBeenCalledWith(
+        'replacement-session',
+        expect.anything(),
+      );
+      expect(router.getTarget('replacement-session')).toBeUndefined();
+    });
+  });
+
+  describe('superseded redirects', () => {
+    const target = {
+      channelName: 'ch',
+      senderId: 'alice',
+      chatId: 'chat1',
+    };
+
+    function supersededError(replacementSessionId: string): Error {
+      return daemonHttpError('worktree_session_superseded', {
+        replacementSessionId,
+      });
+    }
+
+    it('redirects a superseded load to the replacement and heals the route', async () => {
+      const loadSession = vi.fn(async (sessionId: string) => {
+        if (sessionId === 'old-session') {
+          throw supersededError('replacement-session');
+        }
+        return sessionId;
+      });
+      const managedBridge = {
+        ...mockBridge(),
+        loadSession,
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession('old-session', target, '/tmp');
+
+      await expect(
+        router.loadManagedSession('old-session', target, '/tmp'),
+      ).resolves.toEqual({
+        loaded: true,
+        sessionId: 'replacement-session',
+        redirectedFrom: 'old-session',
+      });
+
+      expect(loadSession.mock.calls.map((call) => call[0])).toEqual([
+        'old-session',
+        'replacement-session',
+      ]);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+      expect(router.getTarget('old-session')).toBeUndefined();
+      expect(router.getTarget('replacement-session')).toEqual(target);
+      expect(router.isSessionLive('replacement-session')).toBe(true);
+    });
+
+    it('revalidates the replacement attestation for a worktree redirect', async () => {
+      const managedBridge = {
+        ...mockBridge(),
+        listSessions: vi.fn().mockReturnValue([
+          {
+            sessionId: 'replacement-session',
+            workspaceCwd: '/tmp',
+            hasActivePrompt: false,
+            worktree: {
+              slug: 'task',
+              path: '/tmp/worktree-task',
+              branch: 'task',
+            },
+            worktreeState: 'persisted-v1' as const,
+          },
+        ]),
+        loadSession: vi.fn(async (sessionId: string) => {
+          if (sessionId === 'old-session') {
+            throw supersededError('replacement-session');
+          }
+          return sessionId;
+        }),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+
+      await expect(
+        router.loadManagedSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+          'worktree',
+        ),
+      ).resolves.toEqual({
+        loaded: true,
+        sessionId: 'replacement-session',
+        redirectedFrom: 'old-session',
+      });
+
+      expect(router.getSessionCwd('replacement-session')).toBe(
+        '/tmp/worktree-task',
+      );
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+      expect(router.getTarget('old-session')).toBeUndefined();
+    });
+
+    it('discards a redirected replacement whose attestation does not match', async () => {
+      const discardSession = vi.fn().mockResolvedValue(undefined);
+      const managedBridge = {
+        ...mockBridge(),
+        listSessions: vi.fn().mockReturnValue([
+          {
+            sessionId: 'replacement-session',
+            workspaceCwd: '/tmp',
+            hasActivePrompt: false,
+            worktree: {
+              slug: 'task',
+              path: '/tmp/other-worktree',
+              branch: 'task',
+            },
+            worktreeState: 'persisted-v1' as const,
+          },
+        ]),
+        loadSession: vi.fn(async (sessionId: string) => {
+          if (sessionId === 'old-session') {
+            throw supersededError('replacement-session');
+          }
+          return sessionId;
+        }),
+        discardSession,
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+
+      await expect(
+        router.loadManagedSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+          'worktree',
+        ),
+      ).rejects.toThrow('did not attest');
+
+      expect(discardSession).toHaveBeenCalledWith(
+        'replacement-session',
+        expect.anything(),
+      );
+      // The stale route is kept: no heal happened for a failed redirect.
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+      expect(router.getTarget('replacement-session')).toBeUndefined();
+    });
+
+    it('fails closed when the redirect points at the session itself', async () => {
+      const selfRedirect = supersededError('old-session');
+      const loadSession = vi.fn(async (sessionId: string) => {
+        if (sessionId === 'old-session') {
+          throw selfRedirect;
+        }
+        return sessionId;
+      });
+      const managedBridge = {
+        ...mockBridge(),
+        loadSession,
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession('old-session', target, '/tmp');
+
+      await expect(
+        router.loadManagedSession('old-session', target, '/tmp'),
+      ).rejects.toBe(selfRedirect);
+      expect(loadSession).toHaveBeenCalledTimes(1);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+    });
+
+    it('fails closed when the replacement is itself superseded', async () => {
+      const firstRedirect = supersededError('replacement-1');
+      const secondRedirect = supersededError('replacement-2');
+      const loadSession = vi.fn(async (sessionId: string) => {
+        if (sessionId === 'old-session') {
+          throw firstRedirect;
+        }
+        if (sessionId === 'replacement-1') {
+          throw secondRedirect;
+        }
+        return sessionId;
+      });
+      const managedBridge = {
+        ...mockBridge(),
+        loadSession,
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession('old-session', target, '/tmp');
+
+      await expect(
+        router.loadManagedSession('old-session', target, '/tmp'),
+      ).rejects.toBe(secondRedirect);
+
+      // A redirect chain is never followed past the first hop.
+      expect(loadSession.mock.calls.map((call) => call[0])).toEqual([
+        'old-session',
+        'replacement-1',
+      ]);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+    });
+
+    it('reads the superseded signal through a wrapped cause', async () => {
+      const wrapped = new Error('load failed', {
+        cause: supersededError('replacement-session'),
+      });
+      const loadSession = vi.fn(async (sessionId: string) => {
+        if (sessionId === 'old-session') {
+          throw wrapped;
+        }
+        return sessionId;
+      });
+      const managedBridge = {
+        ...mockBridge(),
+        loadSession,
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession('old-session', target, '/tmp');
+
+      await expect(
+        router.loadManagedSession('old-session', target, '/tmp'),
+      ).resolves.toEqual({
+        loaded: true,
+        sessionId: 'replacement-session',
+        redirectedFrom: 'old-session',
+      });
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+    });
+
+    it('does not redirect other daemon conflicts', async () => {
+      const conflict = daemonHttpError('worktree_marker_missing');
+      const loadSession = vi.fn(async (sessionId: string) => {
+        if (sessionId === 'old-session') {
+          throw conflict;
+        }
+        return sessionId;
+      });
+      const managedBridge = {
+        ...mockBridge(),
+        loadSession,
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession('old-session', target, '/tmp');
+
+      await expect(
+        router.loadManagedSession('old-session', target, '/tmp'),
+      ).rejects.toBe(conflict);
+      expect(loadSession).toHaveBeenCalledTimes(1);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
     });
   });
 
@@ -2484,6 +2995,119 @@ describe('SessionRouter', () => {
 
       expect(router.handleSessionDied(sessionId)).toBe(true);
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+    });
+  });
+});
+
+describe('daemon error helpers', () => {
+  describe('readDaemonHttpErrorCode', () => {
+    it('reads the code from a DaemonHttpError-shaped error', () => {
+      expect(
+        readDaemonHttpErrorCode(daemonHttpError('worktree_reset_active')),
+      ).toBe('worktree_reset_active');
+    });
+
+    it('reads the code through a cause chain', () => {
+      const error = new Error('outer', {
+        cause: new Error('middle', {
+          cause: daemonHttpError('worktree_reset_interrupted'),
+        }),
+      });
+
+      expect(readDaemonHttpErrorCode(error)).toBe('worktree_reset_interrupted');
+    });
+
+    it('returns undefined for non-matching shapes', () => {
+      expect(readDaemonHttpErrorCode(undefined)).toBeUndefined();
+      expect(readDaemonHttpErrorCode(null)).toBeUndefined();
+      expect(readDaemonHttpErrorCode('worktree_reset_active')).toBeUndefined();
+      expect(readDaemonHttpErrorCode(new Error('plain'))).toBeUndefined();
+      // Wrong name or status, and non-object or empty codes, do not match.
+      expect(
+        readDaemonHttpErrorCode(
+          Object.assign(new Error('x'), {
+            status: 409,
+            body: { code: 'worktree_reset_active' },
+          }),
+        ),
+      ).toBeUndefined();
+      expect(
+        readDaemonHttpErrorCode(
+          Object.assign(new Error('x'), {
+            name: 'DaemonHttpError',
+            status: 500,
+            body: { code: 'worktree_reset_active' },
+          }),
+        ),
+      ).toBeUndefined();
+      expect(
+        readDaemonHttpErrorCode(
+          Object.assign(new Error('x'), {
+            name: 'DaemonHttpError',
+            status: 409,
+            body: { code: '' },
+          }),
+        ),
+      ).toBeUndefined();
+      expect(
+        readDaemonHttpErrorCode(
+          Object.assign(new Error('x'), {
+            name: 'DaemonHttpError',
+            status: 409,
+            body: ['worktree_reset_active'],
+          }),
+        ),
+      ).toBeUndefined();
+    });
+
+    it('bounds the cause-chain walk', () => {
+      let error: Error = daemonHttpError('worktree_reset_active');
+      for (let depth = 0; depth < 8; depth++) {
+        error = new Error(`wrap-${depth}`, { cause: error });
+      }
+
+      expect(readDaemonHttpErrorCode(error)).toBeUndefined();
+    });
+  });
+
+  describe('readSupersededReplacementId', () => {
+    it('reads the replacement id from a superseded conflict', () => {
+      expect(
+        readSupersededReplacementId(
+          daemonHttpError('worktree_session_superseded', {
+            replacementSessionId: 'replacement-session',
+          }),
+        ),
+      ).toBe('replacement-session');
+    });
+
+    it('reads the replacement id through a cause chain', () => {
+      const error = new Error('outer', {
+        cause: daemonHttpError('worktree_session_superseded', {
+          replacementSessionId: 'replacement-session',
+        }),
+      });
+
+      expect(readSupersededReplacementId(error)).toBe('replacement-session');
+    });
+
+    it('returns undefined for other codes or a missing replacement id', () => {
+      expect(
+        readSupersededReplacementId(daemonHttpError('worktree_reset_active')),
+      ).toBeUndefined();
+      expect(
+        readSupersededReplacementId(
+          daemonHttpError('worktree_session_superseded'),
+        ),
+      ).toBeUndefined();
+      expect(
+        readSupersededReplacementId(
+          daemonHttpError('worktree_session_superseded', {
+            replacementSessionId: '',
+          }),
+        ),
+      ).toBeUndefined();
+      expect(readSupersededReplacementId(new Error('plain'))).toBeUndefined();
     });
   });
 });
