@@ -5124,6 +5124,61 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('makes a concurrent caller join the in-flight initialization', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      // Make the first flight hang until we release it, so the second call
+      // arrives while initialization is still running.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const initializeInternal = vi
+        .spyOn(
+          config as unknown as {
+            initializeInternal: () => Promise<void>;
+          },
+          'initializeInternal',
+        )
+        .mockImplementation(() => gate);
+
+      const first = config.initialize();
+      // Second call lands mid-flight → joins the first flight instead of
+      // bouncing off the already-set flag.
+      const second = config.initialize();
+      release();
+      await Promise.all([first, second]);
+      expect(initializeInternal).toHaveBeenCalledOnce();
+
+      await expect(config.initialize()).rejects.toThrow(
+        'Config was already initialized',
+      );
+    });
+
+    it('shares a failed in-flight initialization with concurrent callers', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockRejectedValue(new Error('startup discovery exploded'));
+
+      const first = config.initialize();
+      const second = config.initialize();
+      const [firstError, secondError] = await Promise.all([
+        first.catch((error: unknown) => error),
+        second.catch((error: unknown) => error),
+      ]);
+      expect(firstError).toBeInstanceOf(Error);
+      expect(secondError).toBe(firstError);
+    });
+
     it('should skip implicit startup discovery in bare mode', async () => {
       const extensionRefreshSpy = vi
         .spyOn(ExtensionManager.prototype, 'refreshCache')

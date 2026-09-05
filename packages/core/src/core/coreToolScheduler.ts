@@ -10,6 +10,7 @@ import type {
   ToolExecutionStatus,
 } from './turn.js';
 import type {
+  AutoModeFallbackConfirmation,
   ToolCallConfirmationDetails,
   ToolResult,
   ToolResultDisplay,
@@ -116,9 +117,11 @@ import {
 } from './plan-mode-entry-policy.js';
 import {
   applyAutoModeDecision,
-  decorateClassifierUnavailableConfirmation,
+  decorateAutoModeFallbackConfirmation,
   evaluateAutoMode,
+  getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
+  prepareAutoModeFallback,
   shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
@@ -131,7 +134,6 @@ import {
   isDenialFallbackReason,
   recordAllow,
   recordFallbackApprove,
-  shouldFallback,
 } from '../permissions/denialTracking.js';
 import {
   getResponseTextFromParts,
@@ -2976,8 +2978,16 @@ export class CoreToolScheduler {
             // manual approval — confusing UX given the previous allow-rule
             // call just worked silently.
             if (approvalMode === ApprovalMode.AUTO) {
+              const actionFingerprint = getAutoModeActionFingerprint(
+                canonicalName,
+                toolParams,
+                this.config.getCwd(),
+              );
               this.config.setAutoModeDenialState(
-                recordAllow(this.config.getAutoModeDenialState()),
+                recordAllow(
+                  this.config.getAutoModeDenialState(),
+                  actionFingerprint,
+                ),
               );
             }
             this.setToolCallOutcome(
@@ -2993,13 +3003,20 @@ export class CoreToolScheduler {
           // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
-          let autoModeFallbackMessage: string | undefined;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
           if (
             !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, canonicalName)
           ) {
-            const denialState = this.config.getAutoModeDenialState();
-            const fallback = shouldFallback(denialState);
+            const actionFingerprint = getAutoModeActionFingerprint(
+              canonicalName,
+              toolParams,
+              this.config.getCwd(),
+            );
+            const { denialState, fallback } = prepareAutoModeFallback(
+              this.config,
+              actionFingerprint,
+            );
             // `buildClassifierContents` retains only the most recent
             // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
             // exactly that tail rather than triggering a
@@ -3032,6 +3049,7 @@ export class CoreToolScheduler {
               decision,
               this.config,
               denialState,
+              actionFingerprint,
             );
             if (
               !this.config.getDisableAllHooks() &&
@@ -3097,18 +3115,28 @@ export class CoreToolScheduler {
                 // operators see recovery fallbacks in the debug log. A
                 // pmForcedAsk fallback isn't an audit-worthy event.
                 if (
-                  isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable'
+                  outcome.message &&
+                  (isDenialFallbackReason(outcome.reason) ||
+                    outcome.reason === 'classifier_unavailable')
                 ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
-                  autoModeFallbackMessage = outcome.message;
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
                   );
-                } else if (outcome.reason === 'external_write') {
+                } else if (
+                  outcome.reason === 'external_write' &&
+                  outcome.message
+                ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
-                  autoModeFallbackMessage = outcome.message;
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
                   );
@@ -3152,10 +3180,11 @@ export class CoreToolScheduler {
               continue;
             }
 
-            if (autoModeFallbackMessage) {
-              confirmationDetails = decorateClassifierUnavailableConfirmation(
+            if (autoModeFallback) {
+              confirmationDetails = decorateAutoModeFallbackConfirmation(
                 confirmationDetails,
-                autoModeFallbackMessage,
+                autoModeFallback.reason,
+                autoModeFallback.message,
               );
             }
 
@@ -6413,8 +6442,15 @@ export class CoreToolScheduler {
           debugLogger.info(
             `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
           );
-          const denialState = this.config.getAutoModeDenialState();
-          const fallback = shouldFallback(denialState);
+          const actionFingerprint = getAutoModeActionFingerprint(
+            pendingTool.request.name,
+            toolParams,
+            this.config.getCwd(),
+          );
+          const { denialState, fallback } = prepareAutoModeFallback(
+            this.config,
+            actionFingerprint,
+          );
           const messages =
             this.config
               .getLlmClient?.()
@@ -6444,6 +6480,7 @@ export class CoreToolScheduler {
             decision,
             this.config,
             denialState,
+            actionFingerprint,
           );
           if (
             !this.config.getDisableAllHooks() &&
@@ -6528,13 +6565,23 @@ export class CoreToolScheduler {
                 );
               }
 
-              if (outcome.message) {
+              if (
+                outcome.message &&
+                (isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write')
+              ) {
+                const autoModeFallback: AutoModeFallbackConfirmation = {
+                  reason: outcome.reason,
+                  message: outcome.message,
+                };
                 this.setStatusInternal(
                   pendingTool.request.callId,
                   'awaiting_approval',
-                  decorateClassifierUnavailableConfirmation(
+                  decorateAutoModeFallbackConfirmation(
                     pendingTool.confirmationDetails,
-                    outcome.message,
+                    autoModeFallback.reason,
+                    autoModeFallback.message,
                   ),
                 );
               }

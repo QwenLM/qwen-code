@@ -74,6 +74,10 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
+// The 10s production handshake budget is a desktop budget, not a shared-runner
+// one: macOS E2E shards died on it in #11030 and reddened again in #11034.
+// Match qwen-serve-routes.test.ts.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -351,6 +355,8 @@ beforeAll(async () => {
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
