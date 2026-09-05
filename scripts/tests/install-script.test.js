@@ -1918,16 +1918,6 @@ describe('standalone release packaging', () => {
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
         ).toBe(false);
-        expect(
-          existsSync(
-            path.join(
-              extractDir,
-              'qwen-code',
-              'lib',
-              'export-transcript-document.js',
-            ),
-          ),
-        ).toBe(false);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);
@@ -2481,6 +2471,9 @@ describe('standalone release packaging', () => {
     );
     expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
     const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
+    expect(createReleaseStep).toContain(
+      'packages/web-templates/src/export-html/dist/export-transcript-document.js',
+    );
     expect(createReleaseStep).toContain('dist/standalone/qwen-code-*');
     expect(createReleaseStep).toContain('dist/standalone/SHA256SUMS');
     // OSS upload logic must not remain in release.yml
@@ -2511,6 +2504,7 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain('${GITHUB_PATH}');
     expect(existsSync('scripts/upload-aliyun-oss-assets.js')).toBe(true);
     expect(ossWorkflow).toContain('node scripts/upload-aliyun-oss-assets.js');
+    expect(ossWorkflow).toContain("--pattern 'export-transcript-document.js'");
     expect(ossWorkflow.match(/upload_asset\(\)/g) || []).toHaveLength(0);
     expect(ossWorkflow).toContain('releases/qwen-code/${RELEASE_TAG}');
     expect(ossWorkflow).toContain('releases/qwen-code/latest');
@@ -2551,6 +2545,10 @@ describe('standalone release packaging', () => {
       'releases/qwen-code/latest/VERSION',
     );
     const syncStep = ossWorkflow.slice(syncStepIndex, verifyStepIndex);
+    const verifyStep = ossWorkflow.slice(verifyStepIndex, syncHostedStepIndex);
+    expect(syncStep).toContain(
+      'dist/export-html/export-transcript-document.js',
+    );
     expect(syncStep).not.toContain('dist/installation/');
     expect(syncStep).not.toContain('installation/install-qwen-standalone.sh');
     const syncHostedStep = ossWorkflow.slice(
@@ -2586,13 +2584,18 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
     );
+    expect(verifyStep).toContain(
+      '${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}/export-transcript-document.js',
+    );
+    expect(verifyStep).toContain(
+      'cmp -s dist/export-html/export-transcript-document.js "${renderer_tmp}"',
+    );
     expect(ossWorkflow).toContain(
       'latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d',
     );
     expect(ossWorkflow).not.toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"',
     );
-    const verifyStep = ossWorkflow.slice(verifyStepIndex, syncHostedStepIndex);
     expect(verifyStep).not.toContain('hosted_tmp_dir');
     const verifyHostedStep = ossWorkflow.slice(verifyHostedStepIndex);
     expect(ossWorkflow).toContain('hosted_tmp_dir="$(mktemp -d)"');
@@ -4618,10 +4621,6 @@ function ensureMinimalDist({
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
   }
   if (includeNpmPackageArtifacts) {
-    writeFileSync(
-      path.join(distPath, 'export-transcript-document.js'),
-      'export {};\n',
-    );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
       'console.log("postinstall");\n',

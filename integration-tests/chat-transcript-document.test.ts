@@ -4,7 +4,6 @@ import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
-import { buildSync } from 'esbuild';
 import {
   EXPORT_TRANSCRIPT_RENDERER_LIMITS,
   EXPORT_TRANSCRIPT_RENDERER_VERSION,
@@ -22,7 +21,7 @@ import {
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
-const RENDERER_URL = `https://cdn.jsdelivr.net/npm/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
+const RENDERER_URL = `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const MAX_DOCUMENT_DURATION_MS = 60_000;
@@ -43,19 +42,7 @@ const rendererAssetPath = resolve(
   repoRoot,
   'packages/web-templates/src/export-html/dist/export-transcript-document.js',
 );
-const rendererAsset = buildSync({
-  entryPoints: [rendererAssetPath],
-  bundle: true,
-  format: 'esm',
-  platform: 'browser',
-  target: ['chrome120'],
-  write: false,
-  legalComments: 'none',
-  define: { 'process.env.NODE_ENV': '"production"' },
-}).outputFiles[0]?.text;
-if (!rendererAsset) {
-  throw new Error('Failed to build the local document renderer test asset.');
-}
+const rendererAsset = readFileSync(rendererAssetPath, 'utf8');
 
 const expectedNetwork = JSON.parse(
   readFileSync(
@@ -427,7 +414,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     visit(schema);
   });
 
-  it('opens, searches, copies, and prints the maximum document with its pinned CDN runtime', async () => {
+  it('opens, searches, copies, and prints the maximum document with its pinned OSS runtime', async () => {
     const exportDocument = createMaximumDocument();
     const serialized = JSON.stringify(exportDocument);
     const html = renderExportTranscriptDocumentToHtml(exportDocument);
@@ -633,13 +620,13 @@ describe('ExportTranscriptDocument browser gate', () => {
     }
   });
 
-  it('fails closed when the CDN renderer is unavailable or fails to execute', async () => {
+  it('fails closed when the OSS renderer is unavailable or fails to execute', async () => {
     const document = createExportTranscriptDocumentV1(
-      [record('cdn-error', null, 'user', 'CDN error probe')],
+      [record('oss-error', null, 'user', 'OSS error probe')],
       {
         startTime: '2026-08-16T00:00:00.000Z',
         metadata: {
-          sessionId: 'cdn-error',
+          sessionId: 'oss-error',
           startTime: '2026-08-16T00:00:00.000Z',
           exportTime: EXPORTED_AT,
           cwd: '/workspace/project',
@@ -676,7 +663,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     }
   });
 
-  it('runs the real HTML export entry point with its pinned CDN runtime', async () => {
+  it('runs the real HTML export entry point with its pinned OSS runtime', async () => {
     const records = [
       {
         ...record(

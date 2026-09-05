@@ -53,35 +53,21 @@ describe('HTML export formatter', () => {
     const secondHtml = toHtml(sessionData, records);
     const nonce = html.match(/script-src 'nonce-([^']+)'/)?.[1];
     const secondNonce = secondHtml.match(/script-src 'nonce-([^']+)'/)?.[1];
-    const importMap = JSON.parse(
-      html.match(/<script[^>]+type="importmap">\s*(.*?)\s*<\/script>/s)?.[1] ??
-        '{}',
-    ) as { imports?: Record<string, string> };
-
     expect(html).toContain('id="transcript-document"');
     expect(html).toContain('Hello from the document exporter.');
     expect(html).toContain("connect-src 'none'");
     expect(html).toMatch(
-      /script-src 'nonce-[^']+' https:\/\/cdn\.jsdelivr\.net\/npm\//,
+      /script-src 'nonce-[^']+' https:\/\/qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com\/releases\/qwen-code\//,
     );
-    expect(Object.keys(importMap.imports ?? {})).toEqual([
-      'react',
-      'react/jsx-runtime',
-      'react-dom',
-      'react-dom/client',
-    ]);
     expect(html).toContain(
-      `https://cdn.jsdelivr.net/npm/@qwen-code/qwen-code@${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
+      `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
     );
     expect(EXPORT_TRANSCRIPT_RENDERER_VERSION).toMatch(
       /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+[a-f0-9]{16}$/,
     );
-    expect(html).toMatch(
-      /https:\/\/cdn\.jsdelivr\.net\/npm\/react@\d+\.\d+\.\d+\/\+esm/,
-    );
-    expect(html).toMatch(
-      /https:\/\/cdn\.jsdelivr\.net\/npm\/react-dom@\d+\.\d+\.\d+\/client\/\+esm/,
-    );
+    expect(html).not.toContain('cdn.jsdelivr.net');
+    expect(html).not.toContain('type="importmap"');
+    expect(html).not.toContain('type="module"');
     expect(html.length).toBeLessThan(500_000);
     expect(html).not.toContain('id="chat-data"');
     expect(html).not.toContain('session-secret');
