@@ -82,6 +82,45 @@ describe('persistStableClientId', () => {
       window.sessionStorage.getItem('qwen-code-webui-client-id'),
     ).toBeNull();
   });
+
+  // The key below is spelled out instead of imported on purpose. Every other
+  // test here round-trips through `SESSION_CLIENT_ID_STORAGE_PREFIX`, so
+  // renaming that constant moves the read and the write together and leaves
+  // the suite green — while a tab that persisted its id under the historical
+  // WebUI key loses it across the migration, and the daemon then sees a fresh
+  // `X-Qwen-Client-Id` for the same controller. These two assertions are the
+  // only thing that goes red on a rename.
+  it('writes under the historical WebUI key', () => {
+    persistStableClientId('client-a', 'session-a');
+
+    expect(
+      window.sessionStorage.getItem(
+        'qwen-code-webui-client-id:session:session-a',
+      ),
+    ).toBe('client-a');
+  });
+
+  it('reads an id a WebUI-era tab left under the historical key', () => {
+    window.sessionStorage.setItem(
+      'qwen-code-webui-client-id:session:session-a',
+      'legacy-client',
+    );
+
+    expect(getStableClientId(undefined, 'session-a')).toBe('legacy-client');
+    expect(getPersistedClientId('session-a')).toBe('legacy-client');
+  });
+
+  it('percent-encodes the session id in the key', () => {
+    // The suffix is part of the persisted shape too: a session id carrying `/`
+    // or `:` would otherwise collide with the prefix's own separator.
+    persistStableClientId('client-slash', 'work/space:1');
+
+    expect(
+      window.sessionStorage.getItem(
+        'qwen-code-webui-client-id:session:work%2Fspace%3A1',
+      ),
+    ).toBe('client-slash');
+  });
 });
 
 describe('getPersistedClientId', () => {
