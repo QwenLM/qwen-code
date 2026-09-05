@@ -18,6 +18,7 @@ import {
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
+  CerebrasOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -33,6 +34,7 @@ export {
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
+  CerebrasOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -104,6 +106,14 @@ export function determineProvider(
   // Check for Mistral provider
   if (MistralOpenAICompatibleProvider.isMistralProvider(config)) {
     return new MistralOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Cerebras provider
+  if (CerebrasOpenAICompatibleProvider.isCerebrasProvider(config)) {
+    return new CerebrasOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );
