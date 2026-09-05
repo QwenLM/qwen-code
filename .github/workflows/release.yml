@@ -337,7 +337,15 @@ jobs:
   quality_static:
     name: 'Quality Checks (Static)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Runtime tracks how busy hk4 is, not the work: run 33963757913 lost this
+    # lane at 30m13s (Run Lint) and quality_build at 45m13s (Pack Build
+    # Outputs) with no failing step — four heavy lanes on one host's CPUs, and
+    # `npm run format` alone took 21 minutes. A timeout kill reports as
+    # 'cancelled', which the quality aggregate fails closed on, so the release
+    # was lost to host load with nothing to fix in the tree. Same knob as
+    # workspace_tests: an operator can retune it without a PR, defaults
+    # unchanged.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}"
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -401,7 +409,7 @@ jobs:
   quality_build:
     name: 'Quality Checks (Build)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 45
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
