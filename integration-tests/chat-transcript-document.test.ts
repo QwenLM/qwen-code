@@ -469,7 +469,9 @@ describe('ExportTranscriptDocument browser gate', () => {
     await expandAll.click();
     expect(await expandAll.isDisabled()).toBe(true);
     await themeToggle.click();
-    expect(await page.locator('html').getAttribute('class')).toContain('light');
+    await expect
+      .poll(() => page.locator('html').getAttribute('class'))
+      .toMatch(/light/);
     await expect
       .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
       .toBeGreaterThan(0);
@@ -654,6 +656,31 @@ describe('ExportTranscriptDocument browser gate', () => {
       });
       await page.setContent(renderExportTranscriptDocumentToHtml(document), {
         waitUntil: 'load',
+      });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to load this chat export',
+      );
+      await page.close();
+    }
+
+    // The `unhandledrejection` fail-closed handler is wired to showLoadError but
+    // no servable body passes SRI, so exercise it with a synthetic rejection.
+    {
+      const page = await browser.newPage();
+      await page.route('**/*', (route) => route.abort('blockedbyclient'));
+      await page.setContent(renderExportTranscriptDocumentToHtml(document), {
+        waitUntil: 'load',
+      });
+      await page.evaluate(() => {
+        window.dispatchEvent(
+          new PromiseRejectionEvent('unhandledrejection', {
+            promise: Promise.reject(new Error('boot failed')),
+            reason: new Error('boot failed'),
+          }),
+        );
       });
       await expect
         .poll(() => page.locator('body').getAttribute('data-render-complete'))
