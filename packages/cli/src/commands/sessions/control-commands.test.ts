@@ -136,14 +136,18 @@ describe('answer command parsing', () => {
 
 describe('answer command parsing with the root options registered', () => {
   // The real chain registers globals on the root yargs instance
-  // (config.ts: --debug/-d, --proxy, --telemetry*, ...). They stay known
-  // inside the answer subtree, where `unknown-options-as-args` cannot see
-  // them, so without forgetInheritedOptions a quoted flag sets the option
-  // and is silently stripped from the text. Mirror that chain.
+  // (config.ts: --debug/-d, --proxy, --telemetry*, --version/-v, ...).
+  // They stay known inside the answer subtree, where
+  // `unknown-options-as-args` cannot see them, so without
+  // forgetInheritedOptions a quoted flag sets the option and is silently
+  // stripped from the text. Mirror that chain, including the way
+  // config.ts registers --version and the sessions builder disables it.
   async function parse(argv: string[]): Promise<Record<string, unknown>> {
     return (await yargs(argv)
       .option('debug', { type: 'boolean', alias: 'd', default: false })
       .option('proxy', { type: 'string' })
+      .version('x')
+      .alias('v', 'version')
       .command({
         command: 'sessions',
         describe: 'Manage Qwen Code sessions',
@@ -204,6 +208,22 @@ describe('answer command parsing with the root options registered', () => {
     const answer = mockDelivered();
     await parse(['sessions', 'answer', SESSION, 'rerun', '-d', 'now']);
     expect(answer).toHaveBeenCalledWith(SESSION, 'rerun -d now');
+  });
+
+  it('keeps the version alias in the answer text', async () => {
+    // `.version(false)` up the chain deletes `version` from the key/type
+    // groups but leaves the alias entry `v: ['version']` behind, which
+    // keeps `-v` known unless forgetInheritedOptions forgets it too.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'rerun', '-v', 'now']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'rerun -v now');
+  });
+
+  it('delivers an answer that is only --version', async () => {
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, '--version']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--version');
+    expect(stderr).toEqual([]);
   });
 
   it('still shows help for a bare --help', async () => {

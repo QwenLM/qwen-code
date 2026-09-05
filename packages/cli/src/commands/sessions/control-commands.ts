@@ -75,15 +75,15 @@ interface ParsableOptionsTable {
 
 /**
  * Forget the options registered higher up the chain (the root `--debug`,
- * `--proxy`, `--telemetry*`, ... globals in config.ts) so they cannot be
- * parsed out of an answer.
+ * `--proxy`, `--telemetry*`, `--version`, ... globals in config.ts) so
+ * they cannot be parsed out of an answer.
  *
  * They stay known inside this command's parse, and `unknown-options-as-args`
  * only protects unknown options, so a quoted flag (`answer <id> rerun with
  * --debug`) would set the flag and vanish from the text while the CLI
  * reports success. An answer is free text: drop every inherited option from
  * the parse table so quoted tokens become unknown again and stay in the
- * text. `--help` and `--version` stay known, the way the docs promise.
+ * text. Only `--help` stays known, the way the docs promise.
  */
 function forgetInheritedOptions(built: Argv): Argv {
   // getOptions() exists at runtime but is missing from @types/yargs;
@@ -91,8 +91,22 @@ function forgetInheritedOptions(built: Argv): Argv {
   const table = (
     built as unknown as { getOptions(): ParsableOptionsTable }
   ).getOptions();
-  const keep = new Set(['help', 'h', 'version', 'v']);
-  const inherited = Object.keys(table.key).filter((key) => !keep.has(key));
+  const keep = new Set(['help', 'h']);
+  // Derive the inherited set from every group, not just `table.key`:
+  // `.version(false)` up the chain deletes `version` from the key/type
+  // groups but leaves the alias entry `v: ['version']` behind, which is
+  // enough for yargs-parser to keep `-v`/`--version` known.
+  const candidates = new Set<string>();
+  for (const group of Object.values(table)) {
+    if (Array.isArray(group)) {
+      for (const key of group as unknown[]) {
+        if (typeof key === 'string') candidates.add(key);
+      }
+    } else if (group !== null && typeof group === 'object') {
+      for (const key of Object.keys(group)) candidates.add(key);
+    }
+  }
+  const inherited = [...candidates].filter((key) => !keep.has(key));
   for (const group of Object.values(table)) {
     if (Array.isArray(group)) {
       const keys = group as string[];
