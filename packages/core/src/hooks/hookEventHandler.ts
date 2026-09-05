@@ -568,10 +568,9 @@ export class HookEventHandler {
   }
 
   /**
-   * Fire a PermissionDenied event for tool calls rejected before manual
-   * permission handling starts. Unlike PermissionRequest, this event does not
-   * ask hooks to approve or modify the call; it reports AUTO-mode denials that
-   * happen before any permission dialog would be shown.
+   * Fire a PermissionDenied event for AUTO-mode classifier denials. Unlike
+   * PermissionRequest, this event does not ask hooks to approve or modify the
+   * call. A threshold fallback may still show a manual dialog afterward.
    */
   async firePermissionDeniedEvent(
     toolName: string,
