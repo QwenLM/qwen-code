@@ -164,6 +164,11 @@ import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
+import {
+  TrustedUserAnswers,
+  type TrustedUserAnswerQuestion,
+  type TrustedUserAnswerSnapshot,
+} from '../permissions/trusted-user-answers.js';
 
 // Hook types and utilities
 import {
@@ -395,6 +400,7 @@ export function getMainSessionBaseSystemPrompt(
 
 export class LlmClient {
   private chat?: LlmChat;
+  private readonly trustedUserAnswers = new TrustedUserAnswers();
   private initializedSessionId: string | undefined;
   /**
    * Open session-swap telemetry transaction, if any. See
@@ -829,6 +835,18 @@ export class LlmClient {
     return this.getChat().getHistoryTail(count, curated);
   }
 
+  recordTrustedUserAnswers(
+    callId: string,
+    questions: readonly TrustedUserAnswerQuestion[],
+    answers: unknown,
+  ): boolean {
+    return this.trustedUserAnswers.record(callId, questions, answers);
+  }
+
+  getTrustedUserAnswers(): TrustedUserAnswerSnapshot {
+    return this.trustedUserAnswers.snapshot();
+  }
+
   private getHistoryTailShallow(
     count: number,
     curated: boolean = false,
@@ -988,6 +1006,7 @@ export class LlmClient {
       // Nothing to strip — leave caches and IDE context alone.
       return strippedEntries;
     }
+    this.trustedUserAnswers.clear();
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's
@@ -1066,6 +1085,7 @@ export class LlmClient {
   }
 
   setHistory(history: Content[]) {
+    this.trustedUserAnswers.clear();
     this.getChat().setHistory(history);
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
@@ -1090,6 +1110,7 @@ export class LlmClient {
     // the clear, reintroducing the file_unchanged placeholder bug).
     const newLen = this.getChat().getHistoryLength();
     if (newLen < prevLen) {
+      this.trustedUserAnswers.clear();
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
@@ -2174,6 +2195,7 @@ export class LlmClient {
     signal?: AbortSignal,
   ): Promise<LlmChat> {
     signal?.throwIfAborted();
+    this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -2257,6 +2279,9 @@ export class LlmClient {
             history,
             this.config.getChatRecordingService(),
             uiTelemetryService,
+            () => {
+              if (this.chat === chat) this.trustedUserAnswers.clear();
+            },
           ),
       );
       chat.enableManualPlanExitNotices();

@@ -1163,6 +1163,53 @@ describe('Gemini Client (client.ts)', () => {
       expect(enableSpy).toHaveBeenCalledTimes(2);
     });
 
+    it('clears trusted user answers when a chat is rebuilt', async () => {
+      client.recordTrustedUserAnswers(
+        'ask-1',
+        [{ question: 'Continue?', options: [] }],
+        { '0': 'No' },
+      );
+      expect(client.getTrustedUserAnswers()).toHaveLength(1);
+
+      await client.startChat(
+        [{ role: 'user', parts: [{ text: 'resumed' }] }],
+        SessionStartSource.Resume,
+      );
+
+      expect(client.getTrustedUserAnswers()).toEqual([]);
+    });
+
+    it('clears trusted user answers when the main chat replaces history', async () => {
+      await client.startChat();
+      client.recordTrustedUserAnswers(
+        'ask-1',
+        [{ question: 'Continue?', options: [] }],
+        { '0': 'No' },
+      );
+
+      client
+        .getChat()
+        .setHistory([{ role: 'user', parts: [{ text: 'compacted' }] }]);
+
+      expect(client.getTrustedUserAnswers()).toEqual([]);
+    });
+
+    it('does not let a replaced chat clear current trusted answers', async () => {
+      const replacedChat = await client.startChat();
+      await client.startChat();
+      client.recordTrustedUserAnswers(
+        'ask-1',
+        [{ question: 'Continue?', options: [] }],
+        { '0': 'No' },
+      );
+
+      replacedChat.setHistory([
+        { role: 'user', parts: [{ text: 'late compaction' }] },
+      ]);
+
+      expect(client.getTrustedUserAnswers()).toHaveLength(1);
+    });
+
     it('passes startup, resume, and clear sources to the profiler', async () => {
       await client.startChat();
       await client.startChat([{ role: 'user', parts: [{ text: 'hi' }] }]);
@@ -3184,10 +3231,16 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         setHistory: vi.fn(),
       } as unknown as LlmChat;
+      client.recordTrustedUserAnswers(
+        'ask-1',
+        [{ question: 'Continue?', options: [] }],
+        { '0': 'No' },
+      );
 
       client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
 
       expect(cacheClear).toHaveBeenCalled();
+      expect(client.getTrustedUserAnswers()).toEqual([]);
     });
 
     /**
@@ -3209,10 +3262,16 @@ describe('Gemini Client (client.ts)', () => {
     it('truncateHistory clears the cache when entries are actually removed', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = mockChatWithLengths(3, 2);
+      client.recordTrustedUserAnswers(
+        'ask-1',
+        [{ question: 'Continue?', options: [] }],
+        { '0': 'No' },
+      );
 
       client.truncateHistory(2);
 
       expect(cacheClear).toHaveBeenCalled();
+      expect(client.getTrustedUserAnswers()).toEqual([]);
     });
 
     it('truncateHistory does NOT clear the cache when nothing was removed (keepCount >= history length)', () => {

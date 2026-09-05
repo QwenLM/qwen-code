@@ -4314,7 +4314,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getLlmClient()!.getChat();
+    const llmClient = this.config.getLlmClient()!;
+    const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -4328,7 +4329,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -4383,7 +4384,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
+    this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -5299,8 +5300,9 @@ export class Session implements SessionContext {
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
-                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                  null;
+                  this.config
+                    .getLlmClient()!
+                    .stripOrphanedUserEntriesFromHistory() ?? null;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -5316,7 +5318,7 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -11785,6 +11787,13 @@ export class Session implements SessionContext {
           // The VS Code extension is just a UI layer for requestPermission.
           const isAskUserQuestionTool =
             policyToolName === ToolNames.ASK_USER_QUESTION;
+          // Core keeps built-in tool classes lazy-loaded. The bundle's
+          // keepNames preserves this class check; name and kind also reject
+          // MCP and registry shadows.
+          const isTrustedAskUserQuestionTool =
+            isAskUserQuestionTool &&
+            tool.kind === Kind.Think &&
+            tool.constructor.name === 'AskUserQuestionTool';
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
           const flowResult =
@@ -11973,15 +11982,17 @@ export class Session implements SessionContext {
             // exactly that tail rather than triggering a `structuredClone`
             // of the whole session on every non-fast-path AUTO call.
             // Parallels coreToolScheduler.ts.
+            const llmClient = this.config.getLlmClient?.();
             const messages =
-              this.config
-                .getLlmClient?.()
-                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+              llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const trustedUserAnswers =
+              llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
               pmForcedAsk,
               toolParams,
               messages,
+              trustedUserAnswers,
               config: this.config,
               signal: abortSignal,
               skipClassifierReason: fallback.fallback
@@ -12598,6 +12609,24 @@ export class Session implements SessionContext {
                   cancelBeforeExecutionIfAborted(toolName);
                 if (confirmationCancellation) {
                   return confirmationCancellation;
+                }
+                if (
+                  isTrustedAskUserQuestionTool &&
+                  isApproveOutcome(outcome) &&
+                  confirmationDetails.type === 'ask_user_question' &&
+                  output.answers !== undefined &&
+                  output.answers !== null &&
+                  typeof output.answers === 'object' &&
+                  !Array.isArray(output.answers) &&
+                  Object.keys(output.answers).length > 0
+                ) {
+                  this.config
+                    .getLlmClient?.()
+                    ?.recordTrustedUserAnswers?.(
+                      callId,
+                      confirmationDetails.questions,
+                      output.answers,
+                    );
                 }
               } catch (error) {
                 if (outcome !== ToolConfirmationOutcome.Cancel) {

@@ -22,24 +22,9 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { resolveInteractionMode } from '../core/prompts.js';
 import { InputFormat } from '../output/types.js';
+import { parseAnswerQuestionIndex } from '../permissions/trusted-user-answers.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
-
-function parseAnswerQuestionIndex(
-  key: string,
-  questionCount: number,
-): number | undefined {
-  const index = Number(key);
-  if (
-    !Number.isSafeInteger(index) ||
-    index < 0 ||
-    index >= questionCount ||
-    String(index) !== key
-  ) {
-    return undefined;
-  }
-  return index;
-}
 
 export interface QuestionOption {
   label: string;
