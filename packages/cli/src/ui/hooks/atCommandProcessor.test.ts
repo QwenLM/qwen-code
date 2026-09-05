@@ -18,6 +18,7 @@ import {
   Storage,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
+import { formatClipboardFileReference } from '../utils/clipboardUtils.js';
 import * as os from 'node:os';
 import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -691,6 +692,30 @@ describe('handleAtCommand', () => {
       expect(result.toolDisplays).toBeDefined();
       expect(result.toolDisplays).toHaveLength(1);
       expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'should resolve clipboard-formatted Windows references with escaped spaces',
+    async () => {
+      const fileContent = 'Windows path with spaces';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'path with spaces', 'file.txt'),
+        fileContent,
+      );
+      const query = formatClipboardFileReference(filePath);
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 125,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.processedQuery).toContainEqual({ text: fileContent });
+      expect(result.toolDisplays?.[0].status).toBe(ToolCallStatus.Success);
     },
   );
 

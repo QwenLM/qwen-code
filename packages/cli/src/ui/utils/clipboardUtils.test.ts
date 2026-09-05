@@ -8,10 +8,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
-const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
+const {
+  mockSpawn,
+  mockExecSync,
+  mockClipboardHasFormat,
+  mockClipboardGetFiles,
+  clipboardMockState,
+} = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockExecSync: vi.fn(),
-  clipboardMockState: { failLoad: false, loadDelayMs: 0 },
+  mockClipboardHasFormat: vi.fn(),
+  mockClipboardGetFiles: vi.fn(),
+  clipboardMockState: {
+    failLoad: false,
+    loadDelayMs: 0,
+    files: [] as string[],
+    getFilesError: false,
+  },
 }));
 
 // Mock @teddyzhu/clipboard
@@ -24,15 +37,27 @@ vi.mock('@teddyzhu/clipboard', async () => {
   if (clipboardMockState.failLoad) {
     throw new Error('native clipboard module missing');
   }
+  mockClipboardHasFormat.mockImplementation(
+    (format: string) =>
+      format === 'files' && clipboardMockState.files.length > 0,
+  );
+  mockClipboardGetFiles.mockImplementation(() => {
+    if (clipboardMockState.getFilesError) {
+      throw new Error('clipboard file read failed');
+    }
+    return clipboardMockState.files;
+  });
   return {
     default: {
       ClipboardManager: vi.fn().mockImplementation(() => ({
-        hasFormat: vi.fn().mockReturnValue(false),
+        hasFormat: mockClipboardHasFormat,
+        getFiles: mockClipboardGetFiles,
         getImageData: vi.fn().mockReturnValue({ data: null }),
       })),
     },
     ClipboardManager: vi.fn().mockImplementation(() => ({
-      hasFormat: vi.fn().mockReturnValue(false),
+      hasFormat: mockClipboardHasFormat,
+      getFiles: mockClipboardGetFiles,
       getImageData: vi.fn().mockReturnValue({ data: null }),
     })),
   };
@@ -158,6 +183,7 @@ vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('clipboardUtils', () => {
   let clipboardHasImage: () => Promise<boolean>;
+  let readClipboardFiles: (onUnavailable?: () => void) => Promise<string[]>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
@@ -175,6 +201,8 @@ describe('clipboardUtils', () => {
 
     clipboardMockState.failLoad = false;
     clipboardMockState.loadDelayMs = 0;
+    clipboardMockState.files = [];
+    clipboardMockState.getFilesError = false;
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -182,6 +210,7 @@ describe('clipboardUtils', () => {
     // Top-level import would be stale after resetModules.
     const mod = await import('./clipboardUtils.js');
     clipboardHasImage = mod.clipboardHasImage;
+    readClipboardFiles = mod.readClipboardFiles;
     saveClipboardImage = mod.saveClipboardImage;
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
@@ -591,6 +620,17 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+        writable: true,
+      });
+      const onFilesUnavailable = vi.fn();
+      await expect(mod.readClipboardFiles(onFilesUnavailable)).resolves.toEqual(
+        [],
+      );
+      expect(onFilesUnavailable).toHaveBeenCalledOnce();
     });
 
     it('shares an in-flight native module load without false errors', async () => {
@@ -649,6 +689,60 @@ describe('clipboardUtils', () => {
         configurable: true,
         writable: true,
       });
+    });
+
+    it('returns copied file paths on Windows', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+        writable: true,
+      });
+      clipboardMockState.files = [
+        'C:\\Users\\mochi\\image.png',
+        'C:\\Users\\mochi\\notes.txt',
+      ];
+
+      await expect(readClipboardFiles()).resolves.toEqual(
+        clipboardMockState.files,
+      );
+    });
+
+    it('returns immediately outside Windows without reporting the native module unavailable', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(readClipboardFiles(onUnavailable)).resolves.toEqual([]);
+      expect(onUnavailable).not.toHaveBeenCalled();
+      expect(mockClipboardHasFormat).not.toHaveBeenCalled();
+      expect(mockClipboardGetFiles).not.toHaveBeenCalled();
+    });
+
+    it('returns no files when the clipboard has no file format', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+        writable: true,
+      });
+
+      await expect(readClipboardFiles()).resolves.toEqual([]);
+      expect(mockClipboardHasFormat).toHaveBeenCalledWith('files');
+      expect(mockClipboardGetFiles).not.toHaveBeenCalled();
+    });
+
+    it('returns no files when reading the file list throws', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+        writable: true,
+      });
+      clipboardMockState.files = ['C:\\Users\\mochi\\notes.txt'];
+      clipboardMockState.getFilesError = true;
+
+      await expect(readClipboardFiles()).resolves.toEqual([]);
     });
   });
 

@@ -800,6 +800,10 @@ export function SettingsDialog({
           const definition = getSettingDefinition(editingKey);
           const type = definition?.type;
 
+          if (key.clipboardFiles) {
+            return;
+          }
+
           if (key.paste && key.sequence) {
             let pasted = key.sequence;
             if (type === 'number') {

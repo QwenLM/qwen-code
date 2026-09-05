@@ -17,6 +17,7 @@ import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import os from 'node:os';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -64,6 +65,12 @@ const mockViewActions = vi.hoisted(() => ({
   enterBgDetailFromPanel: vi.fn(),
 }));
 
+const { mockFsStat, mockFsMkdir, mockFsCopyFile } = vi.hoisted(() => ({
+  mockFsStat: vi.fn(),
+  mockFsMkdir: vi.fn(),
+  mockFsCopyFile: vi.fn(),
+}));
+
 vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
@@ -72,7 +79,19 @@ vi.mock('../hooks/use-voice-input.js');
 vi.mock('../voice/voice-recorder.js', () => ({
   createVoiceRecorder: vi.fn(),
 }));
-vi.mock('../utils/clipboardUtils.js');
+vi.mock('../utils/clipboardUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/clipboardUtils.js')>()),
+  clipboardHasImage: vi.fn(),
+  saveClipboardImage: vi.fn(),
+  cleanupOldClipboardImages: vi.fn(),
+  readClipboardFiles: vi.fn(),
+}));
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+  stat: mockFsStat,
+  mkdir: mockFsMkdir,
+  copyFile: mockFsCopyFile,
+}));
 vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
@@ -218,6 +237,10 @@ describe('InputPrompt', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([]);
+    mockFsStat.mockRejectedValue(new Error('file not found'));
+    mockFsMkdir.mockResolvedValue(undefined);
+    mockFsCopyFile.mockResolvedValue(undefined);
     mockedSavePromptStash.mockReturnValue(true);
     mockedClearPromptStash.mockReturnValue(true);
     mockViewActions.setAgentTabBarFocused.mockReset();
@@ -1649,6 +1672,18 @@ describe('InputPrompt', () => {
 
   describe('clipboard image paste', () => {
     const isWindows = process.platform === 'win32';
+    const copiedNonImageFileCases = [
+      {
+        pathKind: 'drive-letter',
+        filePath: 'C:\\Users\\mochi\\My Notes\\notes.txt',
+        expectedReference: '@C:/Users/mochi/My\\ Notes/notes.txt',
+      },
+      {
+        pathKind: 'UNC',
+        filePath: '\\\\server\\share\\My Report.txt',
+        expectedReference: '@//server/share/My\\ Report.txt',
+      },
+    ];
 
     beforeEach(() => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
@@ -1705,6 +1740,291 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
       // Note: The new implementation adds images as attachments rather than inserting into buffer
+      unmount();
+    });
+
+    it.each(copiedNonImageFileCases)(
+      'inserts copied $pathKind non-image files as references on the clipboard shortcut',
+      async ({ filePath, expectedReference }) => {
+        vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+          filePath,
+        ]);
+
+        const TestHarness = () => {
+          const buffer = useTextBuffer({
+            viewport: { width: 80, height: 20 },
+            isValidPath: (candidate) => candidate === filePath,
+            onChange: () => {},
+          });
+          return <InputPrompt {...props} buffer={buffer} />;
+        };
+
+        const { stdin, lastFrame, unmount } = renderWithProviders(
+          <TestHarness />,
+        );
+        await wait();
+
+        stdin.write(isWindows ? '\x1Bv' : '\x16');
+        await wait();
+
+        expect(stripAnsi(lastFrame() ?? '')).toContain(expectedReference);
+        expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
+
+    it.each(copiedNonImageFileCases)(
+      'keeps copied $pathKind references resolvable through an empty bracketed paste',
+      async ({ filePath, expectedReference }) => {
+        vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+          filePath,
+        ]);
+        let bufferText = '';
+
+        const TestHarness = () => {
+          const buffer = useTextBuffer({
+            viewport: { width: 80, height: 20 },
+            isValidPath: (candidate) => candidate === filePath,
+            onChange: () => {},
+          });
+          bufferText = buffer.text;
+          return <InputPrompt {...props} buffer={buffer} />;
+        };
+
+        const { stdin, unmount } = renderWithProviders(<TestHarness />);
+        await wait();
+
+        stdin.write('\x1B[200~\x1B[201~');
+
+        await waitFor(() => {
+          expect(bufferText).toBe(expectedReference);
+        });
+        expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
+
+    it('promotes a copied image with shell metacharacters through an empty bracketed paste', async () => {
+      const imagePath = 'C:\\Photos\\image(1).png';
+      const normalizedImagePath = imagePath.replaceAll('\\', '/');
+      const expectedSource = path.isAbsolute(normalizedImagePath)
+        ? normalizedImagePath
+        : path.resolve(props.config.getTargetDir(), normalizedImagePath);
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+        imagePath,
+      ]);
+      mockFsStat.mockResolvedValue({
+        isFile: () => true,
+      });
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B[200~\x1B[201~');
+
+      await waitFor(() => {
+        expect(mockFsStat).toHaveBeenCalledWith(expectedSource);
+      });
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expectedSource,
+        expect.stringMatching(/clipboard-\d+-0\.png$/),
+      );
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('promotes copied image files to attachments on the clipboard shortcut', async () => {
+      const imagePath = 'C:\\Users\\mochi\\image.png';
+      const expectedSource = path.isAbsolute(imagePath)
+        ? imagePath
+        : path.resolve(props.config.getTargetDir(), imagePath);
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+        imagePath,
+      ]);
+      mockFsStat.mockResolvedValue({
+        isFile: () => true,
+      });
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(mockFsStat).toHaveBeenCalledWith(expectedSource);
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expectedSource,
+        expect.stringMatching(/clipboard-\d+-0\.png$/),
+      );
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('falls back to all copied image file references when promotion fails', async () => {
+      const imagePaths = [
+        'C:\\Photos\\Missing Image.png',
+        'C:\\Photos\\Uncopyable Image.png',
+      ];
+      const expectedReferences = imagePaths
+        .map(clipboardUtils.formatClipboardFileReference)
+        .join(' ');
+      const expectedSources = imagePaths.map((imagePath) =>
+        path.isAbsolute(imagePath)
+          ? imagePath
+          : path.resolve(props.config.getTargetDir(), imagePath),
+      );
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue(
+        imagePaths,
+      );
+      mockFsStat
+        .mockRejectedValueOnce(new Error('file not found'))
+        .mockResolvedValueOnce({ isFile: () => true });
+      mockFsCopyFile.mockRejectedValueOnce(new Error('copy failed'));
+      let bufferText = '';
+
+      const TestHarness = () => {
+        const buffer = useTextBuffer({
+          viewport: { width: 80, height: 20 },
+          isValidPath: (candidate) => imagePaths.includes(candidate),
+          onChange: () => {},
+        });
+        bufferText = buffer.text;
+        return <InputPrompt {...props} buffer={buffer} />;
+      };
+
+      const { stdin, unmount } = renderWithProviders(<TestHarness />);
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+
+      await waitFor(() => {
+        expect(bufferText).toBe(expectedReferences);
+      });
+      expect(mockFsStat).toHaveBeenNthCalledWith(1, expectedSources[0]);
+      expect(mockFsStat).toHaveBeenNthCalledWith(2, expectedSources[1]);
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expectedSources[1],
+        expect.stringMatching(/clipboard-\d+-0\.png$/),
+      );
+      unmount();
+    });
+
+    it('keeps references for copied images that fail partial promotion', async () => {
+      const imagePaths = [
+        'C:\\Photos\\Copied Image.png',
+        'C:\\Photos\\Missing Image.png',
+      ];
+      const expectedSources = imagePaths.map((imagePath) =>
+        path.isAbsolute(imagePath)
+          ? imagePath
+          : path.resolve(props.config.getTargetDir(), imagePath),
+      );
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue(
+        imagePaths,
+      );
+      mockFsStat
+        .mockResolvedValueOnce({ isFile: () => true })
+        .mockRejectedValueOnce(new Error('file not found'));
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+
+      await waitFor(() => {
+        expect(mockFsCopyFile).toHaveBeenCalledWith(
+          expectedSources[0],
+          expect.stringMatching(/clipboard-\d+-0\.png$/),
+        );
+      });
+      expect(mockFsStat).toHaveBeenNthCalledWith(2, expectedSources[1]);
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        clipboardUtils.formatClipboardFileReference(imagePaths[1]),
+        { paste: false },
+      );
+      unmount();
+    });
+
+    it('keeps mixed copied files as references without promoting images', async () => {
+      const clipboardFiles = ['C:\\Photos\\image.png', 'C:\\Docs\\notes.txt'];
+      const expectedReferences = clipboardFiles
+        .map(clipboardUtils.formatClipboardFileReference)
+        .join(' ');
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue(
+        clipboardFiles,
+      );
+      let bufferText = '';
+
+      const TestHarness = () => {
+        const buffer = useTextBuffer({
+          viewport: { width: 80, height: 20 },
+          isValidPath: (candidate) => clipboardFiles.includes(candidate),
+          onChange: () => {},
+        });
+        bufferText = buffer.text;
+        return <InputPrompt {...props} buffer={buffer} />;
+      };
+
+      const { stdin, unmount } = renderWithProviders(<TestHarness />);
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+
+      await waitFor(() => {
+        expect(bufferText).toBe(expectedReferences);
+      });
+      expect(mockFsStat).not.toHaveBeenCalled();
+      expect(mockFsCopyFile).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('preserves references behind a large copied file list placeholder', async () => {
+      const clipboardFiles = Array.from(
+        { length: 11 },
+        (_, index) => `C:\\Users\\mochi\\notes-${index}.txt`,
+      );
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue(
+        clipboardFiles,
+      );
+      const fileReferences = clipboardFiles
+        .map(clipboardUtils.formatClipboardFileReference)
+        .join(' ');
+
+      const TestHarness = () => {
+        const buffer = useTextBuffer({
+          viewport: { width: 80, height: 20 },
+          isValidPath: (candidate) => clipboardFiles.includes(candidate),
+          onChange: () => {},
+        });
+        return <InputPrompt {...props} buffer={buffer} />;
+      };
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <TestHarness />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      const placeholder = `[Pasted Content ${[...fileReferences].length} chars]`;
+      expect(stripAnsi(lastFrame() ?? '')).toContain(placeholder);
+
+      stdin.write('\r');
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          fileReferences,
+          expect.objectContaining({
+            submittedPrompt: placeholder,
+          }),
+        );
+      });
       unmount();
     });
 
@@ -6201,6 +6521,48 @@ function clean(str: string | undefined): string {
 }
 
 describe('classifyPastedImagePaths', () => {
+  it('recognizes a Windows image path read from the file clipboard', () => {
+    const imagePath = 'C:\\Users\\mochi\\image(1).png';
+    expect(classifyPastedImagePaths(imagePath)).toEqual({
+      imagePaths: [imagePath],
+      allImages: true,
+    });
+  });
+
+  it('preserves a raw Windows image path with a space-leading segment', () => {
+    const platformSpy = vi.spyOn(os, 'platform').mockReturnValue('win32');
+    const imagePath = 'C:\\data\\ archive\\img.png';
+
+    try {
+      expect(classifyPastedImagePaths(imagePath)).toEqual({
+        imagePaths: [imagePath],
+        allImages: true,
+      });
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('unescapes a shell-escaped Unix image path exactly once', () => {
+    const platformSpy = vi.spyOn(os, 'platform').mockReturnValue('linux');
+
+    try {
+      expect(classifyPastedImagePaths('@/tmp/foo\\\\ bar.png')).toEqual({
+        imagePaths: ['/tmp/foo\\ bar.png'],
+        allImages: true,
+      });
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('unescapes a normalized Windows image reference before promotion', () => {
+    expect(classifyPastedImagePaths('@C:/Photos/image\\(1\\).png')).toEqual({
+      imagePaths: ['C:/Photos/image(1).png'],
+      allImages: true,
+    });
+  });
+
   it('treats a lone @-prefixed image path (terminal Cmd+V injection) as all-image', () => {
     const result = classifyPastedImagePaths(
       '@/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
@@ -6223,11 +6585,31 @@ describe('classifyPastedImagePaths', () => {
     ]);
   });
 
+  it('splits multiple space-separated forward-slash drive references', () => {
+    expect(classifyPastedImagePaths('@C:/a.png @C:/b.jpg')).toEqual({
+      imagePaths: ['C:/a.png', 'C:/b.jpg'],
+      allImages: true,
+    });
+  });
+
   it('unwraps surrounding quotes and shell-escaped spaces', () => {
     const result = classifyPastedImagePaths('"/a/my image.png"');
     expect(result.allImages).toBe(true);
     expect(result.imagePaths).toEqual(['/a/my image.png']);
   });
+
+  it.each([
+    ['@"/var/tmp/screenshot.png"', '/var/tmp/screenshot.png'],
+    ['@"C:/Photos/image\\(1\\).png"', 'C:/Photos/image(1).png'],
+  ])(
+    'unwraps a quoted @-prefixed image reference: %s',
+    (reference, expected) => {
+      expect(classifyPastedImagePaths(reference)).toEqual({
+        imagePaths: [expected],
+        allImages: true,
+      });
+    },
+  );
 
   it('does not treat plain text or non-image paths as image paste', () => {
     expect(classifyPastedImagePaths('just some text').allImages).toBe(false);

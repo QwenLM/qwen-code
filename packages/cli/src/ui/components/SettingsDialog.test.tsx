@@ -36,6 +36,15 @@ import {
 } from '../../config/settingsUtils.js';
 import { OUTPUT_LANGUAGE_AUTO } from '../../i18n/languageUtils.js';
 
+const { mockReadClipboardFiles } = vi.hoisted(() => ({
+  mockReadClipboardFiles: vi.fn(),
+}));
+
+vi.mock('../utils/clipboardUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/clipboardUtils.js')>()),
+  readClipboardFiles: mockReadClipboardFiles,
+}));
+
 // Mock the VimModeContext
 const mockToggleVimEnabled = vi.fn();
 const mockSetVimMode = vi.fn();
@@ -204,6 +213,7 @@ describe('SettingsDialog', () => {
     // console.log = vi.fn();
     // console.error = vi.fn();
     mockToggleVimEnabled.mockResolvedValue(true);
+    mockReadClipboardFiles.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -1353,6 +1363,97 @@ describe('SettingsDialog', () => {
 
       unmount();
     });
+  });
+
+  describe('Clipboard Paste', () => {
+    it.each([
+      {
+        description: 'ignores synthesized clipboard file references',
+        settingKey: 'general.outputLanguage',
+        typedValue: 'x',
+        pastePayload: '',
+        clipboardFiles: ['C:\\Users\\mochi\\My Notes\\notes.txt'],
+        expectedSettings: { general: { outputLanguage: 'x' } },
+      },
+      {
+        description: 'ignores synthesized clipboard file references',
+        settingKey: 'general.cleanupPeriodDays',
+        typedValue: '3',
+        pastePayload: '',
+        clipboardFiles: ['C:\\Users\\mochi\\notes-1.txt'],
+        expectedSettings: { general: { cleanupPeriodDays: 3 } },
+      },
+      {
+        description: 'accepts regular clipboard text',
+        settingKey: 'general.outputLanguage',
+        typedValue: 'x',
+        pastePayload: '-fr',
+        clipboardFiles: [],
+        expectedSettings: { general: { outputLanguage: 'x-fr' } },
+      },
+    ])(
+      '$description while editing $settingKey',
+      async ({
+        settingKey,
+        typedValue,
+        pastePayload,
+        clipboardFiles,
+        expectedSettings,
+      }) => {
+        vi.mocked(saveModifiedSettings).mockClear();
+        mockReadClipboardFiles.mockClear();
+        mockReadClipboardFiles.mockResolvedValue(clipboardFiles);
+        const settings = createMockSettings();
+
+        const { stdin, unmount, lastFrame } = render(
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <SettingsDialog settings={settings} onSelect={() => {}} />
+          </KeypressProvider>,
+        );
+
+        await waitFor(() => {
+          expect(lastFrame()).toContain('Settings');
+        });
+
+        const settingIndex = getDialogSettingKeys().indexOf(settingKey);
+        expect(settingIndex).toBeGreaterThanOrEqual(0);
+
+        const press = async (key: string) => {
+          act(() => {
+            stdin.write(key);
+          });
+          await wait();
+        };
+
+        for (let i = 0; i < settingIndex; i++) {
+          await press(TerminalKeys.DOWN_ARROW);
+        }
+        await press(TerminalKeys.ENTER);
+        await press(typedValue);
+
+        act(() => {
+          stdin.write(`\x1b[200~${pastePayload}\x1b[201~`);
+        });
+        if (pastePayload === '') {
+          await waitFor(() => {
+            expect(mockReadClipboardFiles).toHaveBeenCalled();
+          });
+        }
+        await wait();
+
+        await press(TerminalKeys.ENTER);
+        await waitFor(() => {
+          expect(vi.mocked(saveModifiedSettings)).toHaveBeenCalledWith(
+            new Set([settingKey]),
+            expectedSettings,
+            expect.any(LoadedSettings),
+            SettingScope.User,
+          );
+        });
+
+        unmount();
+      },
+    );
   });
 
   describe('Config Tabs and Search', () => {
