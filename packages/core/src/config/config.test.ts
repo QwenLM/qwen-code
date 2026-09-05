@@ -5157,6 +5157,37 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('rejects a joining caller whose signal is already aborted', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockImplementation(() => gate);
+
+      const first = config.initialize();
+      const controller = new AbortController();
+      const abortReason = new Error('joining caller already aborted');
+      controller.abort(abortReason);
+      // A joining caller cannot have its options honored, so an
+      // already-aborted signal fails fast instead of blocking on the first
+      // flight. Assert the rejection while the gate is still held: settling
+      // the first flight first would let a guard placed after the `await`
+      // reject with the same reason and pass.
+      const joining = config.initialize({ signal: controller.signal });
+      await expect(joining).rejects.toBe(abortReason);
+      release();
+      await expect(first).resolves.toBeUndefined();
+    });
+
     it('shares a failed in-flight initialization with concurrent callers', async () => {
       const config = new Config({
         ...baseParams,
@@ -5177,6 +5208,12 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(firstError).toBeInstanceOf(Error);
       expect(secondError).toBe(firstError);
+
+      // A failed-and-settled first flight still flips `initializationSettled`,
+      // so a later call must throw rather than re-join the stale rejection.
+      await expect(config.initialize()).rejects.toThrow(
+        'Config was already initialized',
+      );
     });
 
     it('should skip implicit startup discovery in bare mode', async () => {
@@ -9511,6 +9548,34 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.LS);
     });
 
+    it('does not register todo_write by default', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.TODO_WRITE);
+    });
+
+    it('registers todo_write when todoWriteEnabled is true', async () => {
+      const config = new Config({ ...baseParams, todoWriteEnabled: true });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.TODO_WRITE);
+    });
+
     it.each([
       { label: 'the canonical name', entry: ToolNames.LS },
       { label: 'an alias', entry: 'ListFiles' },
@@ -9910,6 +9975,7 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
+        todoWriteEnabled: true,
         // Mirrors the CLI wiring. `permissions.allow` is deliberately left
         // unset: the eager/deferred split is driven solely by tools.eager
         // (#10075).
@@ -10072,11 +10138,12 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       ) as string[];
 
-      // Without an allowlist nothing is gated at registry level
+      // Without an allowlist ordinary built-ins are not gated at registry
+      // level, but opt-in tools remain disabled.
       expect(registered).toContain(ToolNames.SEND_MESSAGE);
       expect(registered).toContain(ToolNames.UPDATE_GOAL);
       expect(registered).toContain(ToolNames.AGENT);
-      expect(registered).toContain(ToolNames.TODO_WRITE);
+      expect(registered).not.toContain(ToolNames.TODO_WRITE);
       expect(registered).toContain(ToolNames.READ_FILE);
     });
 
