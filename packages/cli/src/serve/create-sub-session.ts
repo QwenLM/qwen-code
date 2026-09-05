@@ -897,7 +897,7 @@ export function createSubSessionLauncher(
           throw new RequestError(
             -32603,
             `sub-session model selection failed: ${info.model}`,
-            { code: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
+            { errorKind: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
           );
         }
         throw new Error(`sub-session model selection failed: ${info.model}`);

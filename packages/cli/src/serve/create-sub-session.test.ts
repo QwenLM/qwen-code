@@ -602,7 +602,7 @@ describe('sub-session launcher', () => {
         message: expect.stringMatching(
           /model selection failed.*missing-model/i,
         ),
-        data: { code: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
+        data: { errorKind: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
       });
 
       expect(fake.closes).toEqual(['sub-1']);

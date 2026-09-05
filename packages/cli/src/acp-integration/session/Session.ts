@@ -8600,7 +8600,7 @@ export class Session implements SessionContext {
       const modelSelectionFailed =
         typeof errorData === 'object' &&
         errorData !== null &&
-        (errorData as { code?: unknown }).code ===
+        (errorData as { errorKind?: unknown }).errorKind ===
           SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE;
       const errorMessage =
         error instanceof Error

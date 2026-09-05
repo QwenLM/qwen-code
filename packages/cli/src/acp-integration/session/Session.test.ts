@@ -59,6 +59,11 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import {
+  makeBridge,
+  makeChannel,
+  WS_A,
+} from '@qwen-code/acp-bridge/internal/testUtils';
 import { SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE } from '../../runtime/scheduled-task-run.js';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
@@ -4409,22 +4414,45 @@ describe('Session', () => {
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-    vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
-      code: -32603,
-      message: 'selected model is unavailable',
-      data: {
-        code: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE,
+    const handle = makeChannel({
+      newSessionImpl: () => ({ sessionId: 'test-session-id' }),
+    });
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: new Promise<never>(() => {}),
+      transportGuard: {
+        maxActiveHandlers: 256,
+        maxActiveHandlerBytes: 64 * 1024 * 1024,
+        reserveOutboundOperation: () => () => {},
+        reservePreparedResponse: () => {},
+        fail: () => {},
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      onCreateSubSession: () => {
+        throw new RequestError(-32603, 'selected model is unavailable', {
+          errorKind: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE,
+        });
       },
     });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    vi.mocked(mockClient.extMethod).mockImplementationOnce((method, params) =>
+      handle.agentConnection.extMethod(method, params),
+    );
 
-    session.startCronScheduler();
+    try {
+      session.startCronScheduler();
 
-    await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        dispatchFailed: true,
+      await vi.waitFor(() => {
+        expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+          dispatchFailed: true,
+        });
       });
-    });
-    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    } finally {
+      await bridge.shutdown();
+    }
   });
 
   it('does not dispatch a scheduled task with an over-long model id', async () => {
