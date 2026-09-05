@@ -632,6 +632,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       const displayResult: FileDiff = {
         fileDiff,
         fileName,
+        filePath: file_path,
         originalContent,
         newContent: content,
         diffStat,
