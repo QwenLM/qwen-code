@@ -371,21 +371,108 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
-    it('should throw when no nightly dist-tag exists (promote-nightly)', () => {
-      const mockWithNoNightly = (command) => {
-        if (command.includes('npm view') && command.includes('--tag=nightly')) {
+    // A nightly's numeric base is main's package.json version, which the
+    // ordinary stable path publishes on its own, so it cannot double as the
+    // promotion's version: by the time a nightly is promoted that number has
+    // shipped or fallen behind `latest`. The tag selects the source; the
+    // version is named by the maintainer or derived from `latest`.
+    const mockUnreleased = (command) => {
+      const absent = new Error('not found');
+      absent.status = 2;
+      if (command.startsWith('npm view') && command.endsWith('version')) {
+        throw new Error('npm error code E404');
+      }
+      if (command.startsWith('git ls-remote')) throw absent;
+      return mockExecSync(command);
+    };
+
+    it('derives the promotion version as the next minor after latest', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+
+      const result = getVersion({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+      });
+      // latest is 0.6.1, so the nightly's own 0.8.0 base is not reused.
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('promotes to the stable version the maintainer named', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+
+      const result = getVersion({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        promote_nightly_stable_version: 'v0.9.0',
+      });
+      expect(result.releaseVersion).toBe('0.9.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('rejects promotion without an exact nightly version', () => {
+      vi.mocked(execSync).mockImplementation(mockExecSync);
+      expect(() => getVersion({ type: 'promote-nightly' })).toThrow(
+        'Invalid nightly version',
+      );
+    });
+
+    it('rejects a malformed explicit promotion version', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+          promote_nightly_stable_version: '0.9.0-preview.1',
+        }),
+      ).toThrow('Invalid version (with promote_nightly)');
+    });
+
+    it('rejects promotion below the published latest version', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+          promote_nightly_stable_version: '0.5.0',
+        }),
+      ).toThrow(
+        'Promoted stable version 0.5.0 is lower than published latest 0.6.1',
+      );
+    });
+
+    it('refuses to promote a version that already shipped', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.startsWith('npm view') && command.endsWith('version')) {
+          return '0.7.0';
+        }
+        return mockExecSync(command);
+      });
+
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        }),
+      ).toThrow('has already shipped');
+    });
+
+    it('refuses to promote when the latest dist-tag is unavailable', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest')) {
           throw new Error('npm error code E404');
         }
-        if (command.includes('npm view') && command.includes('versions --json'))
-          return JSON.stringify(['0.6.0', '0.6.1']);
+        return mockUnreleased(command);
+      });
 
-        return mockExecSync(command);
-      };
-      vi.mocked(execSync).mockImplementation(mockWithNoNightly);
-
-      expect(() => getVersion({ type: 'promote-nightly' })).toThrow(
-        'Unable to determine baseline version for nightly',
-      );
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        }),
+      ).toThrow('the "latest" dist-tag is unavailable');
     });
 
     it('should throw when no dist-tag exists (patch)', () => {
@@ -702,6 +789,52 @@ describe('getVersion', () => {
       npmTag: 'latest',
       previousReleaseTag: 'v0.6.1',
     });
+  });
+
+  it('runCli exits 3 when the promoted version has already shipped', () => {
+    // prepare's "Get the version" step keys its version_refusal output on
+    // this exit code: a re-dispatched promotion whose version a first
+    // attempt published must fail as the decisive, benign refusal (3), not
+    // as an uncaught exception (1) that opens a release-failed issue.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('--tag=latest')) return '0.6.1';
+      if (command.startsWith('npm view') && command.endsWith('version')) {
+        return '0.7.0';
+      }
+      return mockExecSync(command);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(
+      runCli({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+      }),
+    ).toBe(3);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::error::Version 0.7.0 has already shipped'),
+    );
+  });
+
+  it('refuses an explicit promotion version equal to the published latest', () => {
+    // The retrograde check uses strict less-than, so a version equal to
+    // latest passes it; only the prepare-time assertVersionUnreleased guard
+    // catches the equality.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('--tag=latest')) return '0.9.0';
+      if (command.startsWith('npm view') && command.endsWith('version')) {
+        return '0.9.0';
+      }
+      return mockExecSync(command);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() =>
+      getVersion({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        promote_nightly_stable_version: '0.9.0',
+      }),
+    ).toThrow(/already shipped/);
   });
 });
 

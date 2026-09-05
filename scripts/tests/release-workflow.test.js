@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { REQUIRED_JOBS } from '../verify-nightly-promotion.js';
 import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -32,7 +33,14 @@ const hasGnuRealpath =
     0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const promotionScript = readFileSync(
+  'scripts/verify-nightly-promotion.js',
+  'utf8',
+);
 const releaseYaml = parse(workflow);
+const audioCapturePrebuildsYaml = parse(
+  readFileSync('.github/workflows/audio-capture-prebuilds.yml', 'utf8'),
+);
 const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
@@ -803,7 +811,7 @@ describe('release workflow', () => {
     // !cancelled() overrides the needs gate and turns five skipped lanes
     // into a quality failure that opens notify_failure on a fork dispatch.
     expect(quality.if).toBe(
-      "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}",
+      "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}",
     );
     expect(quality.steps[0].run).toContain(
       'if [[ "${result}" != \'success\' ]]',
@@ -850,6 +858,140 @@ describe('release workflow', () => {
         "github.event.inputs.force_skip_tests != 'true'",
       );
     }
+  });
+
+  it('only reuses validation from an explicitly verified nightly', () => {
+    expect(releaseYaml.on.workflow_dispatch.inputs.promote_nightly.type).toBe(
+      'string',
+    );
+    expect(releaseYaml.jobs.prepare.permissions.actions).toBe('read');
+    expect(releaseYaml.jobs.prepare.outputs.reuse_validation).toBe(
+      '${{ steps.promotion.outputs.reuse_validation }}',
+    );
+
+    const prepareSteps = releaseYaml.jobs.prepare.steps;
+    const source = prepareSteps.find((step) => step.id === 'source');
+    expect(source.run).toContain('release-source.txt');
+    // release_sha must bind to the verified nightly source: the wiring is
+    // promotion.outputs.source_sha -> PROMOTION_SHA env -> release_sha,
+    // with the fallback shape pinned so neither half can be dropped. On a
+    // promotion run the checkout ref is github.sha, so losing this wiring
+    // would silently publish commits no successful Release run validated.
+    expect(source.env.PROMOTION_SHA).toBe(
+      '${{ steps.promotion.outputs.source_sha }}',
+    );
+    expect(source.run).toContain(
+      'release_sha="${PROMOTION_SHA:-$(git rev-parse HEAD)}"',
+    );
+    // The wiring only resolves while the promotion step runs first:
+    // reordered, steps.promotion.outputs.source_sha evaluates to '' and
+    // release_sha silently falls back to the dispatch HEAD while
+    // reuse_validation still skips every validation job.
+    expect(
+      prepareSteps.findIndex((step) => step.id === 'promotion'),
+    ).toBeLessThan(prepareSteps.findIndex((step) => step.id === 'source'));
+    const sourceEvidence = prepareSteps.find(
+      (step) => step.name === 'Record release source',
+    );
+    expect(sourceEvidence.with.name).toBe(
+      'release-source-${{ steps.source.outputs.release_sha }}',
+    );
+    expect(sourceEvidence.with.overwrite).toBe(true);
+
+    // Evidence for a later, optional promotion must not be able to fail a
+    // release: a flaky upload here would otherwise fail prepare and open a
+    // "Release Failed" issue.
+    expect(sourceEvidence['continue-on-error']).toBe(true);
+
+    const promotion = prepareSteps.find((step) => step.id === 'promotion');
+    expect(promotion.run).toContain('verify-nightly-promotion.js');
+    expect(promotion.run).toContain('force_skip_tests');
+    // Without the gate every scheduled nightly and ordinary dispatch would
+    // run the script with an empty input and fail prepare; inverted, the
+    // promotion input would be silently ignored on promote dispatches.
+    expect(promotion.if).toBe(
+      "${{ github.event.inputs.promote_nightly != '' }}",
+    );
+    // The step's outputs are written by the script, not by jq in the
+    // workflow, so the output name has to stay in step with it.
+    expect(promotionScript).toContain('reuse_validation=true');
+    expect(promotionScript).toContain('source_sha=');
+    // The gate's deterministic evidence refusals are a correct outcome, not
+    // a release failure: the script marks them so notify_failure can keep
+    // them out of the release-failed issue and autofix dispatch.
+    expect(promotionScript).toContain('promotion_refusal=true');
+    expect(releaseYaml.jobs.prepare.outputs.promotion_refusal).toBe(
+      '${{ steps.promotion.outputs.promotion_refusal }}',
+    );
+
+    // The nightly tag selects the source revision; the stable version is a
+    // release decision taken from the `version` input (or derived from the
+    // `latest` dist-tag), because the tag's own numeric base is published by
+    // the ordinary stable path.
+    const version = prepareSteps.find((step) => step.id === 'version');
+    expect(version.run).toContain('--promote_nightly_stable_version=');
+    expect(version.run).not.toContain(
+      'version cannot be combined with promote_nightly',
+    );
+    // The prepare-time "already shipped" refusal exits 3 and is marked like
+    // the publish-side push-time guard, so a re-dispatched promotion whose
+    // version a first attempt published does not notify as a failure.
+    expect(version.run).toContain('version_refusal=true');
+    expect(releaseYaml.jobs.prepare.outputs.version_refusal).toBe(
+      '${{ steps.version.outputs.version_refusal }}',
+    );
+    expect(releaseYaml.jobs.notify_failure.if).toContain(
+      "needs.prepare.outputs.version_refusal != 'true'",
+    );
+    expect(releaseYaml.jobs.notify_failure.if).toContain(
+      "needs.prepare.outputs.promotion_refusal != 'true'",
+    );
+
+    // promote_nightly ignores `ref`, which is a required input with a
+    // default: refuse a non-default value rather than releasing a different
+    // revision than the operator chose.
+    const vars = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'vars',
+    );
+    expect(vars.run).toContain('promote_nightly ignores the ref input');
+  });
+
+  // The promotion check matches these by display name, so a rename would
+  // silently make every promotion fail closed forever.
+  it('keeps the promotion check bound to jobs that exist', () => {
+    const jobNames = new Set(
+      Object.values(releaseYaml.jobs).map((job) => job.name),
+    );
+    for (const required of REQUIRED_JOBS) {
+      expect(jobNames, required).toContain(required);
+    }
+
+    for (const id of [
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+      'quality',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(releaseYaml.jobs[id].if, id).toContain(
+        "needs.prepare.outputs.reuse_validation != 'true'",
+      );
+    }
+    expect(releaseYaml.jobs.publish.if).toContain(
+      "needs.prepare.outputs.reuse_validation == 'true'",
+    );
+    expect(releaseYaml.jobs.audio_capture_prebuilds.with.source_ref).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
+    expect(
+      audioCapturePrebuildsYaml.on.workflow_call.inputs.source_ref.type,
+    ).toBe('string');
+    expect(audioCapturePrebuildsYaml.jobs.build.steps[0].with.ref).toBe(
+      '${{ inputs.source_ref || github.sha }}',
+    );
   });
 
   it('keeps workspace cleanup from inspecting or signaling host processes', () => {

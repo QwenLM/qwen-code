@@ -51,6 +51,32 @@ export function validateVersion(version, format, name) {
 }
 
 /**
+ * Split a canonical nightly version into its parts. `baseVersion` is the
+ * numeric prefix main's package.json carried when the nightly was cut — it is
+ * deliberately NOT named as a promotion target: the ordinary stable path
+ * publishes that same number, so promoting a nightly picks its stable version
+ * separately (see promoteNightlyVersion). `sourceShaPrefix` is a label, not
+ * evidence; the source binding lives in the release-source artifact.
+ */
+export function parseNightlyVersion(value) {
+  const version = String(value ?? '').replace(/^v/, '');
+  const match = /^(\d+\.\d+\.\d+)-nightly\.(\d{8})\.([0-9a-f]{7,40})$/.exec(
+    version,
+  );
+  if (!match) {
+    throw new Error(
+      `Invalid nightly version: ${value || '<empty>'}. Must be in X.Y.Z-nightly.YYYYMMDD.GITSHA format.`,
+    );
+  }
+  return {
+    nightlyVersion: version,
+    nightlyTag: `v${version}`,
+    baseVersion: match[1],
+    sourceShaPrefix: match[3],
+  };
+}
+
+/**
  * Check whether an error from `gh release view` indicates the release
  * simply doesn't exist (as opposed to an unexpected failure).
  */

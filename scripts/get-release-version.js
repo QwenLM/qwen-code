@@ -12,6 +12,7 @@ import semver from 'semver';
 import {
   getArgs,
   isExpectedMissingGitHubRelease,
+  parseNightlyVersion,
   readJson,
   validateVersion,
 } from './lib/release-helpers.js';
@@ -390,23 +391,69 @@ function getLatestStableReleaseTag() {
   }
 }
 
-function promoteNightlyVersion() {
-  const result = getAndVerifyTags('nightly', 'v*-nightly*');
-  if (!result) {
+/**
+ * Error code for a deterministic version-input refusal: the explicit
+ * `version` input is malformed or retrograde, an outcome no retry or code
+ * change can alter. `runCli` maps it to a dedicated exit code the workflow
+ * marks as version_refusal, keeping the operator typo out of the
+ * release-failed notification; probe failures carry no code and exit 2.
+ */
+const USAGE_REFUSED = 'USAGE_REFUSED';
+
+function usageRefusal(message) {
+  const error = new Error(message);
+  error.code = USAGE_REFUSED;
+  return error;
+}
+
+/**
+ * A nightly tag names the source revision to promote; it does NOT name the
+ * stable version to publish. Its numeric base comes from main's
+ * package.json (see getNightlyVersion), which the ordinary stable path
+ * publishes on its own — 0.22.0-nightly.* shipped as 0.22.0, 0.22.3-nightly.*
+ * as 0.22.3 — so stripping the suffix always lands on a number that has
+ * either already shipped or fallen behind the `latest` dist-tag. The version
+ * is therefore a release decision: the maintainer names it, or it is derived
+ * as the next minor after `latest`.
+ */
+function promoteNightlyVersion(args) {
+  // Validates the tag's shape before anything else consumes it.
+  parseNightlyVersion(args.promote_nightly_version);
+  const latestStable = getVersionFromNPM('latest');
+  const hasLatest = Boolean(latestStable) && semver.valid(latestStable);
+
+  let releaseVersion;
+  if (args.promote_nightly_stable_version) {
+    releaseVersion = String(args.promote_nightly_stable_version).replace(
+      /^v/,
+      '',
+    );
+    try {
+      validateVersion(
+        releaseVersion,
+        'X.Y.Z',
+        'version (with promote_nightly)',
+      );
+    } catch (error) {
+      throw usageRefusal(error.message);
+    }
+  } else if (hasLatest) {
+    releaseVersion = semver.inc(latestStable, 'minor');
+  } else {
     throw new Error(
-      'Unable to determine baseline version for nightly (required for promote-nightly)',
+      'Cannot derive a promotion version: the "latest" dist-tag is unavailable. Pass an explicit stable version in the workflow\'s "version" input.',
     );
   }
-  const baseVersion = result.latestVersion.split('-')[0];
-  const versionParts = baseVersion.split('.');
-  const major = versionParts[0];
-  const minor = versionParts[1] ? parseInt(versionParts[1]) : 0;
-  const nextMinor = minor + 1;
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const gitShortHash = execSync('git rev-parse --short HEAD').toString().trim();
+
+  if (hasLatest && semver.lt(releaseVersion, latestStable)) {
+    throw usageRefusal(
+      `Promoted stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
+    );
+  }
+  assertVersionUnreleased(releaseVersion);
   return {
-    releaseVersion: `${major}.${nextMinor}.0-nightly.${date}.${gitShortHash}`,
-    npmTag: 'nightly',
+    releaseVersion,
+    npmTag: 'latest',
   };
 }
 
@@ -572,7 +619,7 @@ export function getVersion(options = {}) {
       }
       break;
     case 'promote-nightly':
-      versionData = promoteNightlyVersion();
+      versionData = promoteNightlyVersion(args);
       break;
     case 'stable':
       versionData = getStableVersion(args);
@@ -625,9 +672,10 @@ export function getVersion(options = {}) {
  * the push-time guard; anything else prints the version JSON. Returns the
  * exit code. Guard codes: 0 = unreleased, 3 = already shipped (a decisive,
  * benign refusal the workflow marks to skip the release-failed
- * notification), 2 = probe or usage failure. 1 is never returned on
- * purpose: node exits 1 on uncaught errors, and those must stay on the
- * real-failure path.
+ * notification), 4 = a deterministic version-input refusal on the
+ * JSON-dispatch path (likewise marked by the workflow), 2 = probe failure.
+ * 1 is never returned on purpose: node exits 1 on uncaught errors, and
+ * those must stay on the real-failure path.
  */
 export function runCli(args) {
   if (args['assert-unreleased'] !== undefined) {
@@ -641,7 +689,29 @@ export function runCli(args) {
     }
     return 0;
   }
-  console.log(JSON.stringify(getVersion(args), null, 2));
+  let result;
+  try {
+    result = getVersion(args);
+  } catch (error) {
+    // The JSON-dispatch path honors the same codes as the guard branch:
+    // the prepare-time "already shipped" refusal (a re-dispatched
+    // promotion whose version a first attempt published before failing)
+    // exits 3 so the workflow marks it and keeps the benign outcome out
+    // of the release-failed notification. A deterministic version-input
+    // refusal (malformed or retrograde explicit version) exits 4 so the
+    // workflow marks it the same way instead of opening a release-failed
+    // issue on an operator typo; probe failures exit 2; 1 stays reserved
+    // for uncaught errors.
+    console.log(`::error::${error.message}`);
+    if (error.code === 'VERSION_SHIPPED') {
+      return 3;
+    }
+    if (error.code === USAGE_REFUSED) {
+      return 4;
+    }
+    return 2;
+  }
+  console.log(JSON.stringify(result, null, 2));
   return 0;
 }
 
