@@ -18,6 +18,7 @@ import {
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalPauseReasonForFailure,
+  goalPauseReasonForHeadlessFailure,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -1601,6 +1602,56 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('passes loop detection failures to the host pause-reason resolver', async () => {
+    const { client, runtime } = setupGoalClient();
+    vi.spyOn(
+      client['loopDetector'],
+      'checkAlwaysOnSafeties',
+    ).mockReturnValueOnce(true);
+    turnMocks.run.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'loop-tool',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'goal-prompt',
+          },
+        };
+      })(),
+    );
+    const getInterruptedGoalPauseReason = vi.fn(
+      (interruption?: { failure?: string }) =>
+        goalPauseReasonForHeadlessFailure(interruption?.failure ?? ''),
+    );
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'start work' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getInterruptedGoalPauseReason,
+        },
+      ),
+    );
+
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledWith({
+      failure: 'loop detected',
+    });
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: goalPauseReasonForHeadlessFailure('loop detected'),
+    });
+  });
+
   it('drains a concurrent pause before a blocking Stop hook recurses', async () => {
     const { client, config, runtime } = setupGoalClient();
     let stopRequestCount = 0;
@@ -1859,6 +1910,52 @@ describe('LlmClient Goal admission', () => {
       type: LlmEventType.HookSystemMessage,
       value:
         'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+    });
+  });
+
+  it('lets the host name a Stop-hook cap pause in its own register', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    const messageBus = {
+      request: vi.fn(async () => ({
+        output: { decision: 'block', reason: 'still blocked' },
+        stopHookCount: 1,
+      })),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    vi.mocked(config.getStopHookBlockingCap).mockReturnValue(1);
+    const hostReason =
+      'The headless run stopped after the Stop hook cap. Resume the Goal in a later run.';
+    const getInterruptedGoalPauseReason = vi.fn(() => hostReason);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getInterruptedGoalPauseReason,
+        },
+      ),
+    );
+
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledWith({
+      failure: undefined,
+      cause: 'stop-hook-cap',
+    });
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: hostReason,
     });
   });
 

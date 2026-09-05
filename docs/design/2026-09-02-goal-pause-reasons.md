@@ -39,7 +39,7 @@ projection, the ACP error mapping, and `shouldDisplayGoalStateCause`.
 The reasons themselves are constants in `goal-protocol.ts` rather than
 per-host prose, so the same event reads the same way everywhere and a test can
 assert on the event instead of one host's wording: a user interrupt, `/goal
-pause`, the model's output limit, a closed session, the Stop-hook cap, plus
+pause`, the session token limit, a closed session, the Stop-hook cap, plus
 two builders for a failed turn and a spent headless run budget. `parseGoalControlRequest`
 accepts a reason only on `pause`, and only a non-empty string within
 `GOAL_PAUSE_REASON_MAX_CHARACTERS`, so the HTTP and ACP control paths cannot

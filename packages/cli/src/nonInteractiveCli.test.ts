@@ -1327,6 +1327,11 @@ describe('runNonInteractive', () => {
 
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     expect(goalStatusAtExit).toBe('paused');
+    expect(goalRuntime.getSnapshot().goal?.lastReason).toBe(
+      goalPauseReasonForHeadlessFailure(
+        'Headless Goal stopped after the session turn limit',
+      ),
+    );
   });
 
   it('keeps explicit tool-call budgets on runtime Goal work', async () => {

@@ -4989,6 +4989,30 @@ export const useLlmStream = (
       }
       let promptId =
         ownerToolCall?.request.prompt_id ?? continuationOwner?.promptId;
+      const pairGoalToolResponsesIntoHistory = async () => {
+        if (!llmClient || llmTools.length === 0) return;
+        const responses = await finalizeToolResponses(
+          config,
+          llmTools.map(({ request, response }) => ({
+            callId: request.callId,
+            toolName: request.name,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
+          })),
+          new Map(
+            llmTools.flatMap(({ request }) =>
+              request.prompt_id
+                ? [[request.callId, request.prompt_id] as const]
+                : [],
+            ),
+          ),
+        );
+        llmClient.addHistory({
+          role: 'user',
+          parts: responses.flatMap((entry) => entry.responseParts),
+        });
+      };
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
         errorMessage?: string,
@@ -5030,6 +5054,7 @@ export const useLlmStream = (
         toolGoalPermit = sharedGoalPermit(toolGoalContexts);
       } catch (error) {
         const callIds = llmTools.map((toolCall) => toolCall.request.callId);
+        await pairGoalToolResponsesIntoHistory();
         markToolsAsSubmitted(callIds);
         const reason = getErrorMessage(error);
         const bindings = new Map<string, GoalTurnBinding>();
@@ -5087,6 +5112,7 @@ export const useLlmStream = (
           }
         }
         if (active && activeGoalPermitValid) {
+          await pairGoalToolResponsesIntoHistory();
           markToolsAsSubmitted(
             llmTools.map((toolCall) => toolCall.request.callId),
           );
@@ -5113,6 +5139,7 @@ export const useLlmStream = (
       if (toolGoalPermit) {
         const existing = goalTurnBindingsRef.current.get(toolGoalPermit.turnId);
         if (existing && !sameGoalPermit(existing.permit, toolGoalPermit)) {
+          await pairGoalToolResponsesIntoHistory();
           markToolsAsSubmitted(
             llmTools.map((toolCall) => toolCall.request.callId),
           );
@@ -5605,6 +5632,7 @@ export const useLlmStream = (
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
         if (toolGoalBinding) {
+          llmClient?.addHistory({ role: 'user', parts: responsesToSend });
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped after a model switch',

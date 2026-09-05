@@ -369,8 +369,8 @@ export function validateGoalPauseReason(reason: string): string | null {
 export const GOAL_PAUSE_REASON_USER_INTERRUPT =
   'Interrupted by the user. Run /goal resume to continue.';
 export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
-export const GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT =
-  'The model hit its output limit before the turn finished. Run /goal resume to continue.';
+export const GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT =
+  'The session token limit was exceeded before the model request. Start a new session or increase sessionTokenLimit in settings.json before resuming the Goal.';
 export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
   'A Stop hook blocked this session too many times in a row. Run /goal resume to continue.';
 /**

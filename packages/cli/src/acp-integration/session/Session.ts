@@ -180,7 +180,7 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
-  GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
@@ -2651,7 +2651,7 @@ export class Session implements SessionContext {
         : cancelledByUser
           ? GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
-            ? GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT
+            ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
               ? GOAL_PAUSE_REASON_SESSION_DISPOSED
               : failureMessage !== undefined

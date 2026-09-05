@@ -384,6 +384,7 @@ describe('useLlmStream', () => {
     onCancelSubmit: Parameters<typeof useLlmStream>[15] = () => {},
     logger?: Parameters<typeof useLlmStream>[20],
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
+    modelSwitchedFromQuotaError = false,
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -453,7 +454,7 @@ describe('useLlmStream', () => {
           () => 'vscode' as EditorType,
           () => {},
           () => Promise.resolve(),
-          false,
+          modelSwitchedFromQuotaError,
           () => {},
           () => {},
           onCancelSubmit,
@@ -4309,6 +4310,138 @@ describe('useLlmStream', () => {
     expect(options.goalPermit).not.toBe(permit);
   });
 
+  it('pairs responses before rejecting a ToolResult batch with mixed Goal contexts', async () => {
+    const firstPermit: GoalTurnPermit = {
+      goalId: 'goal-mixed',
+      revision: 1,
+      turnId: 'turn-mixed-1',
+    };
+    const secondPermit: GoalTurnPermit = {
+      ...firstPermit,
+      turnId: 'turn-mixed-2',
+    };
+    const completedTool = (
+      callId: string,
+      goalContext: GoalTurnPermit,
+    ): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-mixed',
+          goalContext,
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+    const runtime = {
+      permitForTurn: vi.fn(() => undefined),
+      getSnapshot: vi.fn(() => ({ goal: null })),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    const client = new MockedLlmClientClass(mockConfig);
+    const { completeToolRound } = renderTestHook([], client);
+
+    await completeToolRound([
+      completedTool('mixed-tool-1', firstPermit),
+      completedTool('mixed-tool-2', secondPermit),
+    ]);
+
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [
+        { text: 'mixed-tool-1 response' },
+        { text: 'mixed-tool-2 response' },
+      ],
+    });
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+      'mixed-tool-1',
+      'mixed-tool-2',
+    ]);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('pairs Goal tool responses when a quota switch stops the continuation', async () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-quota-switch',
+      revision: 1,
+      turnId: 'turn-quota-switch',
+    };
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
+    const runtime = {
+      permitForTurn: vi.fn(() => currentPermit),
+      dispatch,
+      finishTurn: vi.fn().mockResolvedValue(undefined),
+      getSnapshot: vi.fn(() => ({
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          status: 'active',
+        },
+      })),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    const completedTool = {
+      request: {
+        callId: 'quota-tool',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-quota-switch',
+        goalContext: permit,
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'quota-tool',
+        responseParts: [{ text: 'quota-tool response' }],
+        errorType: undefined,
+      },
+      tool: { displayName: 'MockTool' },
+      invocation: {
+        getDescription: () => 'quota-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const client = new MockedLlmClientClass(mockConfig);
+    const { completeToolRound } = renderTestHook(
+      [],
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    await completeToolRound([completedTool]);
+
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [{ text: 'quota-tool response' }],
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: goalPauseReasonForFailure(''),
+    });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('ignores a deduplicated tool without Goal context when forwarding a fresh Goal result', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-dedup',
@@ -4467,9 +4600,10 @@ describe('useLlmStream', () => {
       capturedOnComplete = onComplete;
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
+    const client = new MockedLlmClientClass(mockConfig);
     renderHook(() =>
       useLlmStream(
-        new MockedLlmClientClass(mockConfig),
+        client,
         [],
         mockAddItem,
         mockConfig,
@@ -4508,6 +4642,7 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
     expect(mockScheduleToolCalls).toHaveBeenCalled();
+    client.addHistory.mockClear();
 
     // The continuation batch drops the Goal context while the turn is still
     // active, which must fail close instead of reaching the model.
@@ -4524,6 +4659,10 @@ describe('useLlmStream', () => {
         },
         expect.any(Number),
       );
+    });
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [{ text: 'cont-tool response' }],
     });
     expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['cont-tool']);
     expect(dispatch).toHaveBeenCalledWith({
@@ -4611,9 +4750,10 @@ describe('useLlmStream', () => {
       capturedOnComplete = onComplete;
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
+    const client = new MockedLlmClientClass(mockConfig);
     renderHook(() =>
       useLlmStream(
-        new MockedLlmClientClass(mockConfig),
+        client,
         [],
         mockAddItem,
         mockConfig,
@@ -4652,6 +4792,7 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
     expect(mockScheduleToolCalls).toHaveBeenCalled();
+    client.addHistory.mockClear();
 
     // A revision bump (e.g. an edit) lands before the continuation batch
     // completes, so it carries a stale permit and must fail close.
@@ -4668,6 +4809,10 @@ describe('useLlmStream', () => {
         },
         expect.any(Number),
       );
+    });
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [{ text: 'cont-tool response' }],
     });
     expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['cont-tool']);
     expect(dispatch).toHaveBeenCalledWith({

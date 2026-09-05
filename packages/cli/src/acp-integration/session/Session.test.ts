@@ -38,7 +38,7 @@ import type {
 import {
   ApprovalMode,
   AuthType,
-  GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
@@ -23799,7 +23799,7 @@ describe('Session', () => {
         });
       });
 
-      it('records the model output limit that pauses an ACP Goal turn', async () => {
+      it('records the session token limit that pauses an ACP Goal turn before the model request', async () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',
           revision: 1,
@@ -23842,7 +23842,7 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: permit.goalId,
             expectedRevision: permit.revision,
-            reason: GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT,
+            reason: GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
           });
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();

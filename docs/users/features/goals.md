@@ -22,7 +22,7 @@ Cancelling a Goal turn pauses the Goal. Press Esc while the model is answering o
 
 Typing a message while a Goal is active does not pause it. Your message runs as the next Goal turn, so use it to steer the work; use `/goal pause` or `/goal clear` to stop it.
 
-Every pause states its reason: that you interrupted it, that you ran `/goal pause`, that the model hit its output limit, or that the turn failed. A Goal stopped by a limit keeps the reason for that limit instead.
+Every pause states its reason: that you interrupted it, that you ran `/goal pause`, that the session token limit blocked the next model request, or that the turn failed. A Goal stopped by a limit keeps the reason for that limit instead.
 
 ## How a Goal is judged
 

@@ -71,7 +71,6 @@ import {
   GoalPersistenceUnavailableError,
   GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
-  goalPauseReasonForFailure,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   addAgentOutputMessageAttributes,
@@ -699,7 +698,8 @@ export async function runNonInteractive(
                 action: 'pause',
                 expectedGoalId: turn.permit.goalId,
                 expectedRevision: turn.permit.revision,
-                reason: pauseReason ?? goalPauseReasonForFailure(reason),
+                reason:
+                  pauseReason ?? goalPauseReasonForHeadlessFailure(reason),
               });
             } catch (error) {
               debugLogger.warn('Failed to pause terminal headless Goal', error);
@@ -2407,6 +2407,11 @@ export async function runNonInteractive(
                     }
                     if (abortController.signal.aborted) {
                       return GOAL_PAUSE_REASON_USER_INTERRUPT;
+                    }
+                    if (interruption?.cause === 'stop-hook-cap') {
+                      return goalPauseReasonForHeadlessFailure(
+                        'a Stop hook blocked this session too many times in a row',
+                      );
                     }
                     // A turn that died with an error did not end cleanly, so
                     // it must not read as the run simply finishing first --
