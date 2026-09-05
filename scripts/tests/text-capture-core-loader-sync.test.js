@@ -35,15 +35,15 @@ describe('skill-review-harness core loader sync', () => {
       (match) => [match[1], match[2]],
     ),
   );
+  const exportsMap = JSON.parse(
+    readFileSync(join(coreDir, 'package.json'), 'utf8'),
+  ).exports;
+  const namedKeys = Object.keys(exportsMap).filter(
+    (key) =>
+      key.startsWith('./') && !key.includes('*') && key !== './package.json',
+  );
 
   it('covers every named entry of the core exports map', () => {
-    const exportsMap = JSON.parse(
-      readFileSync(join(coreDir, 'package.json'), 'utf8'),
-    ).exports;
-    const namedKeys = Object.keys(exportsMap).filter(
-      (key) =>
-        key.startsWith('./') && !key.includes('*') && key !== './package.json',
-    );
     expect(namedKeys.length).toBeGreaterThan(0);
     for (const key of namedKeys) {
       expect(
@@ -53,12 +53,39 @@ describe('skill-review-harness core loader sync', () => {
     }
   });
 
-  it('points every entry at an existing core source file', () => {
+  it('points every entry at the exports target in source space', () => {
     expect(named.size).toBeGreaterThan(0);
     for (const [name, target] of named) {
       expect(
         existsSync(join(coreDir, 'src', target)),
         `loader entry ${name} -> packages/core/src/${target} does not exist`,
+      ).toBe(true);
+      // Key coverage alone is not enough: a retargeted exports entry would
+      // leave the loader serving the old module (the named map short-circuits
+      // ahead of the loader's stem probe) while a built CLI runs the new one.
+      // All named entries target ./dist/src/<stem>.js; an entry targeting
+      // elsewhere needs an explicit exemption, not a blanket rewrite.
+      const entry = exportsMap[`./${name}`];
+      const importTarget = typeof entry === 'string' ? entry : entry?.import;
+      const stem = importTarget
+        .replace(/^\.\/dist\/src\//, '')
+        .replace(/\.js$/, '');
+      expect(
+        [`${stem}.ts`, `${stem}.tsx`],
+        `loader entry ${name} -> ${target} disagrees with exports target ${importTarget}`,
+      ).toContain(target);
+    }
+  });
+
+  it('has no loader entries without a matching exports key', () => {
+    // The reverse direction of the key-set identity: a stale loader-only
+    // entry short-circuits in a capture to a module the shipped package can
+    // no longer resolve (ERR_PACKAGE_PATH_NOT_EXPORTED), so the capture runs
+    // green on a module graph production rejects.
+    for (const [name] of named) {
+      expect(
+        namedKeys.includes(`./${name}`),
+        `loader entry ${name} has no matching exports key ./${name}`,
       ).toBe(true);
     }
   });
