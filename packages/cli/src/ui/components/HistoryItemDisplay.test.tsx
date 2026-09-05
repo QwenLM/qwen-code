@@ -29,7 +29,8 @@ import {
 } from '../utils/measure-element-position.js';
 
 // Mock child components
-vi.mock('./messages/ToolGroupMessage.js', () => ({
+vi.mock('./messages/ToolGroupMessage.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./messages/ToolGroupMessage.js')>()),
   ToolGroupMessage: vi.fn(() => <div />),
 }));
 

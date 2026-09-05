@@ -54,9 +54,7 @@ function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
  * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
  * (i.e. a `task_execution` subagent invocation), regardless of status.
  */
-export function isSubagentToolEntry(
-  tool: IndividualToolCallDisplay,
-): boolean {
+export function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
   const rd = tool.resultDisplay;
   return (
     typeof rd === 'object' &&
