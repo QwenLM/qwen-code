@@ -79,7 +79,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile helper step,
   # both in `lint_and_static`, so a new helper test can't be added to one
   # path and silently dropped from the other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/ci/classify-infra-flake.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -721,6 +721,10 @@ jobs:
           # work runs 5x apart depending on placement (#10490). Skip those
           # assertions here — they still run locally and on the hosted lanes.
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          # Set the repository variable to '0' to make every starved-worker RPC
+          # timeout red again without a PR. This is the switch to reach for if
+          # the classifier is ever suspected of masking a real unhandled error.
+          QWEN_CI_TOLERATE_RPC_TIMEOUT: "${{ vars.QWEN_CI_TOLERATE_RPC_TIMEOUT || '1' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           # ENOSPC has failed test steps mid-suite while the host looks
@@ -752,9 +756,22 @@ jobs:
           if [ -n "${VITEST_RETRY:-}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
+          # An all-green suite still exits 1 when a worker's onTaskUpdate RPC
+          # starves on host CPU pressure (#10438): five of the thirteen
+          # consecutive red Test jobs on 2026-09-05 had zero failing tests, cli
+          # among them printing "1014 passed (1014)". --retry cannot help (it is
+          # per test, this is reported after the run) and neither can the step
+          # ceiling (no job was cancelled; the longest finished at 96m55s). So
+          # classify the exit against the junit totals instead of reporting a
+          # failure no test caused. Fails closed: any real FAIL line, a missing
+          # junit, or a second kind of unhandled error keeps the run red.
+          WORKSPACES_LOG="${TMPDIR}/test-ci-workspaces.log"
           set +e
-          npm run test:ci:workspaces -- "${retry_arg[@]}"
-          RC=$?
+          npm run test:ci:workspaces -- "${retry_arg[@]}" 2>&1 | tee "$WORKSPACES_LOG"
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" -ne 0 ] && [ "${QWEN_CI_TOLERATE_RPC_TIMEOUT:-1}" != '0' ]; then
+            node .github/scripts/ci/classify-infra-flake.mjs --log "$WORKSPACES_LOG" --root . --samples "$DISK_SAMPLES" --runner-name "${RUNNER_NAME:-}" && RC=0
+          fi
           if [ "$RC" -eq 0 ]; then
             npm run test:scripts -- "${retry_arg[@]}"
             RC=$?
