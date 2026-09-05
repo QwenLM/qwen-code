@@ -155,7 +155,7 @@ function sessionAlive(pid: number): boolean {
 // signals only that pid — on the installed-release lane it is the bin wrapper,
 // which relaunches the real CLI with spawnSync and dies on SIGHUP's default
 // action at once, so `exited` settles while that CLI is still draining into
-// the PTY (#10990). The spawned process leads its own process group and the
+// the PTY. The spawned process leads its own process group and the
 // relaunched CLI stays in it, and a group reads empty only once every member
 // has exited and been reaped, so wait for both inside the same grace. Timers
 // are unrefed so a lost race leaves no handle holding the worker's event loop
@@ -562,7 +562,7 @@ export class TestRig {
     // into this worker's stdout; after vitest tears the worker down those
     // writes EPIPE and fail an otherwise all-green run (#10969). Signalling
     // alone still returns with the child alive and writing, so wait for it to
-    // actually go away (#10990).
+    // actually go away.
     for (const { ptyProcess, exited } of this.interactiveProcesses.splice(0)) {
       try {
         ptyProcess.kill();
