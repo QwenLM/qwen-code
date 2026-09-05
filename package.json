@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "version": "0.23.0",
+  "packageManager": "pnpm@11.24.0",
   "engines": {
     "node": ">=22.0.0"
   },

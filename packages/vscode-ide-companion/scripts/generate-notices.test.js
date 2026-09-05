@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,7 +15,64 @@ import {
   findSupplementaryLicenseFiles,
   getFallbackLicenseText,
   normalizeRepositoryUrl,
+  runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('runNoticeGeneration', () => {
+  it('skips generation during dependency-only worktree setup', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Stubbed no-op so a regression that drops the early return rewrites the
+    // tracked NOTICES.txt instead of merely failing this assertion.
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+
+    try {
+      await runNoticeGeneration({
+        npm_lifecycle_event: 'generate:notices',
+        QWEN_SKIP_NOTICE_GENERATION: '1',
+      });
+
+      expect(log).toHaveBeenCalledWith(
+        'Skipping VS Code notice generation during worktree bootstrap.',
+      );
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      write.mockRestore();
+    }
+  });
+
+  it('still generates notices when the skip flag is absent', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Empty dependency graph: main() reaches the write without touching the
+    // real node_modules, and a failing main() cannot process.exit the worker.
+    const read = vi.spyOn(fs, 'readFile').mockImplementation(async (file) => {
+      const name = String(file);
+      if (name.endsWith('package.json')) {
+        return JSON.stringify({ dependencies: {} });
+      }
+      if (name.endsWith('package-lock.json')) {
+        return JSON.stringify({ packages: {} });
+      }
+      throw Object.assign(new Error(`ENOENT: ${name}`), { code: 'ENOENT' });
+    });
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+
+    try {
+      await runNoticeGeneration({ npm_lifecycle_event: 'generate:notices' });
+
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(String(write.mock.calls[0]?.[1])).toContain(
+        'third-party software notices and license terms',
+      );
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+      read.mockRestore();
+      write.mockRestore();
+    }
+  });
+});
 
 describe('findLicenseFile', () => {
   let packageDir;
