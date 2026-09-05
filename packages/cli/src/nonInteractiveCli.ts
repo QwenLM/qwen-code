@@ -997,9 +997,13 @@ export async function runNonInteractive(
             pendingTeammateMessages.push(
               `<team_notice>\n${reason}\n</team_notice>`,
             );
-            event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
-              debugLogger.warn('Teammate approval Cancel failed:', err);
-            });
+            event
+              .respond(ToolConfirmationOutcome.Cancel, {
+                cancelMessage: reason,
+              })
+              .catch((err) => {
+                debugLogger.warn('Teammate approval Cancel failed:', err);
+              });
           };
         }
         manager

@@ -172,6 +172,10 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
   }
 
+  override canAutoApproveOnAllow(): boolean {
+    return false;
+  }
+
   /**
    * Whether a host is present that can put the questions in front of the
    * user *and* answer them. ACP hosts (VSCode extension, Zed, stream-json
