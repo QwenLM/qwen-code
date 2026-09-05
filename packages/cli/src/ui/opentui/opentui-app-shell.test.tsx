@@ -33,6 +33,8 @@
  *    never hang waiting for a renderer;
  *  - the session re-key reaches the entry seam, or reports that no owner is
  *    wired to re-key the UI-side session state;
+ *  - host history writes reach the live transcript as projected events and a
+ *    host clear arrives as an empty reset;
  *  - user history rows drive the composer's history, and an error thrown in the
  *    subtree is caught by the boundary.
  */
@@ -56,6 +58,9 @@ const mocks = vi.hoisted(() => {
     deferGate: null as null | ((text: string) => boolean | Promise<boolean>),
     handledTexts: [] as string[],
     host: null as unknown,
+    /** One entry per dispatcher construction: churn means the host was rebuilt. */
+    hosts: [] as unknown[],
+    dispatcherConstructions: 0,
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
@@ -121,6 +126,8 @@ vi.mock('./commands-dispatch.js', () => ({
       commands: readonly unknown[],
     ) {
       mocks.state.host = host;
+      mocks.state.hosts.push(host);
+      mocks.state.dispatcherConstructions += 1;
       this._commands = commands;
     }
     _commands: readonly unknown[];
@@ -221,6 +228,8 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
     mocks.state.host = null;
+    mocks.state.hosts.length = 0;
+    mocks.state.dispatcherConstructions = 0;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
     mocks.state.toolConfirmProps = null;
@@ -235,6 +244,34 @@ describe('OpenTuiApp shell wiring', () => {
     renderApp();
     await settle();
     expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('builds one host, and one dispatcher, across re-renders', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      onTranscriptEvent: vi.fn(),
+      onTranscriptReset: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    // A turn re-renders this component repeatedly. Every transcript seam prop
+    // above is a stable identity (the live turn memoizes them with empty-dep
+    // useCallbacks), so rebuilding the host here would mean the shell's own
+    // memo broke — and a churning host loses `host.history` per render.
+    for (const streaming of [true, false, true, false]) {
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={streaming} />);
+        await Promise.resolve();
+      });
+    }
+
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+    expect(new Set(mocks.state.hosts).size).toBe(1);
   });
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
@@ -294,6 +331,9 @@ describe('OpenTuiApp shell wiring', () => {
         modelOverride: undefined,
         onComplete: undefined,
         refreshContextFilesOnWrite: undefined,
+        // The recorded invocation is already on the transcript, so the live
+        // turn must not echo the generated content as a second user row.
+        invocationEchoed: true,
       },
     );
   });
@@ -316,6 +356,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      invocationEchoed: true,
     });
   });
 
@@ -416,6 +457,33 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('routes a host history write to the live transcript (U-28)', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    const host = mocks.state.host as {
+      addItem: (item: unknown, ts: number) => void;
+    };
+    await act(async () => {
+      host.addItem({ type: 'info', text: 'Report filed.' }, 1000);
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Report filed.',
+    });
+  });
+
+  it('routes a host clear to an empty transcript reset (U-29)', async () => {
+    const onTranscriptReset = vi.fn();
+    renderApp({ onTranscriptReset });
+    await settle();
+    const host = mocks.state.host as { clearItems: () => void };
+    await act(async () => {
+      host.clearItems();
+    });
+    expect(onTranscriptReset).toHaveBeenCalledWith([]);
   });
 
   it('routes the session re-key to the entry seam', async () => {

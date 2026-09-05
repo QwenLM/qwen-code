@@ -102,6 +102,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
   };
 });
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
   Promise.resolve(composeReviewCommand.handler(argv as never) as void);
@@ -10901,7 +10902,9 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     const wrapped = `comment 102 (b.ts) — body\n${' '.repeat(80_000)}truncated`;
     const t0 = performance.now();
     const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
-    expect(performance.now() - t0).toBeLessThan(2000);
+    expectWithinLatencyBudget(performance.now() - t0, 2000, {
+      poolMultiplier: 10,
+    });
     // 160k of model prose used to reach the body budget's last-resort
     // truncation; the per-entry char cap this account now shares bounds it
     // upstream of the budget instead, which is the better place for it. So

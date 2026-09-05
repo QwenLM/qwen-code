@@ -140,7 +140,9 @@ export interface WebShellRightPanelOptions {
 export type WebShellEnvironmentPanelItem =
   | 'environment'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
   /** Sections to show. Defaults to all sections. */
@@ -464,10 +466,27 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
   exitCode?: number;
 }
 
+export interface WebShellWorkflowTask extends WebShellTaskBase {
+  kind: 'workflow';
+  status:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  currentPhase?: string;
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal?: number;
+}
+
 export type WebShellTaskInfo =
   | WebShellAgentTask
   | WebShellShellTask
-  | WebShellMonitorTask;
+  | WebShellMonitorTask
+  | WebShellWorkflowTask;
 
 // ---- Model info (public type for footer renderer) ----
 

@@ -1946,6 +1946,31 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('reads a saved workflow definition and unwraps the envelope', async () => {
+    const session = createMockSession('session-a');
+    const workflow = {
+      v: 1 as const,
+      sessionId: 'session-a',
+      name: 'deep-review',
+      source: 'project' as const,
+      scriptPath: '/workspace/.qwen/workflows/deep-review.js',
+      script: 'export const meta = { name: "deep-review", description: "d" }',
+      meta: { name: 'deep-review', description: 'd' },
+    };
+    session.savedWorkflow.mockResolvedValueOnce({
+      v: 1,
+      sessionId: 'session-a',
+      name: 'deep-review',
+      workflow,
+    });
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.readSavedWorkflow('deep-review')).resolves.toEqual(
+      workflow,
+    );
+    expect(session.savedWorkflow).toHaveBeenCalledWith('deep-review');
+  });
+
   it('suppresses a stale workflow-control failure after switching sessions', async () => {
     const sessionA = createMockSession('session-a');
     const sessionB = createMockSession('session-b');
@@ -3436,6 +3461,39 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('lists attachments through the active session client', async () => {
+    const session = createMockSession('session-current', 'client-current');
+    session.listAttachments = vi.fn(async () => [
+      {
+        type: 'resource',
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ]);
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.listAttachments()).resolves.toEqual([
+      {
+        type: 'resource',
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ]);
+    expect(session.listAttachments).toHaveBeenCalledOnce();
+  });
+
+  it('rejects listing attachments without a notice when no session exists', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.listAttachments()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('normalizes image MIME parameters when naming an uploaded attachment', async () => {
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({ session });
@@ -4132,6 +4190,7 @@ function createMockSession(
       sessionWorkflowTaskAction: vi.fn(),
       removeSessionAttachment: vi.fn(async () => true),
     },
+    savedWorkflow: vi.fn(),
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
@@ -4154,6 +4213,7 @@ function createMockSession(
       data: 'aGVsbG8=',
       mimeType: 'text/plain',
     })),
+    listAttachments: vi.fn(async () => []),
     removeAttachment: vi.fn(async () => true),
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
     shellCommand: vi.fn(async () => ({ promptId: 'shell-prompt-1' })),
