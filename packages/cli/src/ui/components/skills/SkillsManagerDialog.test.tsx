@@ -88,7 +88,9 @@ describe('buildHigherDisabled', () => {
       ),
     );
 
-    expect(higher.lockedIn(prefixed)).toBe('System');
+    expect(higher.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (System)",
+    );
   });
 
   it('blames the registry-name entry first when scopes hold one spelling each', () => {
