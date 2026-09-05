@@ -10,7 +10,8 @@ import {
   createRuntimeContentGeneratorView,
   resolveCredentialField,
 } from './content-generator-config.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, createContentGenerator } from '../core/contentGenerator.js';
+import { ModelRegistry } from './modelRegistry.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from './types.js';
@@ -37,7 +38,7 @@ function createMockConfig(
 }
 
 describe('buildAgentContentGeneratorConfig', () => {
-  const parentConfig: ContentGeneratorConfig = {
+  const parentConfig = {
     model: 'parent-model',
     authType: 'openai' as ContentGeneratorConfig['authType'],
     apiKey: 'parent-key',
@@ -50,7 +51,7 @@ describe('buildAgentContentGeneratorConfig', () => {
     maxRetries: 3,
     contextWindowSize: 128000,
     extra_body: { custom: 'value' },
-  };
+  } satisfies ContentGeneratorConfig;
 
   describe('same-provider, bare model ID, no registry match', () => {
     it('should override the model but keep parent generation config', () => {
@@ -323,6 +324,256 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.proxy).toBe('http://proxy.example.com');
       expect(result.userAgent).toBe('custom-agent/1.0');
     });
+  });
+
+  describe('local worker credential isolation', () => {
+    const localModel: ResolvedModelConfig = {
+      id: 'local-worker',
+      name: 'Local worker',
+      authType: 'openai' as ResolvedModelConfig['authType'],
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      registryBaseUrl: 'http://127.0.0.1:11434/v1',
+      envKey: 'LOCAL_WORKER_KEY',
+      generationConfig: {},
+      capabilities: {},
+    };
+
+    beforeEach(() => {
+      vi.stubEnv('LOCAL_WORKER_KEY', undefined);
+      vi.stubEnv('OPENAI_API_KEY', 'global-cloud-key');
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it.each([undefined, ''])(
+      'does not replace a missing worker key (%s)',
+      (key) => {
+        vi.stubEnv('LOCAL_WORKER_KEY', key);
+        const result = buildAgentContentGeneratorConfig(
+          createMockConfig(parentConfig, localModel),
+          localModel.id,
+          { authType: 'openai' },
+        );
+
+        expect(result.apiKey).toBe(key);
+        expect(result.apiKeyEnvKey).toBe('LOCAL_WORKER_KEY');
+        expect(result.baseUrl).toBe(localModel.baseUrl);
+      },
+    );
+
+    it('honors a missing explicit envKey even on the leader endpoint', () => {
+      const result = buildAgentContentGeneratorConfig(
+        createMockConfig(parentConfig, {
+          ...localModel,
+          baseUrl: parentConfig.baseUrl,
+        }),
+        localModel.id,
+        { authType: 'openai' },
+      );
+
+      expect(result.apiKey).toBeUndefined();
+      expect(result.apiKeyEnvKey).toBe('LOCAL_WORKER_KEY');
+    });
+
+    it.each([true, false])(
+      'does not use parent or global keys for another endpoint (registered=%s)',
+      (registered) => {
+        const result = buildAgentContentGeneratorConfig(
+          createMockConfig(
+            parentConfig,
+            registered ? { ...localModel, envKey: undefined } : undefined,
+          ),
+          localModel.id,
+          { authType: 'openai', baseUrl: localModel.baseUrl },
+        );
+
+        expect(result.apiKey).toBeUndefined();
+        expect(result.apiKeyEnvKey).toBeUndefined();
+        expect(result.baseUrl).toBe(localModel.baseUrl);
+      },
+    );
+
+    it.each([true, false])(
+      'accepts an explicit worker key (registered=%s)',
+      (registered) => {
+        const result = buildAgentContentGeneratorConfig(
+          createMockConfig(parentConfig, registered ? localModel : undefined),
+          localModel.id,
+          {
+            authType: 'openai',
+            baseUrl: localModel.baseUrl,
+            apiKey: 'explicit-worker-key',
+          },
+        );
+
+        expect(result.apiKey).toBe('explicit-worker-key');
+        expect(result.baseUrl).toBe(localModel.baseUrl);
+      },
+    );
+
+    it('keeps the leader unchanged while applying only worker request options', () => {
+      vi.stubEnv('LOCAL_WORKER_KEY', 'ollama');
+      const leader = {
+        ...parentConfig,
+        customHeaders: { Authorization: 'Bearer leader-header' },
+      };
+      const before = structuredClone(leader);
+      const result = buildAgentContentGeneratorConfig(
+        createMockConfig(leader, {
+          ...localModel,
+          generationConfig: { contextWindowSize: 8192, timeout: 60000 },
+        }),
+        localModel.id,
+        { authType: 'openai' },
+      );
+
+      expect(result.apiKey).toBe('ollama');
+      expect(result.customHeaders).toBeUndefined();
+      expect(result.reasoning).toBeUndefined();
+      expect(result.samplingParams).toBeUndefined();
+      expect(result.extra_body).toBeUndefined();
+      expect(result.contextWindowSize).toBe(8192);
+      expect(result.timeout).toBe(60000);
+      expect(leader).toEqual(before);
+    });
+
+    it('does not inherit custom headers when the credential declaration changes', () => {
+      vi.stubEnv('LOCAL_WORKER_KEY', 'worker-key');
+      const result = buildAgentContentGeneratorConfig(
+        createMockConfig(
+          { ...parentConfig, customHeaders: { 'X-Api-Key': 'leader-header' } },
+          { ...localModel, baseUrl: parentConfig.baseUrl },
+        ),
+        localModel.id,
+        { authType: 'openai' },
+      );
+
+      expect(result.apiKey).toBe('worker-key');
+      expect(result.customHeaders).toBeUndefined();
+    });
+
+    it('applies the local model own custom headers', () => {
+      vi.stubEnv('LOCAL_WORKER_KEY', 'ollama');
+      const headers = { 'X-Worker': 'local' };
+      const result = buildAgentContentGeneratorConfig(
+        createMockConfig(parentConfig, {
+          ...localModel,
+          generationConfig: { customHeaders: headers },
+        }),
+        localModel.id,
+        { authType: 'openai' },
+      );
+
+      expect(result.customHeaders).toEqual(headers);
+    });
+
+    it.each([true, false])(
+      'isolates a Gemini leader from a local worker (key=%s)',
+      (hasKey) => {
+        if (hasKey) vi.stubEnv('LOCAL_WORKER_KEY', 'ollama');
+        const result = buildAgentContentGeneratorConfig(
+          createMockConfig(
+            {
+              ...parentConfig,
+              authType: 'gemini' as ContentGeneratorConfig['authType'],
+            },
+            { ...localModel, envKey: hasKey ? 'LOCAL_WORKER_KEY' : undefined },
+          ),
+          localModel.id,
+          { authType: 'openai' },
+        );
+
+        expect(result.apiKey).toBe(hasKey ? 'ollama' : undefined);
+        expect(result.baseUrl).toBe(localModel.baseUrl);
+        expect(result.authType).toBe('openai');
+      },
+    );
+
+    it('drops parent headers when an explicit key changes on the same endpoint', () => {
+      const result = buildAgentContentGeneratorConfig(
+        createMockConfig({
+          ...parentConfig,
+          customHeaders: { Authorization: 'Bearer parent-header' },
+        }),
+        'other-model',
+        { authType: 'openai', apiKey: 'worker-key' },
+      );
+
+      expect(result.apiKey).toBe('worker-key');
+      expect(result.customHeaders).toBeUndefined();
+      expect(result.baseUrl).toBe(parentConfig.baseUrl);
+    });
+
+    it('preserves same-endpoint inheritance without a separate credential', () => {
+      const result = buildAgentContentGeneratorConfig(
+        createMockConfig(parentConfig, {
+          ...localModel,
+          baseUrl: parentConfig.baseUrl,
+          envKey: undefined,
+        }),
+        localModel.id,
+        { authType: 'openai' },
+      );
+
+      expect(result.apiKey).toBe(parentConfig.apiKey);
+      expect(result.apiKeyEnvKey).toBe(parentConfig.apiKeyEnvKey);
+      expect(result.reasoning).toEqual(parentConfig.reasoning);
+    });
+
+    it.each([
+      [AuthType.USE_GEMINI, 'GEMINI_API_KEY'],
+      [AuthType.USE_ANTHROPIC, 'ANTHROPIC_API_KEY'],
+      [AuthType.USE_OPENAI, 'OPENAI_API_KEY'],
+    ])(
+      'preserves provider-default credentials for registered %s workers',
+      (authType, key) => {
+        vi.stubEnv(key, 'worker-default-key');
+        const registry = new ModelRegistry({
+          [authType]: [{ id: 'default-worker' }],
+        });
+        const resolved = registry.getModel(authType, 'default-worker');
+        expect(resolved).toBeDefined();
+        const config = createMockConfig(
+          {
+            ...parentConfig,
+            authType:
+              authType === AuthType.USE_OPENAI
+                ? AuthType.USE_GEMINI
+                : AuthType.USE_OPENAI,
+          },
+          resolved,
+        );
+
+        for (const baseUrl of [undefined, resolved!.baseUrl]) {
+          const result = buildAgentContentGeneratorConfig(
+            config,
+            'default-worker',
+            { authType, baseUrl },
+          );
+          expect(result.apiKey).toBe('worker-default-key');
+        }
+      },
+    );
+
+    it.each([AuthType.USE_GEMINI, AuthType.USE_OPENAI])(
+      'requires a local credential in the real registry with a %s leader',
+      (authType) => {
+        const registry = new ModelRegistry({
+          openai: [{ id: localModel.id, baseUrl: localModel.baseUrl }],
+        });
+        const resolved = registry.getModel(AuthType.USE_OPENAI, localModel.id);
+        expect(resolved).toBeDefined();
+        const result = buildAgentContentGeneratorConfig(
+          createMockConfig({ ...parentConfig, authType }, resolved),
+          localModel.id,
+          { authType: AuthType.USE_OPENAI, baseUrl: localModel.baseUrl },
+        );
+        expect(result.apiKey).toBeUndefined();
+        expect(result.baseUrl).toBe(localModel.baseUrl);
+      },
+    );
   });
 });
 

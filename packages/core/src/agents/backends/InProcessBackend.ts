@@ -58,9 +58,7 @@ export class InProcessBackend implements Backend {
   private readonly agents = new Map<string, AgentInteractive>();
   private readonly agentContentGenerators = new Map<string, ContentGenerator>();
   // Why a dedicated per-agent ContentGenerator could not be created,
-  // keyed by agentId. The creation failure is swallowed into a debug
-  // log (fallback to the parent generator); spawn callers verifying a
-  // requested route need the cause to fail with a useful message.
+  // keyed by agentId. Spawn callers can inspect the cause of a rejected route.
   private readonly agentContentGeneratorErrors = new Map<string, string>();
   // Per-agent tool registries keyed by agentId so `stopAgent` can
   // dispose just that agent's registry (releasing tool listeners on
@@ -154,7 +152,8 @@ export class InProcessBackend implements Backend {
         perAgent.contentGenerator,
       );
     }
-    if (perAgent.contentGeneratorError) {
+    this.agentContentGeneratorErrors.delete(config.agentId);
+    if (perAgent.contentGeneratorError !== undefined) {
       this.agentContentGeneratorErrors.set(
         config.agentId,
         perAgent.contentGeneratorError,
@@ -163,6 +162,11 @@ export class InProcessBackend implements Backend {
 
     this.agentRegistries.set(config.agentId, agentContext.getToolRegistry());
     this.agentApprovalCleanups.set(config.agentId, perAgent.cleanup);
+
+    if (perAgent.contentGeneratorError !== undefined) {
+      this.releaseAgentResources(config.agentId);
+      throw new Error(perAgent.contentGeneratorError);
+    }
 
     const core = new AgentCore(
       inProcessConfig.agentName,
@@ -646,7 +650,7 @@ async function createPerAgentConfig(
         );
       } catch (error) {
         debugLogger.error(
-          'Failed to create per-agent ContentGenerator, falling back to parent:',
+          'Failed to create per-agent ContentGenerator:',
           error,
         );
         // The debug log above is a no-op unless QWEN_DEBUG_LOG_FILE is
