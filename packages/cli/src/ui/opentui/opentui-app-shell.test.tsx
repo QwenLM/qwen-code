@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Wiring tests for the OpenTUI app shell (Batch 5 — backend composition root).
@@ -32,6 +33,8 @@
  *    never hang waiting for a renderer;
  *  - the session re-key reaches the entry seam, or reports that no owner is
  *    wired to re-key the UI-side session state;
+ *  - host history writes reach the live transcript as projected events and a
+ *    host clear arrives as an empty reset;
  *  - user history rows drive the composer's history, and an error thrown in the
  *    subtree is caught by the boundary.
  */
@@ -55,6 +58,9 @@ const mocks = vi.hoisted(() => {
     deferGate: null as null | ((text: string) => boolean | Promise<boolean>),
     handledTexts: [] as string[],
     host: null as unknown,
+    /** One entry per dispatcher construction: churn means the host was rebuilt. */
+    hosts: [] as unknown[],
+    dispatcherConstructions: 0,
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
@@ -62,6 +68,8 @@ const mocks = vi.hoisted(() => {
     actionConfirmProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     exitInProgress: false,
+    /** Runs while a dispatched command is still awaiting its outcome. */
+    onHandle: null as null | ((text: string) => void),
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -118,6 +126,8 @@ vi.mock('./commands-dispatch.js', () => ({
       commands: readonly unknown[],
     ) {
       mocks.state.host = host;
+      mocks.state.hosts.push(host);
+      mocks.state.dispatcherConstructions += 1;
       this._commands = commands;
     }
     _commands: readonly unknown[];
@@ -135,6 +145,7 @@ vi.mock('./commands-dispatch.js', () => ({
     dispose() {}
     async handle(text: string) {
       mocks.state.handledTexts.push(text);
+      mocks.state.onHandle?.(text);
       const queued = mocks.state.handleResults;
       return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
     }
@@ -217,6 +228,8 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
     mocks.state.host = null;
+    mocks.state.hosts.length = 0;
+    mocks.state.dispatcherConstructions = 0;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
     mocks.state.toolConfirmProps = null;
@@ -224,12 +237,41 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.actionConfirmProps = null;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.exitInProgress = false;
+    mocks.state.onHandle = null;
   });
 
   it('renders the composer inside the error boundary by default', async () => {
     renderApp();
     await settle();
     expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('builds one host, and one dispatcher, across re-renders', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      onTranscriptEvent: vi.fn(),
+      onTranscriptReset: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    // A turn re-renders this component repeatedly. Every transcript seam prop
+    // above is a stable identity (the live turn memoizes them with empty-dep
+    // useCallbacks), so rebuilding the host here would mean the shell's own
+    // memo broke — and a churning host loses `host.history` per render.
+    for (const streaming of [true, false, true, false]) {
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={streaming} />);
+        await Promise.resolve();
+      });
+    }
+
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+    expect(new Set(mocks.state.hosts).size).toBe(1);
   });
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
@@ -289,6 +331,9 @@ describe('OpenTuiApp shell wiring', () => {
         modelOverride: undefined,
         onComplete: undefined,
         refreshContextFilesOnWrite: undefined,
+        // The recorded invocation is already on the transcript, so the live
+        // turn must not echo the generated content as a second user row.
+        invocationEchoed: true,
       },
     );
   });
@@ -311,6 +356,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      invocationEchoed: true,
     });
   });
 
@@ -411,6 +457,33 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('routes a host history write to the live transcript (U-28)', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    const host = mocks.state.host as {
+      addItem: (item: unknown, ts: number) => void;
+    };
+    await act(async () => {
+      host.addItem({ type: 'info', text: 'Report filed.' }, 1000);
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Report filed.',
+    });
+  });
+
+  it('routes a host clear to an empty transcript reset (U-29)', async () => {
+    const onTranscriptReset = vi.fn();
+    renderApp({ onTranscriptReset });
+    await settle();
+    const host = mocks.state.host as { clearItems: () => void };
+    await act(async () => {
+      host.clearItems();
+    });
+    expect(onTranscriptReset).toHaveBeenCalledWith([]);
   });
 
   it('routes the session re-key to the entry seam', async () => {
@@ -566,6 +639,36 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onInterrupt.mock.invocationCallOrder[0]).toBeLessThan(
       onQuit.mock.invocationCallOrder[0],
     );
+  });
+
+  it('normalizes bare quit tokens ahead of the mid-turn gate and the dispatch', async () => {
+    // ink normalizes the whole quit family where its handleFinalSubmit puts the
+    // check — before the queue — so an `exit` typed mid-response stops the stream
+    // instead of queueing behind it or reaching the model as text. The text the
+    // gate is asked about is the ordering witness: `/quit`, never `exit`.
+    const gateSeen: string[] = [];
+    mocks.state.deferGate = (text) => {
+      gateSeen.push(text);
+      const command = text.trim();
+      return command.startsWith('/') && command !== '/quit';
+    };
+    const onQuit = vi.fn();
+    const onSubmitPrompt = vi.fn();
+    renderApp({ streaming: true, onQuit, onSubmitPrompt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages: [],
+    } satisfies OpenTuiDispatchOutcome;
+
+    const tokens = ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'];
+    for (const token of tokens) await submit(token);
+
+    expect(gateSeen).toEqual(tokens.map(() => '/quit'));
+    expect(mocks.state.handledTexts).toEqual(tokens.map(() => '/quit'));
+    expect(onQuit).toHaveBeenCalledTimes(tokens.length);
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Queued/)).toBeNull();
   });
 
   it('drains a held command whose defer verdict lands after the idle edge', async () => {
@@ -818,6 +921,36 @@ describe('OpenTuiApp shell wiring', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(mocks.state.handledTexts).toEqual([]);
+  });
+
+  it('stops between dispatches when the exit starts while one is in flight', async () => {
+    // The crossing the edge check cannot see: the drain is already past it,
+    // and the exit begins while '/first' awaits its outcome. Only the in-loop
+    // latch check keeps '/second' back (R4-1).
+    mocks.state.deferDuringStreaming = true;
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/first');
+    await submit('/second');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    mocks.state.onHandle = () => {
+      mocks.state.exitInProgress = true;
+    };
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.state.handledTexts).toEqual(['/first']);
   });
 
   it('catches a subtree render error inside the error boundary', async () => {
