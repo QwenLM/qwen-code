@@ -8908,6 +8908,25 @@ describe('Server Config (config.ts)', () => {
     expect(directories).toContain('/path/to/dir2');
   });
 
+  it('schedules orphan project cleanup after initialization', async () => {
+    const cleanup = vi
+      .spyOn(Storage.prototype, 'cleanOrphanProjectDirs')
+      .mockReturnValue({
+        removed: [],
+        errors: [],
+      });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      cleanup.mockClear();
+      const config = new Config(baseParams);
+      await config.initialize();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(cleanup).toHaveBeenCalledOnce();
+    } finally {
+      cleanup.mockRestore();
+    }
+  });
+
   it('Config constructor should set telemetry to true when provided as true', () => {
     const paramsWithTelemetry: ConfigParameters = {
       ...baseParams,

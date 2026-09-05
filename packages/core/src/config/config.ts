@@ -3642,6 +3642,24 @@ export class Config {
         }
       })();
     }
+
+    setImmediate(() => {
+      try {
+        const { removed, errors } = this.storage.cleanOrphanProjectDirs();
+        removed.forEach((entry) =>
+          this.debugLogger.info(`Removed orphan project snapshot: ${entry}`),
+        );
+        errors.forEach(({ entry, error }) =>
+          this.debugLogger.warn(
+            `Failed to clean orphan project snapshot ${entry}: ${error}`,
+          ),
+        );
+      } catch (error) {
+        this.debugLogger.warn(
+          `Failed to scan orphan project snapshots: ${error}`,
+        );
+      }
+    });
   }
 
   private async activateChatRecording(): Promise<void> {
