@@ -21,7 +21,7 @@ import { SettingScope } from '../../config/settings.js';
 const FocusModeStateContext = createContext<boolean>(false);
 
 interface FocusModeActionsType {
-  toggleFocusMode: () => Promise<boolean>;
+  toggleFocusMode: () => Promise<boolean | null>;
   syncFocusMode: () => void;
 }
 
@@ -51,6 +51,13 @@ export const FocusModeProvider = ({
   focusModeEnabledRef.current = focusModeEnabled;
 
   const toggleFocusMode = useCallback(async () => {
+    if (
+      settings.system.settings.ui?.focusMode !== undefined ||
+      (settings.isTrusted &&
+        settings.workspace.settings.ui?.focusMode !== undefined)
+    ) {
+      return null;
+    }
     const newValue = !focusModeEnabledRef.current;
     settings.setValue(SettingScope.User, 'ui.focusMode', newValue, undefined, {
       throwOnWriteFailure: true,

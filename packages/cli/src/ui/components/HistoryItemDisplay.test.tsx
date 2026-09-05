@@ -728,6 +728,50 @@ describe('<HistoryItemDisplay />', () => {
       expect(ToolGroupMessage).toHaveBeenCalled();
     });
 
+    it.each([
+      { images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }] },
+      { omittedImageCount: 1 },
+    ])('preserves image-bearing tool groups: %j', (imageOutput) => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [{ ...successTool('image'), ...imageOutput }],
+          }}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+      expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'preserves memory counts in a mixed group: %s',
+      (mixed) => {
+        vi.mocked(ToolGroupMessage).mockClear();
+        const { lastFrame } = renderInFocusMode(
+          <HistoryItemDisplay
+            item={{
+              id: 1,
+              type: 'tool_group',
+              tools: [
+                { ...successTool('memory'), name: 'memory_write' },
+                ...(mixed ? [successTool('shell')] : []),
+              ],
+              memoryReadCount: 2,
+              memoryWriteCount: 1,
+            }}
+            terminalWidth={120}
+            isPending={false}
+          />,
+        );
+        expect(lastFrame()).toContain('Memory: 2 read, 1 written');
+        expect(ToolGroupMessage).not.toHaveBeenCalled();
+      },
+    );
+
     it('does NOT collapse a pending (still running) tool_group', () => {
       vi.mocked(ToolGroupMessage).mockClear();
       const item: HistoryItem = {
@@ -784,7 +828,7 @@ describe('<HistoryItemDisplay />', () => {
         expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
         expect(vi.mocked(ToolGroupMessage).mock.calls[0][0]).toMatchObject({
           fullDetail: true,
-          tools: item.tools,
+          toolCalls: item.tools,
         });
       },
     );

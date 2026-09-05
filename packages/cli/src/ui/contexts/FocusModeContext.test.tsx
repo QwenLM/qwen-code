@@ -8,7 +8,7 @@ import { act } from 'react';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
@@ -25,7 +25,7 @@ afterEach(() => {
   }
 });
 
-function setup(workspaceFocus = false) {
+function setup(workspaceFocus = false, isTrusted = true) {
   const directory = mkdtempSync(join(tmpdir(), 'qwen-focus-provider-'));
   temporaryDirectories.push(directory);
   const settings = new LoadedSettings(
@@ -45,7 +45,7 @@ function setup(workspaceFocus = false) {
       settings: workspaceFocus ? { ui: { focusMode: true } } : {},
       originalSettings: {},
     },
-    true,
+    isTrusted,
     new Set(),
   );
   vi.spyOn(settings, 'setValue');
@@ -104,16 +104,48 @@ describe('FocusModeProvider', () => {
     unmount();
   });
 
-  it('reports the effective workspace override after writing the user preference', async () => {
-    const { getActions, settings, lastFrame, unmount } = setup(true);
+  it.each([SettingScope.Workspace, SettingScope.System])(
+    'does not change the user preference when %s overrides focus',
+    async (scope) => {
+      const { getActions, settings, lastFrame, unmount } = setup();
+      for (const enabled of [true, false]) {
+        await act(async () => {
+          settings.setValue(scope, 'ui.focusMode', enabled);
+          getActions().syncFocusMode();
+        });
+        vi.mocked(settings.setValue).mockClear();
+        await act(async () => {
+          expect(await getActions().toggleFocusMode()).toBe(null);
+        });
+        expect(lastFrame()).toContain(enabled ? 'focused' : 'normal');
+        expect(settings.setValue).not.toHaveBeenCalled();
+        expect(existsSync(settings.user.path)).toBe(false);
+      }
+      unmount();
+    },
+  );
+
+  it('ignores an untrusted workspace when toggling the user preference', async () => {
+    const { getActions, settings, lastFrame, unmount } = setup(true, false);
     await act(async () => {
       expect(await getActions().toggleFocusMode()).toBe(true);
     });
+    expect(settings.user.settings.ui?.focusMode).toBe(true);
     expect(lastFrame()).toContain('focused');
-    expect(settings.merged.ui?.focusMode).toBe(true);
-    expect(
-      JSON.parse(readFileSync(settings.user.path, 'utf8')).ui.focusMode,
-    ).toBe(false);
+    unmount();
+  });
+
+  it('allows the user preference to override system defaults', async () => {
+    const { getActions, settings, lastFrame, unmount } = setup();
+    await act(async () => {
+      settings.setValue(SettingScope.SystemDefaults, 'ui.focusMode', true);
+      getActions().syncFocusMode();
+    });
+    await act(async () => {
+      expect(await getActions().toggleFocusMode()).toBe(false);
+    });
+    expect(settings.user.settings.ui?.focusMode).toBe(false);
+    expect(lastFrame()).toContain('normal');
     unmount();
   });
 });

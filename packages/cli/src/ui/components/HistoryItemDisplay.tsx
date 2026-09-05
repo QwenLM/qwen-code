@@ -24,6 +24,7 @@ import {
 import {
   ToolGroupMessage,
   isSubagentToolEntry,
+  hasInlineImageOutput,
 } from './messages/ToolGroupMessage.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
@@ -314,7 +315,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         tool.status === ToolCallStatus.Success ||
         tool.status === ToolCallStatus.Error,
     ) &&
-    !item.tools.some(isSubagentToolEntry);
+    !item.tools.some(isSubagentToolEntry) &&
+    !item.tools.some(hasInlineImageOutput);
   const failedToolCount = collapseToolGroup
     ? item.tools.filter((tool) => tool.status === ToolCallStatus.Error).length
     : 0;
@@ -468,10 +470,16 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
                     },
                   )
                 : itemForDisplay.tools.length === 1
-                  ? t('1 tool call hidden (/focus to show)')
-                  : t('{{count}} tool calls hidden (/focus to show)', {
+                  ? t('1 tool call hidden (Ctrl+O for details)')
+                  : t('{{count}} tool calls hidden (Ctrl+O for details)', {
                       count: String(itemForDisplay.tools.length),
                     })}
+              {((itemForDisplay.memoryReadCount ?? 0) > 0 ||
+                (itemForDisplay.memoryWriteCount ?? 0) > 0) &&
+                ` · ${t('Memory: {{read}} read, {{written}} written', {
+                  read: String(itemForDisplay.memoryReadCount ?? 0),
+                  written: String(itemForDisplay.memoryWriteCount ?? 0),
+                })}`}
             </Text>
           </Box>
         ) : (

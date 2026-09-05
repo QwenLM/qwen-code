@@ -114,8 +114,9 @@ export interface CommandContext {
     /**
      * Toggles focus mode via FocusModeContext so the transcript re-renders
      * immediately. Hosts without focus rendering omit it.
+     * Returns null when a higher-precedence setting prevents the toggle.
      */
-    toggleFocusMode?: () => Promise<boolean>;
+    toggleFocusMode?: () => Promise<boolean | null>;
     setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;

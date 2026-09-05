@@ -31,7 +31,7 @@ describe('focusCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.',
+        'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.',
     });
   });
 
@@ -62,6 +62,18 @@ describe('focusCommand', () => {
       type: 'message',
       messageType: 'error',
       content: 'Focus mode is not supported by this renderer.',
+    });
+  });
+
+  it('explains an overriding setting without claiming focus was toggled', async () => {
+    const context = createMockCommandContext({
+      ui: { toggleFocusMode: vi.fn().mockResolvedValue(null) },
+    });
+    expect(await focusCommand.action!(context, '')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.',
     });
   });
 });

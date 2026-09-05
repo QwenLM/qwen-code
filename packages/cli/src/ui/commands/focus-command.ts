@@ -25,13 +25,22 @@ export const focusCommand: SlashCommand = {
       };
     }
     const enabled = await context.ui.toggleFocusMode();
+    if (enabled === null) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.',
+        ),
+      };
+    }
 
     return {
       type: 'message',
       messageType: 'info',
       content: enabled
         ? t(
-            'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.',
+            'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.',
           )
         : t('Focus mode disabled.'),
     };

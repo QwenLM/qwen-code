@@ -46,7 +46,7 @@ function isRunningAgent(
   );
 }
 
-function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
+export function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
   return Boolean(tool.images?.length || tool.omittedImageCount);
 }
 

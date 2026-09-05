@@ -235,7 +235,7 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
   extensionRefreshState?: ExtensionRefreshState,
-  toggleFocusMode?: () => Promise<boolean>,
+  toggleFocusMode?: () => Promise<boolean | null>,
 ) => {
   const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
     null,

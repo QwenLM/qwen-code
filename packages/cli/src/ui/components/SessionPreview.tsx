@@ -171,6 +171,7 @@ export function SessionPreview(props: SessionPreviewProps) {
                 terminalWidth={boxWidth}
                 isPending={false}
                 thoughtExpanded={true}
+                fullDetail
               />
             )),
             footerSeparator,
