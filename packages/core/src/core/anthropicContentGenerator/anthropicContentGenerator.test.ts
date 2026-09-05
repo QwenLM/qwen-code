@@ -2230,6 +2230,7 @@ describe('AnthropicContentGenerator', () => {
       async function thinkingFor(
         model: string,
         reasoningOverride?: ContentGeneratorConfig['reasoning'],
+        configOverrides: Partial<ContentGeneratorConfig> = {},
       ): Promise<unknown> {
         const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue({
@@ -2247,6 +2248,7 @@ describe('AnthropicContentGenerator', () => {
             samplingParams: { max_tokens: 500 },
             schemaCompliance: 'auto',
             reasoning: reasoningOverride ?? { effort: 'medium' },
+            ...configOverrides,
           },
           mockConfig,
         );
@@ -2295,6 +2297,39 @@ describe('AnthropicContentGenerator', () => {
           type: 'adaptive',
           display: 'summarized',
         });
+      });
+
+      it('uses explicit adaptive metadata for MiniMax-M3', async () => {
+        expect(
+          await thinkingFor('MiniMax-M3', undefined, {
+            adaptiveThinking: true,
+          }),
+        ).toEqual({ type: 'adaptive', display: 'summarized' });
+        expect(
+          await thinkingFor('MiniMax-M3', false, {
+            adaptiveThinking: true,
+          }),
+        ).toBeUndefined();
+        expect(
+          await thinkingFor(
+            'MiniMax-M3',
+            {
+              effort: 'medium',
+              budget_tokens: 42_000,
+            },
+            {
+              adaptiveThinking: true,
+            },
+          ),
+        ).toEqual({ type: 'adaptive', display: 'summarized' });
+      });
+
+      it('keeps thinking enabled for MiniMax-M2.7 when disabled globally', async () => {
+        expect(
+          await thinkingFor('MiniMax-M2.7', false, {
+            thinkingMandatory: true,
+          }),
+        ).toEqual({ type: 'enabled', budget_tokens: 32_000 });
       });
 
       it('selects adaptive for dotted-minor aliases (claude-opus-4.7 / 4.8, claude-sonnet-4.6)', async () => {

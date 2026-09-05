@@ -23,10 +23,39 @@ function resolveEnvKey(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
 ): string {
-  const protocol = inputs.protocol ?? config.protocol;
+  const protocol = resolveProtocol(config, inputs);
   return typeof config.envKey === 'function'
     ? config.envKey(protocol, inputs.baseUrl)
     : config.envKey;
+}
+
+function getProviderProtocols(config: ProviderConfig): AuthType[] {
+  const protocols = config.protocolOptions?.length
+    ? [...config.protocolOptions]
+    : [config.protocol];
+  if (Array.isArray(config.baseUrl)) {
+    for (const option of config.baseUrl) {
+      if (option.protocol && !protocols.includes(option.protocol)) {
+        protocols.push(option.protocol);
+      }
+    }
+  }
+  return protocols;
+}
+
+function resolveProtocol(
+  config: ProviderConfig,
+  inputs: Pick<ProviderSetupInputs, 'protocol' | 'baseUrl'>,
+): AuthType {
+  if (inputs.protocol) return inputs.protocol;
+  if (Array.isArray(config.baseUrl)) {
+    const selectedBaseUrl = normalizeBaseUrlForMatching(inputs.baseUrl);
+    const selectedOption = config.baseUrl.find(
+      (option) => normalizeBaseUrlForMatching(option.url) === selectedBaseUrl,
+    );
+    if (selectedOption?.protocol) return selectedOption.protocol;
+  }
+  return config.protocol;
 }
 
 function resolveModelNamePrefix(
@@ -61,13 +90,21 @@ export function resolveOwnsModel(
 function buildGenerationConfig(
   spec: Pick<
     ModelSpec,
-    'enableThinking' | 'thinkingMandatory' | 'contextWindowSize' | 'modalities'
+    | 'enableThinking'
+    | 'adaptiveThinking'
+    | 'thinkingMandatory'
+    | 'contextWindowSize'
+    | 'modalities'
   >,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const parts: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (spec.enableThinking) {
     parts.extra_body = { enable_thinking: true };
+    hasAny = true;
+  }
+  if (spec.adaptiveThinking) {
+    parts.adaptiveThinking = true;
     hasAny = true;
   }
   if (spec.thinkingMandatory) {
@@ -252,7 +289,7 @@ export function buildInstallPlan(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
 ): ProviderInstallPlan {
-  const protocol = inputs.protocol ?? config.protocol;
+  const protocol = resolveProtocol(config, inputs);
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
   const ownsModel = config.mergeModelsByIdentity
@@ -387,9 +424,7 @@ export function findExistingProviderModels(
   | undefined {
   const ownsModel = resolveOwnsModel(config);
   if (!ownsModel || !modelProviders) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
+  const protocols = getProviderProtocols(config);
   for (const protocol of protocols) {
     const raw = modelProviders[protocol];
     if (!Array.isArray(raw)) continue;
@@ -450,9 +485,7 @@ export function providerMatchesCredentials(
     // the config's default `config.protocol`. So when we don't know which
     // protocol the user originally chose, try every option the provider
     // offers and match if any of them derives `envKey`.
-    const protocols = config.protocolOptions?.length
-      ? config.protocolOptions
-      : [config.protocol];
+    const protocols = getProviderProtocols(config);
     for (const proto of protocols) {
       try {
         const derived = config.envKey(proto, baseUrl);

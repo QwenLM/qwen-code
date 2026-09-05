@@ -45,6 +45,7 @@ export type ModelGenerationConfig = Pick<
   | 'customHeaders'
   | 'extra_body'
   | 'thinkingMandatory'
+  | 'adaptiveThinking'
   | 'contextWindowSize'
   | 'modalities'
   | 'splitToolMedia'

@@ -1004,13 +1004,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   /**
    * Check if the current model supports adaptive thinking (type: 'adaptive').
-   * Claude 4.6+ models require adaptive thinking; older models use the
-   * budget-based config. Shares `parseClaudeModelVersion` with
+   * Explicit provider metadata takes precedence over model-name inference.
+   * Versioned models that require adaptive thinking are inferred as a fallback.
+   * Shares `parseClaudeModelVersion` with
    * `anthropicSupportedEffortTiers` so the family list and the date-suffix guard
    * stay in lockstep — a model parsed for effort gating is parsed identically
    * here for the thinking shape.
    */
   private modelSupportsAdaptiveThinking(): boolean {
+    if (this.contentGeneratorConfig.adaptiveThinking) return true;
     const parsed = parseClaudeModelVersion(
       this.contentGeneratorConfig.model || '',
     );
@@ -1028,10 +1030,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * instead (https://platform.claude.com/docs/en/build-with-claude/effort).
    * Opus 4.5/4.6 and Sonnet 4.6 still accept `budget_tokens` (deprecated on
    * 4.6), and unknown/unversioned ids keep the manual escape hatch, so both
-   * return false. Shares `parseClaudeModelVersion` with the effort/adaptive
-   * gates so the version rules can't drift.
+   * return false. Explicit adaptive-thinking metadata also rejects the manual
+   * shape. Shares `parseClaudeModelVersion` with the effort/adaptive gates so
+   * the version rules can't drift.
    */
   private modelRejectsManualThinking(): boolean {
+    if (this.contentGeneratorConfig.adaptiveThinking) return true;
     const parsed = parseClaudeModelVersion(
       this.contentGeneratorConfig.model || '',
     );
@@ -1066,13 +1070,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
 
     const reasoning = this.contentGeneratorConfig.reasoning;
+    const reasoningConfig = reasoning === false ? undefined : reasoning;
     const requestBudgetCap = request.config?.thinkingConfig?.thinkingBudget;
     const applyRequestBudgetCap = (budgetTokens: number): number =>
       typeof requestBudgetCap === 'number' && requestBudgetCap > 0
         ? Math.min(budgetTokens, requestBudgetCap)
         : budgetTokens;
 
-    if (reasoning === false) {
+    if (reasoning === false && !this.contentGeneratorConfig.thinkingMandatory) {
       return undefined;
     }
 
@@ -1093,12 +1098,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // silently dropped on models that DO still honor it — adaptive omits
     // `budget_tokens` entirely, which would discard the user override.
     if (
-      reasoning?.budget_tokens !== undefined &&
+      reasoningConfig?.budget_tokens !== undefined &&
       !this.modelRejectsManualThinking()
     ) {
       return {
         type: 'enabled',
-        budget_tokens: applyRequestBudgetCap(reasoning.budget_tokens),
+        budget_tokens: applyRequestBudgetCap(reasoningConfig.budget_tokens),
       };
     }
 
@@ -1107,12 +1112,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // effort. Every other clamp in this PR leaves a one-time trace; mirror that
     // here so the dropped user override isn't silently invisible.
     if (
-      reasoning?.budget_tokens !== undefined &&
+      reasoningConfig?.budget_tokens !== undefined &&
       this.modelRejectsManualThinking() &&
       !this.budgetDropWarned
     ) {
       debugLogger.warn(
-        `reasoning.budget_tokens=${reasoning.budget_tokens} is ignored on '${
+        `reasoning.budget_tokens=${reasoningConfig.budget_tokens} is ignored on '${
           this.contentGeneratorConfig.model ?? 'unknown'
         }' (Opus 4.7+/5.x use adaptive thinking); output_config.effort governs thinking depth instead.`,
       );

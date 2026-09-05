@@ -87,6 +87,19 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.thinkingMandatory).toBeUndefined();
     });
+
+    it('does not inherit adaptive thinking from another model', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        adaptiveThinking: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'openai',
+      });
+
+      expect(result.adaptiveThinking).toBeUndefined();
+    });
   });
 
   describe('cross-provider, no registry match', () => {
@@ -263,6 +276,24 @@ describe('buildAgentContentGeneratorConfig', () => {
       );
 
       expect(result.thinkingMandatory).toBeUndefined();
+    });
+
+    it('does not inherit adaptive thinking from another same-provider model', () => {
+      const config = createMockConfig(
+        { ...parentConfig, adaptiveThinking: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.adaptiveThinking).toBeUndefined();
     });
 
     it('rejects image-only models for agent content generation', () => {

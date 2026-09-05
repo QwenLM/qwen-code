@@ -38,6 +38,14 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   };
 }
 
+function getAlternateProtocol(protocol: AuthType): AuthType {
+  const alternate = Object.values(AuthType).find(
+    (candidate) => candidate !== protocol,
+  );
+  if (!alternate) throw new Error('Expected multiple transport types');
+  return alternate;
+}
+
 describe('buildInstallPlan', () => {
   it('builds a plan with fixed models (not editable)', () => {
     const config = makeConfig();
@@ -233,6 +241,34 @@ describe('buildInstallPlan', () => {
 
     expect(plan.authType).toBe(AuthType.USE_ANTHROPIC);
     expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_ANTHROPIC);
+  });
+
+  it('uses the protocol declared by the selected endpoint', () => {
+    const defaultProtocol = makeConfig().protocol;
+    const alternateProtocol = getAlternateProtocol(defaultProtocol);
+    const config = makeConfig({
+      baseUrl: [
+        {
+          id: 'standard',
+          label: 'Standard',
+          url: 'https://api.test.com/v1',
+        },
+        {
+          id: 'messages',
+          label: 'Messages',
+          url: 'https://api.test.com/messages',
+          protocol: alternateProtocol,
+        },
+      ],
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/messages',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    expect(plan.authType).toBe(alternateProtocol);
+    expect(plan.modelProviders?.[0]?.authType).toBe(alternateProtocol);
   });
 });
 
@@ -456,6 +492,34 @@ describe('findExistingProviderModels', () => {
     });
     expect(result?.protocol).toBe(AuthType.USE_ANTHROPIC);
     expect(result?.models.map((m) => m.id)).toEqual(['anthropic-model']);
+  });
+
+  it('scans protocols declared by endpoint options', () => {
+    const defaultProtocol = makeConfig().protocol;
+    const alternateProtocol = getAlternateProtocol(defaultProtocol);
+    const endpointProtocols = makeConfig({
+      modelNamePrefix: '',
+      envKey: 'TEST_API_KEY',
+      baseUrl: [
+        {
+          id: 'standard',
+          label: 'Standard',
+          url: 'https://api.test.com/v1',
+        },
+        {
+          id: 'messages',
+          label: 'Messages',
+          url: 'https://api.test.com/messages',
+          protocol: alternateProtocol,
+        },
+      ],
+    });
+    const result = findExistingProviderModels(endpointProtocols, {
+      [alternateProtocol]: [{ id: 'messages-model', envKey: 'TEST_API_KEY' }],
+    });
+
+    expect(result?.protocol).toBe(alternateProtocol);
+    expect(result?.models.map((m) => m.id)).toEqual(['messages-model']);
   });
 });
 
