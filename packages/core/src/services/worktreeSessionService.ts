@@ -57,6 +57,19 @@ export interface WorktreeSession {
    * treat empty as "unknown" and skip the commit-count display.
    */
   originalHeadCommit: string;
+  /**
+   * Set on the superseded session's sidecar by a worktree reset: the
+   * replacement session this session's worktree ownership moved to. Readers
+   * redirect to it (and self-heal their registry) instead of restoring the
+   * superseded session.
+   */
+  supersededBy?: string;
+  /**
+   * Set on the replacement session's sidecar by a worktree reset: the
+   * session it took the worktree from. Cross-checked against the old
+   * session's `supersededBy` to classify an interrupted transfer.
+   */
+  supersedes?: string;
 }
 
 export type StrictWorktreeSession =
@@ -82,7 +95,10 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     (v['workspaceCwd'] === undefined ||
       typeof v['workspaceCwd'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
-    typeof v['originalHeadCommit'] === 'string'
+    typeof v['originalHeadCommit'] === 'string' &&
+    (v['supersededBy'] === undefined ||
+      typeof v['supersededBy'] === 'string') &&
+    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
   );
 }
 

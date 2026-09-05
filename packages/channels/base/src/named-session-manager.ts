@@ -13,6 +13,7 @@ import process from 'node:process';
 import { canonicalizeWorkspacePath } from './paths.js';
 import type { SessionTarget } from './types.js';
 import type { SessionRouter } from './SessionRouter.js';
+import { readDaemonHttpErrorCode } from './SessionRouter.js';
 
 const REGISTRY_VERSION = 1;
 const MAX_OPEN_TASKS = 8;
@@ -332,12 +333,13 @@ export class NamedSessionManager {
       }
       const timestamp = this.nextTimestamp(owner);
 
-      const loaded = await this.loadTask(
+      const loadResult = await this.loadTask(
         task,
         `Could not load task "${task.name}". The current task was not changed.`,
       );
       const updatedTask: StoredTask = {
         ...task,
+        sessionId: loadResult.sessionId,
         status: 'open',
         updatedAt: timestamp,
         lastSelectedAt: timestamp,
@@ -346,14 +348,18 @@ export class NamedSessionManager {
       try {
         this.commitOwner(nextOwner);
       } catch (error) {
-        if (loaded) {
+        if (loadResult.loaded) {
           await this.router
-            .detachManagedSession(task.sessionId)
+            .detachManagedSession(loadResult.sessionId)
             .catch(() => undefined);
         }
         throw error;
       }
-      this.router.activateManagedSession(task.sessionId, task.target, task.cwd);
+      this.router.activateManagedSession(
+        loadResult.sessionId,
+        updatedTask.target,
+        updatedTask.cwd,
+      );
       return this.selection(nextOwner, updatedTask);
     });
   }
@@ -388,11 +394,14 @@ export class NamedSessionManager {
             .sort((a, b) => b.lastSelectedAt - a.lastSelectedAt)[0]
         : undefined;
       let replacementLoaded = false;
+      let replacementSessionId: string | undefined;
       if (replacement) {
-        replacementLoaded = await this.loadTask(
+        const replacementLoad = await this.loadTask(
           replacement,
           `Could not load fallback task "${replacement.name}". Task "${task.name}" was not closed.`,
         );
+        replacementLoaded = replacementLoad.loaded;
+        replacementSessionId = replacementLoad.sessionId;
       }
 
       const closedTask: StoredTask = {
@@ -408,6 +417,7 @@ export class NamedSessionManager {
       const selectedReplacement = replacement
         ? {
             ...replacement,
+            sessionId: replacementSessionId ?? replacement.sessionId,
             updatedAt: timestamp,
             lastSelectedAt: timestamp,
           }
@@ -424,7 +434,7 @@ export class NamedSessionManager {
       } catch (error) {
         if (replacement && replacementLoaded) {
           await this.router
-            .detachManagedSession(replacement.sessionId)
+            .detachManagedSession(replacementSessionId ?? replacement.sessionId)
             .catch(() => undefined);
         }
         throw error;
@@ -432,7 +442,7 @@ export class NamedSessionManager {
 
       if (replacement) {
         this.router.activateManagedSession(
-          replacement.sessionId,
+          replacementSessionId ?? replacement.sessionId,
           replacement.target,
           replacement.cwd,
         );
@@ -442,13 +452,13 @@ export class NamedSessionManager {
       } catch (error) {
         this.commitOwner(owner);
         this.router.forgetManagedSession(task.sessionId);
-        await this.loadTask(
+        const restored = await this.loadTask(
           task,
           `Task "${task.name}" could not be restored after close failed.`,
         );
         if (wasActive) {
           this.router.activateManagedSession(
-            task.sessionId,
+            restored.sessionId,
             task.target,
             task.cwd,
           );
@@ -467,22 +477,61 @@ export class NamedSessionManager {
     });
   }
 
-  reset(
-    input: NamedSessionOwnerInput,
-  ): Promise<
-    { name: string; previousSessionId: string; sessionId: string } | undefined
+  reset(input: NamedSessionOwnerInput): Promise<
+    | {
+        name: string;
+        previousSessionId: string;
+        sessionId: string;
+        worktreeKept: boolean;
+      }
+    | undefined
   > {
     return this.withOwnerLock(input, async () => {
       const owner = await this.ensureOwner(input, false);
       if (!owner?.activeTaskName) return undefined;
       const task = this.findTask(owner, owner.activeTaskName);
       if (!task || task.status !== 'open') return undefined;
-      if (task.isolation === 'worktree') {
-        throw new Error(
-          `Task "${task.name}" uses a worktree and cannot be cleared or reset yet. Continue using the task or close it. Its files were not changed.`,
-        );
-      }
       const timestamp = this.nextTimestamp(owner);
+
+      if (task.isolation === 'worktree') {
+        // Worktree reset is an ownership transfer, not a new conversation:
+        // the daemon moves the checkout to a fresh session and supersedes
+        // this one. Busy tasks fail before any daemon call; an interrupted
+        // transfer gets exactly one automatic retry.
+        if (this.isBusy(task.sessionId)) {
+          throw new Error(
+            `Task "${task.name}" is busy. Wait for the running prompt to finish (or cancel it), then try again.`,
+          );
+        }
+        const sessionId = await this.resetWorktreeSession(task);
+        const updatedTask: StoredTask = {
+          ...task,
+          sessionId,
+          updatedAt: timestamp,
+          lastSelectedAt: timestamp,
+        };
+        const nextOwner = this.replaceTask(owner, updatedTask, task.name);
+        try {
+          this.commitOwner(nextOwner);
+        } catch (error) {
+          await this.router
+            .detachManagedSession(sessionId)
+            .catch(() => undefined);
+          throw error;
+        }
+        this.router.activateManagedSession(
+          sessionId,
+          updatedTask.target,
+          updatedTask.cwd,
+        );
+        this.router.forgetManagedSession(task.sessionId);
+        return {
+          name: task.name,
+          previousSessionId: task.sessionId,
+          sessionId,
+          worktreeKept: true,
+        };
+      }
 
       const sessionId = await this.createSession(
         task.target,
@@ -514,6 +563,7 @@ export class NamedSessionManager {
         name: task.name,
         previousSessionId: task.sessionId,
         sessionId,
+        worktreeKept: false,
       };
     });
   }
@@ -615,15 +665,26 @@ export class NamedSessionManager {
       throw new Error('The selected Channel task is unavailable.');
     }
     const release = reserve?.(task.sessionId);
+    let activeRelease = release;
     try {
-      await this.loadTask(
+      const result = await this.loadTask(
         task,
         `Could not load task "${task.name}". No replacement session was created.`,
       );
-      this.router.activateManagedSession(task.sessionId, task.target, task.cwd);
-      return task.sessionId;
+      if (result.sessionId !== task.sessionId && reserve) {
+        // The task moved to its replacement session; the reservation must
+        // follow the id the caller will dispatch on.
+        release?.();
+        activeRelease = reserve(result.sessionId);
+      }
+      this.router.activateManagedSession(
+        result.sessionId,
+        task.target,
+        task.cwd,
+      );
+      return result.sessionId;
     } catch (error) {
-      release?.();
+      activeRelease?.();
       throw error;
     }
   }
@@ -665,19 +726,75 @@ export class NamedSessionManager {
   private async loadTask(
     task: StoredTask,
     failureMessage: string,
-  ): Promise<boolean> {
+  ): Promise<{ loaded: boolean; sessionId: string }> {
     try {
-      return (
-        await this.router.loadManagedSession(
+      const result = await this.router.loadManagedSession(
+        task.sessionId,
+        task.target,
+        this.cwd,
+        task.cwd,
+        task.isolation,
+      );
+      if (
+        result.redirectedFrom !== undefined &&
+        result.sessionId !== task.sessionId
+      ) {
+        this.healSupersededTask(task, result.sessionId);
+      }
+      // Callers must use the returned id for everything after this point:
+      // when a superseded redirect fired, the caller's `task` snapshot still
+      // names the old session, and building registry updates from it would
+      // overwrite the heal.
+      return result;
+    } catch (error) {
+      throw new Error(failureMessage, { cause: error });
+    }
+  }
+
+  /**
+   * Point a task at its replacement session after a superseded redirect
+   * healed the route. No-op when the registry entry already moved on (a
+   * concurrent reset under the same owner lock cannot interleave, but a
+   * stale in-memory snapshot could).
+   */
+  private healSupersededTask(task: StoredTask, sessionId: string): void {
+    const owner = this.getOwner(task.target);
+    if (!owner) return;
+    const current = this.findTask(owner, task.name);
+    if (!current || current.sessionId !== task.sessionId) return;
+    const timestamp = this.nextTimestamp(owner);
+    this.commitOwner(
+      this.replaceTask(
+        owner,
+        { ...current, sessionId, updatedAt: timestamp },
+        owner.activeTaskName,
+      ),
+    );
+  }
+
+  private async resetWorktreeSession(task: StoredTask): Promise<string> {
+    let retriedInterrupted = false;
+    for (;;) {
+      try {
+        return await this.router.replaceManagedWorktreeSession(
           task.sessionId,
           task.target,
           this.cwd,
           task.cwd,
-          task.isolation,
-        )
-      ).loaded;
-    } catch (error) {
-      throw new Error(failureMessage, { cause: error });
+        );
+      } catch (error) {
+        const code = readDaemonHttpErrorCode(error);
+        if (code === 'worktree_reset_interrupted' && !retriedInterrupted) {
+          // The daemon classified a crashed transfer and rolled the
+          // pre-commit shapes back; exactly one automatic retry completes
+          // (or definitively reports) the reset.
+          retriedInterrupted = true;
+          continue;
+        }
+        throw new Error(`Could not reset task "${task.name}".`, {
+          cause: error,
+        });
+      }
     }
   }
 

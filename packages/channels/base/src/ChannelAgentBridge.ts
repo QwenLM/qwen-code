@@ -192,6 +192,17 @@ export interface ChannelAgentBridge {
     options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string>;
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session and return the replacement's id. Bridges without daemon-side
+   * worktree reset support omit it; callers fail closed.
+   */
+  resetWorktreeSession?(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
   prompt(
     sessionId: string,
     text: string,

@@ -46,6 +46,67 @@ interface ResolveOptions {
 export type SessionRecoveryMode = 'eager' | 'lazy';
 export type ManagedSessionIsolation = 'shared' | 'worktree';
 
+/**
+ * Read the daemon's typed error code off a `DaemonHttpError` (matched by
+ * shape: channels/base keeps no SDK dependency), walking `cause` chains so
+ * callers that wrap errors (the named-session manager) stay transparent.
+ */
+export function readDaemonHttpErrorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (
+      (typeof current !== 'object' && typeof current !== 'function') ||
+      current === null
+    ) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (record['name'] === 'DaemonHttpError' && record['status'] === 409) {
+      const body = record['body'];
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const code = (body as Record<string, unknown>)['code'];
+        if (typeof code === 'string' && code.length > 0) return code;
+      }
+    }
+    current = record['cause'];
+  }
+  return undefined;
+}
+
+/**
+ * The replacement session id from a `409 worktree_session_superseded`
+ * daemon response, when the error carries one.
+ */
+export function readSupersededReplacementId(
+  error: unknown,
+): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (
+      (typeof current !== 'object' && typeof current !== 'function') ||
+      current === null
+    ) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (record['name'] === 'DaemonHttpError' && record['status'] === 409) {
+      const body = record['body'];
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const typedBody = body as Record<string, unknown>;
+        if (typedBody['code'] !== 'worktree_session_superseded') {
+          return undefined;
+        }
+        const replacement = typedBody['replacementSessionId'];
+        return typeof replacement === 'string' && replacement.length > 0
+          ? replacement
+          : undefined;
+      }
+    }
+    current = record['cause'];
+  }
+  return undefined;
+}
+
 export interface SessionRouterOptions {
   recoveryMode?: SessionRecoveryMode;
 }
@@ -501,7 +562,12 @@ export class SessionRouter {
     workspaceCwd: string,
     expectedCwd: string = workspaceCwd,
     isolation: ManagedSessionIsolation = 'shared',
-  ): Promise<{ loaded: boolean }> {
+    allowSupersededRedirect = true,
+  ): Promise<{
+    loaded: boolean;
+    sessionId: string;
+    redirectedFrom?: string;
+  }> {
     if (this.liveSessionIds.has(sessionId)) {
       const actualCwd = this.validateManagedSessionIdentity(
         this.bridge,
@@ -512,7 +578,7 @@ export class SessionRouter {
       );
       this.toTarget.set(sessionId, target);
       this.toCwd.set(sessionId, actualCwd);
-      return { loaded: false };
+      return { loaded: false, sessionId };
     }
 
     const loadWindow = this.beginSessionLoad();
@@ -558,11 +624,131 @@ export class SessionRouter {
       this.toTarget.set(sessionId, target);
       this.toCwd.set(sessionId, actualCwd);
       this.liveSessionIds.add(sessionId);
-      return { loaded: true };
+      return { loaded: true, sessionId };
     } catch (error) {
       if (loadedSessionId) {
         await bridge
           .discardSession?.(loadedSessionId, bindingToken)
+          .catch(() => undefined);
+        throw error;
+      }
+      // Superseded redirect: a worktree reset moved this session's checkout
+      // ownership to a replacement. Redirect the load once, then heal the
+      // route mappings so the stale id is never consulted again. A redirect
+      // chain (or a self-redirect) fails closed.
+      const replacementId = readSupersededReplacementId(error);
+      if (
+        allowSupersededRedirect &&
+        replacementId !== undefined &&
+        replacementId !== sessionId
+      ) {
+        const redirected = await this.loadManagedSession(
+          replacementId,
+          target,
+          workspaceCwd,
+          expectedCwd,
+          isolation,
+          false,
+        );
+        this.healSupersededRoute(sessionId, redirected.sessionId);
+        return {
+          loaded: redirected.loaded,
+          sessionId: redirected.sessionId,
+          redirectedFrom: sessionId,
+        };
+      }
+      throw error;
+    } finally {
+      this.endSessionLoad(loadWindow);
+    }
+  }
+
+  /**
+   * Remap every route that still points at a superseded session to its
+   * replacement, and drop the superseded id's bookkeeping. The manager's
+   * own task registry heals separately (it owns the task-name mapping).
+   */
+  private healSupersededRoute(
+    oldSessionId: string,
+    newSessionId: string,
+  ): void {
+    let changed = false;
+    for (const [key, mappedSessionId] of this.toSession) {
+      if (mappedSessionId !== oldSessionId) continue;
+      this.invalidateRouteOperation(key);
+      this.toSession.set(key, newSessionId);
+      changed = true;
+    }
+    changed = this.toTarget.delete(oldSessionId) || changed;
+    changed = this.toCwd.delete(oldSessionId) || changed;
+    this.liveSessionIds.delete(oldSessionId);
+    if (changed) this.persist();
+  }
+
+  /**
+   * Worktree reset: transfer the task session's checkout ownership to a
+   * fresh replacement session on the daemon, validate the replacement's
+   * attestation, and route it. The task registry itself is swapped by the
+   * named-session manager (it owns the task-name mapping); this call only
+   * wires the router's session bookkeeping.
+   *
+   * A failure past the daemon's marker flip rolls nothing back: the
+   * registry keeps pointing at the old id, and the next selection's load
+   * heals it through the superseded redirect.
+   */
+  async replaceManagedWorktreeSession(
+    sessionId: string,
+    target: SessionTarget,
+    workspaceCwd: string,
+    expectedCwd: string,
+  ): Promise<string> {
+    const bridge = this.bridge;
+    if (!bridge.resetWorktreeSession) {
+      throw new Error('Worktree reset is not supported by this bridge');
+    }
+    const loadWindow = this.beginSessionLoad();
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const bindingToken = {};
+    let replacementId: string | undefined;
+    try {
+      replacementId = await bridge.resetWorktreeSession(
+        sessionId,
+        workspaceCwd,
+        this.sessionOptions(target.channelName),
+        bindingToken,
+      );
+      if (
+        lifecycleGeneration !== this.lifecycleGeneration ||
+        bridge !== this.bridge
+      ) {
+        this.scheduleManagedDiscard(bridge, replacementId, bindingToken);
+        throw new Error('Managed session reset was invalidated');
+      }
+      if (typeof replacementId !== 'string' || replacementId.length === 0) {
+        throw new Error('Invalid session ID from bridge');
+      }
+      if (loadWindow.delete(replacementId)) {
+        await bridge.discardSession?.(replacementId, bindingToken);
+        throw new Error(
+          `Managed session ${replacementId} died before reset completed`,
+        );
+      }
+      const actualCwd = this.validateManagedSessionIdentity(
+        bridge,
+        replacementId,
+        workspaceCwd,
+        expectedCwd,
+        'worktree',
+      );
+      this.toTarget.set(replacementId, target);
+      this.toCwd.set(replacementId, actualCwd);
+      this.liveSessionIds.add(replacementId);
+      this.forgetManagedSession(sessionId);
+      return replacementId;
+    } catch (error) {
+      if (replacementId !== undefined) {
+        await bridge
+          .discardSession?.(replacementId, bindingToken)
           .catch(() => undefined);
       }
       throw error;

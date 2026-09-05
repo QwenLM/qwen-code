@@ -1530,6 +1530,37 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     worktree: { slug: string; path: string; branch: string },
   ): void;
 
+  /**
+   * Clear the in-memory worktree association of a live session. Used by the
+   * worktree-reset transfer after the marker moved to the replacement
+   * session, so the superseded session's runtime view matches the disk
+   * state. No-op when the session is not live or carries no worktree.
+   */
+  clearSessionWorktree?(sessionId: string): void;
+
+  /**
+   * Arm the worktree-reset prompt barrier for a session id: while armed,
+   * `sendPrompt` throws `SessionResetPendingError` synchronously at
+   * admission. Returns whether a live entry currently exists for the id — a
+   * dormant session counts as quiescent but is still fenced against
+   * re-admission. Optional so lightweight fakes may omit it.
+   */
+  setSessionResetPending?(sessionId: string): boolean;
+
+  /**
+   * Disarm the worktree-reset prompt barrier. Idempotent; the reset route
+   * calls it on every transfer outcome.
+   */
+  clearSessionResetPending?(sessionId: string): void;
+
+  /**
+   * Detach every client registered on a live session. The last detach runs
+   * the normal idle-close path (transcript and persisted record survive).
+   * No-op for unknown ids. Used by the worktree-reset transfer to sever the
+   * superseded session's residual attaches after the ownership flip.
+   */
+  severSessionClients?(sessionId: string): Promise<void>;
+
   /** Admit a restore question deferred by the daemon's integrity gate. */
   fireDeferredRestoreAskUserQuestionPrompt?(
     sessionId: string,

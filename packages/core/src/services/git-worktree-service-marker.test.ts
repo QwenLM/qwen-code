@@ -13,6 +13,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionMarkerStrict,
+  readWorktreeSessionMarkerStrictSync,
+  transferWorktreeSessionMarkerOwner,
   WORKTREE_SESSION_FILE,
 } from './gitWorktreeService.js';
 
@@ -40,7 +42,7 @@ describe('daemon worktree session markers', () => {
 
     await createWorktreeSessionMarkerExclusive(dir, 'session-123');
 
-    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
       state: 'valid',
       sessionId: 'session-123',
     });
@@ -153,10 +155,12 @@ describe('daemon worktree session markers', () => {
     await probe.close();
 
     try {
-      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
-        state: 'valid',
-        sessionId: 'owner',
-      });
+      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject(
+        {
+          state: 'valid',
+          sessionId: 'owner',
+        },
+      );
       expect(readFileSpy).not.toHaveBeenCalled();
       expect(readSpy).toHaveBeenCalledWith(expect.any(Buffer), 0, 513, 0);
     } finally {
@@ -191,10 +195,12 @@ describe('daemon worktree session markers', () => {
       .mockImplementation(shortRead as typeof prototype.read);
 
     try {
-      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
-        state: 'valid',
-        sessionId: 'session-owner',
-      });
+      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject(
+        {
+          state: 'valid',
+          sessionId: 'session-owner',
+        },
+      );
       expect(readSpy.mock.calls.length).toBeGreaterThan(1);
     } finally {
       readSpy.mockRestore();
@@ -263,5 +269,214 @@ describe('daemon worktree session markers', () => {
     } finally {
       writeSpy.mockRestore();
     }
+  });
+});
+
+describe('readWorktreeSessionMarkerStrictSync', () => {
+  const tempDirs: string[] = [];
+
+  async function tempDir(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-marker-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs
+        .splice(0)
+        .map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  it('matches the async reader on missing, valid, and invalid markers', async () => {
+    const dir = await tempDir();
+    expect(readWorktreeSessionMarkerStrictSync(dir)).toEqual({
+      state: 'missing',
+    });
+
+    await createWorktreeSessionMarkerExclusive(dir, 'session-123');
+    const syncResult = readWorktreeSessionMarkerStrictSync(dir);
+    expect(syncResult).toMatchObject({
+      state: 'valid',
+      sessionId: 'session-123',
+    });
+    const asyncResult = await readWorktreeSessionMarkerStrict(dir);
+    expect(syncResult).toEqual(asyncResult);
+
+    const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
+    await fs.unlink(markerPath);
+    const targetPath = path.join(dir, 'target');
+    await fs.writeFile(targetPath, 'keep');
+    await fs.symlink(targetPath, markerPath);
+    expect(readWorktreeSessionMarkerStrictSync(dir)).toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.unlink(markerPath);
+    await fs.writeFile(markerPath, ' padded\n');
+    expect(readWorktreeSessionMarkerStrictSync(dir)).toMatchObject({
+      state: 'invalid',
+      reason: 'invalid marker owner',
+    });
+  });
+});
+
+describe('transferWorktreeSessionMarkerOwner', () => {
+  const tempDirs: string[] = [];
+
+  async function tempDir(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-marker-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs
+        .splice(0)
+        .map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  it('moves an owned marker to the replacement owner', async () => {
+    const dir = await tempDir();
+    await createWorktreeSessionMarkerExclusive(dir, 'session-old');
+
+    await transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new');
+
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: 'session-new',
+    });
+    // No transfer temp file lingers next to the marker.
+    const siblings = await fs.readdir(dir);
+    expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('recreates a missing marker exclusively through the hatch', async () => {
+    const dir = await tempDir();
+
+    await transferWorktreeSessionMarkerOwner(dir, null, 'session-new');
+
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: 'session-new',
+    });
+  });
+
+  it('refuses the hatch when a marker already exists', async () => {
+    const dir = await tempDir();
+    await createWorktreeSessionMarkerExclusive(dir, 'session-old');
+
+    await expect(
+      transferWorktreeSessionMarkerOwner(dir, null, 'session-new'),
+    ).rejects.toBeDefined();
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: 'session-old',
+    });
+  });
+
+  it('aborts when the opening read does not name the expected owner', async () => {
+    const dir = await tempDir();
+    await createWorktreeSessionMarkerExclusive(dir, 'session-other');
+
+    await expect(
+      transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
+    ).rejects.toThrow('does not match');
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: 'session-other',
+    });
+  });
+
+  it('aborts when the marker expected by the transfer is missing', async () => {
+    const dir = await tempDir();
+
+    await expect(
+      transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
+    ).rejects.toThrow('does not match');
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
+      state: 'missing',
+    });
+  });
+
+  it('aborts on an invalid marker without touching it', async () => {
+    const dir = await tempDir();
+    await fs.writeFile(path.join(dir, WORKTREE_SESSION_FILE), ' padded\n');
+
+    await expect(
+      transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
+    ).rejects.toThrow('Worktree marker is invalid');
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
+
+  it('requires the new owner to differ from the expected owner', async () => {
+    const dir = await tempDir();
+    await createWorktreeSessionMarkerExclusive(dir, 'session-old');
+
+    await expect(
+      transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-old'),
+    ).rejects.toThrow('distinct new owner');
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: 'session-old',
+    });
+  });
+
+  it('leaves the marker excluded from git after a transfer', async () => {
+    const dir = await tempDir();
+    const repo = path.join(dir, 'repo');
+    const worktree = path.join(dir, 'worktree');
+    await fs.mkdir(repo);
+    await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: repo,
+    });
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+    await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+      cwd: repo,
+    });
+    await fs.writeFile(path.join(repo, 'tracked.txt'), 'tracked');
+    await execFileAsync('git', ['add', '.'], { cwd: repo });
+    await execFileAsync(
+      'git',
+      ['commit', '-q', '-m', 'initial', '--no-verify'],
+      {
+        cwd: repo,
+      },
+    );
+    await execFileAsync(
+      'git',
+      ['worktree', 'add', '-q', '-b', 'task', worktree],
+      {
+        cwd: repo,
+      },
+    );
+    await createWorktreeSessionMarkerExclusive(worktree, 'session-old');
+
+    await transferWorktreeSessionMarkerOwner(
+      worktree,
+      'session-old',
+      'session-new',
+    );
+
+    const exclude = await fs.readFile(
+      path.join(repo, '.git', 'info', 'exclude'),
+      'utf8',
+    );
+    const rules = exclude.split(/\r?\n/);
+    expect(rules).toContain(WORKTREE_SESSION_FILE);
+    expect(rules).toContain(`${WORKTREE_SESSION_FILE}.*.tmp`);
+    await execFileAsync('git', ['add', '-A'], { cwd: worktree });
+    const { stdout } = await execFileAsync(
+      'git',
+      ['diff', '--cached', '--name-only'],
+      { cwd: worktree },
+    );
+    expect(stdout).toBe('');
   });
 });
