@@ -88,13 +88,23 @@ Document export runtime is <N> bytes
 Then measure the generated templates (the actual `/export html` file is the template
 plus a small data envelope):
 
+> **Changed by #9812 (merged 2026-09-05).** The renderer is no longer inlined into
+> `document.html`. That file is now a small template that loads a version-pinned,
+> SRI-protected `export-transcript-document.js` from unpkg, and the legacy
+> `index.html` renderer is gone. **Measure the asset, not the template** — it is the
+> download every reader of an exported file now pays before the transcript renders.
+
 ```bash
-wc -c src/export-html/dist/document.html            # the document renderer template
-gzip -9 -c src/export-html/dist/document.html | wc -c
-wc -c src/export-html/dist/index.html               # legacy renderer, control
+wc -c src/export-html/dist/export-transcript-document.js   # the renderer asset — the number that matters
+gzip -9 -c src/export-html/dist/export-transcript-document.js | wc -c
+wc -c src/export-html/dist/document.html                   # template only; now small
 ```
 
 **Record all of these.** Known reference points, all from the PR author's machine:
+
+All rows below were taken **before #9812**, when the runtime was still inlined, so
+`document.html` raw ≈ the runtime. Compare them against the new
+`export-transcript-document.js` asset, not against the new `document.html`.
 
 | Revision                      | `document.html` raw |      gzip | inline runtime |
 | ----------------------------- | ------------------: | --------: | -------------: |
