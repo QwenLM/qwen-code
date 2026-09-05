@@ -590,6 +590,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         }
       }
 
+      signal.throwIfAborted();
+
       // Create parent directories AFTER the pre-write enforcement
       // check passes. Doing it before would leak intermediate
       // directories on the failure path — a real (if minor) FS
@@ -724,6 +726,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         returnDisplay: displayResult,
       };
     } catch (error) {
+      if (signal.aborted) {
+        throw error;
+      }
       const errorMsg = getErrorMessage(error);
       return {
         llmContent: `Error executing edit: ${errorMsg}`,

@@ -765,6 +765,41 @@ describe('WriteFileTool', () => {
       expect(writtenContent).toBe(proposedContent);
     });
 
+    it('rejects without creating a file when aborted during trackEdit', async () => {
+      const filePath = path.join(
+        rootDir,
+        'abort-during-track-edit',
+        'new-file.txt',
+      );
+      const abortController = new AbortController();
+      const abortError = new Error('Abort requested during trackEdit');
+      let releaseTrackEdit!: () => void;
+      let signalTrackEditStarted!: () => void;
+      const trackEditStarted = new Promise<void>((resolve) => {
+        signalTrackEditStarted = resolve;
+      });
+
+      mockFileHistoryService.trackEdit.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseTrackEdit = resolve;
+            signalTrackEditStarted();
+          }),
+      );
+
+      const execution = tool
+        .build({ file_path: filePath, content: 'new content' })
+        .execute(abortController.signal);
+
+      await trackEditStarted;
+      abortController.abort(abortError);
+      releaseTrackEdit();
+
+      await expect(execution).rejects.toBe(abortError);
+      expect(fs.existsSync(filePath)).toBe(false);
+      expect(fs.existsSync(path.dirname(filePath))).toBe(false);
+    });
+
     // Pin the upstream-aligned ordering: trackEdit MUST run before the
     // pre-write checkPriorRead. The upstream `claude-code/src/tools/
     // FileEditTool` comment on the equivalent block says:
