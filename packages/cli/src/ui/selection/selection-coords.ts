@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ReadonlyFrame } from 'ink';
 import { frameAnchor } from '../utils/list-mouse.js';
 import type { Point } from './selection-state.js';
 
@@ -31,6 +32,27 @@ export function terminalToGrid(
 ): Point {
   const anchor = frameAnchor(terminalHeight, frameHeight);
   return { x: col - 1, y: row - 1 - anchor };
+}
+
+/**
+ * Snap a grid point off the trailing spacer half of a wide (2-column)
+ * character onto its leading fullWidth cell. The frame stores wide characters
+ * as `value` in the first cell and an empty spacer in the second, so a click
+ * on the right half must resolve to the left cell for any per-cell lookup.
+ */
+export function snapWideChar(
+  frame: ReadonlyFrame | null | undefined,
+  point: Point,
+): Point {
+  const row = frame?.cells[point.y];
+  if (
+    point.x > 0 &&
+    row?.[point.x]?.value === '' &&
+    row[point.x - 1]?.fullWidth
+  ) {
+    return { ...point, x: point.x - 1 };
+  }
+  return point;
 }
 
 /** Whether a grid point falls inside the history viewport region. */

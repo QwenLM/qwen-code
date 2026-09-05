@@ -581,6 +581,29 @@ class FakeBridge {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
+  async getSessionAgentsStatus(sessionId: string) {
+    return { sessionId, tasks: [] };
+  }
+  async getSessionAgentTrace(sessionId: string, rootAgentId?: string) {
+    return {
+      v: 1 as const,
+      sessionId,
+      nodes: [],
+      rootAgentIds: rootAgentId ? [rootAgentId] : [],
+      warnings: [],
+    };
+  }
+  async listSessionAttachments() {
+    return [
+      {
+        type: 'resource' as const,
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ];
+  }
+
   lastCancelledTask:
     | {
         sessionId: string;
@@ -614,6 +637,28 @@ class FakeBridge {
   ) {
     this.lastWorkflowAction = { sessionId, taskId, action, context };
     return { changed: true, status: 'running' as const };
+  }
+  lastSavedWorkflowRead: { sessionId: string; name: string } | undefined;
+  async getSessionSavedWorkflow(sessionId: string, name: string) {
+    this.lastSavedWorkflowRead = { sessionId, name };
+    return {
+      v: 1 as const,
+      sessionId,
+      name,
+      workflow:
+        name === 'deep-review'
+          ? {
+              v: 1 as const,
+              sessionId,
+              name,
+              source: 'project' as const,
+              scriptPath: `${TEST_WORKSPACE}/.qwen/workflows/deep-review.js`,
+              script:
+                "export const meta = { name: 'deep-review', description: 'd' }",
+              meta: { name: 'deep-review', description: 'd' },
+            }
+          : null,
+    };
   }
   async getSessionLspStatus(sessionId: string) {
     return {
@@ -8868,6 +8913,81 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastWorkflowAction).toBeUndefined();
     });
 
+    it('_qwen/session/agents returns agents', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/agents',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('_qwen/session/agent_trace returns persisted lineage', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/agent_trace',
+        params: { sessionId: 'sess-1', rootAgentId: 'root-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          sessionId: 'sess-1',
+          rootAgentIds: ['root-1'],
+          nodes: [],
+        },
+      });
+    });
+
+    it('_qwen/session/attachments returns attachments', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/attachments',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          attachments: [{ attachmentId: 'notes.txt', size: 5 }],
+        },
+      });
+    });
+
     it('_qwen/session/lsp returns status', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -8895,6 +9015,67 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           servers: [{ name: 'typescript', status: 'READY' }],
         },
       });
+    });
+
+    it('_qwen/session/saved_workflow returns the definition envelope', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 63,
+        method: '_qwen/session/saved_workflow',
+        params: { sessionId: 'sess-1', name: 'deep-review' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        id: 63,
+        result: {
+          sessionId: 'sess-1',
+          name: 'deep-review',
+          workflow: {
+            source: 'project',
+            meta: { name: 'deep-review', description: 'd' },
+          },
+        },
+      });
+      expect(bridge.lastSavedWorkflowRead).toEqual({
+        sessionId: 'sess-1',
+        name: 'deep-review',
+      });
+    });
+
+    it('_qwen/session/saved_workflow fails closed for an untrusted workspace', async () => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 64,
+        method: '_qwen/session/saved_workflow',
+        params: { sessionId: 'sess-1', name: 'deep-review' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        id: 64,
+        result: { sessionId: 'sess-1', name: 'deep-review', workflow: null },
+      });
+      expect(bridge.lastSavedWorkflowRead).toBeUndefined();
     });
 
     it('_qwen/session/artifacts returns the session artifact snapshot', async () => {
@@ -12158,6 +12339,38 @@ describe('ACP WebSocket transport security', () => {
 
     expect(res).toMatchObject({ id: 2, result: { v: 1 } });
     expect(tiers).toEqual(['read']);
+    ws.close();
+  });
+
+  it('classifies session definition reads as WS read methods', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/session/attachments',
+      params: { sessionId: 'session-1' },
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/session/saved_workflow',
+      params: { sessionId: 'missing-session', name: 'deep-review' },
+    });
+
+    expect(tiers).toEqual(['read', 'read']);
     ws.close();
   });
 

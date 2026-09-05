@@ -138,6 +138,32 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+export function stripGeneratedAttachmentTokens(
+  displayText: string,
+  systemPayload: unknown,
+): string {
+  const payload = isObjectRecord(systemPayload) ? systemPayload : undefined;
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
+}
+
 export function wrapUserPromptSubmitContext(context: string): string {
   return `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n${context}\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
 }

@@ -117,6 +117,9 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected getResponseSourceLabel(_sessionId: string): undefined {
         return undefined;
       }
+      protected configuredMessagePrefix(): string | undefined {
+        return this.config['messagePrefix'] as string | undefined;
+      }
       protected formatMarkdownAttributedText(
         text: string,
         sourceLabel?: string,
@@ -144,6 +147,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     sanitizeSenderName: real.sanitizeSenderName,
     sanitizePromptText: real.sanitizePromptText,
     sanitizeLogText: real.sanitizeLogText,
+    stripMessagePrefix: real.stripMessagePrefix,
     truncateCodePoints: real.truncateCodePoints,
   };
 });
@@ -309,7 +313,7 @@ describe('session persistence paths', () => {
 //   newlines, Unicode line separators, and BiDi overrides. The tests below
 //   validate each threat class individually.
 describe('group sender-name sanitization', () => {
-  function makeChannel() {
+  function makeChannel(messagePrefix?: string) {
     return new QQChannel(
       'qq-bot',
       {
@@ -324,6 +328,7 @@ describe('group sender-name sanitization', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        ...(messagePrefix ? { messagePrefix } : {}),
       },
       {} as unknown as ChannelAgentBridge,
     );
@@ -419,6 +424,234 @@ describe('group sender-name sanitization', () => {
     // when finalIsAtBot is forced — text becomes the clean slash command.
     expect(env.text).toBe('/clear');
     expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps another member mention display-only for an unprefixed group slash command', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-slash-other-mention',
+      group_openid: 'grp-1',
+      content: '<@OPENID_OTHER> /clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toBe('/clear');
+    expect(env.displayText).toBe('<@OPENID_OTHER> /clear');
+  });
+
+  it('keeps a sanitizer-shaped group command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-sanitized-command-group',
+      group_openid: 'grp-1',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('keeps a sanitizer-shaped C2C command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+
+    (ch as unknown as { handleC2C: (event: unknown) => void }).handleC2C({
+      id: 'evt-sanitized-command-c2c',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'user-openid' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('recognizes a slash command after the configured message prefix', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('review:');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-prefixed-slash',
+      group_openid: 'grp-1',
+      content: 'review: /help',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as {
+      text: string;
+      alreadyPrefixed?: boolean;
+    };
+    expect(env.text).toBe('review: /help');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps a tag-shaped group prefix authoritative across prompt sanitization', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('[review]');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-tag-prefix-group',
+      group_openid: 'grp-1',
+      content: '[review] hello',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.displayText).toBe('review hello');
+    expect(env.messagePrefixText).toBe('[review] hello');
+    expect(env.text).toMatch(/: review hello$/);
+  });
+
+  it('keeps a tag-shaped C2C prefix authoritative across prompt sanitization', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('[review]');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+
+    (ch as unknown as { handleC2C: (event: unknown) => void }).handleC2C({
+      id: 'evt-tag-prefix-c2c',
+      content: '[review] hello',
+      author: { username: 'Alice', id: 'uid', user_openid: 'user-openid' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.displayText).toBe('review hello');
+    expect(env.messagePrefixText).toBe('[review] hello');
+    expect(env.text).toMatch(/: review hello$/);
+  });
+
+  it('does not accept a group prefix manufactured by prompt sanitization', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('review');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-sanitized-prefix-group',
+      group_openid: 'grp-1',
+      content: '[r]eview hello',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.displayText).toBe('review hello');
+    expect(env.messagePrefixText).toBe('[r]eview hello');
+  });
+
+  it('does not restore another member mention in a prefixed group slash command', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('!ai');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-prefixed-compact',
+      group_openid: 'grp-1',
+      content: '!ai /compact <@OPENID_OTHER>',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toBe('!ai /compact');
+    expect(env.displayText).toBe('!ai /compact');
+    expect(env.messagePrefixText).toBe('!ai /compact');
+    expect(env.text).not.toContain('OPENID_OTHER');
+  });
+
+  it('audits the command that ran, not the configured prefix', () => {
+    // The audit log exists to identify which command reset a session. With
+    // a prefix configured every command shares the same leading token, so
+    // the log has to read the payload after the prefix.
+    vi.useFakeTimers();
+    const ch = makeChannel('/review');
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-prefixed-audit',
+      group_openid: 'grp-1',
+      content: '/review /clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      mentions: [{ is_you: true, member_openid: 'bot-openid' }],
+    });
+
+    spy.mockRestore();
+
+    const audit = writes.find((w) => w.includes('Slash cmd from'));
+    expect(audit).toBeDefined();
+    expect(audit).toContain('/clear');
+    expect(audit).not.toContain('/review');
+    expect(audit!.split('\n')).toHaveLength(2);
+  });
+
+  it('does not audit a slash command rejected by the configured prefix', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('/review');
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-unprefixed-audit',
+      group_openid: 'grp-1',
+      content: '/clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      mentions: [{ is_you: true, member_openid: 'bot-openid' }],
+    });
+
+    spy.mockRestore();
+
+    expect(writes.some((write) => write.includes('Slash cmd from'))).toBe(
+      false,
+    );
   });
 
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {

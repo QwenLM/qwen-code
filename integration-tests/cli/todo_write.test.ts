@@ -4,17 +4,103 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
+  runForcedToolCallScenario,
   TestRig,
   printDebugInfo,
   validateModelOutput,
 } from '../test-helper.js';
+import { fakeToolCall } from '../fake-openai-server.js';
+
+async function runForcedTodoCall(rig: TestRig) {
+  return runForcedToolCallScenario({
+    rig,
+    toolCall: fakeToolCall('todo_write', {
+      todos: [{ id: '1', content: 'Verify Todo', status: 'pending' }],
+    }),
+    prompt: 'Complete the requested action.',
+    finalResponse: 'done',
+  });
+}
+
+function inspectTodoRequests(requests: Array<Record<string, unknown>>) {
+  const initialRequest = requests[0];
+  const tools = (initialRequest?.['tools'] ?? []) as Array<{
+    function?: { name?: string };
+  }>;
+  const systemMessage = (
+    (initialRequest?.['messages'] ?? []) as Array<{
+      role?: string;
+      content?: unknown;
+    }>
+  ).find(({ role }) => role === 'system');
+  const toolResult = requests
+    .flatMap(
+      (request) =>
+        ((request?.['messages'] ?? []) as Array<{
+          role?: string;
+          content?: unknown;
+        }>) ?? [],
+    )
+    .filter(({ role }) => role === 'tool')
+    .map(({ content }) => JSON.stringify(content))
+    .join('\n');
+  return {
+    tools,
+    baseSystemPrompt: String(systemMessage?.content).split('\n\n---\n\n', 1)[0],
+    toolResultRequest: JSON.stringify(requests[1]),
+    toolResult,
+  };
+}
 
 describe('todo_write', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('should not declare todo_write by default', async () => {
+    const rig = new TestRig();
+    await rig.setup('should not declare todo_write by default');
+
+    const requests = await runForcedTodoCall(rig);
+    const { tools, baseSystemPrompt, toolResultRequest } =
+      inspectTodoRequests(requests);
+    const toolDescriptionsWithTodo = tools
+      .filter((tool) => JSON.stringify(tool).includes('todo_write'))
+      .map((tool) => tool.function?.name);
+
+    expect(tools.map((tool) => tool.function?.name)).not.toContain(
+      'todo_write',
+    );
+    expect(baseSystemPrompt).not.toContain('todo_write');
+    expect(toolDescriptionsWithTodo).toEqual([]);
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(toolResultRequest).toContain('disabled by default');
+    expect(toolResultRequest).toContain('tools.todoWrite.enabled');
+  });
+
+  it('should declare and execute todo_write when enabled', async () => {
+    const rig = new TestRig();
+    await rig.setup('should declare and execute todo_write when enabled', {
+      settings: { tools: { todoWrite: { enabled: true } } },
+    });
+
+    const requests = await runForcedTodoCall(rig);
+    const { tools, baseSystemPrompt, toolResult } =
+      inspectTodoRequests(requests);
+
+    expect(tools.map((tool) => tool.function?.name)).toContain('todo_write');
+    expect(baseSystemPrompt).toContain('# Task Management');
+    expect(toolResult).toContain('Verify Todo');
+    expect(toolResult).not.toContain('disabled by default');
+  });
+
   it('should be able to create and manage a todo list', async () => {
     const rig = new TestRig();
-    await rig.setup('should be able to create and manage a todo list');
+    await rig.setup('should be able to create and manage a todo list', {
+      settings: { tools: { todoWrite: { enabled: true } } },
+    });
 
     const prompt = `Please create a todo list with these three simple tasks:
 1. Buy milk

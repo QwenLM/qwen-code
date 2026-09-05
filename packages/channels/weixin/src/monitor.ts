@@ -50,6 +50,11 @@ export interface ParsedMessage {
   file?: FileCdnRef;
   /** Text of the referenced (replied-to) message. */
   refText?: string;
+  /**
+   * `text` is the placeholder this module synthesized for a caption-less
+   * image or file, not something the user typed.
+   */
+  syntheticText?: true;
 }
 
 export type OnMessageCallback = (msg: ParsedMessage) => Promise<void>;
@@ -197,6 +202,7 @@ async function processMessage(
     fromUserId,
     messageId: String(msg.message_id || ''),
     text: textContent || (file ? `(file: ${file.fileName})` : '(image)'),
+    ...(textContent ? {} : { syntheticText: true as const }),
     image,
     file,
     refText,

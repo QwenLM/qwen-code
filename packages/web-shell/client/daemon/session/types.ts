@@ -23,6 +23,7 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
+  DaemonSessionSavedWorkflowDetail,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
   DaemonRewindResult,
@@ -258,6 +259,7 @@ export type DaemonNoticeOperation =
   | 'cancel_task'
   | 'control_workflow'
   | 'run_saved_workflow'
+  | 'read_saved_workflow'
   | 'load_goal'
   | 'control_goal'
   | 'clear_goal'
@@ -519,6 +521,8 @@ export interface DaemonSessionActions {
     opts?: { signal?: AbortSignal; sessionId?: string },
   ): Promise<DaemonSessionAttachmentReference>;
   readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  /** List every attachment currently stored for the session, upload order. */
+  listAttachments(): Promise<DaemonSessionAttachmentReference[]>;
   removeAttachment(
     attachmentId: string,
     opts?: { sessionId?: string },
@@ -583,6 +587,13 @@ export interface DaemonSessionActions {
     status?: DaemonSessionWorkflowTaskStatus['status'];
     taskId?: string;
   }>;
+  /**
+   * Read one saved workflow definition (script + parsed meta). Resolves to
+   * null when the name is unknown or Workflow controls are unavailable.
+   */
+  readSavedWorkflow(
+    name: string,
+  ): Promise<DaemonSessionSavedWorkflowDetail | null>;
   getGoal(): Promise<GoalStateResponse>;
   controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
   /**

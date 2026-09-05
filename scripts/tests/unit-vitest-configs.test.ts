@@ -29,7 +29,6 @@ import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
-import webuiConfig from '../../packages/webui/vite.config.js';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 import scriptsTestsConfig from './vitest.config.js';
 
@@ -84,14 +83,6 @@ describe('unhandled-error exemption on the platform lanes', () => {
       );
     });
   }
-
-  it('keeps unhandled errors fatal only on Linux in packages/webui', async () => {
-    // webui's vitest configuration is the function-form vite.config.ts.
-    const config = await webuiConfig({ command: 'serve', mode: 'test' });
-    expect(config.test?.dangerouslyIgnoreUnhandledErrors).toBe(
-      process.platform !== 'linux',
-    );
-  });
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same
@@ -195,24 +186,6 @@ describe('shared-pool test timeout', () => {
     });
   }
 
-  it('raises the ceiling on the shared pool in packages/webui', async () => {
-    // webui's vitest configuration is the function-form vite.config.ts.
-    for (const runnerName of POOL_RUNNER_NAMES) {
-      vi.stubEnv('RUNNER_NAME', runnerName);
-      vi.resetModules();
-      try {
-        const mod = await import('../../packages/webui/vite.config.js');
-        const config = await mod.default({ command: 'serve', mode: 'test' });
-        expect(
-          config.test?.testTimeout,
-          `packages/webui (${runnerName})`,
-        ).toBeGreaterThanOrEqual(POOL_FLOOR_MS);
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    }
-  });
-
   // The gated ternaries: off the pool these must fall back to vitest's own
   // default, so a hang on a developer machine still fails in 5s. One list,
   // iterated by both off-pool arms below — a newly gated workspace gets
@@ -256,10 +229,6 @@ describe('shared-pool test timeout', () => {
       const mod = await configModules[name]!();
       expect(mod.default.test?.testTimeout, name).toBe(ms);
     }
-    // webui's vitest configuration is the function-form vite.config.ts.
-    const webui = await import('../../packages/webui/vite.config.js');
-    const config = await webui.default({ command: 'serve', mode: 'test' });
-    expect(config.test?.testTimeout, 'packages/webui').toBeUndefined();
   }
 
   it('leaves the off-pool default alone', async () => {
@@ -348,7 +317,7 @@ describe('shared-pool test timeout', () => {
       .map((packageJsonPath) =>
         packageJsonPath.slice(0, -'/package.json'.length),
       )
-      .filter((name) => !(name in configModules) && name !== 'packages/webui');
+      .filter((name) => !(name in configModules));
     expect(
       missing,
       'runs test:ci but has no entry in configModules above',

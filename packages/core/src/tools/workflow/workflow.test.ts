@@ -696,14 +696,18 @@ await agent('scan package.json')
     const result = await new WorkflowTool(config, {
       dispatch: async () => 'unused',
     })
-      .buildSessionOwnedBackground({
-        script: `phase('Inspect'); return { status: 'ready' };`,
-      })
+      .buildSessionOwnedBackground(
+        {
+          script: `phase('Inspect'); return { status: 'ready' };`,
+        },
+        'review-and-fix',
+      )
       .execute(new AbortController().signal);
 
     expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
     const run = registry.get(result.workflowRunId!);
     expect(run?.isBackgrounded).toBe(true);
+    expect(run?.workflowName).toBe('review-and-fix');
     await vi.waitFor(() =>
       expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
     );
@@ -980,6 +984,7 @@ await agent('scan package.json')
       const entries = registry.list();
       expect(entries).toHaveLength(1);
       expect(entries[0].scriptPath).toBe(scriptPath);
+      expect(entries[0].workflowName).toBe('greet');
     } finally {
       await fs.rm(projectDir, { recursive: true, force: true });
     }
@@ -1093,6 +1098,9 @@ await agent('scan package.json')
     expect(result.error).toBeDefined();
     expect(result.error!.message).toContain('scripted failure');
     expect(JSON.stringify(result.llmContent)).toContain('Workflow failed');
+    expect(String(result.returnDisplay)).toMatch(
+      /"runId"\s*:\s*"wf_[0-9a-f]+"/,
+    );
     // T4 (PR #4732 R1): assert the machine-readable error type so a
     // refactor removing the field doesn't go uncaught.
     expect(result.error!.type).toBe('execution_failed');
