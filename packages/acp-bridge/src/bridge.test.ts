@@ -145,6 +145,9 @@ import {
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  ACTIVE_WORK_CLOSE_RETRY_BASE_MS,
+  ACTIVE_WORK_CLOSE_RETRY_CEILING_MS,
+  activeWorkCloseRetryDelayMs,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
 
@@ -173,6 +176,37 @@ describe('sessionCloseDrainBudgetMs', () => {
     for (const outer of [2, 3, 7, 100, 1_000, 30_000]) {
       expect(sessionCloseDrainBudgetMs(outer)).toBeGreaterThanOrEqual(1);
       expect(sessionCloseDrainBudgetMs(outer)).toBeLessThan(outer);
+    }
+  });
+});
+
+describe('activeWorkCloseRetryDelayMs', () => {
+  it('keeps the first retry immediate, then backs off to a ceiling', () => {
+    // Literal pin: one unanswered probe must stay immediately retryable,
+    // because that single deferral is the documented recovery for a lost
+    // close response — `recovers a lost close response once nothing local
+    // holds the session` depends on the retry running on the very next
+    // snapshot. A grace of 0 would break that recovery.
+    expect(activeWorkCloseRetryDelayMs(0)).toBeNull();
+    expect(activeWorkCloseRetryDelayMs(1)).toBeNull();
+    expect(activeWorkCloseRetryDelayMs(2)).toBe(
+      ACTIVE_WORK_CLOSE_RETRY_BASE_MS,
+    );
+    expect(activeWorkCloseRetryDelayMs(3)).toBe(
+      ACTIVE_WORK_CLOSE_RETRY_BASE_MS * 2,
+    );
+    // Geometric growth must saturate at the ceiling, not overflow past it.
+    for (const failures of [12, 40, 1_000]) {
+      expect(activeWorkCloseRetryDelayMs(failures)).toBe(
+        ACTIVE_WORK_CLOSE_RETRY_CEILING_MS,
+      );
+    }
+    // A longer run of failures never shortens the deferral.
+    let previous = 0;
+    for (let failures = 0; failures <= 30; failures++) {
+      const delay = activeWorkCloseRetryDelayMs(failures) ?? 0;
+      expect(delay).toBeGreaterThanOrEqual(previous);
+      previous = delay;
     }
   });
 });
@@ -841,6 +875,166 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(1);
       // The refusal's hold set is adopted, so the daemon now agrees it is busy.
       expect(bridge.activeWork).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('logs the child error detail when a conditional close fails', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          // Mirrors the child's drain deadline: a bare Error, which the ACP
+          // SDK turns into a JSON-RPC `-32603` carrying the text in
+          // `data.details` — a plain object on this side, not an Error.
+          throw new Error('Session close timed out after 8000ms');
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await bridge.detachClient(session.sessionId, session.clientId);
+
+        await vi.waitFor(() => {
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'did not resolve (Session close timed out after 8000ms)',
+            ),
+          );
+        });
+        // A non-answer still never authorizes teardown.
+        expect(bridge.sessionCount).toBe(1);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+
+      await bridge.shutdown();
+    });
+
+    it('defers further probes after a run of unanswered conditional closes', async () => {
+      let closeAttempts = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          closeAttempts++;
+          throw new Error('Session close timed out after 8000ms');
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await bridge.detachClient(session.sessionId, session.clientId);
+        // The detach probes once; the next snapshot probes again, because one
+        // deferral is the documented recovery for a lost close response.
+        await sendActiveWorkSnapshot(handle, 2, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        // Wait on the daemon's own log rather than `closeAttempts`: the counter
+        // moves when the child is asked, while the backoff is armed only once
+        // the failure has been recorded on this side.
+        await vi.waitFor(() => {
+          const failures = stderrSpy.mock.calls.filter((call) =>
+            String(call[0]).includes('did not resolve'),
+          ).length;
+          expect(failures).toBe(2);
+        });
+        expect(closeAttempts).toBe(2);
+
+        for (const seq of [3, 4, 5]) {
+          await sendActiveWorkSnapshot(handle, seq, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+        }
+        // The deferral is far longer than this settle window, so reaching the
+        // child again here would mean the backoff is not applied at all.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(closeAttempts).toBe(2);
+        expect(bridge.sessionCount).toBe(1);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+
+      await bridge.shutdown();
+    });
+
+    it('probes again at once once the child reports held work', async () => {
+      let closeAttempts = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          closeAttempts++;
+          throw new Error('Session close timed out after 8000ms');
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await bridge.detachClient(session.sessionId, session.clientId);
+        await sendActiveWorkSnapshot(handle, 2, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await vi.waitFor(() => {
+          const failures = stderrSpy.mock.calls.filter((call) =>
+            String(call[0]).includes('did not resolve'),
+          ).length;
+          expect(failures).toBe(2);
+        });
+
+        // A report of held work is an answer, so the run of failures is over.
+        await sendActiveWorkSnapshot(handle, 3, [
+          { sessionId: session.sessionId, holds: [agentHold('a1')] },
+        ]);
+        expect(bridge.activeWork).toBe(true);
+
+        // Going idle again must probe on the very next snapshot rather than
+        // waiting out a deferral earned against a different state of the
+        // world — a transient wedge is never stranded.
+        await sendActiveWorkSnapshot(handle, 4, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await vi.waitFor(() => expect(closeAttempts).toBe(3));
+        expect(bridge.sessionCount).toBe(1);
+      } finally {
+        stderrSpy.mockRestore();
+      }
 
       await bridge.shutdown();
     });
