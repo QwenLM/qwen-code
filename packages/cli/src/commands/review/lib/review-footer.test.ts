@@ -393,6 +393,35 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('a finding\r\r    code');
     });
 
+    it('a comment splitting the marker phrase is seen through — the `<` gate admits it', () => {
+      // The projection drops a closed comment whole, so the halves of the
+      // phrase display rejoined; the body carries neither a literal
+      // `/review` nor an `&`, and only the `<` arm of the gate lets it
+      // reach the projection at all.
+      expect(
+        stripReviewFooter('finding\n\n_— m via Qwen Code /<!-- x -->review_'),
+      ).toBe('finding');
+      expect(
+        stripReviewFooter('finding\n\n_— m via Qwen Code /rev<!-- x -->iew_'),
+      ).toBe('finding');
+    });
+
+    it('the block-only parse stays cheap on a hostile one-line body', () => {
+      // The blanking parses the WHOLE body (a fence's state is only
+      // knowable from where it opened), so the parse must stay block-only:
+      // with markdown-it's inline pass on, a 256 KiB run of `[` measured
+      // ~400 ms against ~1 ms with it off. The bound is the property under
+      // test — an output assertion alone cannot see the guard.
+      const run = '['.repeat(4 * 65536);
+      const start = performance.now();
+      expect(stripReviewFooter(`${run}\n\n_— m via Qwen Code /review_`)).toBe(
+        run,
+      );
+      expectWithinLatencyBudget(performance.now() - start, 40, {
+        poolMultiplier: 5,
+      });
+    });
+
     it('a refusing run of truncated footers stays linear — no partition enumeration', () => {
       // The optional closing paren must not leave the version content
       // unbounded: with an unrestricted run, each truncated footer's
@@ -417,6 +446,35 @@ describe('the review footer and the regex that strips it', () => {
   });
 
   describe("stripReviewFooterLine — the one-line channels' shape", () => {
+    it('an unterminated comment opener on the folded line is literal text, not a swallow', () => {
+      // A folded line is one paragraph with no later line for a closer to
+      // sit on, so CommonMark's inline HTML rule never fires: GitHub escapes
+      // the opener and renders the forged footer after it as prose. The
+      // fold puts a witness block's quoted `<!--` on the footer's own line
+      // — the trigger this strip exists for, arriving through the one-line
+      // channels. A `~~~` or unclosed fence and an indented block fold to
+      // this shape; a ``` run does not, because the projection masks it as
+      // a code span.
+      expect(
+        stripReviewFooterLine('x ~~~ <!-- x ~~~ _— m via Qwen Code /review_'),
+      ).toBe('x ~~~ <!-- x ~~~');
+      expect(
+        stripReviewFooterLine('x <!-- x _— m via Qwen Code /review_'),
+      ).toBe('x <!-- x');
+      // A closed comment still drops whole: a footer after it strips, one
+      // inside it is invisible either way.
+      expect(
+        stripReviewFooterLine('x <!-- hidden --> _— m via Qwen Code /review_'),
+      ).toBe('x');
+      const hidden = 'x <!-- _— m via Qwen Code /review_ -->';
+      expect(stripReviewFooterLine(hidden)).toBe(hidden);
+      // The multi-line strip keeps the aggressive reading: a line-leading
+      // opener opens a comment block running to the end of the input, and
+      // the footer inside it renders as nothing.
+      const swallowed = 'x\n<!-- y\n_— m via Qwen Code /review_';
+      expect(stripReviewFooter(swallowed)).toBe(swallowed);
+    });
+
     it('strips a trailing footer a folded line carries — a single line is no block quotation', () => {
       // The one-line channels (folded deferral titles, reroute records,
       // relocated claims, ingested entries) flatten every code shape

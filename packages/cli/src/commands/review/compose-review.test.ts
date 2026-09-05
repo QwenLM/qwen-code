@@ -8945,6 +8945,24 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     ).toThrow(/non-empty file and title/);
   });
 
+  it('strips a forged footer a title quotes behind an unclosed fence and an unterminated opener', () => {
+    // The multi-line strip keeps the footer — it sits inside an unclosed
+    // fence — and the fold puts the quoted `<!--` on the footer's line,
+    // where a swallowing projection hid it. The folded line is one
+    // paragraph on GitHub, so the opener is literal and the footer renders
+    // as prose: it must strip.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: '```\n<!-- x\n\n_— m via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+  });
+
   it('exactly at the line cap, the verdict line does not claim truncation', () => {
     const entries = Array.from({ length: 20 }, (_, i) =>
       nit({ file: `f${i}.ts`, title: `n${i}` }),

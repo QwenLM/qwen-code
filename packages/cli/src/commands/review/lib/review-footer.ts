@@ -159,8 +159,22 @@ interface Projection {
  * no code span in CommonMark and stays literal. The strips used to match
  * the raw bytes and disagreed with their own `rendersAsNothing` gate, which
  * projects first — one projection for all of them ends the disagreement.
+ *
+ * An UNCLOSED comment opener has two readings, and the caller picks. In a
+ * multi-line body it runs to the end of the input (`'swallow'`): a
+ * line-leading opener opens a comment block GitHub renders as nothing to
+ * the end, and the attribution-off line strips rely on that reading to
+ * remove a forged footer trailed by junk. On a folded SINGLE line
+ * (`'literal'`) there is no later line for a closer to sit on, so
+ * CommonMark's inline HTML rule never fires: GitHub escapes the opener to
+ * literal text and everything after it renders as prose — swallowing there
+ * hid a forged footer the render shows, on the one-line channels whose fold
+ * puts a witness block's quoted `<!--` on the footer's own line.
  */
-function projectInvisibles(input: string): Projection {
+function projectInvisibles(
+  input: string,
+  unclosedOpener: 'swallow' | 'literal' = 'swallow',
+): Projection {
   let text = '';
   const starts: number[] = [];
   const ends: number[] = [];
@@ -207,6 +221,11 @@ function projectInvisibles(input: string): Projection {
     }
     if (ch === '<' && input.startsWith('<!--', i)) {
       const close = input.indexOf('-->', i + 4);
+      if (close === -1 && unclosedOpener === 'literal') {
+        push('<!--', i, i + 4);
+        i += 4;
+        continue;
+      }
       i = close === -1 ? n : close + 3;
       continue;
     }
@@ -428,7 +447,10 @@ const STRIP_TAIL_LIMIT = 8192;
  * line and stays inside that bound. Shared by both strip sites —
  * `compose-review`'s drafted entries and `submit`'s inline comments —
  * because one guard is one guard, and a second copy is how one site
- * eventually forgets it.
+ * eventually forgets it. The tail bound is the REGEX's: the blanking ahead
+ * of it reads the whole body — a fence's state is only knowable from where
+ * it opened — in one linear, block-only parse, a few milliseconds at
+ * GitHub's 65,536-character comment cap.
  *
  * The match runs on the displayed projection — a comment or entity inside
  * the marker phrase cannot hide a trailing forged footer (or forge one:
@@ -450,10 +472,12 @@ export function stripReviewFooter(body: string): string {
  * no block structure — the collapse flattened it — so a footer on it is
  * never the quotation `stripReviewFooter`'s blanking keeps: a fence
  * delimiter leading the line is posted text, not a code edge, and must
- * not blind the strip.
+ * not blind the strip. Nor may an unterminated `<!--` the fold carried
+ * onto the line: it is literal text on a single line (the projection's
+ * `'literal'` reading), and the footer after it renders as prose.
  */
 export function stripReviewFooterLine(line: string): string {
-  return stripTrailingFooter(line, line);
+  return stripTrailingFooter(line, line, 'literal');
 }
 
 /**
@@ -473,9 +497,13 @@ function canProjectFooterMarker(s: string): boolean {
  * `body` itself — and the SAME length, so an index into the projection of
  * its tail is an index into the original bytes the cut slices.
  */
-function stripTrailingFooter(body: string, scanned: string): string {
+function stripTrailingFooter(
+  body: string,
+  scanned: string,
+  unclosedOpener: 'swallow' | 'literal' = 'swallow',
+): string {
   const tail = scanned.slice(-STRIP_TAIL_LIMIT);
-  const proj = projectInvisibles(tail);
+  const proj = projectInvisibles(tail, unclosedOpener);
   if (!proj.text.includes(FOOTER_MARKER)) return body;
   const m = REVIEW_FOOTER_RE.exec(proj.text);
   if (m === null) return body;
@@ -536,8 +564,9 @@ const LINE_ENDING_RE = /\r\n?|\n/g;
  * delimiter inside `<div>…</div>` would open code state GitHub does not
  * render. Same construction as `audit-layers.ts`. Only `token.type` and
  * `token.map` are read, and the `block` core rule produces both — the
- * inline pass is pure cost (and quadratic on some one-line bodies), so it
- * is off.
+ * inline pass is pure cost, two orders of magnitude on hostile one-line
+ * bodies (a 256 KiB run of `[` measured ~1 ms block-only, ~400 ms with the
+ * inline pass; linear either way), so it is off. A test bounds the cost.
  */
 const BLOCK_PARSER = new MarkdownIt({ html: true });
 BLOCK_PARSER.core.ruler.disable(['inline']);
