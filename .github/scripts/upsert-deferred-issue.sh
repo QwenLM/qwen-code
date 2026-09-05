@@ -397,7 +397,9 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   # failure here degrades to the bare title / no assignee — metadata must
   # never lose findings.
   gh_err_reset
-  PR_JSON="$(gh api "repos/${REPO}/pulls/${PR}" 2> "${GH_ERR:-/dev/null}" || true)"
+  PR_FETCH_OK=1
+  PR_JSON="$(gh api "repos/${REPO}/pulls/${PR}" 2> "${GH_ERR:-/dev/null}")" ||
+    PR_FETCH_OK=0
   # Both fields are API-derived content published under the bot identity, so
   # they get the same mention/comment-opener neutralization as the reason
   # rendering. The title slice happens in jq (codepoint-safe): a bash byte
@@ -412,6 +414,20 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   PR_AUTHOR="$(jq -r '.user.login // ""' <<< "${PR_JSON}" 2> /dev/null || true)"
   # GitHub login charset; anything else (or a failed fetch) reads as absent.
   [[ "${PR_AUTHOR}" =~ ^[A-Za-z0-9-]{1,39}$ ]] || PR_AUTHOR=''
+  # The degradation must be SAID, like every other gh failure path here: the
+  # reset before the create call below wipes this call's captured reason, so
+  # without this warning a systematic pulls-endpoint failure — a fine-grained
+  # PAT rotated without pull-requests:read, a rate limit, a persistent 404 —
+  # reverts every new tracking issue to the bare title / no assignee / no cc
+  # while the success line still prints, and a fully degraded round is
+  # indistinguishable from a healthy one in the log. Gated on the CALL status,
+  # not on a body field: a successful fetch of a PR object is not a failure
+  # whatever fields it carries. Non-blocking (persistence must never fail a
+  # round) and read BEFORE that reset, so the create-failure warning below
+  # still reports its own reason.
+  if [[ "${PR_FETCH_OK}" != 1 ]]; then
+    echo "::warning::could not fetch PR #${PR} context ($(gh_reason)); creating the deferred-findings issue with the bare title, no assignee and no cc — the findings themselves are still persisted"
+  fi
   CREATE_TITLE="${TITLE}"
   [[ -n "${PR_TITLE}" ]] && CREATE_TITLE="${TITLE}: ${PR_TITLE}"
   CONTEXT="PR #${PR}"

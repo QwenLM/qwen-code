@@ -14101,6 +14101,7 @@ exit 1
       listErr = '',
       prJson = '{"title":"Some PR title","user":{"login":"someone"}}',
       prFail = false,
+      prErr = '',
       assignFail = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
@@ -14163,7 +14164,9 @@ exit 1
           '    printf "%s" "$LIST_JSON";;',
           '  */comments?per_page=100*) [[ "$COMMENTS_FAIL" == 1 ]] && exit 1; printf "%s" "$COMMENTS_JSON";;',
           '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
-          '  repos/*/pulls/*) [[ "$PR_FETCH_FAIL" == 1 ]] && exit 1; printf "%s" "$PR_JSON";;',
+          // PR_ERR mirrors LIST_ERR: the script captures this call's stderr as
+          // the warning's reason, so a fetch failure has to produce one.
+          '  repos/*/pulls/*) if [[ "$PR_FETCH_FAIL" == 1 ]]; then printf "%s" "$PR_ERR" >&2; exit 1; fi; printf "%s" "$PR_JSON";;',
           // The assignment is its own endpoint call, matched before the
           // issue-body read below so ASSIGN_FAIL fails ONLY the assignment.
           '  */assignees) [[ "$ASSIGN_FAIL" == 1 ]] && exit 1; echo ok;;',
@@ -14201,6 +14204,7 @@ exit 1
             WRITE_FAIL: writeFail ? '1' : '0',
             PR_JSON: prJson,
             PR_FETCH_FAIL: prFail ? '1' : '0',
+            PR_ERR: prErr,
             ASSIGN_FAIL: assignFail ? '1' : '0',
           },
         },
@@ -14235,13 +14239,30 @@ exit 1
     expect(created.calls).toContain(
       'https://github.com/o/r/pull/5#discussion_r7',
     );
+    // The fetch-failure warning is gated on the CALL status, not on a body
+    // field: this stub's PR_JSON is a title/user object with no `.number`, so
+    // a `jq -e '.number'` gate would warn here on every healthy round.
+    expect(created.out).not.toContain('could not fetch PR');
     // A failed PR-context fetch degrades to the bare title and no assignee —
-    // the findings themselves are still persisted.
+    // the findings themselves are still persisted — and it WARNS, like every
+    // other gh failure path in the script: the `gh_err_reset` before the
+    // create call would otherwise wipe this call's reason unread, so a
+    // systematic pulls-endpoint failure (a fine-grained PAT rotated without
+    // pull-requests:read, a rate limit, a persistent 404) would silently
+    // revert every new tracking issue to the bare form behind a clean success
+    // line. Deleting the warning, or reading raw `${GH_ERR}` instead of
+    // `gh_reason()`, must red one of the two assertions below — the payload
+    // carries `::`, which gh_reason() neutralizes to `;;`.
     const prFetchFailed = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
       prFail: true,
+      prErr: '::error::fine-grained PAT lacks pull-requests read scope',
     });
     expect(prFetchFailed.out).toContain('tracked in new issue #77');
+    expect(prFetchFailed.out).toContain(
+      '::warning::could not fetch PR #5 context (;;error;;fine-grained PAT lacks pull-requests read scope)',
+    );
+    expect(prFetchFailed.out).not.toContain('::error::');
     expect(prFetchFailed.calls).toContain(
       '-f title=Deferred review findings from PR #5 -f body=',
     );
