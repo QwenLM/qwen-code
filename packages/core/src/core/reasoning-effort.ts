@@ -149,17 +149,30 @@ export function parseModelReasoningCapabilities(
   ) {
     return undefined;
   }
-  if (candidate['toggleOnly'] === true) {
+  // Downstream reads `toggleOnly` by truthiness and `canDisable` by
+  // `=== false`, so a mistyped value would silently change the declaration
+  // instead of failing the entry.
+  const toggleOnly = candidate['toggleOnly'];
+  if (toggleOnly !== undefined && typeof toggleOnly !== 'boolean') {
+    return undefined;
+  }
+  const canDisable = candidate['canDisable'];
+  if (canDisable !== undefined && canDisable !== false) {
+    return undefined;
+  }
+  if (toggleOnly === true) {
     return candidate as unknown as ModelReasoningCapabilities;
   }
   const efforts = candidate['efforts'];
   if (
     !Array.isArray(efforts) ||
+    efforts.length === 0 ||
     !efforts.every(
       (effort) =>
         typeof effort === 'string' &&
         REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort),
-    )
+    ) ||
+    new Set(efforts).size !== efforts.length
   ) {
     return undefined;
   }

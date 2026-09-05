@@ -193,11 +193,17 @@ export function OpenTuiEffortDialog(props: {
   // out-of-range effort starts at the top (ink EffortDialog parity).
   const currentEffort = config?.getReasoningEffort?.();
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
-  const [sel, setSel] = useState(Math.max(0, configuredIndex));
+  const initialIndex = Math.max(0, configuredIndex);
+  const [sel, setSel] = useState(initialIndex);
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
-    if (effort) {
+    // On a forced cursor, confirming without moving is the "just looking"
+    // gesture: close without persisting a tier the user never chose over the
+    // stored global value (ink EffortDialog parity).
+    const forcedCursor =
+      currentEffort && configuredIndex === -1 && sel === initialIndex;
+    if (effort && !forcedCursor) {
       try {
         // Apply at runtime (next turn) and persist for future sessions;
         // provider adapters clamp the tier per model (ink useEffortCommand
@@ -230,9 +236,11 @@ export function OpenTuiEffortDialog(props: {
         }
         onPick={pick}
       />
-      {currentEffort && configuredIndex === -1 ? (
+      {configuredIndex === -1 ? (
         <text fg={C.dim}>
-          {`${currentEffort} is not available for this model — using the model/provider default.`}
+          {currentEffort
+            ? `${currentEffort} is not available for this model — using the model/provider default.`
+            : 'No effort configured — using the model/provider default.'}
         </text>
       ) : null}
     </Shell>

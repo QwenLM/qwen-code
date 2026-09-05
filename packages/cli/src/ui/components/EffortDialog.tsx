@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import {
@@ -48,15 +48,27 @@ export function EffortDialog({
   // at the top rather than highlighting 'high', and so does a tier the global
   // `model.reasoningEffort` carried over from another model (only ACP sessions
   // reconcile it) — either way the cursor must not read as "this tier is
-  // current", or a bare Enter silently overwrites the stored value with it.
+  // current".
   const configuredIndex = currentEffort ? efforts.indexOf(currentEffort) : -1;
   const initialIndex = Math.max(0, configuredIndex);
+  const cursorMoved = useRef(false);
+
+  const handleHighlight = useCallback(() => {
+    cursorMoved.current = true;
+  }, []);
 
   const handleSelect = useCallback(
     (effort: ReasoningEffort) => {
+      // On a forced cursor, confirming without moving is the "just looking"
+      // gesture: cancel rather than persist a tier the user never chose over
+      // the stored global value, which is still valid on other models.
+      if (currentEffort && configuredIndex === -1 && !cursorMoved.current) {
+        onSelect(undefined);
+        return;
+      }
       onSelect(effort);
     },
-    [onSelect],
+    [onSelect, currentEffort, configuredIndex],
   );
 
   useKeypress(
@@ -88,6 +100,7 @@ export function EffortDialog({
         items={items}
         initialIndex={initialIndex}
         onSelect={handleSelect}
+        onHighlight={handleHighlight}
         isFocused
         showNumbers
       />

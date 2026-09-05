@@ -151,6 +151,16 @@ describe('parseModelReasoningCapabilities', () => {
     });
   });
 
+  it('accepts the optional members when they are well-formed', () => {
+    // Rejecting a garbage declaration must not reject the declaration itself:
+    // `canDisable: false` is the whole point of the field, and an explicit
+    // `toggleOnly: false` still uses the ladder.
+    const forbidden = { ...valid, canDisable: false };
+    expect(parseModelReasoningCapabilities(forbidden)).toBe(forbidden);
+    const ladder = { ...valid, toggleOnly: false };
+    expect(parseModelReasoningCapabilities(ladder)).toBe(ladder);
+  });
+
   it.each([
     ['a missing capability', undefined],
     ['a non-object', 'high'],
@@ -159,10 +169,32 @@ describe('parseModelReasoningCapabilities', () => {
     ['an unknown disableField', { ...valid, disableField: 'budget' }],
     ['a missing efforts list', { thinking: true, disableField: 'thinking' }],
     [
+      'an empty efforts list',
+      { thinking: true, efforts: [], disableField: 'thinking' },
+    ],
+    [
+      'a repeated tier',
+      {
+        thinking: true,
+        efforts: ['low', 'low', 'high'],
+        disableField: 'thinking',
+      },
+    ],
+    [
       'an unknown tier',
       { thinking: true, efforts: ['ultra'], disableField: 'thinking' },
     ],
     ['a defaultEffort outside efforts', { ...valid, defaultEffort: 'low' }],
+    [
+      'a non-boolean toggleOnly',
+      {
+        thinking: true,
+        toggleOnly: 'false',
+        efforts: ['high'],
+        disableField: 'thinking',
+      },
+    ],
+    ['a non-false canDisable', { ...valid, canDisable: 'false' }],
   ])('rejects %s', (_label, value) => {
     expect(parseModelReasoningCapabilities(value)).toBeUndefined();
   });
