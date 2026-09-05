@@ -7637,11 +7637,9 @@ describe('Late permission.resolved after sentinel pruned (wenshao R3 qwen3.7-max
   });
 });
 
-// Note: webui transcriptAdapter previewMarkdown/rawOutput preservation
-// test lives in packages/webui/src/daemon/transcriptAdapter.test.ts —
-// keeping it co-located with the adapter ensures path resolution goes
-// through webui's tsconfig path-mapping into source rather than the
-// SDK dist (which doesn't exist in CI before this PR builds).
+// Note: the previewMarkdown/rawOutput enrichment path retired with the
+// webui package; Web Shell's transcriptAdapter has no such enrichment,
+// so no co-located preservation test exists for it in this repo.
 
 describe('ensureSafeImageUrl tightened to data:image/* (audit follow-up)', () => {
   it('allows http/https/data:image/* but rejects data:text/html', async () => {

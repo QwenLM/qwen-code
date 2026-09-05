@@ -613,6 +613,9 @@ describe('UpdateGoalTool', () => {
     expect(tool.description).toContain(
       'end the turn without additional user-facing text',
     );
+    expect(tool.description).toContain(
+      'readyForVerification or checkpointRequired',
+    );
     expect(tool.description).not.toContain(
       'say the proposal is awaiting independent verification',
     );
@@ -923,7 +926,7 @@ describe('UpdateGoalTool', () => {
     );
   });
 
-  it('queues truncated completion for boundary classification', async () => {
+  it('checkpoints a truncated catalog before recording completion', async () => {
     const recordTerminalProposal = vi.fn(() => ({
       recorded: true,
       readyForVerification: true,
@@ -971,6 +974,55 @@ describe('UpdateGoalTool', () => {
         status: 'complete',
         reason: 'done',
         evidenceRefs: ['output'],
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      proposalRecorded: false,
+      readyForVerification: false,
+      goalLifecycleChanged: false,
+      checkpointRequired: true,
+      nextAction: expect.stringContaining('checkpoint the evidence catalog'),
+    });
+    expect(result.terminateTurn).toBe(true);
+    expect(recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
+  it('keeps truncated repeated blockers eligible for coverage validation', async () => {
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
+    const turns = ['turn-2', 'turn-3', permit.turnId];
+    const runtime = {
+      getGoalForWorker: vi.fn().mockResolvedValue({
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'Ship Goal v3',
+        evidenceCursor: { recordId: 'goal-created' },
+        evidenceCatalog: {
+          entries: turns.map((turnId, index) => ({
+            uuid: `failure-${index + 1}`,
+            provenance: 'tool_result' as const,
+            turnId,
+            preview: 'same failure',
+            proofKind: 'external_fact' as const,
+          })),
+          lineageTurnIds: turns,
+          truncated: true,
+        },
+      }),
+      getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+      recordTerminalProposal,
+    };
+    const invocation = goalTurnContext.run(permit, () =>
+      new UpdateGoalTool(makeConfig(runtime)).build({
+        status: 'blocked',
+        reason: 'The same command fails on every attempt',
+        evidenceRefs: ['failure-1', 'failure-2', 'failure-3'],
+        blockerKind: 'repeated',
       }),
     );
 
