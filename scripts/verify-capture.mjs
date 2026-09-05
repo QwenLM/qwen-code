@@ -12,7 +12,7 @@
  * Why this exists: the `verify-pr` skill asked the agent to assemble its own
  * node-pty -> xterm.js -> Playwright pipeline. Those dependencies do resolve
  * from this repo (node-pty is a root optionalDependency shipping prebuilt
- * binaries; playwright is declared in packages/webui and
+ * binaries; playwright is declared at the repository root and in
  * integration-tests/terminal-capture), but the route needs a browser, is slow,
  * and — the real fragility — integration-tests/terminal-capture is not a root
  * workspace, so its package.json is never installed as a unit and resolves only
