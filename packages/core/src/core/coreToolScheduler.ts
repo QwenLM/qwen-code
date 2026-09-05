@@ -55,6 +55,7 @@ import { logToolCall } from '../telemetry/loggers.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { InputFormat } from '../output/types.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { resolveDeferredToolCall } from '../tools/tool-call.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
@@ -991,6 +992,21 @@ function toParts(input: PartListUnion): Part[] {
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
+type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
+  modelFacingName?: string;
+  modelFacingArgs?: Record<string, unknown>;
+  bridgeResolutionError?: {
+    error: Error;
+    type: ToolErrorType;
+  };
+};
+
+function getModelFacingToolName(request: ToolCallRequestInfo): string {
+  return (
+    (request as SchedulerToolCallRequestInfo).modelFacingName ?? request.name
+  );
+}
+
 // NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
 // LLM-facing prompt directive (injected into the model prompt, not rendered in
 // the TUI). The width-1 glyph rationale used elsewhere in this change does not
@@ -1022,7 +1038,7 @@ const createErrorResponse = (
     {
       functionResponse: {
         id: request.callId,
-        name: request.name,
+        name: getModelFacingToolName(request),
         response: { error: error.message },
       },
     },
@@ -1051,7 +1067,7 @@ const createCancelledResponse = (
       {
         functionResponse: {
           id: request.callId,
-          name: request.name,
+          name: getModelFacingToolName(request),
           response: { error: errorMessage },
         },
       },
@@ -1324,6 +1340,18 @@ interface CoreToolSchedulerOptions {
    * an owner that declares whatever it registers.
    */
   hasSkillTool?: () => boolean;
+  /**
+   * Whether the resolved TARGET of a tool_call bridge request may execute.
+   *
+   * The outer owner's execution allowlist gates the model-emitted name, but
+   * for bridge requests that name is always `tool_call` — the allowlist must
+   * be re-checked against the resolved target, or a fork whose declarations
+   * include `tool_call` could reach any registered deferred tool through the
+   * bridge regardless of its allowlist. Return false to reject the target
+   * with an execution-denied error. Omitted, targets are unrestricted here
+   * (owners without an execution allowlist).
+   */
+  isToolExecutionAllowed?: (toolName: string) => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1499,6 +1527,7 @@ export class CoreToolScheduler {
   private onToolResultFullTurnModel?: (model: string) => boolean;
   private shouldObserveProducer: (callId: string) => boolean;
   private hasSkillToolOverride?: () => boolean;
+  private isToolExecutionAllowed?: (toolName: string) => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
@@ -1570,6 +1599,7 @@ export class CoreToolScheduler {
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
     this.hasSkillToolOverride = options.hasSkillTool;
+    this.isToolExecutionAllowed = options.isToolExecutionAllowed;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1771,7 +1801,7 @@ export class CoreToolScheduler {
                   {
                     functionResponse: {
                       id: currentCall.request.callId,
-                      name: currentCall.request.name,
+                      name: getModelFacingToolName(currentCall.request),
                       response: {
                         error: errorMessage,
                       },
@@ -2327,6 +2357,106 @@ export class CoreToolScheduler {
     }
   }
 
+  private async resolveToolCallBridgeRequest(
+    request: ToolCallRequestInfo,
+    signal: AbortSignal,
+  ): Promise<SchedulerToolCallRequestInfo> {
+    if (
+      signal.aborted ||
+      canonicalToolName(request.name) !== ToolNames.TOOL_CALL
+    ) {
+      return request;
+    }
+
+    const permissionManager = this.config.getPermissionManager?.();
+    if (permissionManager) {
+      let bridgeEnabled: boolean;
+      try {
+        bridgeEnabled = await permissionManager.isToolEnabled(
+          ToolNames.TOOL_CALL,
+        );
+      } catch (error) {
+        if (signal.aborted) {
+          return request;
+        }
+        return {
+          ...request,
+          bridgeResolutionError: {
+            error: error instanceof Error ? error : new Error(String(error)),
+            type: ToolErrorType.UNHANDLED_EXCEPTION,
+          },
+        };
+      }
+      if (signal.aborted || !bridgeEnabled) {
+        return request;
+      }
+    } else if (
+      (this.config.getPermissionsDeny?.() ?? []).some(
+        (name) =>
+          canonicalToolName(name).toLowerCase().trim() === ToolNames.TOOL_CALL,
+      )
+    ) {
+      // Preserve the legacy no-PermissionManager deny path: leave the bridge
+      // wrapped so the normal pre-registry permission check rejects it.
+      // Mirror the loop's legacy-deny normalization exactly
+      // (toLowerCase().trim(), see the getPermissionsDeny fallback in
+      // _schedule): Config stores deny entries verbatim, so an entry like
+      // 'Tool_Call' must deny the bridge here exactly as it would deny a
+      // direct tool_call in the loop — without this the envelope would be
+      // unwrapped and only the resolved TARGET name would be checked against
+      // the deny list, converting a denied call into an executed one (R2-1).
+      return request;
+    }
+
+    const resolution = await runInRequestGoalContext(request, () =>
+      resolveDeferredToolCall(this.toolRegistry, request.args, {
+        // Thread the real configured depth so the bridge's exclusion check
+        // mirrors prepareTools()'s depth-gated AgentTool re-admission
+        // instead of failing closed on it (round-5 review, R4-1 follow-up).
+        maxSubagentDepth: this.config.getMaxSubagentDepth(),
+      }),
+    );
+    if ('error' in resolution) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: resolution.error,
+          type: resolution.errorType,
+        },
+      };
+    }
+
+    // The pre-schedule gates checked the wrapper name (`tool_call`), which is
+    // always declared and allowed; re-check the owner's tool policy against
+    // the resolved target — the execution allowlist AND the per-agent
+    // disallowedTools blocklist, both folded into the owner-supplied
+    // predicate — so the bridge cannot smuggle a call past either (e.g. a
+    // fork whose allowlist lists `tool_call` but not the target, or a
+    // subagent whose disallowedTools blocklists it; round-6 review, R6-8).
+    if (
+      this.isToolExecutionAllowed &&
+      !this.isToolExecutionAllowed(resolution.tool.name)
+    ) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: new Error(
+            `Tool "${resolution.tool.name}" is not permitted by this agent's tool policy (execution allowlist or disallowedTools blocklist).`,
+          ),
+          type: ToolErrorType.EXECUTION_DENIED,
+        },
+      };
+    }
+
+    return {
+      ...request,
+      name: resolution.tool.name,
+      args: resolution.arguments,
+      modelFacingName: request.name,
+      modelFacingArgs: request.args,
+    };
+  }
+
   schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -2443,9 +2573,19 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = dedupeRequestsByCallId(
-        Array.isArray(request) ? request : [request],
-      ).map((item) => ({ ...item, args: structuredClone(item.args) }));
+      const requestsToProcess = await Promise.all(
+        dedupeRequestsByCallId(
+          Array.isArray(request) ? request : [request],
+        ).map((item) =>
+          this.resolveToolCallBridgeRequest(
+            {
+              ...item,
+              args: structuredClone(item.args),
+            },
+            signal,
+          ),
+        ),
+      );
       // args are cloned at intake: callers pass args that may alias the
       // model-emitted functionCall part stored in chat history, and
       // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
@@ -2527,6 +2667,40 @@ export class CoreToolScheduler {
                 reqInfo,
                 new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE),
                 ToolErrorType.EXECUTION_DENIED,
+                'not_started',
+              ),
+              durationMs: 0,
+            });
+            continue;
+          }
+
+          if (reqInfo.bridgeResolutionError) {
+            let bridgeError = reqInfo.bridgeResolutionError.error;
+            // Route invalid-envelope bridge errors through the same
+            // validation-retry tracking as build() failures so a persistent
+            // malformed tool_call loop still receives the early stop
+            // directive instead of riding to the coarser guards.
+            if (
+              reqInfo.bridgeResolutionError.type ===
+              ToolErrorType.INVALID_TOOL_PARAMS
+            ) {
+              const count = recordBatchRetryableToolError(
+                reqInfo.name,
+                bridgeError.message,
+              );
+              if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {
+                bridgeError = new Error(
+                  `${bridgeError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
+                );
+              }
+            }
+            newToolCalls.push({
+              status: 'error',
+              request: reqInfo,
+              response: createErrorResponse(
+                reqInfo,
+                bridgeError,
+                reqInfo.bridgeResolutionError.type,
                 'not_started',
               ),
               durationMs: 0,
@@ -5126,7 +5300,7 @@ export class CoreToolScheduler {
             (mutated ??=
               producerToolResult == null ||
               !producerContentEqual(
-                toolName,
+                getModelFacingToolName(scheduledCall.request),
                 callId,
                 producerToolResult.llmContent,
                 response.responseParts,
@@ -5617,7 +5791,7 @@ export class CoreToolScheduler {
           typeof content === 'string' ? content.length : undefined;
 
         const convertedResponse = convertToFunctionResponse(
-          toolName,
+          getModelFacingToolName(scheduledCall.request),
           callId,
           content,
         );
@@ -5791,7 +5965,7 @@ export class CoreToolScheduler {
             toolResult.llmContent,
           );
           let responseParts = convertToFunctionErrorResponse(
-            toolName,
+            getModelFacingToolName(scheduledCall.request),
             callId,
             timeoutContent.content,
             operationalErrorMessage,

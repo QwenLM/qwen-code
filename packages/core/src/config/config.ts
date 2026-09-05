@@ -960,8 +960,8 @@ export interface ConfigParameters {
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
    * schema size of every eligible deferred tool — bundled built-ins and MCP
-   * alike — fits within the budget, they are revealed upfront instead of
-   * loaded on demand via `tool_search`. Tools demoted by `tools.eager` are
+   * alike — fits within the budget, they are revealed upfront for direct calls instead of being invoked through
+   * the `tool_search` + `tool_call` bridge. Tools demoted by `tools.eager` are
    * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
@@ -9363,7 +9363,8 @@ export class Config {
       // PermissionManager handles the coreTools allowlist, deny rules, and
       // the `tools.eager` allowlist in a single check. A tool the active
       // eager allowlist omits comes back `deferred`, not `disabled`: it is
-      // still registered — listed in `/tools` and loadable via ToolSearch —
+      // still registered — listed in `/tools` and reachable through the
+      // `tool_search` + `tool_call` bridge —
       // but its schema stays out of the eager model request (#9827) without
       // the tool silently disappearing (#10075).
       let status: ToolRegistrationStatus = 'registered';
@@ -9475,6 +9476,10 @@ export class Config {
 
     // --- Core tools (always registered) ---
     await registerGoalWorkerTools();
+    await registerLazy(ToolNames.TOOL_CALL, async () => {
+      const { ToolCallTool } = await import('../tools/tool-call.js');
+      return new ToolCallTool();
+    });
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);

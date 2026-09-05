@@ -9,12 +9,122 @@ import type { ToolResult } from '../../tools/tools.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
-import { getCurrentAgentId } from './agent-context.js';
+import {
+  getCurrentAgentId,
+  isTopLevelSession,
+  spawnBlockReason,
+} from './agent-context.js';
 
 export const SUBAGENT_PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.ENTER_PLAN_MODE,
   ToolNames.EXIT_PLAN_MODE,
 ]);
+
+/**
+ * Tools that must never be available to non-team subagents (including
+ * forked agents spawned via the Agent tool). Moved here (from agent-core)
+ * so the tool_call bridge (tools/tool-call.ts) can enforce the same
+ * exclusion without a circular import (agent-core imports coreToolScheduler,
+ * which imports tool-call).
+ * - AgentTool is depth-gated rather than unconditionally excluded:
+ *   `isExcluded()` in `prepareTools()` re-admits it while
+ *   `canSpawnNestedAgent()` permits another nesting level, and consults
+ *   this set only for every other tool. The entry here remains the
+ *   fail-closed floor for consumers of the raw set.
+ * - Cron tools are session-scoped and should only run from the main session.
+ * - TaskStop and SendMessage are parent-side control-plane tools for managing
+ *   background subagents; subagents have no agent IDs to manage natively, so
+ *   exposing them only widens the surface for cross-agent interference if an
+ *   ID leaks via prompt or transcript.
+ * - Team management (team_create/team_delete) and task coordination
+ *   (task_create/task_update/task_list) are leader/teammate tools. A
+ *   non-team Agent subagent has no teammate identity, so isTeammate()
+ *   returns false and these tools would treat it as the leader — letting
+ *   it delete or rewrite the active team.
+ * - Plan lifecycle tools are owned by the caller/main session. A subagent
+ *   should return its plan to the caller instead of entering or exiting mode.
+ * - Todo state is also parent-owned because subagents share the session's
+ *   persisted Todo sidecar.
+ */
+export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
+  ToolNames.TASK_STOP,
+  ToolNames.SEND_MESSAGE,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.REQUEST_SHUTDOWN,
+  ToolNames.TASK_CREATE,
+  ToolNames.TASK_UPDATE,
+  ToolNames.TASK_LIST,
+  ToolNames.TODO_WRITE,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  // Worktree management belongs to the parent session — a subagent must
+  // never enter or exit the user's worktree state independently.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
+  // V1 session artifacts are owned by the parent daemon session.
+  ToolNames.ARTIFACT,
+  ToolNames.RECORD_ARTIFACT,
+  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
+  // fan-out: a subagent spawned by Workflow that calls Workflow would create
+  // O(k^n) subagents.
+  ToolNames.WORKFLOW,
+]);
+
+/**
+ * Tools excluded from teammates. Teammates need send_message and the
+ * task_* coordination tools to do their job, but they must not be able
+ * to create or destroy the team itself — only the leader can do that.
+ * Plan lifecycle tools remain caller-owned for teammates too.
+ */
+export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
+  ToolNames.TASK_STOP,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.REQUEST_SHUTDOWN,
+  ToolNames.TODO_WRITE,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  // Worktree management belongs to the parent session.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
+  // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
+  // identity propagates through AsyncLocalStorage into anything it
+  // spawns, so prepareTools() would keep choosing THIS exclusion set
+  // for nested agents — without WORKFLOW here, a teammate-launched
+  // workflow re-arms the O(k^n) fan-out the subagent set prevents.
+  ToolNames.WORKFLOW,
+]);
+
+/**
+ * The tool-exclusion set for the current execution context: subagents get
+ * EXCLUDED_TOOLS_FOR_SUBAGENTS, teammates get EXCLUDED_TOOLS_FOR_TEAMMATES
+ * (with EXIT_PLAN_MODE re-admitted for plan-required teammates). Shared by
+ * prepareTools (declaration-level) and the tool_call bridge
+ * (resolveDeferredToolCall, invocation-level) so both enforce the same set.
+ */
+export function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
+  if (!isTeammate()) {
+    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+  }
+  if (!isPlanRequiredTeammateContext()) {
+    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+  }
+
+  const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
+  excluded.delete(ToolNames.EXIT_PLAN_MODE);
+  return excluded;
+}
 
 export const READ_ONLY_INSPECTION_TOOLS: readonly string[] = [
   ToolNames.READ_FILE,
@@ -42,6 +152,48 @@ const PRE_APPROVAL_TASK_CLAIM_KEYS: ReadonlySet<string> = new Set([
 
 export function isSubagentLikeExecutionContext(): boolean {
   return getCurrentAgentId() !== null || isTeammate();
+}
+
+/**
+ * The effective exclusion test, shared by `prepareTools()` (declaration
+ * level) and the tool_call bridge (`resolveDeferredToolCall`, invocation
+ * level) so the two layers cannot drift.
+ *
+ * Deliberately NOT gated on isSubagentLikeExecutionContext(): prepareTools()
+ * only ever serves agents and must fail closed on a missing agent frame
+ * (isTopLevelSession() below), while the bridge wraps this predicate in its
+ * own context gate so the top-level leader session stays unaffected.
+ *
+ * AgentTool is depth-gated rather than unconditionally excluded — mirroring
+ * `prepareTools()`: while `spawnBlockReason()` permits another nesting level
+ * inside a genuine agent frame, AgentTool is re-admitted even though it is a
+ * member of the raw exclusion sets. The raw-set entry remains the fail-closed
+ * floor: when `maxSubagentDepth` is unknown (undefined) AgentTool stays
+ * excluded, as do teammate and fork contexts (spawnBlockReason reports
+ * 'teammate'/'fork' for them).
+ */
+export function isToolExcludedForCurrentContext(
+  toolName: string,
+  maxSubagentDepth?: number,
+): boolean {
+  if (toolName === ToolNames.AGENT) {
+    if (maxSubagentDepth === undefined) {
+      return true;
+    }
+    const nestingAllowed =
+      !isTopLevelSession() && spawnBlockReason(maxSubagentDepth) === null;
+    return !nestingAllowed;
+  }
+  return getExcludedToolsForCurrentContext().has(toolName);
+}
+
+/**
+ * The model-facing denial message for a tool refused by the exclusion set.
+ * Shared by the tool_call bridge and tool_search's discovery-side filter so
+ * both halves of the bridge report the same wording.
+ */
+export function getExcludedToolUnavailableMessage(toolName: string): string {
+  return `Tool "${toolName}" is not available to this agent.`;
 }
 
 export function isPlanRequiredTeammateContext(): boolean {

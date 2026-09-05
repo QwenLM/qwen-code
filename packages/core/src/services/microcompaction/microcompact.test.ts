@@ -41,6 +41,40 @@ function makeToolResult(name: string, output: string): Content {
   };
 }
 
+function makeBridgedToolCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown> = {},
+): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: {
+          id,
+          name: 'tool_call',
+          args: { name, arguments: args },
+        },
+      },
+    ],
+  };
+}
+
+function makeBridgedToolResult(id: string, output: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'tool_call',
+          response: { output },
+        },
+      },
+    ],
+  };
+}
+
 function makeFileToolCall(id: string, filePath: string): Content {
   return {
     role: 'model',
@@ -839,6 +873,47 @@ describe('microcompactHistory', () => {
     expect(
       result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('Y'.repeat(25_500));
+  });
+
+  it('size-compacts bridged tool results using the target tool identity', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c1', 'WEB_FETCH'),
+      makeBridgedToolResult('c1', 'x'.repeat(1_000)),
+      makeBridgedToolCall('c2', 'web_fetch'),
+      makeBridgedToolResult('c2', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      toolsCleared: 1,
+      toolResultCharsBefore: 1_006,
+    });
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not guess when a bridged call id maps to mixed tool names', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'web_fetch'),
+      makeBridgedToolCall('reused', 'grep_search'),
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
   });
 
   it('size-compacts old skill results and keeps the most recent result', () => {
@@ -1803,6 +1878,28 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     // Only the blanked (oldest) file is reported; the kept one is not.
     expect(result.meta!.evictedReadPaths).toEqual(['/proj/old.ts']);
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('reports the inner file path of a blanked bridged read_file result', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c0', 'read_file', {
+        file_path: '/proj/old.ts',
+      }),
+      makeBridgedToolResult('c0', 'old long content '.repeat(50)),
+      makeBridgedToolCall('c1', 'web_fetch'),
+      makeBridgedToolResult('c1', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toMatchObject({
+      toolsCleared: 1,
+      evictedReadPaths: ['/proj/old.ts'],
+      unresolvedEvictedReads: 0,
+    });
   });
 
   it('does not let a kept read_file result vouch for residency (issue #4239)', () => {

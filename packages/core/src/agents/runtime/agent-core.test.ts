@@ -64,6 +64,8 @@ import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
+  type AgentToolCallEvent,
+  type AgentToolResultEvent,
 } from './agent-events.js';
 
 const boundaryObserveMock = vi.hoisted(() =>
@@ -496,6 +498,384 @@ describe('AgentCore approval response deduplication', () => {
     );
     return { core, errorSpy };
   }
+
+  it('emits scheduler-resolved tool identity for bridged calls', async () => {
+    const { core } = buildApprovalCore();
+    const toolCallEvents: AgentToolCallEvent[] = [];
+    const toolResultEvents: AgentToolResultEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_CALL, (event) => {
+      toolCallEvents.push(event);
+    });
+    core.getEventEmitter().on(AgentEventType.TOOL_RESULT, (event) => {
+      toolResultEvents.push(event);
+    });
+
+    const targetRequest = {
+      callId: 'call-bridge',
+      name: 'mcp__docs__read',
+      args: { path: 'README.md' },
+      modelFacingName: ToolNames.TOOL_CALL,
+      modelFacingArgs: {
+        name: 'mcp__docs__read',
+        arguments: { path: 'README.md' },
+      },
+      isClientInitiated: true,
+      prompt_id: 'prompt-bridge',
+    };
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([
+          {
+            status: 'scheduled',
+            request: targetRequest,
+          } as unknown as ToolCall,
+        ]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: targetRequest.callId,
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: targetRequest.name,
+            arguments: targetRequest.args,
+          },
+        },
+      ],
+      abortController,
+      targetRequest.prompt_id,
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(toolCallEvents).toHaveLength(1));
+      expect(toolCallEvents[0]).toMatchObject({
+        callId: targetRequest.callId,
+        name: targetRequest.name,
+        args: targetRequest.args,
+        modelFacingName: ToolNames.TOOL_CALL,
+        modelFacingArgs: {
+          name: targetRequest.name,
+          arguments: targetRequest.args,
+        },
+      });
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+    expect(toolResultEvents).toHaveLength(1);
+    expect(toolResultEvents[0]).toMatchObject({
+      callId: targetRequest.callId,
+      name: targetRequest.name,
+      success: false,
+    });
+    expect(toolResultEvents[0].responseParts?.[0]?.functionResponse?.name).toBe(
+      ToolNames.TOOL_CALL,
+    );
+  });
+
+  it('does not emit a bridged TOOL_CALL start after abort reported its cancellation', async () => {
+    // Abort variant of the test above: the abort lands BEFORE the
+    // scheduler's first update, so onAbort already emitted the synthetic
+    // cancelled TOOL_RESULT for the bridge callId. The later scheduler
+    // update must not emit a TOOL_CALL start after that result (and must
+    // not fire preToolUse for a call that never runs).
+    const { core } = buildApprovalCore();
+    const toolCallEvents: AgentToolCallEvent[] = [];
+    const toolResultEvents: AgentToolResultEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_CALL, (event) => {
+      toolCallEvents.push(event);
+    });
+    core.getEventEmitter().on(AgentEventType.TOOL_RESULT, (event) => {
+      toolResultEvents.push(event);
+    });
+
+    const targetRequest = {
+      callId: 'call-bridge-aborted',
+      name: 'mcp__docs__read',
+      args: { path: 'README.md' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-bridge-aborted',
+    };
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        // Hold the first update until after the abort has run.
+        await updateGate;
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([
+          {
+            status: 'scheduled',
+            request: targetRequest,
+          } as unknown as ToolCall,
+        ]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: targetRequest.callId,
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: targetRequest.name,
+            arguments: targetRequest.args,
+          },
+        },
+      ],
+      abortController,
+      targetRequest.prompt_id,
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    releaseUpdate();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    // The cancelled TOOL_RESULT is emitted, but no TOOL_CALL start follows.
+    expect(toolResultEvents).toHaveLength(1);
+    expect(toolResultEvents[0]).toMatchObject({
+      callId: targetRequest.callId,
+      success: false,
+    });
+    expect(toolResultEvents[0].responseParts?.[0]?.functionResponse?.name).toBe(
+      ToolNames.TOOL_CALL,
+    );
+    expect(toolCallEvents).toHaveLength(0);
+  });
+
+  it('passes the execution allowlist to the scheduler for bridged targets', async () => {
+    // The pre-schedule gates only see the wrapper name (tool_call), which a
+    // fork's allowlist always contains; the scheduler must be given a
+    // predicate bound to the same allowlist to re-check resolved targets.
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('allowlist-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'allowlist-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: ['*'],
+        executionAllowedTools: [
+          ToolNames.TOOL_CALL,
+          ToolNames.TOOL_SEARCH,
+          'read_file',
+        ],
+      },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-allowlist',
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'web_fetch', arguments: {} },
+        },
+      ],
+      abortController,
+      'prompt-allowlist',
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    expect(capturedPredicate?.('web_fetch')).toBe(false);
+    expect(capturedPredicate?.('read_file')).toBe(true);
+    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
+
+  it('folds the per-agent disallowedTools blocklist into the bridged-target re-check', async () => {
+    // R6-8: the tool_call bridge resolves around the declaration list, so
+    // the disallowedTools blocklist prepareTools applies to declarations
+    // must be re-checked at invocation level — symmetrically to the
+    // execution allowlist above. Without this fold a subagent configured
+    // with disallowedTools: ['mcp__slack'] could bridge-execute
+    // mcp__slack__post_message even though prepareTools filtered it out of
+    // the declarations. Mutation check: removing the blocklist fold from
+    // isToolExecutionAllowed turns this test red.
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('blocklist-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'blocklist-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: ['*'],
+        disallowedTools: ['mcp__slack', ToolNames.TODO_WRITE],
+      },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-blocklist',
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'mcp__slack__post_message', arguments: {} },
+        },
+      ],
+      abortController,
+      'prompt-blocklist',
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    // Server-level MCP pattern blocks every tool of that server…
+    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+    expect(capturedPredicate?.('mcp__slack')).toBe(false);
+    // …without touching other servers.
+    expect(capturedPredicate?.('mcp__github__create_issue')).toBe(true);
+    // Exact-match blocklisting for non-MCP tools.
+    expect(capturedPredicate?.(ToolNames.TODO_WRITE)).toBe(false);
+    expect(capturedPredicate?.('read_file')).toBe(true);
+    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
+
+  it('lets disallowedTools beat the execution allowlist for bridged targets', async () => {
+    // R7-13: the two policy lists must compose with the blocklist winning —
+    // an allowlist entry cannot re-admit a tool the agent's disallowedTools
+    // removes. Mutation check: moving the blocklist fold after the allowlist
+    // pass (or dropping it) turns this red.
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('precedence-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'precedence-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: ['*'],
+        executionAllowedTools: [
+          ToolNames.TOOL_CALL,
+          ToolNames.TOOL_SEARCH,
+          'mcp__slack__post_message',
+        ],
+        disallowedTools: ['mcp__slack'],
+      },
+    );
+
+    let capturedPredicate: ((name: string) => boolean) | undefined;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        capturedPredicate = (
+          this as unknown as {
+            isToolExecutionAllowed?: (name: string) => boolean;
+          }
+        ).isToolExecutionAllowed;
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: 'call-precedence',
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'mcp__slack__post_message', arguments: {} },
+        },
+      ],
+      abortController,
+      'prompt-precedence',
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+    abortController.abort();
+    await processing;
+    scheduleSpy.mockRestore();
+
+    expect(capturedPredicate).toBeDefined();
+    // Allowlisted AND blocklisted → blocklist wins.
+    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+    // Allowlisted and not blocklisted → allowed.
+    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+  });
 
   it('retries only a transiently failed listener', async () => {
     const { core, errorSpy } = buildApprovalCore();

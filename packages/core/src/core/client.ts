@@ -440,6 +440,11 @@ export class LlmClient {
   // `announcedDeferredToolNames` is broader and exists for deferred tool-search
   // dedup; MCP add/remove deltas need this narrower model-visible set.
   private announcedMcpToolNames = new Set<string>();
+  // MCP tools eagerly revealed by the incomplete-bridge fallback below.
+  // `rememberAnnouncedDeferredTools` re-seeds `announcedMcpToolNames` from the
+  // reminder list — which is `undefined` in that state — so without this set a
+  // later disconnect of an eagerly revealed tool would never be announced.
+  private eagerlyRevealedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
   private announcedMcpServerInstructions = new Map<string, string>();
@@ -1477,8 +1482,8 @@ export class LlmClient {
     // Drop any deferred tools revealed this session so /clear really gives
     // a clean slate. We don't clear inside startChat itself because that path
     // is also taken by compression (which preserves the session), and
-    // compression should keep previously-revealed tools so the model can
-    // continue using them without re-running ToolSearch.
+    // compression should keep session-setup reveals so the declaration list
+    // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat(undefined, SessionStartSource.Clear);
     this.initializedSessionId = this.config.getSessionId();
@@ -1657,9 +1662,7 @@ export class LlmClient {
    * alike — at session start when the combined estimated size of their
    * schemas fits within `tools.toolSearch.threshold` percent of the
    * context window. A small deferred set is cheaper to declare upfront
-   * than to load on demand: with nothing left for ToolSearch to reveal,
-   * the declaration list stays stable for the whole session and no
-   * reveal ever invalidates the prompt-cache prefix.
+   * than to load on demand through the bridge.
    *
    * Deliberately NOT called from setTools(): revealing a tool the startup
    * reminder already announced would make queueAddedMcpToolsReminder flag
@@ -1669,9 +1672,12 @@ export class LlmClient {
    */
   private preloadDeferredToolsWithinBudget(): void {
     const toolRegistry = this.config.getToolRegistry();
-    // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
+    // Without either bridge, resolveDeferredToolsForReminder() eagerly
     // reveals everything — there is no budget decision to make.
-    if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
+    if (
+      !toolRegistry.getTool(ToolNames.TOOL_SEARCH) ||
+      !toolRegistry.getTool(ToolNames.TOOL_CALL)
+    ) {
       return;
     }
     const thresholdPercent = this.config.getToolSearchThreshold();
@@ -1752,27 +1758,30 @@ export class LlmClient {
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), deferred tools are eagerly revealed here so
-   * they land in the declaration list. Tools explicitly demoted by
-   * `tools.eager` stay hidden unless the history-reveal pass above already
-   * re-exposed one for a resumed session — that schema stays in the
+   * Side effect: when either ToolSearch or ToolCall is not registered (e.g.
+   * `--exclude-tools tool_search` or a deny rule), deferred tools are eagerly
+   * revealed here so they land in the declaration list. Tools explicitly
+   * demoted by `tools.eager` stay hidden unless the history-reveal pass above
+   * already re-exposed one for a resumed session — that schema stays in the
    * declarations, so it is not counted unreachable below. Skipping this for
    * ordinary deferred tools would leave them both off the declarations AND
    * off the deferred-summary list
    * (since `undefined` is returned in that branch) — a silent disappearance.
    *
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand. Tools held back
-   * by `tools.eager` in that state are unreachable for the session, which is
-   * warned about once per session.
+   * Returns `undefined` when the bridge is incomplete (ToolSearch or
+   * ToolCall unregistered): reminders must not advertise tools the model has
+   * no way to invoke on demand. Tools held back by `tools.eager` in that
+   * state are unreachable for the session, which is warned about once per
+   * session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
   ): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
-    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-    if (!toolSearchAvailable) {
+    const bridgeAvailable =
+      !!toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+      !!toolRegistry.getTool(ToolNames.TOOL_CALL);
+    if (!bridgeAvailable) {
       if (deferredSummary.length > 0) {
         const withheld: string[] = [];
         for (const t of deferredSummary) {
@@ -1787,14 +1796,38 @@ export class LlmClient {
             continue;
           }
           toolRegistry.revealDeferredTool(t.name);
+          if (t.serverName) {
+            // Keep the disconnect-announcement path seeded even though the
+            // reminder list is undefined in this state (see the field).
+            this.eagerlyRevealedMcpToolNames.add(t.name);
+            // Track the reveal as an announcement as well: the model now
+            // sees the tool, so a later disconnect must announce its
+            // removal. A mid-session setTools() reveal never passes through
+            // rememberAnnouncedDeferredTools (startChat-only), which is the
+            // sole path promoting the seed into announcedMcpToolNames —
+            // without this, a server that registers after the initial
+            // startChat disconnects silently and the model keeps calling a
+            // dead server's tools (R1-28).
+            this.announcedMcpToolNames.add(t.name);
+          }
         }
         if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
           this.warnedAboutUnreachableEagerTools = true;
+          const missingHalves: string[] = [];
+          if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
+            missingHalves.push(ToolNames.TOOL_SEARCH);
+          }
+          if (!toolRegistry.getTool(ToolNames.TOOL_CALL)) {
+            missingHalves.push(ToolNames.TOOL_CALL);
+          }
           // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
           console.warn(
-            `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
-              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
-              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+            `tools.eager is holding back ${withheld.length} tool(s) in a session where the ` +
+              `ToolSearch + ToolCall bridge is incomplete (${missingHalves.join(' and ')} not registered), ` +
+              `so they are not offered to the model and cannot be loaded through the bridge until restart; ` +
+              `they remain registered and direct calls by name still use normal approval: ${withheld.join(', ')}. ` +
+              `Enable tools.toolSearch.enabled (which registers both bridge tools) and drop any ` +
+              `tool_search/tool_call deny rule, --exclude-tools entry, or tools.disabled entry to keep them loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
           );
         }
@@ -1817,6 +1850,19 @@ export class LlmClient {
         .filter((tool) => tool.serverName)
         .map((tool) => tool.name),
     );
+    // Re-seed eagerly revealed MCP tools so their later disconnect is still
+    // announced. Runs after the reset above (callers run
+    // resolveDeferredToolsForReminder first, which rebuilds the set); drop
+    // names already gone from the registry so a removal announced before a
+    // restart/compaction is not re-announced.
+    const toolRegistry = this.config.getToolRegistry();
+    for (const name of this.eagerlyRevealedMcpToolNames) {
+      if (toolRegistry.getTool(name)) {
+        this.announcedMcpToolNames.add(name);
+      } else {
+        this.eagerlyRevealedMcpToolNames.delete(name);
+      }
+    }
     this.pendingAddedMcpTools.clear();
     this.pendingRemovedMcpToolNames.clear();
   }
@@ -1908,6 +1954,9 @@ export class LlmClient {
       // a tool actually removed from the registry is unavailable now.
       if (!toolRegistry.getTool(name)) {
         this.pendingRemovedMcpToolNames.add(name);
+        // The removal is about to be announced; forget the eager-reveal seed
+        // so a later startChat does not re-announce the same removal.
+        this.eagerlyRevealedMcpToolNames.delete(name);
       }
     }
 

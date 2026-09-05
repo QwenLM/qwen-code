@@ -48,7 +48,8 @@ describe('ReadMcpResourceTool', () => {
     const tool = new ReadMcpResourceTool(configWith(readMcpResource));
 
     expect(tool.name).toBe(ToolNames.READ_MCP_RESOURCE);
-    // Deferred (discovered via tool_search) like web_fetch — infrequent.
+    // Deferred (reviewed via tool_search and invoked via tool_call) like
+    // web_fetch — infrequent.
     expect(tool.shouldDefer).toBe(true);
     expect(tool.schema.name).toBe(ToolNames.READ_MCP_RESOURCE);
     expect(tool.schema.parametersJsonSchema).toMatchObject({

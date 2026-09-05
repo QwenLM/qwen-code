@@ -1573,8 +1573,9 @@ export async function processSingleFileContent(
                   text:
                     `Image overview: ${view.outputWidth}x${view.outputHeight}; ` +
                     `oriented source: ${view.sourceWidth}x${view.sourceHeight}. ` +
-                    `If details are too small, use tool_search for "zoom image", then ` +
-                    `call zoom_image with coordinates normalized from 0 to 1000.`,
+                    `If details are too small, call zoom_image with coordinates normalized ` +
+                    `from 0 to 1000 (if it is not in your tool list, review it with ` +
+                    `tool_search first, then invoke it through tool_call).`,
                 },
                 {
                   inlineData: {

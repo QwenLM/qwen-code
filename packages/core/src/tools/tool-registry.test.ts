@@ -867,7 +867,7 @@ describe('ToolRegistry', () => {
 
       registry.clearRevealedDeferredTools();
 
-      // The ToolSearch-discovered reveal is dropped by the reset...
+      // A transient reveal is dropped by the reset...
       expect(registry.isDeferredToolRevealed('discovered')).toBe(false);
       expect(
         registry.getFunctionDeclarations().map((d) => d.name),
@@ -893,7 +893,8 @@ describe('ToolRegistry', () => {
 
   // #10075: built-in tools an active `settings.tools.eager` allowlist does
   // not name are demoted to deferred instead of being dropped from the
-  // registry, so they stay listed in /tools and loadable via ToolSearch
+  // registry, so they stay listed in /tools and reachable through the
+  // `tool_search` + `tool_call` bridge
   // while their schemas stay out of the eager model request (#9827).
   describe('permission-deferred tools (#10075)', () => {
     it('registers the tool but hides it from the eager declarations', async () => {
@@ -921,7 +922,7 @@ describe('ToolRegistry', () => {
           .getFunctionDeclarations({ includeDeferred: true })
           .map((d) => d.name),
       ).toContain('hidden_by_allowlist');
-      // ...and discoverable through the deferred summary (ToolSearch).
+      // ...and discoverable through the deferred summary (ToolSearch + ToolCall).
       expect(
         toolRegistry.getDeferredToolSummary().map((t) => t.name),
       ).toContain('hidden_by_allowlist');
@@ -952,7 +953,7 @@ describe('ToolRegistry', () => {
       ).not.toContain('hidden_by_allowlist');
     });
 
-    it('reveals the schema once ToolSearch loads the tool', async () => {
+    it('includes a permission-deferred schema after an explicit reveal', async () => {
       toolRegistry.registerPermissionDeferredFactory(
         'hidden_by_allowlist',
         async () => new MockTool({ name: 'hidden_by_allowlist' }),

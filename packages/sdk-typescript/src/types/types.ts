@@ -412,20 +412,24 @@ export interface QueryOptions {
    * Separately, `tools.eager` in settings.json (requires restart) selects
    * which eager-by-default tool schemas remain eligible for the initial
    * model request. Unlisted non-exempt tools are demoted to deferred and stay
-   * loadable via `tool_search` while ToolSearch is registered; when ToolSearch
-   * is not registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
-   * rule, or the automatic DeepSeek opt-out) the demoted tools are out of
-   * reach for that session and a warning is logged. Two carve-outs: demoted
-   * tools referenced in resumed session history get their schemas re-sent
-   * without a warning, and demoted tools listed in `tools.visible` are
-   * declared up front. Tools already deferred by
-   * default remain on
-   * demand even when listed; `tools.visible` surfaces one at startup. The
+   * reachable through `tool_search` + `tool_call` while both bridge tools are
+   * registered; when either is unregistered (`tools.toolSearch.enabled: false`
+   * denies both; a `tool_search` or `tool_call` deny rule, or a
+   * `tools.disabled` entry removes one) the
+   * demoted tools that remain hidden are not offered to the model and cannot
+   * be reached through the bridge for that session, and a warning is logged;
+   * they stay registered, so a direct call by their own name is still
+   * evaluated and approved normally — except tools also listed in
+   * `tools.visible`, which
+   * are declared upfront, and resumed sessions, which re-declare demoted
+   * tools referenced by direct calls in the transcript.
+   * Tools already deferred by default remain
+   * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
    * `structured_output` contract, plan-mode lifecycle tools, `task_stop`,
-   * `tool_search`, or the `computer_use__*` family (#9827, #10075).
-   * `permissions.allow` plays no part in this — it
-   * is pure auto-approval and never removes or hides a tool. Aliases like
+   * `tool_search`, `tool_call`, or the `computer_use__*` family
+   * (#9827, #10075). `permissions.allow` plays no part in this — it is pure
+   * auto-approval and never removes or hides a tool. Aliases like
    * 'Read', 'Edit', and 'Bash' also work but resolve to single tools.
    * Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
    * tool registration, not invocation.
@@ -466,14 +470,19 @@ export interface QueryOptions {
    *   `--allowed-tools` flag and is pure auto-approval, as is
    *   `permissions.allow` in settings.json (#10075). To keep unlisted
    *   eager-by-default built-in schemas out of the initial model request, set
-   *   `tools.eager` in settings.json (requires restart); tools omitted
-   *   there are demoted to deferred — still registered and loadable via
-   *   `tool_search` while ToolSearch is registered; when ToolSearch is not
-   *   registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
-   *   rule, or the automatic DeepSeek opt-out) the demoted tools are out of
-   *   reach for that session and a warning is logged — except demoted tools
-   *   referenced in resumed session history (re-sent without a warning) or
-   *   listed in `tools.visible` (declared up front) (#9827)
+   *   `tools.eager` in settings.json (requires restart); tools omitted there
+   *   are demoted to deferred — still registered and reachable through
+   *   `tool_search` + `tool_call` while both bridge tools are registered;
+   *   when either is unregistered (`tools.toolSearch.enabled: false` denies
+   *   both; a `tool_search` or `tool_call` deny rule, or a
+   *   `tools.disabled` entry removes one) the
+   *   demoted tools that remain hidden are not offered to the model and cannot
+   *   be reached through the bridge for that session, and a warning is logged;
+   *   they stay registered, so a direct call by their own name is still
+   *   evaluated and approved normally — except tools also listed in
+   *   `tools.visible`,
+   *   which are declared upfront, and resumed sessions, which re-declare
+   *   demoted tools referenced by direct calls in the transcript (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

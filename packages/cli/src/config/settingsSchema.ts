@@ -2673,7 +2673,7 @@ const SETTINGS_SCHEMA = {
         category: 'Tools',
         requiresRestart: true,
         default: {},
-        description: 'Settings for the ToolSearch discovery mechanism.',
+        description: 'Settings for deferred-tool discovery and invocation.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2683,7 +2683,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
+              'When enabled, deferred tools are reviewed via ToolSearch and invoked through the stable ToolCall bridge. Bridge review and invocation keep the tool list stable, reducing prompt size without touching the prompt-cache prefix; a resumed session may still refresh its declarations when a deferred tool referenced by direct calls in the transcript registers mid-session.',
             showInDialog: true,
           },
           threshold: {
@@ -2693,7 +2693,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred schema fits within the budget, all are declared upfront for direct calls, keeping the prompt prefix stable for KV caching; otherwise they stay behind the stable ToolSearch + ToolCall bridge while both bridge tools are registered. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge while it is registered; when either bridge tool is unregistered (tools.toolSearch.enabled false denies both; a tool_search or tool_call deny rule removes one) the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and resumed sessions, which re-declare demoted tools referenced by direct calls in the transcript. Set 0 to disable this preload; deferred tools then stay behind the bridge except for reveals this threshold does not govern (resumed-history replay, tools.visible, and the incomplete-bridge fallback that eagerly declares them).',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -2864,7 +2864,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
+          'Deferred tool names made visible at startup without requiring the ToolSearch + ToolCall bridge. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2875,7 +2875,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and resumed sessions, which re-declare demoted tools referenced by direct calls in the transcript. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {
