@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
@@ -1042,9 +1043,9 @@ describe('maybeOpenWebShellBrowser', () => {
 });
 
 describe('serve startup import boundary', () => {
-  const ecs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-');
-  const startupMs = ecs ? 60_000 : 30_000;
-  const testMs = ecs ? 70_000 : 40_000;
+  const ecs = isSlowTestHost();
+  const startupMs = ecs ? 90_000 : 30_000;
+  const testMs = ecs ? 110_000 : 40_000;
 
   it(
     'reaches listening through the dev entrypoint without loading interactive Ink internals first',

@@ -8,6 +8,8 @@ import type {
   ChannelMemoryTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
@@ -222,6 +224,7 @@ interface ChannelMemoryRecallSelection {
 }
 
 export interface ChannelBaseOptions {
+  locale?: 'en' | 'zh';
   router?: SessionRouter;
   proxy?: string;
   /** Adapter-owned persistent state directory. */
@@ -248,6 +251,54 @@ export interface ChannelBaseOptions {
     /** Read persisted observations so adapters can hydrate label caches. */
     list?(): ObservedChannelContactGraph;
   };
+}
+
+const PERMISSION_COPY = {
+  en: {
+    toolUse: 'Tool use',
+    allowOnce: 'Allow once',
+    allowAlwaysProject: 'always allow for this project',
+    allowAlwaysUser: 'always allow for this user',
+    allowAlways: 'always allow',
+    deny: 'Deny',
+    required: 'Permission required to run a tool',
+    request: 'Request:',
+    tool: 'Tool:',
+    action: 'Action:',
+    parameters: 'Parameters:',
+    replyWith: 'Reply with:',
+  },
+  zh: {
+    toolUse: '工具调用',
+    allowOnce: '仅允许本次',
+    allowAlwaysProject: '始终允许此项目',
+    allowAlwaysUser: '始终允许此用户',
+    allowAlways: '始终允许',
+    deny: '拒绝',
+    required: '运行工具需要授权',
+    request: '请求：',
+    tool: '工具：',
+    action: '操作：',
+    parameters: '参数：',
+    replyWith: '回复以下命令：',
+  },
+} as const;
+
+/**
+ * Translate the stock prefix of a scoped always-allow label, keeping the
+ * command/tool scope that exec and mcp confirmations append to it.
+ */
+function localizedScopedAlwaysLabel(
+  label: string,
+  stockLabel: string,
+  localizedLabel: string,
+): string | undefined {
+  if (label === stockLabel) return localizedLabel;
+  const scopeSeparator = ': ';
+  if (!label.startsWith(stockLabel + scopeSeparator)) return undefined;
+  return `${localizedLabel}：${label.slice(
+    stockLabel.length + scopeSeparator.length,
+  )}`;
 }
 
 export interface ChannelLoopController {
@@ -280,6 +331,7 @@ type PendingPermission = {
   sourceLabel?: string;
   taskName?: string;
   userInputPresented?: boolean;
+  permissionPresented?: boolean;
   settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
   settled?: UserInputSettlementReason;
   responsePromise?: Promise<boolean>;
@@ -413,6 +465,7 @@ export abstract class ChannelBase {
   protected proxy?: string;
   /** Adapter-owned persistent state directory, when supplied by the runtime. */
   protected readonly stateDir?: string;
+  protected readonly locale: 'en' | 'zh';
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -876,6 +929,10 @@ export abstract class ChannelBase {
       if (presentation && (await presentation)) {
         return;
       }
+      const permissionPresentation = this.tryPresentPermission(pending);
+      if (permissionPresentation && (await permissionPresentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
@@ -991,6 +1048,150 @@ export abstract class ChannelBase {
     })();
   }
 
+  private tryPresentPermission(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const isUserQuestion =
+      meta?.['qwenInteractionKind'] === 'user_question' ||
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const decisions = this.permissionPresentationDecisions(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      isUserQuestion ||
+      !decisions
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelPermissionRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      title: this.permissionTitle(pending.request.toolCall),
+      decisions,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (decision) => {
+        const response = this.permissionPresentationResponse(pending, decision);
+        if (!response) return Promise.resolve(false);
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.permissionPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        const result = await this.presentPermissionRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] permission presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private permissionPresentationDecisions(
+    pending: PendingPermission,
+  ): ChannelPermissionRequestContext['decisions'] | undefined {
+    const allowOnce = this.approvalOption(pending);
+    if (!allowOnce) return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    const allowAlways = this.approvalAlwaysOption(pending);
+    return [
+      {
+        kind: 'allow_once',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(allowOnce, copy.allowOnce),
+          80,
+        ),
+      },
+      ...(allowAlways
+        ? [
+            {
+              kind: 'allow_always' as const,
+              label: sanitizeQuotedText(allowAlways.label, 80),
+            },
+          ]
+        : []),
+      {
+        kind: 'deny',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(this.denialOption(pending), copy.deny),
+          80,
+        ),
+      },
+    ];
+  }
+
+  private permissionPresentationResponse(
+    pending: PendingPermission,
+    decision: ChannelPermissionDecision,
+  ): ChannelUserInputResponse | undefined {
+    if (decision === 'deny') return this.denialResponse(pending);
+    const optionId =
+      decision === 'allow_once'
+        ? this.approvalOptionId(pending)
+        : this.approvalAlwaysOption(pending)?.optionId;
+    return optionId
+      ? { outcome: { outcome: 'selected', optionId } }
+      : undefined;
+  }
+
   private normalizeUserQuestions(
     pending: PendingPermission,
   ): ChannelUserQuestion[] | undefined {
@@ -1071,7 +1272,8 @@ export abstract class ChannelBase {
     response: ChannelUserInputResponse,
   ): Promise<boolean> {
     if (pending.responsePromise) {
-      return pending.responsePromise;
+      await pending.responsePromise;
+      return false;
     }
     if (
       this.pendingPermissions.get(pending.requestId) !== pending ||
@@ -1155,6 +1357,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
+    this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
@@ -1261,6 +1464,12 @@ export abstract class ChannelBase {
 
   protected async presentUserInputRequest(
     _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
+  protected async presentPermissionRequest(
+    _context: ChannelPermissionRequestContext,
   ): Promise<UserInputPresentationResult> {
     return { kind: 'unsupported' };
   }
@@ -3042,7 +3251,7 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
-      (!pending.userInputPresented ||
+      ((!pending.userInputPresented && !pending.permissionPresented) ||
         pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
@@ -3051,15 +3260,16 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
+    const copy = PERMISSION_COPY[this.locale];
     const parameters = this.permissionParameterSummary(toolCall);
     const approveLabel = this.permissionOptionLabel(
       this.approvalOption(pending),
-      'allow once',
+      copy.allowOnce.toLocaleLowerCase(this.locale),
     );
     const alwaysOption = this.approvalAlwaysOption(pending);
     const denyLabel = this.permissionOptionLabel(
       this.denialOption(pending),
-      'deny',
+      copy.deny.toLocaleLowerCase(this.locale),
     );
     const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
     const replyPadding = pending.taskName
@@ -3075,14 +3285,14 @@ export abstract class ChannelBase {
       `${this.prefixedCommand(`/deny${requestSuffix}`)}${replyPadding.deny}${denyLabel}`,
     ];
     return [
-      'Permission required to run a tool',
-      ...(pending.taskName ? [`Request: ${pending.requestId}`] : []),
+      copy.required,
+      ...(pending.taskName ? [`${copy.request} ${pending.requestId}`] : []),
       '',
-      `Tool: ${this.permissionToolName(toolCall)}`,
-      `Action: ${this.permissionTitle(toolCall)}`,
-      ...(parameters ? [`Parameters: ${parameters}`] : []),
+      `${copy.tool} ${this.permissionToolName(toolCall)}`,
+      `${copy.action} ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`${copy.parameters} ${parameters}`] : []),
       '',
-      'Reply with:',
+      copy.replyWith,
       ...replies,
     ].join('\n');
   }
@@ -3100,7 +3310,10 @@ export abstract class ChannelBase {
   ): string {
     const rawTitle =
       typeof toolCall.title === 'string' ? toolCall.title : undefined;
-    return sanitizeQuotedText(rawTitle || '', 160).trim() || 'Tool use';
+    return (
+      sanitizeQuotedText(rawTitle || '', 160).trim() ||
+      PERMISSION_COPY[this.locale].toolUse
+    );
   }
 
   private permissionToolName(
@@ -3151,7 +3364,39 @@ export abstract class ChannelBase {
   ): string {
     const rawLabel = typeof option?.name === 'string' ? option.name : '';
     const label = sanitizeQuotedText(rawLabel, 160).trim();
-    return label || fallback;
+    if (!label) return fallback;
+    return this.localizedPermissionOptionLabel(option, label) ?? label;
+  }
+
+  private localizedPermissionOptionLabel(
+    option: PermissionOption | undefined,
+    label: string,
+  ): string | undefined {
+    if (this.locale !== 'zh') return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    if (option?.kind === 'allow_always') {
+      if (option.optionId === 'proceed_always_project') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow in project',
+          copy.allowAlwaysProject,
+        );
+      }
+      if (option.optionId === 'proceed_always_user') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow for user',
+          copy.allowAlwaysUser,
+        );
+      }
+      if (option.optionId === 'proceed_always' && label === 'Allow All Edits') {
+        return copy.allowAlways;
+      }
+      return undefined;
+    }
+    if (label === 'Allow' || label === 'Allow once') return copy.allowOnce;
+    if (label === 'Deny' || label === 'Reject') return copy.deny;
+    return undefined;
   }
 
   private approvalOption(
@@ -3204,13 +3449,14 @@ export abstract class ChannelBase {
   }
 
   private approvalAlwaysLabel(option: PermissionOption): string {
+    const copy = PERMISSION_COPY[this.locale];
     if (option.optionId === 'proceed_always_project') {
-      return 'always allow for this project';
+      return copy.allowAlwaysProject;
     }
     if (option.optionId === 'proceed_always_user') {
-      return 'always allow for this user';
+      return copy.allowAlwaysUser;
     }
-    return 'always allow';
+    return copy.allowAlways;
   }
 
   private denialResponse(pending: PendingPermission): {
@@ -3350,9 +3596,10 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = pending.userInputPresented
-        ? await this.respondToUserInput(pending, response)
-        : await this.bridge.respondToPermission(pending.requestId, response);
+      accepted =
+        pending.userInputPresented || pending.permissionPresented
+          ? await this.respondToUserInput(pending, response)
+          : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
