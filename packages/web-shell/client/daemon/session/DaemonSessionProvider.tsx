@@ -4894,13 +4894,39 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // already in the window and only needs focusing.
           return { ok: true, targetRecordId: focusRecordId };
         }
+        // Placement comes from snapshot-local ordinals, never from record-id
+        // ordering: ids are not ordered, and guessing a position could
+        // interleave two ranges that were never adjacent. The ordinals are read
+        // after the await on purpose — an append-only refresh leaves them
+        // unchanged, while a divergent one discards the pages and leaves the
+        // window unorderable.
+        const insertAt = ledgerInsertIndexForOrdinal(
+          ledger,
+          turnOrdinalMap(turnIndexRef.current),
+          target.entry.ordinal,
+        );
+        if (insertAt === undefined) {
+          // Nothing resident in the ledger carries an ordinal, so this page has
+          // no provable position. The index is sparse and evictable by design,
+          // so "not resident" is ordinary and is not evidence of "newest":
+          // appending would assert an order the client cannot justify.
+          return { ok: false, reason: 'unavailable' };
+        }
+        // Whether this is a head landing is the block offset, not the span
+        // index. The canonical ledger for a bounded restore is `[gap, page]`,
+        // so a page older than everything retained lands at span 1 while still
+        // becoming the window's oldest content.
+        const insertOffset = ledgerBlockOffset(ledger, insertAt);
         const admission = materializeTranscriptHistory(
           preCommit,
           uiEvents,
           maxBlocks,
-          // This page is spliced in at its ledger position, not prepended, so
-          // the window's oldest block is not adjacent to it.
-          { boundaryEchoDedup: false },
+          // The boundary echo rule compares the page's newest user block against
+          // the window's OLDEST block, which is its neighbour only on a head
+          // landing. Anywhere else the two are unrelated blocks, and running the
+          // rule would drop a distinct older prompt that merely repeats the
+          // echo's text — orphaning its assistant reply.
+          { boundaryEchoDedup: insertOffset === 0 },
         );
         if (!admission.admitted) {
           return {
@@ -4908,24 +4934,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             reason: admission.impossible ? 'window_impossible' : 'window_full',
           };
         }
-        // Placement comes from snapshot-local ordinals, never from record-id
-        // ordering: ids are not ordered, and guessing a position could
-        // interleave two ranges that were never adjacent. The ordinals are read
-        // after the await on purpose — an append-only refresh leaves them
-        // unchanged, while a divergent one discards the pages and makes the
-        // window unorderable, which takes the page to the tail instead of
-        // placing it by a snapshot that no longer describes the chain.
-        const insertAt =
-          ledgerInsertIndexForOrdinal(
-            ledger,
-            turnOrdinalMap(turnIndexRef.current),
-            target.entry.ordinal,
-          ) ?? ledger.spans.length;
         store.reset(
           applyTranscriptHistoryAt(
             preCommit,
             admission.materialization,
-            ledgerBlockOffset(ledger, insertAt),
+            insertOffset,
           ),
         );
         const entry = createLedgerPageEntry(
@@ -4962,10 +4975,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // with no room left would only produce an immediate rejection.
           const history = transcriptHistoryRef.current;
           if (
-            insertAt === 0 &&
+            insertOffset === 0 &&
             history.sessionId === session.sessionId &&
             entry.firstRecordId !== undefined
           ) {
+            // A load-older in flight is anchored at the record this page just
+            // displaced as the window's oldest. Its result would splice in
+            // beside a boundary that no longer exists, placing two ranges that
+            // were never fetched as neighbours — so drop it the same way an
+            // oldest-first retention trim does.
+            paginationGenerationRef.current += 1;
             history.beforeRecordId = entry.firstRecordId;
             history.cursor = undefined;
             history.hasMore =

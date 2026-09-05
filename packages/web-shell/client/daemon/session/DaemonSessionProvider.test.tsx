@@ -18207,6 +18207,248 @@ describe('DaemonSessionProvider', () => {
         totalTurns: 5,
       });
     });
+
+    function anchoredPageEvent(
+      recordId: string,
+      text: string,
+      kind:
+        | 'user_message_chunk'
+        | 'agent_message_chunk' = 'agent_message_chunk',
+    ): DaemonEvent {
+      return {
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: kind,
+            content: { type: 'text', text },
+            _meta: {
+              'qwen.session.recordId': recordId,
+              qwenTranscript: { sourceRecordIds: [recordId] },
+            },
+          },
+        },
+      };
+    }
+
+    it('refuses a jump it cannot place instead of appending it to the tail', async () => {
+      // The window's only page carries a record the index does not know, so no
+      // resident ordinal exists to order the incoming page against. A sparse,
+      // evictable index makes that an ordinary state rather than evidence the
+      // page is the newest thing in the session, and appending it would assert
+      // an order the client cannot justify — possibly interleaving two ranges
+      // that were never adjacent.
+      const session = createMockSession({
+        sessionId: 'session-turn-index-unorderable',
+        replaySnapshot: {
+          compactedReplay: [
+            anchoredPageEvent('record-unindexed', 'retained content'),
+          ],
+          liveJournal: [],
+        },
+        events: createIdleEvents(),
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [anchoredPageEvent('record-0', 'anchored content')],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'record-0',
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      let blocks: ReturnType<typeof useDaemonTranscriptBlocks> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: session.sessionId,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      const retainedTexts = blocks?.map((block) => block.id);
+
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = index?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: false, reason: 'unavailable' });
+      // Refusing must also leave the window exactly as it was.
+      expect(blocks?.map((block) => block.id)).toEqual(retainedTexts);
+    });
+
+    it('re-anchors load-older when the page lands at the head behind a gap', async () => {
+      // The canonical ledger for a bounded restore is [gap, page], so a page
+      // older than everything retained lands at span index 1 while its block
+      // offset is 0. Keying the head test on the span index missed that, and the
+      // load-older affordance kept pointing at a record the jump had just
+      // displaced as the window's oldest.
+      const session = createMockSession({
+        sessionId: 'session-turn-index-head-gap',
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              v: 1,
+              type: 'history_truncated',
+              data: {
+                reason: 'replay_window_exceeded',
+                truncatedEvents: 4,
+                retainedEvents: 1,
+                maxBytes: 512,
+                fullTranscriptAvailable: true,
+              },
+            },
+            anchoredPageEvent('record-5', 'retained tail'),
+          ],
+          liveJournal: [],
+        },
+        events: createIdleEvents(),
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({
+          sessionId: session.sessionId,
+          totalTurns: 6,
+          start: 0,
+          turns: turnEntries(0, 6),
+        }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [anchoredPageEvent('record-0', 'older page')],
+        hasMore: false,
+        hasOlder: true,
+        targetRecordId: 'record-0',
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        history = useDaemonTranscriptHistory();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: session.sessionId,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = index?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: true, targetRecordId: 'record-0' });
+
+      sdkMocks.getSessionTranscriptPage.mockClear();
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [],
+        hasMore: false,
+      });
+      await act(async () => history?.loadMore());
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ beforeRecordId: 'record-0' }),
+      );
+    });
+
+    it('dedups the boundary echo when an anchored page lands at the head', async () => {
+      // The local echo of the user's own prompt carries no record id, so the
+      // record-id dedup is blind to it. When an anchored page lands at the head,
+      // the page's newest user block IS that echo's persisted record and sits
+      // directly beside it — the boundary pair the echo rule exists for, without
+      // which the same prompt renders twice. Mid-window the two blocks are
+      // unrelated, and running the rule there drops a distinct older prompt that
+      // merely repeats the text, so it is keyed on the landing position.
+      const session = createMockSession({
+        sessionId: 'session-turn-index-head-echo',
+        submitPrompt: vi.fn(async () => ({
+          promptId: 'prompt-echo',
+          lastEventId: 10,
+        })),
+        events: createIdleEvents(),
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [
+          anchoredPageEvent('record-0', 'same prompt', 'user_message_chunk'),
+        ],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'record-0',
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      let actions: DaemonSessionActions | undefined;
+      let blocks: ReturnType<typeof useDaemonTranscriptBlocks> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        actions = useDaemonActions();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: session.sessionId,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      await act(async () => {
+        await requireActions(actions).submitPrompt('same prompt');
+        await flushPromises();
+      });
+      const userBlocks = () =>
+        blocks?.filter((block) => block.kind === 'user') ?? [];
+      expect(userBlocks()).toHaveLength(1);
+
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = index?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: true, targetRecordId: 'record-0' });
+      expect(userBlocks()).toHaveLength(1);
+    });
   });
 });
 
