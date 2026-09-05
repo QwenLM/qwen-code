@@ -2636,6 +2636,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '仅受信任的工作区可以更改自动技能管理器。请通过 `/trust` 信任此文件夹后重试。',
   'Kept model as {{model}}': '模型保持为 {{model}}',
-  'Review messages held from other Qwen Code sessions (accept | deny)':
-    '查看其他 Qwen Code 会话发来的待处理消息（accept | deny）',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
 };
