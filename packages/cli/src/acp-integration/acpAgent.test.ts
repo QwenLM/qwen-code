@@ -4247,6 +4247,54 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('persists an approval mode explicitly requested for a new session', async () => {
+    const innerConfig = makeInnerConfig();
+    Object.assign(innerConfig, {
+      restoreApprovalModeState: vi.fn(),
+    });
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'yolo' },
+      });
+
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(true);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('records the failed newSession stage without changing the error', async () => {
     const configError = new Error('config failed');
     vi.mocked(loadCliConfig).mockRejectedValue(configError);
@@ -5768,6 +5816,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rolls back a live approval-mode change when persistence fails', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let approvalMode = 'default';
+    const persistenceError = new Error('approval persistence failed');
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    Object.assign(innerConfig, {
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      waitForSessionApprovalModePersistence: vi
+        .fn()
+        .mockRejectedValue(persistenceError),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+        sessionId,
+        mode: 'plan',
+      }),
+    ).rejects.toBe(persistenceError);
+    expect(setApprovalMode).toHaveBeenNthCalledWith(1, 'plan');
+    expect(setApprovalMode).toHaveBeenNthCalledWith(2, 'default');
+    expect(approvalMode).toBe('default');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -23632,13 +23712,20 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       });
       expect(
         innerConfig.enableSessionApprovalModePersistence,
-      ).toHaveBeenCalledOnce();
+      ).toHaveBeenCalledWith(false);
       expect(
         innerConfig.restoreApprovalModeState.mock.invocationCallOrder[0],
       ).toBeLessThan(
         innerConfig.enableSessionApprovalModePersistence.mock
           .invocationCallOrder[0],
       );
+      expect(
+        (
+          agent as unknown as {
+            sessionApprovalModeConverged: Map<string, string>;
+          }
+        ).sessionApprovalModeConverged.get('persisted-1'),
+      ).toBe('default');
       expect(response).toEqual(
         expect.objectContaining({
           modes: expect.objectContaining({ currentModeId: 'plan' }),
@@ -23684,6 +23771,15 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       expect(innerConfig.restoreApprovalModeState).toHaveBeenCalledWith({
         mode: 'yolo',
       });
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(true);
+      expect(
+        innerConfig.restoreApprovalModeState.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        innerConfig.enableSessionApprovalModePersistence.mock
+          .invocationCallOrder[0],
+      );
       expect(response).toEqual(
         expect.objectContaining({
           modes: expect.objectContaining({ currentModeId: 'yolo' }),
@@ -23707,8 +23803,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
               type: 'system',
               subtype: 'session_approval_mode',
               systemPayload: {
-                mode: 'plan',
-                prePlanMode: 'auto-edit',
+                mode: 'auto-edit',
               },
             },
           ],
@@ -23737,6 +23832,34 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       await agentPromise;
     },
   );
+
+  it('rejects invalid explicit approval modes for new, load, and resume', async () => {
+    bindRestoreMocks({ sessionExists: true });
+    const { agent, agentPromise } = await spawnAgent();
+    const request = {
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'invalid-mode' },
+    };
+
+    await expect(
+      (
+        agent as unknown as {
+          newSession: (params: typeof request) => Promise<unknown>;
+        }
+      ).newSession(request),
+    ).rejects.toThrow('Invalid session approval mode');
+    await expect(agent.loadSession(request)).rejects.toThrow(
+      'Invalid session approval mode',
+    );
+    await expect(agent.unstable_resumeSession(request)).rejects.toThrow(
+      'Invalid session approval mode',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('maps an explicit approval-mode trust rejection and cleans the cold config', async () => {
     const innerConfig = bindRestoreMocks({ sessionExists: true });

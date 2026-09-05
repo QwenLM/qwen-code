@@ -1924,9 +1924,10 @@ function setRequestedSessionApprovalMode(
       ...(mode === ApprovalMode.PLAN
         ? {
             prePlanMode:
-              restored?.kind === 'valid' &&
-              restored.payload.mode === ApprovalMode.PLAN
-                ? restored.payload.prePlanMode
+              restored?.kind === 'valid'
+                ? restored.payload.mode === ApprovalMode.PLAN
+                  ? restored.payload.prePlanMode
+                  : restored.payload.mode
                 : config.getApprovalMode(),
           }
         : {}),
@@ -5416,6 +5417,7 @@ class QwenAgent implements Agent {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
             approvalModeConvergenceBaseline,
+            persistInitialApprovalMode: requestedApprovalMode !== undefined,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5789,6 +5791,7 @@ class QwenAgent implements Agent {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
             approvalModeConvergenceBaseline,
+            persistInitialApprovalMode: requestedApprovalMode !== undefined,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -11203,6 +11206,7 @@ class QwenAgent implements Agent {
           config.setApprovalMode(mode as ApprovalMode);
           await config.waitForSessionApprovalModePersistence?.();
         } catch (err) {
+          config.setApprovalMode(previous);
           // `TrustGateError` is the core's structured rejection for
           // untrusted-folder + privileged-mode. We re-raise it as a
           // JSON-RPC error whose `data.errorKind` is the literal the

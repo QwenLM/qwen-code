@@ -4510,6 +4510,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.queueSessionApprovalModePersistence();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -8729,7 +8730,6 @@ export class Config {
     while (true) {
       const pending = this.sessionApprovalModePersistenceTail;
       await pending;
-      await this.chatRecordingService?.assertCanStartTurn();
       if (pending === this.sessionApprovalModePersistenceTail) return;
     }
   }
@@ -8997,7 +8997,6 @@ export class Config {
     if (isDerivedConfig(this)) return;
     if (this.sessionApprovalModePersistenceEnabled) {
       await this.waitForSessionApprovalModePersistence();
-      return;
     }
     if (this.chatRecordingService?.hasWriteOwnership()) {
       await this.chatRecordingService.assertCanStartTurn();
@@ -9041,10 +9040,6 @@ export class Config {
       this.sessionWriterHandoffRequested = true;
     }
     this.sessionWriterShutdownRequested = true;
-    this.chatRecordingService?.beginClose({
-      handoff: this.sessionWriterHandoffRequested,
-    });
-    this.startPendingSessionWriterRelease();
     if (this.sessionWriterClosePromise) return this.sessionWriterClosePromise;
     const pending = this.closeSessionWriterOnce();
     this.sessionWriterClosePromise = pending;
@@ -9060,16 +9055,20 @@ export class Config {
     const failures: unknown[] = [];
     const activation = this.sessionWriterActivationPromise;
     try {
+      await this.waitForSessionApprovalModePersistence();
+    } catch (error) {
+      failures.push(error);
+    }
+    this.chatRecordingService?.beginClose({
+      handoff: this.sessionWriterHandoffRequested,
+    });
+    this.startPendingSessionWriterRelease();
+    try {
       await activation;
     } catch (error) {
       if (!(error instanceof SessionWriterShutdownError)) {
         failures.push(error);
       }
-    }
-    try {
-      await this.sessionApprovalModePersistenceTail;
-    } catch (error) {
-      failures.push(error);
     }
     try {
       await this.chatRecordingService?.close({

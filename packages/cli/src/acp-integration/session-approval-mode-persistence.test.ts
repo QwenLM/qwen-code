@@ -101,18 +101,24 @@ describe('applyRestoredSessionApprovalMode', () => {
     });
   });
 
-  it('keeps the restricted boot mode instead of restoring session state', () => {
-    const target = config({ isSafeMode: vi.fn(() => true) });
+  it.each([
+    ['safe mode', { isSafeMode: vi.fn(() => true) }],
+    ['bare mode', { getBareMode: vi.fn(() => true) }],
+  ] as const)(
+    'keeps the restricted boot mode for %s instead of restoring session state',
+    (_label, restriction) => {
+      const target = config(restriction);
 
-    applyRestoredSessionApprovalMode(
-      target,
-      projection({
-        kind: 'valid',
-        payload: { mode: ApprovalMode.YOLO },
-      }),
-    );
+      applyRestoredSessionApprovalMode(
+        target,
+        projection({
+          kind: 'valid',
+          payload: { mode: ApprovalMode.YOLO },
+        }),
+      );
 
-    expect(target.restoreApprovalModeState).not.toHaveBeenCalled();
-    expect(target.setApprovalMode).not.toHaveBeenCalled();
-  });
+      expect(target.restoreApprovalModeState).not.toHaveBeenCalled();
+      expect(target.setApprovalMode).not.toHaveBeenCalled();
+    },
+  );
 });

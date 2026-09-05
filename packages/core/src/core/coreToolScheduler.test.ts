@@ -11282,15 +11282,12 @@ describe('CoreToolScheduler Plan shell routing', () => {
       returnDisplay: 'ok',
     });
     let release!: () => void;
-    const waitForApprovalModePersistence = vi
-      .fn()
-      .mockResolvedValueOnce(undefined)
-      .mockImplementationOnce(
-        () =>
-          new Promise<void>((resolve) => {
-            release = resolve;
-          }),
-      );
+    const waitForApprovalModePersistence = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
     const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
       tools: [shellTool({ execute })],
       waitForApprovalModePersistence,
@@ -11301,7 +11298,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       new AbortController().signal,
     );
     await vi.waitFor(() =>
-      expect(waitForApprovalModePersistence).toHaveBeenCalledTimes(2),
+      expect(waitForApprovalModePersistence).toHaveBeenCalledOnce(),
     );
     expect(execute).not.toHaveBeenCalled();
 
@@ -11309,6 +11306,30 @@ describe('CoreToolScheduler Plan shell routing', () => {
     await pending;
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('terminalizes a tool when approval-mode persistence fails', async () => {
+    const execute = vi.fn();
+    const persistenceError = new Error('approval persistence failed');
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      waitForApprovalModePersistence: vi
+        .fn()
+        .mockRejectedValue(persistenceError),
+    });
+
+    await scheduler.schedule(
+      [request('approval-mode-failed', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0]).toMatchObject({
+      status: 'error',
+      response: { executionStatus: 'not_started' },
+    });
   });
 
   it('cancels without execution when aborted while awaiting the host guard', async () => {

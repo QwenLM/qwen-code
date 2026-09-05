@@ -4989,9 +4989,10 @@ describe('Server Config (config.ts)', () => {
       await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
       const shutdown = config.shutdown({ shutdownTelemetry: false });
 
-      expect(beginClose).toHaveBeenCalledOnce();
+      expect(beginClose).not.toHaveBeenCalled();
       expect(finalize).not.toHaveBeenCalled();
       expect(flush).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(beginClose).toHaveBeenCalledOnce());
       await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
 
       releaseInitialization();
@@ -10774,6 +10775,24 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO_EDIT);
     });
 
+    it('sanitizes invalid and untrusted restored plan exit targets', () => {
+      const trusted = new Config(baseParams);
+      vi.spyOn(trusted, 'isTrustedFolder').mockReturnValue(true);
+      trusted.restoreApprovalModeState({
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.PLAN,
+      });
+      expect(trusted.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+
+      const untrusted = new Config(baseParams);
+      vi.spyOn(untrusted, 'isTrustedFolder').mockReturnValue(false);
+      untrusted.restoreApprovalModeState({
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.AUTO_EDIT,
+      });
+      expect(untrusted.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
     it('does not report initialization as a manual plan exit', () => {
       const config = new Config({
         ...baseParams,
@@ -10826,7 +10845,91 @@ describe('setApprovalMode with folder trust', () => {
         mode: ApprovalMode.PLAN,
         prePlanMode: ApprovalMode.AUTO_EDIT,
       });
-      expect(assertCanStartTurn).toHaveBeenCalledOnce();
+      expect(assertCanStartTurn).not.toHaveBeenCalled();
+    });
+
+    it('checks recorder health only when the session owns the writer', async () => {
+      const config = new Config(baseParams);
+      const recorderFailure = new Error('recorder failed');
+      const recorder = {
+        hasWriteOwnership: vi.fn().mockReturnValue(false),
+        recordSessionApprovalMode: vi.fn().mockResolvedValue(true),
+        assertCanStartTurn: vi.fn().mockRejectedValue(recorderFailure),
+      };
+      const internal = config as unknown as {
+        chatRecordingService: typeof recorder;
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = recorder;
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+      expect(recorder.assertCanStartTurn).not.toHaveBeenCalled();
+
+      recorder.hasWriteOwnership.mockReturnValue(true);
+      await expect(config.assertCanStartTurn()).rejects.toBe(recorderFailure);
+    });
+
+    it('reanchors approval persistence after starting a new session', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const internal = config as unknown as {
+        createChatRecordingService: () => ReturnType<
+          Config['getChatRecordingService']
+        >;
+      };
+      const replacement = internal.createChatRecordingService();
+      if (!replacement) throw new Error('Expected chat recording service');
+      const recordSessionApprovalMode = vi
+        .spyOn(replacement, 'recordSessionApprovalMode')
+        .mockResolvedValue(true);
+      vi.spyOn(internal, 'createChatRecordingService').mockReturnValue(
+        replacement,
+      );
+      await config.enableSessionApprovalModePersistence(false);
+
+      config.startNewSession('rotated-approval-session');
+      await config.waitForSessionApprovalModePersistence();
+
+      expect(recordSessionApprovalMode).toHaveBeenCalledWith({
+        mode: config.getApprovalMode(),
+      });
+    });
+
+    it('drains approval persistence before closing its recorder', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      let releaseWrite!: () => void;
+      const recordSessionApprovalMode = vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            releaseWrite = () => resolve(true);
+          }),
+      );
+      const recorder = {
+        hasWriteOwnership: vi.fn().mockReturnValue(false),
+        recordSessionApprovalMode,
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+        beginClose: vi.fn(),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      const internal = config as unknown as {
+        chatRecordingService: typeof recorder;
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = recorder;
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      const close = config.closeSessionWriter();
+      await vi.waitFor(() =>
+        expect(recordSessionApprovalMode).toHaveBeenCalledOnce(),
+      );
+      expect(recorder.beginClose).not.toHaveBeenCalled();
+
+      releaseWrite();
+      await close;
+      expect(recorder.beginClose).toHaveBeenCalledOnce();
+      expect(recorder.close).toHaveBeenCalledOnce();
     });
 
     it('waits through a mode snapshot queued during the barrier', async () => {

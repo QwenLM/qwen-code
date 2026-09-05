@@ -116,6 +116,7 @@ import {
   ShellExecutionService,
   stableSessionArtifactId,
   ToolNames,
+  TrustGateError,
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   upsertSessionPr,
@@ -25574,11 +25575,13 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.newSessionCalls[0]?._meta).toMatchObject({
         [SESSION_APPROVAL_MODE_META_KEY]: ApprovalMode.YOLO,
       });
-      expect(handle.agent.extMethodCalls).toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-        }),
-      );
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        params: {
+          sessionId: 'initial-mode',
+          mode: ApprovalMode.YOLO,
+        },
+      });
       await bridge.shutdown();
     });
 
@@ -25632,11 +25635,90 @@ describe('createAcpSessionBridge', () => {
         expect(call?._meta).toMatchObject({
           [SESSION_APPROVAL_MODE_META_KEY]: ApprovalMode.YOLO,
         });
-        expect(handle.agent.extMethodCalls).toContainEqual(
-          expect.objectContaining({
-            method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-          }),
-        );
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          params: {
+            sessionId: `initial-${action}-mode`,
+            mode: ApprovalMode.YOLO,
+          },
+        });
+        await bridge.shutdown();
+      },
+    );
+
+    it('omits approval-mode metadata from newSession when none is requested', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(handle.agent.newSessionCalls[0]?._meta).not.toHaveProperty(
+        SESSION_APPROVAL_MODE_META_KEY,
+      );
+      await bridge.shutdown();
+    });
+
+    it.each(['new', 'load', 'resume'] as const)(
+      'reconstructs a trust-gate rejection from the in-RPC %s request',
+      async (action) => {
+        const rejectTrustGate = () => {
+          throw new RequestError(-32003, 'trust gate rejected', {
+            errorKind: 'trust_gate',
+          });
+        };
+        const handle = makeChannel({
+          newSessionImpl: async (params) => {
+            if (
+              action === 'new' &&
+              params._meta?.[SESSION_APPROVAL_MODE_META_KEY] ===
+                ApprovalMode.YOLO
+            ) {
+              rejectTrustGate();
+            }
+            return { sessionId: 'trust-gate-session' };
+          },
+          loadSessionImpl: async (params) => {
+            if (
+              action === 'load' &&
+              params._meta?.[SESSION_APPROVAL_MODE_META_KEY] ===
+                ApprovalMode.YOLO
+            ) {
+              rejectTrustGate();
+            }
+            return {};
+          },
+          resumeSessionImpl: async (params) => {
+            if (
+              action === 'resume' &&
+              params._meta?.[SESSION_APPROVAL_MODE_META_KEY] ===
+                ApprovalMode.YOLO
+            ) {
+              rejectTrustGate();
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const request = {
+          sessionId: `trust-gate-${action}`,
+          workspaceCwd: WS_A,
+          approvalMode: ApprovalMode.YOLO,
+        };
+
+        const result =
+          action === 'new'
+            ? bridge.spawnOrAttach({
+                workspaceCwd: WS_A,
+                approvalMode: ApprovalMode.YOLO,
+              })
+            : action === 'load'
+              ? bridge.loadSession(request)
+              : bridge.resumeSession(request);
+        await expect(result).rejects.toBeInstanceOf(TrustGateError);
         await bridge.shutdown();
       },
     );

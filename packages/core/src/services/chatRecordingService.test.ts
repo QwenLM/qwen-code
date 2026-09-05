@@ -2946,6 +2946,62 @@ describe('ChatRecordingService', () => {
       expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
       expect(written[1]?.systemPayload).toEqual({ mode: ApprovalMode.YOLO });
     });
+
+    it('re-anchors a pending approval change when rewind lands mid-write', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      let releaseWrite: (() => void) | undefined;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          }),
+      );
+      const pendingSwitch = chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.DEFAULT,
+      });
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      releaseWrite?.();
+      await pendingSwitch;
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewindIndex = written.findIndex(
+        (record) => record.subtype === 'rewind',
+      );
+      expect(rewindIndex).toBeGreaterThanOrEqual(0);
+      expect(written[rewindIndex + 1]).toMatchObject({
+        subtype: 'session_approval_mode',
+        parentUuid: written[rewindIndex]?.uuid,
+        systemPayload: { mode: ApprovalMode.DEFAULT },
+      });
+    });
+
+    it('retries the same approval mode after synchronous setup failure', async () => {
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      const payload = { mode: ApprovalMode.DEFAULT };
+
+      await expect(service.recordSessionApprovalMode(payload)).resolves.toBe(
+        false,
+      );
+      await expect(service.recordSessionApprovalMode(payload)).resolves.toBe(
+        true,
+      );
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
   });
 
   describe('legacy recorder', () => {

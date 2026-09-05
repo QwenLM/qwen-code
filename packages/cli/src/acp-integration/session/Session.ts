@@ -10689,7 +10689,11 @@ export class Session implements SessionContext {
    * Called after the agent switches modes (e.g., from exit_plan_mode tool).
    */
   private async sendCurrentModeUpdateNotification(): Promise<void> {
-    await this.config.waitForSessionApprovalModePersistence?.();
+    try {
+      await this.config.waitForSessionApprovalModePersistence?.();
+    } catch (error) {
+      debugLogger.debug('approval-mode persistence failed', error);
+    }
     const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
