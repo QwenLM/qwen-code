@@ -115,7 +115,7 @@ export function formatHeldList(
     return (
       `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
-      `      held because ${describeHoldCause(entry.cause)}` +
+      `      held because ${describeHoldCause(entry.cause, entry.policyScope)}` +
       describeRemaining(entry, expiryMs)
     );
   });
