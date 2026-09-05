@@ -406,7 +406,10 @@ describe('ndJsonStream', () => {
     );
     await vi.waitFor(() =>
       expect(onTransportError).toHaveBeenCalledWith(
-        expect.any(NdJsonQueueLimitError),
+        expect.objectContaining({
+          code: 'ndjson_queue_limit_exceeded',
+          budget: 'decoded',
+        }),
       ),
     );
     expect(onTransportError).toHaveBeenCalledOnce();
@@ -767,7 +770,10 @@ describe('ndJsonStream', () => {
 
     await vi.waitFor(() =>
       expect(onTransportError).toHaveBeenCalledWith(
-        expect.any(NdJsonQueueLimitError),
+        expect.objectContaining({
+          code: 'ndjson_queue_limit_exceeded',
+          budget: 'inbound_request',
+        }),
       ),
     );
     clearInterval(timer);
@@ -1036,7 +1042,10 @@ describe('ndJsonStream', () => {
         method: 'agent/request',
         params: {},
       }),
-    ).rejects.toBeInstanceOf(NdJsonQueueLimitError);
+    ).rejects.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+      budget: 'outbound_request',
+    });
     expect(onTransportError).toHaveBeenCalledOnce();
     writer.releaseLock();
     await stream.readable.cancel();

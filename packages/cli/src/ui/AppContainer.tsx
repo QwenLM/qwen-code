@@ -42,12 +42,17 @@ import {
   ideContextStore,
   createDebugLogger,
   describeDeliveryStatus,
+  parseHeldExpiry,
   describeHoldCause,
+  describePeerInboxFailure,
   getErrorMessage,
   getAllMemoryFilenames,
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
+  parseCron,
+  readCronTasks,
+  taskHasLegacyCondition,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -222,6 +227,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { ContextMenuProvider } from './context-menu/ContextMenuContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -253,7 +259,10 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
-import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
+import {
+  usePeerInboxFailure,
+  usePeerMessaging,
+} from '../peerMessaging/PeerMessagingContext.js';
 import {
   MAX_ACCEPTED_BACKLOG,
   type PeerMessaging,
@@ -320,17 +329,20 @@ function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
 }
 
 export function isInputActiveForState({
+  isConfigInitialized,
   initError,
   isProcessing,
   hasPendingCompression,
   streamingState,
 }: {
+  isConfigInitialized: boolean;
   initError: unknown;
   isProcessing: boolean;
   hasPendingCompression: boolean;
   streamingState: StreamingState;
 }) {
   return (
+    isConfigInitialized &&
     !initError &&
     (!isProcessing || hasPendingCompression) &&
     (streamingState === StreamingState.Idle ||
@@ -681,6 +693,33 @@ export function mergeStartupWarnings(
   nextWarnings: readonly string[],
 ): string[] {
   return [...new Set([...currentWarnings, ...nextWarnings])];
+}
+
+export function getScheduledTasksStartupWarning(
+  activeTaskCount: number,
+): string | null {
+  if (activeTaskCount < 1) return null;
+  const taskLabel = activeTaskCount === 1 ? 'task' : 'tasks';
+  // `/loop list` comes from the bundled loop skill (registered as a slash
+  // command by BundledSkillLoader), not from the built-in command set, so
+  // it can be absent (bare mode, skills.disabled). Flag the skill in the
+  // wording so the recommendation stays interpretable when /loop is not
+  // registered in this session.
+  return `${activeTaskCount} active scheduled ${taskLabel}. Run /loop list (loop skill) to inspect.`;
+}
+
+export function countActiveScheduledTasks(
+  tasks: Awaited<ReturnType<typeof readCronTasks>>,
+): number {
+  return tasks.filter((task) => {
+    if (task.enabled === false || taskHasLegacyCondition(task)) return false;
+    try {
+      parseCron(task.cron);
+      return true;
+    } catch {
+      return false;
+    }
+  }).length;
 }
 
 /**
@@ -1057,6 +1096,25 @@ export const AppContainer = (props: AppContainerProps) => {
             '(session writer lease contention?); continuing with goal features degraded.',
         );
       }
+      let activeScheduledTaskCount = 0;
+      if (config.isCronEnabled()) {
+        // Count durable tasks read from disk only. The in-memory scheduler
+        // is structurally empty at this point: enableDurable() — the only
+        // TUI path that loads durable jobs into the scheduler — is gated
+        // on isConfigInitialized, which this same effect sets only below,
+        // and session-only jobs cannot exist before input is enabled.
+        try {
+          const durableTasks = await readCronTasks(config.getProjectRoot());
+          activeScheduledTaskCount = countActiveScheduledTasks(durableTasks);
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to read scheduled tasks at startup: ${error}`,
+          );
+        }
+      }
+      const scheduledTasksWarning = getScheduledTasksStartupWarning(
+        activeScheduledTaskCount,
+      );
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(
           currentWarnings,
@@ -1182,6 +1240,19 @@ export const AppContainer = (props: AppContainerProps) => {
             console.debug('worktree session restore failed:', error);
           }
         }
+      }
+
+      // Add this after resume restoration because loadHistory replaces the
+      // current transcript. The notice should be visible in both fresh and
+      // resumed sessions whenever durable scheduling is enabled.
+      if (scheduledTasksWarning) {
+        historyManager.addItem(
+          {
+            type: MessageType.WARNING,
+            text: scheduledTasksWarning,
+          },
+          Date.now(),
+        );
       }
     })();
 
@@ -1606,6 +1677,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     isOutputStyleDialogOpen,
+    outputStyleChoices,
     openOutputStyleDialog,
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
@@ -2608,7 +2680,11 @@ export const AppContainer = (props: AppContainerProps) => {
         {
           type: MessageType.INFO,
           text:
-            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `Held a message from ${
+              newest.selfSent
+                ? 'a process this session started'
+                : 'another session'
+            } (${describeHoldCause(newest.cause)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),
@@ -2653,6 +2729,24 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, [historyManager, peerMessaging]);
 
+  // Say so when the inbox could not bind. With the feature on, a session
+  // without an inbox is unreachable, and its only other symptom is peers
+  // reporting it absent — a problem the user would otherwise discover
+  // from the wrong side. One line, once, with the cause and what to do.
+  const peerInboxFailure = usePeerInboxFailure();
+  const announcedInboxFailureRef = useRef(false);
+  useEffect(() => {
+    if (!peerInboxFailure || announcedInboxFailureRef.current) return;
+    announcedInboxFailureRef.current = true;
+    historyManager.addItem(
+      {
+        type: MessageType.ERROR,
+        text: `Cross-session messaging is OFF for this session — the inbox could not bind: ${describePeerInboxFailure(peerInboxFailure)}`,
+      },
+      Date.now(),
+    );
+  }, [historyManager, peerInboxFailure]);
+
   // A held message may only be waiting on a mode mismatch, so re-run the
   // gate whenever the approval mode changes rather than making the user
   // approve something the new mode would have accepted outright.
@@ -2660,6 +2754,24 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     peerMessaging?.reevaluate('approval-mode-changed');
   }, [approvalModeForPeers, peerMessaging]);
+
+  // Both settings reload live (`requiresRestart: false`), and both change
+  // what the gate would decide for messages already parked. Nothing else
+  // re-runs it: parking under `never` arms no timer at all, so a later
+  // edit to `1m` would otherwise leave the backlog held until session
+  // exit while `/peers` counted down from the new value.
+  //
+  // Keyed on the parsed lifetime and the policy rather than on any
+  // settings edit, because `reevaluate` also settles a parked backlog as
+  // `denied` under a refuse policy -- an unrelated key edit must not
+  // discard the user's backlog.
+  const heldExpiryForPeers = parseHeldExpiry(
+    settings.merged.agents?.crossSessionHeldExpiry,
+  );
+  const inboundPolicyForPeers = settings.merged.agents?.crossSessionInbound;
+  useEffect(() => {
+    peerMessaging?.reevaluate('held-expiry-changed');
+  }, [heldExpiryForPeers, inboundPolicyForPeers, peerMessaging]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
@@ -3370,12 +3482,14 @@ export const AppContainer = (props: AppContainerProps) => {
   /**
    * Determines if the input prompt should be active and accept user input.
    * Input is disabled during:
+   * - Configuration and chat initialization
    * - Initialization errors
    * - Slash command processing, except pending compression where input can queue
    * - Tool confirmations (WaitingForConfirmation state)
    * - Any future streaming states not explicitly allowed
    */
   const isInputActive = isInputActiveForState({
+    isConfigInitialized,
     initError,
     isProcessing,
     hasPendingCompression,
@@ -3498,9 +3612,9 @@ export const AppContainer = (props: AppContainerProps) => {
         // On by default: the schema declares `default: true`, but
         // `mergeSettings` doesn't apply schema defaults, so an unset value is
         // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Same treatment as
-        // `enableFollowupSuggestions` above — only an explicit `false` opts
-        // out.
+        // code unless the flag was explicitly set (#9230). Only an explicit
+        // `false` opts out of cache sharing. This flag does not inherit the
+        // follow-up suggestion runtime gate.
         enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
@@ -3627,6 +3741,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Mirror of the context-menu open state: the provider wraps the app below
+  // this component's own always-active keypress handler, so the handler
+  // cannot call useContextMenu() — the provider reports changes here instead.
+  const contextMenuOpenRef = useRef(false);
+  const handleContextMenuChange = useCallback((open: boolean) => {
+    contextMenuOpenRef.current = open;
+  }, []);
   const dialogsVisibleRef = useRef(false);
   const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
   const [rewindEscPending, setRewindEscPending] = useState(false);
@@ -4418,6 +4540,12 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // While the context menu is open its overlay owns Esc (closing the
+        // menu); the global branches below must not also fire on the same
+        // key — cancelling the stream, arming double-Esc, or cancelling btw.
+        if (contextMenuOpenRef.current) {
+          return;
+        }
         // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
         // the Esc to switch to NORMAL mode. Without this guard, both handlers
         // fire on the same keypress — vim switches mode AND AppContainer
@@ -4500,6 +4628,7 @@ export const AppContainer = (props: AppContainerProps) => {
         btwItem &&
         !btwItem.btw.isPending &&
         !dialogsVisibleRef.current &&
+        !contextMenuOpenRef.current &&
         buffer.text.length === 0
       ) {
         if (key.name === 'return' || key.sequence === ' ') {
@@ -4745,6 +4874,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
       isOutputStyleDialogOpen,
+      outputStyleChoices,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4892,6 +5022,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
       isOutputStyleDialogOpen,
+      outputStyleChoices,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -5237,7 +5368,11 @@ export const AppContainer = (props: AppContainerProps) => {
                   <RenderModeProvider value={renderModeValue}>
                     <TerminalOutputProvider value={writeRaw}>
                       <ShellFocusContext.Provider value={isFocused}>
-                        <App />
+                        <ContextMenuProvider
+                          onMenuChange={handleContextMenuChange}
+                        >
+                          <App />
+                        </ContextMenuProvider>
                       </ShellFocusContext.Provider>
                     </TerminalOutputProvider>
                   </RenderModeProvider>

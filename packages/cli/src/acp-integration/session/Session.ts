@@ -115,8 +115,9 @@ import {
   getOutputStyleTurnReminder,
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
-  getStartupContextLength,
   isSystemReminderContent,
+  findApiRewindCutPoint,
+  countApiUserPrompts,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -494,6 +495,23 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
     remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
   );
 }
+
+/**
+ * ACP rewind's binding of the shared user-prompt classifier
+ * (`isApiUserPrompt` in core). The two deltas from the TUI binding are
+ * deliberate:
+ *
+ * - The todo-stop-guard's synthetic continuation prompts are injected as user
+ *   entries but are not turns a client can rewind to, so they must not
+ *   consume an ordinal.
+ * - Microcompaction media-clear placeholders stay COUNTED here, unlike the
+ *   TUI binding. ACP rewind maps against per-prompt file-history snapshots,
+ *   which ARE created for media-only prompts, so a cleared entry still owns
+ *   an ordinal on this surface.
+ */
+const ACP_API_USER_PROMPT_OPTIONS = {
+  excludeTextPart: isTodoStopGuardPromptText,
+};
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
@@ -3496,6 +3514,10 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  getSettings(): LoadedSettings {
+    return this.settings;
+  }
+
   getWorkflowHistory(): readonly WorkflowSnapshot[] {
     return this.workflowHistory;
   }
@@ -4336,19 +4358,10 @@ export class Session implements SessionContext {
   }
 
   getRewindableUserTurnCount(): number {
-    const apiHistory = this.captureHistorySnapshot();
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-    let count = 0;
-
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (this.#isUserTextContent(apiHistory[i]!)) {
-        count += 1;
-      }
-    }
-
-    return count;
+    return countApiUserPrompts(
+      this.captureHistorySnapshot(),
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
   }
 
   restoreHistory(history: Content[]): void {
@@ -4368,63 +4381,11 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-
-    if (targetTurnIndex === 0) {
-      return startIndex;
-    }
-
-    let realUserPromptCount = 0;
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (!this.#isUserTextContent(apiHistory[i]!)) {
-        continue;
-      }
-
-      if (realUserPromptCount === targetTurnIndex) {
-        return i;
-      }
-
-      realUserPromptCount += 1;
-    }
-
-    return -1;
-  }
-
-  #isUserTextContent(content: Content): boolean {
-    if (content.role !== 'user') return false;
-    if (!content.parts || content.parts.length === 0) return false;
-
-    const hasFunctionResponse = content.parts.some(
-      (part) => 'functionResponse' in part,
+    return findApiRewindCutPoint(
+      apiHistory,
+      targetTurnIndex,
+      ACP_API_USER_PROMPT_OPTIONS,
     );
-    if (hasFunctionResponse) return false;
-
-    // Exclude pure <system-reminder> entries (the startup prelude and the
-    // mid-history MCP added-tool reminders). They are structural, not real
-    // user prompts; counting them would shift the rewind truncation index and
-    // silently drop a real turn. A genuine user turn that merely has a
-    // per-turn reminder prepended still has a non-reminder prompt part, so it
-    // is NOT excluded.
-    if (isSystemReminderContent(content)) return false;
-
-    if (
-      content.parts.some(
-        (part) => 'text' in part && isTodoStopGuardPromptText(part.text),
-      )
-    ) {
-      return false;
-    }
-
-    // Deliberate twin divergence: the TUI twin (isUserTextContent in
-    // packages/cli/src/ui/utils/historyMapping.ts) excludes microcompaction
-    // media-clear placeholders ('[Old inline media cleared: ...]') from the
-    // rewind prompt count because a cleared media-only entry never produced
-    // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
-    // maps against per-prompt file-history snapshots, which ARE created for
-    // media-only prompts. Do not mirror that exclusion into this twin.
-    return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -8308,8 +8269,15 @@ export class Session implements SessionContext {
         // for. Recover that late response and inject it on the next batch instead
         // of discarding it (which would lose the messages from both queues —
         // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
-        // rejection.
-        if (drainPromise) void this.#recoverLateDrain(drainPromise);
+        // rejection, but only of the drain promise: anything that throws after
+        // that race — the debug logger among them — escapes a bare `void` as an
+        // unhandled rejection, which ends the process. This recovery is
+        // best-effort by construction, so nothing it does may take the session
+        // down with it. Swallow silently rather than log, since the logger is
+        // itself one of the things that can throw here.
+        if (drainPromise) {
+          void this.#recoverLateDrain(drainPromise).catch(() => {});
+        }
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -13661,14 +13629,24 @@ export class Session implements SessionContext {
       : undefined;
 
     switch (result.type) {
-      case 'submit_prompt':
-        // Command wants to submit a prompt to the model
-        // Convert PartListUnion to Part[]
+      case 'submit_prompt': {
+        const expandedPrompt = normalizePartList(result.content);
+        const attachmentBlocks =
+          result.resolvedCommand?.kind === CommandKind.BUILT_IN
+            ? []
+            : originalPrompt.filter((block) => block.type !== 'text');
+        const attachmentParts =
+          attachmentBlocks.length === 0
+            ? []
+            : await this.#resolvePrompt(attachmentBlocks, abortSignal, {
+                deferBridgeConversions: true,
+              });
         return this.#applyBridgeConversionsIfNeeded(
-          normalizePartList(result.content),
+          [...attachmentParts, ...expandedPrompt],
           abortSignal,
           onFullTurnModel,
         );
+      }
 
       case 'message': {
         if (result.messageType === 'error') {

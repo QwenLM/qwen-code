@@ -75,6 +75,12 @@ const createMockConfig = (
   getUserMemory: () => '',
   getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
   getCodeModeOnly: () => false,
+  // Read by resolveMainSessionOutputStyle: the peer inherits the style the
+  // main session actually carries, so the main session's prompt-override and
+  // interaction-mode state is part of that decision.
+  getSystemPrompt: (): string | undefined => undefined,
+  getExperimentalZedIntegration: () => false,
+  isInteractive: () => true,
   getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
@@ -437,6 +443,67 @@ describe('ArenaManager', () => {
           'This is a non-interactive, single-turn run',
         );
         expect(systemPrompt).toContain('# Output Style: Concise');
+      }
+    });
+
+    // The peer's whole job is to produce a diff it is judged on, so it must
+    // keep the software-engineering guidance — Verify (Tests), Verify
+    // (Standards), Report outcomes faithfully — that a
+    // `keepCodingInstructions: false` style deletes from the base prompt.
+    it('does not let a style strip the coding instructions from a peer', async () => {
+      mockBackend.type = 'in-process';
+      const haiku = {
+        name: 'Haiku',
+        source: 'user' as const,
+        description: 'Answer in haiku',
+        keepCodingInstructions: false,
+        prompt: 'Answer in haiku.',
+      };
+      mockConfig = {
+        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+        getOutputStyle: () => haiku,
+      };
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        const systemPrompt =
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+        expect(systemPrompt).toContain('## Software Engineering Tasks');
+        expect(systemPrompt).not.toContain('# Output Style: Haiku');
+      }
+    });
+
+    // A replaced main-session prompt carries no style section; the peer must
+    // not reintroduce one the main session deliberately dropped.
+    it('gives a peer no style when a custom system prompt replaces the main one', async () => {
+      mockBackend.type = 'in-process';
+      mockConfig = {
+        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+        getSystemPrompt: () => 'You are terse.',
+        getOutputStyle: () => getBuiltInOutputStyle('Concise'),
+      };
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        expect(
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt,
+        ).not.toContain('# Output Style: Concise');
       }
     });
 

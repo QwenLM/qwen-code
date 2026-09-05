@@ -1260,9 +1260,12 @@ describe('LiveSession', () => {
     expect(host.clearOutput).toHaveBeenCalledTimes(1);
   });
 
-  it('clears estimated playback tail when speech starts after response.done', async () => {
-    const { callbacks, host } = await startSession();
+  it('clears playback tail when speech starts after response.done', async () => {
+    const { session, callbacks, host } = await startSession();
 
+    // Playback receipts arrive via coordinator handlers (not realtime
+    // callbacks) — call the session methods directly as daemon.ts does.
+    session.notePlaybackStarted({ epoch: 1 });
     callbacks.onOutputAudioDelta?.({
       callEpoch: 1,
       responseId: 'resp_tail',
