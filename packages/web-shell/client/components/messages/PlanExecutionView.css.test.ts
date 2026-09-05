@@ -52,6 +52,34 @@ describe('PlanExecutionView stylesheet', () => {
     expect(planCss).toMatch(
       /\.dagCanvas\s+\.node\[data-plan-output='true'\]::after\s*\{[^}]*right:\s*-4px/,
     );
+    // Clipping on ANY rule whose subject is `.node` — a status variant,
+    // attention, selection, a `:has()` state, the media-scoped copies — cuts
+    // the port just as surely as clipping on the base rule, and jsdom never
+    // sees it. Walk every rule block and clear every `.node` subject of
+    // overflow clipping; rules that merely descend from `.node` (such as
+    // `.node[...] .nodeGlyph`) keep their own overflow business, as do the
+    // chip and title rules that clip legitimately.
+    const clipped: string[] = [];
+    // At-rules wrap rules without adding a selector subject of their own, so
+    // unwrap their preludes and scan the inner rules like top-level ones
+    // (the leftover closing braces are lone text no block regex matches).
+    const unwrapped = planCss.replace(/@[a-z-]+[^{]*\{/gi, '');
+    for (const [, selectorList, body] of unwrapped.matchAll(
+      /([^{}]+)\{([^}]*)\}/g,
+    )) {
+      if (!/overflow:\s*(hidden|clip)/.test(body)) continue;
+      for (const selector of selectorList.split(',')) {
+        const subject =
+          selector
+            .trim()
+            .split(/\s*[>+~\s]\s*/)
+            .pop() ?? '';
+        if (/\.node(?![A-Za-z0-9-])/.test(subject)) {
+          clipped.push(selector.trim());
+        }
+      }
+    }
+    expect(clipped).toEqual([]);
   });
 
   // `text-overflow` applies to a block container's own inline content, so
