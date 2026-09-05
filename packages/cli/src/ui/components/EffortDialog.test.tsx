@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { act } from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { EffortDialog } from './EffortDialog.js';
@@ -50,6 +51,97 @@ describe('EffortDialog', () => {
     );
 
     expect(lastFrame() ?? '').not.toContain('No effort configured');
+  });
+
+  it('lists only the tiers the resolved model exposes', () => {
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog onSelect={vi.fn()} efforts={['high', 'max']} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('1.');
+    expect(frame).toContain('2.');
+    expect(frame).not.toContain('3.');
+    expect(frame).not.toContain('medium');
+    expect(frame).not.toContain('xhigh');
+  });
+
+  it('reports a configured tier the resolved model does not expose', () => {
+    // A global `model.reasoningEffort` carried over from another model reaches
+    // the picker; mapping that miss onto the first listed tier would read as
+    // "high is current" and a bare Enter would persist it over the stored value.
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog
+        onSelect={vi.fn()}
+        currentEffort="low"
+        efforts={['high', 'max']}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('low is not available for this model');
+    expect(frame).not.toContain('No effort configured');
+  });
+
+  it('cancels rather than persisting the forced cursor on a bare Enter', async () => {
+    // The stored tier is not in this model's list, so the cursor sits on a row
+    // that is not the user's setting. Confirming without moving is the "just
+    // looking" gesture: it must leave the stored global value alone instead of
+    // overwriting it with the row the clamp forced the cursor onto.
+    const onSelect = vi.fn();
+    renderWithProviders(
+      <EffortDialog
+        onSelect={onSelect}
+        currentEffort="xhigh"
+        efforts={['high', 'max']}
+      />,
+    );
+
+    await act(async () => {
+      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onSelect).toHaveBeenCalledWith(undefined);
+    expect(onSelect).not.toHaveBeenCalledWith('high');
+  });
+
+  it('persists a tier chosen after moving off the forced cursor', async () => {
+    const onSelect = vi.fn();
+    renderWithProviders(
+      <EffortDialog
+        onSelect={onSelect}
+        currentEffort="xhigh"
+        efforts={['high', 'max']}
+      />,
+    );
+
+    act(() => {
+      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'down' } as never);
+    });
+    await act(async () => {
+      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onSelect).toHaveBeenCalledWith('max');
+  });
+
+  it('still persists the highlighted tier when nothing is configured', async () => {
+    // The guard is scoped to a stored tier this model does not expose: with
+    // nothing stored there is no preference to overwrite, so Enter still picks.
+    const onSelect = vi.fn();
+    renderWithProviders(<EffortDialog onSelect={onSelect} />);
+
+    await act(async () => {
+      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onSelect).toHaveBeenCalledWith('low');
   });
 
   it('registers an active Escape handler that cancels with undefined', () => {

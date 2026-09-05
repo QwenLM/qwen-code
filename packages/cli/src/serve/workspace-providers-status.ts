@@ -178,7 +178,9 @@ function buildWorkspaceProvidersStatus(
                 model.id,
                 model.registryBaseUrl ?? model.baseUrl,
               )?.generationConfig.thinkingMandatory === true,
+              model.capabilities?.reasoning,
             ),
+            model.capabilities?.reasoning,
           );
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,

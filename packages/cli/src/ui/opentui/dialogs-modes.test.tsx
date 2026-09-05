@@ -80,7 +80,10 @@ vi.mock('../commands/output-style-utils.js', async (importOriginal) => ({
   loadSessionOutputStyles: mocks.loadSessionOutputStyles,
 }));
 
-import { OpenTuiOutputStyleDialog } from './dialogs-modes.js';
+import {
+  OpenTuiEffortDialog,
+  OpenTuiOutputStyleDialog,
+} from './dialogs-modes.js';
 
 const CONCISE = BUILT_IN_OUTPUT_STYLES.find(
   (style) => style.name === 'Concise',
@@ -139,6 +142,14 @@ async function pressEsc(): Promise<boolean> {
     consumed = handler('\x1b');
   });
   return consumed;
+}
+
+// The catalog lands asynchronously and the cursor is derived from it in a
+// passive effect, which can lag the commit `waitFor` observes. Driving keys
+// before it runs lets the derivation overwrite the navigation, so flush it.
+async function catalogReady(label: string) {
+  await waitFor(() => expect(screen.queryByText(label)).not.toBeNull());
+  await act(async () => {});
 }
 
 describe('OpenTuiOutputStyleDialog', () => {
@@ -278,7 +289,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await catalogReady('Concise');
     press('down');
     press('return');
 
@@ -333,7 +344,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await catalogReady('Concise');
     press('up');
     press('return');
 
@@ -446,7 +457,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await catalogReady('Concise');
     press('return');
 
     await waitFor(() => expect(notify).toHaveBeenCalledWith('disk full'));
@@ -472,7 +483,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await catalogReady('Concise');
     press('down');
     expect(screen.getByText('Concise').parentElement?.textContent).toContain(
       '● Concise',
@@ -578,5 +589,101 @@ describe('OpenTuiOutputStyleDialog', () => {
     );
     expect(screen.getAllByText('reviewer')).toHaveLength(1);
     expect(screen.queryByText('Reviewer')).toBeNull();
+  });
+});
+
+describe('OpenTuiEffortDialog', () => {
+  const capability = {
+    thinking: true,
+    efforts: ['high', 'max'],
+    defaultEffort: 'high',
+    disableField: 'thinking',
+  } as const;
+
+  function renderEffortDialog(reasoningEffort: string | undefined) {
+    const config = {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getReasoningEffort: () => reasoningEffort,
+      setReasoningEffort: vi.fn(),
+      getResolvedModelConfig: () => ({
+        capabilities: { reasoning: capability },
+      }),
+    } as unknown as Config;
+    const setValue = vi.fn();
+    const settings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: { general: {} } },
+      setValue,
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiEffortDialog
+        config={config}
+        settings={settings}
+        onClose={vi.fn()}
+      />,
+    );
+    return setValue;
+  }
+
+  it('lists only the tiers the resolved model exposes', () => {
+    renderEffortDialog(undefined);
+
+    expect(screen.queryByText('low')).toBeNull();
+    expect(screen.queryByText('medium')).toBeNull();
+    expect(screen.queryByText('xhigh')).toBeNull();
+    expect(screen.getByText('high').parentElement?.textContent).toContain(
+      '\u25cf high',
+    );
+  });
+
+  it('reports a configured tier the resolved model does not expose', () => {
+    // A global `model.reasoningEffort` carried over from another model reaches
+    // the picker; the `-1 -> 0` clamp must not pass it off as the selection.
+    renderEffortDialog('xhigh');
+
+    expect(
+      screen.getByText(/xhigh is not available for this model/),
+    ).not.toBeNull();
+  });
+
+  it('discloses an unset effort instead of implying the first tier is current', () => {
+    renderEffortDialog(undefined);
+
+    expect(screen.getByText(/No effort configured/)).not.toBeNull();
+  });
+
+  it('does not persist the forced cursor on a bare Enter', () => {
+    const setValue = renderEffortDialog('xhigh');
+
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('persists a tier chosen after moving off the forced cursor', () => {
+    const setValue = renderEffortDialog('xhigh');
+
+    press('down');
+    press('return');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'max',
+    );
+  });
+
+  it('still persists the highlighted tier when nothing is configured', () => {
+    const setValue = renderEffortDialog(undefined);
+
+    press('return');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+    );
   });
 });

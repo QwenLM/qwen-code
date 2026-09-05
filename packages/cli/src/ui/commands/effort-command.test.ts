@@ -53,6 +53,45 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
+  it('does not open an empty picker for a toggle-only model', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'toggle-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, '');
+    expect(res).toMatchObject({ type: 'message', messageType: 'info' });
+  });
+
+  it('does not answer an explicit tier with an empty choice list', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'toggle-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, 'medium');
+    expect(res).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(res).not.toMatchObject({ messageType: 'error' });
+    expect(JSON.stringify(res)).not.toContain('Choose one of:');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
   it('lists tiers when called with no args non-interactively', async () => {
     const nonInteractive = { ...context, executionMode: 'non_interactive' };
     const res = await effortCommand.action!(
@@ -169,6 +208,26 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
     expect(res).toMatchObject({ messageType: 'error' });
+  });
+
+  it('rejects a tier outside the resolved model capability', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+            disableField: 'thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, 'low');
+    expect(res).toMatchObject({ messageType: 'error' });
+    expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
   it('does not offer tier autocompletion (tiers are hinted via argumentHint)', () => {

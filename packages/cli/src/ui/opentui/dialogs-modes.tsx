@@ -37,6 +37,7 @@ import {
 } from '../commands/output-style-utils.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 function useEsc(onClose: () => void) {
   const renderer = useRenderer();
@@ -185,17 +186,24 @@ export function OpenTuiEffortDialog(props: {
   onClose: () => void;
 }) {
   const { config, settings, onClose } = props;
-  const tiers = REASONING_EFFORT_TIERS as ReasoningEffort[];
-  // Pre-select the live tier only when one is configured; an unset effort
-  // starts at the top (ink EffortDialog initialIndex parity).
+  const tiers = config
+    ? [...getReasoningEffortsForConfig(config)]
+    : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
+  // Pre-select the live tier only when this model exposes it; an unset or
+  // out-of-range effort starts at the top (ink EffortDialog parity).
   const currentEffort = config?.getReasoningEffort?.();
-  const [sel, setSel] = useState(
-    currentEffort ? Math.max(0, tiers.indexOf(currentEffort)) : 0,
-  );
+  const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
+  const initialIndex = Math.max(0, configuredIndex);
+  const [sel, setSel] = useState(initialIndex);
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
-    if (effort) {
+    // On a forced cursor, confirming without moving is the "just looking"
+    // gesture: close without persisting a tier the user never chose over the
+    // stored global value (ink EffortDialog parity).
+    const forcedCursor =
+      currentEffort && configuredIndex === -1 && sel === initialIndex;
+    if (effort && !forcedCursor) {
       try {
         // Apply at runtime (next turn) and persist for future sessions;
         // provider adapters clamp the tier per model (ink useEffortCommand
@@ -228,6 +236,13 @@ export function OpenTuiEffortDialog(props: {
         }
         onPick={pick}
       />
+      {configuredIndex === -1 ? (
+        <text fg={C.dim}>
+          {currentEffort
+            ? `${currentEffort} is not available for this model — using the model/provider default.`
+            : 'No effort configured — using the model/provider default.'}
+        </text>
+      ) : null}
     </Shell>
   );
 }
