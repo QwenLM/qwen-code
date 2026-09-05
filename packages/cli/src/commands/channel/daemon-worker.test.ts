@@ -1410,10 +1410,18 @@ describe('runChannelDaemonWorker', () => {
       'thread',
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('feishu', 'single');
-    expect(mockRouterSetChannelApprovalMode).not.toHaveBeenCalled();
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledTimes(2);
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'telegram',
+      'yolo',
+    );
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'feishu',
+      undefined,
+    );
   });
 
-  it('applies channel approval mode only for webhook-enabled channels', async () => {
+  it('applies channel approval mode to every configured channel', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([
       {
@@ -1437,9 +1445,13 @@ describe('runChannelDaemonWorker', () => {
       loadDaemonSdk: async () => sdk,
     });
 
-    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledTimes(1);
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledTimes(2);
     expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
       'telegram',
+      'yolo',
+    );
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'feishu',
       'yolo',
     );
   });
