@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import yargs from 'yargs';
+import yargs, { type Argv } from 'yargs';
 
 const connectExistingAgentViewSupervisor = vi.fn();
 
@@ -131,5 +131,106 @@ describe('answer command parsing', () => {
     expect(answer).not.toHaveBeenCalled();
     expect(stderr).toEqual(['An answer cannot be empty.']);
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('answer command parsing with the root options registered', () => {
+  // The real chain registers globals on the root yargs instance
+  // (config.ts: --debug/-d, --proxy, --telemetry*, ...). They stay known
+  // inside the answer subtree, where `unknown-options-as-args` cannot see
+  // them, so without forgetInheritedOptions a quoted flag sets the option
+  // and is silently stripped from the text. Mirror that chain.
+  async function parse(argv: string[]): Promise<Record<string, unknown>> {
+    return (await yargs(argv)
+      .option('debug', { type: 'boolean', alias: 'd', default: false })
+      .option('proxy', { type: 'string' })
+      .command({
+        command: 'sessions',
+        describe: 'Manage Qwen Code sessions',
+        builder: (y: Argv) =>
+          y.command(answerCommand).demandCommand(1).version(false),
+        handler: () => {},
+      })
+      .strict()
+      .exitProcess(false)
+      .parseAsync()) as Record<string, unknown>;
+  }
+
+  function mockDelivered() {
+    const answer = vi
+      .fn()
+      .mockResolvedValue({ sessionId: SESSION, answered: true });
+    connectExistingAgentViewSupervisor.mockResolvedValue({ answer });
+    return answer;
+  }
+
+  it('keeps a quoted root option in the answer text', async () => {
+    const answer = mockDelivered();
+    await parse([
+      'sessions',
+      'answer',
+      SESSION,
+      'please',
+      'set',
+      '--debug',
+      'on',
+    ]);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'please set --debug on');
+    expect(stdout).toEqual(['Answer delivered.']);
+  });
+
+  it('keeps a quoted root option that takes a value', async () => {
+    const answer = mockDelivered();
+    await parse([
+      'sessions',
+      'answer',
+      SESSION,
+      'use',
+      '--proxy',
+      'http://x',
+      'now',
+    ]);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'use --proxy http://x now');
+  });
+
+  it('delivers an answer that is only a root option', async () => {
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, '--debug']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--debug');
+    expect(stderr).toEqual([]);
+  });
+
+  it('keeps the short alias of a root option', async () => {
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'rerun', '-d', 'now']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'rerun -d now');
+  });
+
+  it('still shows help for a bare --help', async () => {
+    // The carve-out promised in the positional's describe: quoting flags
+    // in the text must not swallow the help flag itself.
+    const answer = mockDelivered();
+    const parsed = await parse(['sessions', 'answer', SESSION, '--help']);
+    expect(parsed['help']).toBe(true);
+    expect(answer).not.toHaveBeenCalled();
+    expect(stderr).toEqual([]);
+  });
+
+  it('still takes the tokens after -- as the answer', async () => {
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, '--', '--debug']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--debug');
+  });
+
+  it('keeps an unknown option when root options are registered', async () => {
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, '--frobnicate', 'keep']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--frobnicate keep');
+  });
+
+  it('keeps a plain answer working when root options are registered', async () => {
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'yes, go ahead']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'yes, go ahead');
   });
 });

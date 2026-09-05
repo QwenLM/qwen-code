@@ -67,6 +67,50 @@ function sessionPositional(yargs: Argv): Argv {
   });
 }
 
+/** The yargs option table fields that decide whether a token is known. */
+interface ParsableOptionsTable {
+  key: Record<string, unknown>;
+  [group: string]: unknown;
+}
+
+/**
+ * Forget the options registered higher up the chain (the root `--debug`,
+ * `--proxy`, `--telemetry*`, ... globals in config.ts) so they cannot be
+ * parsed out of an answer.
+ *
+ * They stay known inside this command's parse, and `unknown-options-as-args`
+ * only protects unknown options, so a quoted flag (`answer <id> rerun with
+ * --debug`) would set the flag and vanish from the text while the CLI
+ * reports success. An answer is free text: drop every inherited option from
+ * the parse table so quoted tokens become unknown again and stay in the
+ * text. `--help` and `--version` stay known, the way the docs promise.
+ */
+function forgetInheritedOptions(built: Argv): Argv {
+  // getOptions() exists at runtime but is missing from @types/yargs;
+  // sessions.test.ts reaches it the same way.
+  const table = (
+    built as unknown as { getOptions(): ParsableOptionsTable }
+  ).getOptions();
+  const keep = new Set(['help', 'h', 'version', 'v']);
+  const inherited = Object.keys(table.key).filter((key) => !keep.has(key));
+  for (const group of Object.values(table)) {
+    if (Array.isArray(group)) {
+      const keys = group as string[];
+      for (const key of inherited) {
+        let index = keys.indexOf(key);
+        while (index !== -1) {
+          keys.splice(index, 1);
+          index = keys.indexOf(key);
+        }
+      }
+    } else if (group !== null && typeof group === 'object') {
+      const map = group as Record<string, unknown>;
+      for (const key of inherited) delete map[key];
+    }
+  }
+  return built;
+}
+
 export const peekCommand: CommandModule<unknown, SessionIdArgs> = {
   command: 'peek <session>',
   describe: 'Show what a background session is doing or waiting for',
@@ -83,11 +127,13 @@ export const answerCommand: CommandModule<unknown, AnswerArgs> = {
   command: 'answer <session> [text..]',
   describe: 'Answer a background session that is waiting for input',
   builder: (yargs: Argv) =>
-    sessionPositional(yargs)
+    forgetInheritedOptions(sessionPositional(yargs))
       .parserConfiguration({
         // An answer is free text: it may quote a flag or paste a command
         // snippet. Parse unknown options as the text and take what
-        // follows `--` verbatim, the way `mcp add` takes server args.
+        // follows `--` verbatim, the way `mcp add` takes server args;
+        // forgetInheritedOptions keeps the root globals from being
+        // parsed out of the text instead.
         'unknown-options-as-args': true,
         'populate--': true,
       })
