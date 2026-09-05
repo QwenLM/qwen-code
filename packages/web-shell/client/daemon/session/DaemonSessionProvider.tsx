@@ -860,6 +860,27 @@ function clampTurnIndexPageSize(historyPageSize: number | undefined): number {
   );
 }
 
+/**
+ * The daemon's ceiling on a transcript page `limit`, rejected with a 400 above
+ * it. Separate from the turn-index ceiling because they are separate protocol
+ * limits that happen to share a value today; each keeps its own constant so a
+ * change to one does not silently move the other.
+ */
+const TRANSCRIPT_PAGE_LIMIT_MAX = 500;
+
+/**
+ * Clamps a transcript page limit, for the same call-time reason as the metadata
+ * page size above. `historyPageSize` is a public host prop, and a value over the
+ * ceiling would turn every page read — a scroll up or a jump — into a 400 rather
+ * than into a smaller page. `fallback` differs per caller and is preserved.
+ */
+function clampTranscriptPageSize(
+  historyPageSize: number | undefined,
+  fallback: number,
+): number {
+  return Math.min(historyPageSize ?? fallback, TRANSCRIPT_PAGE_LIMIT_MAX);
+}
+
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
   agentsVersion: 0,
@@ -4877,7 +4898,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const page = await session.getTranscriptPage({
           atRecordId: turnId,
           snapshot: target.snapshot,
-          limit: historyPageSizeRef.current ?? TURN_INDEX_PAGE_SIZE,
+          limit: clampTranscriptPageSize(
+            historyPageSizeRef.current,
+            TURN_INDEX_PAGE_SIZE,
+          ),
           clientId: session.clientId,
         });
         if (
@@ -5143,7 +5167,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             : history.beforeRecordId !== undefined
               ? { beforeRecordId: history.beforeRecordId }
               : {}),
-          limit: historyPageSizeRef.current ?? 100,
+          limit: clampTranscriptPageSize(historyPageSizeRef.current, 100),
           clientId: activeSession.clientId,
         });
         if (
@@ -5347,13 +5371,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     };
   }, [connection.sessionId, loadMoreTranscript, transcriptHistoryState]);
   const turnIndexValue = useMemo<DaemonSessionTurnIndex>(() => {
-    // Same session-identity mask as the transcript history value: an index left
-    // over from another session surfaces as `disabled`, never as stale turns.
+    // Same session-identity mask as the transcript history value, and it has to
+    // cover the payload as well as the status: that sibling gates its data on the
+    // same condition, and masking only `status` here would leave the previous
+    // session's `snapshot`, `totalTurns`, `pages` and `liveEntries` readable by a
+    // consumer that does not check the status first.
     const active =
       connection.sessionId === turnIndex.sessionId &&
       sessionRef.current?.sessionId === turnIndex.sessionId;
     return {
-      ...turnIndex,
+      ...(active ? turnIndex : INITIAL_TURN_INDEX),
       status: active ? turnIndex.status : 'disabled',
       ensurePage: ensureTurnIndexPage,
       loadOlderTurns,

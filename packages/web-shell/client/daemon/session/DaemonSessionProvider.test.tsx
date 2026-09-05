@@ -18594,6 +18594,58 @@ describe('DaemonSessionProvider', () => {
         totalTurns: seeded?.totalTurns,
       });
     });
+
+    it('clamps both page sizes when the host asks for more than the daemon takes', async () => {
+      // `historyPageSize` is a public host prop and the daemon rejects a limit
+      // above its ceiling with a 400, so an unclamped value breaks every read
+      // instead of merely asking for a smaller page. The metadata reads already
+      // clamped; neither transcript read did.
+      const session = pushSession('session-turn-index-clamped');
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [anchoredPageEvent('record-0', 'jumped')],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'record-0',
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: session.sessionId,
+        historyPageSize: 1000,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ limit: 500 }),
+      );
+
+      await act(async () => {
+        const opened = index?.openTurnAt('record-0');
+        await flushPromises();
+        await opened;
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ limit: 500 }),
+      );
+    });
   });
 });
 
