@@ -2,7 +2,7 @@
 
 Qwen Code can predict what you want to type next and show it as placeholder text in the input area. This feature uses an LLM call to analyze the conversation context and generate a natural next step suggestion.
 
-This feature works end-to-end in the CLI. In the WebUI, the hook and UI plumbing are available, but host applications must trigger suggestion generation and wire the followup state for suggestions to appear.
+This feature works end-to-end in both the CLI and Web Shell. Generation is automatic and server-side: after each completed turn the daemon emits the suggestion on the session stream (on by default; set `ui.enableFollowupSuggestions` to `false` to opt out), and Web Shell's composer already wires the `useDaemonFollowupSuggestion` hook, so suggestions render and accept with no additional host wiring.
 
 ## How It Works
 
