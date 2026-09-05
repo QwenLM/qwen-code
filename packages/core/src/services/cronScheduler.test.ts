@@ -1338,7 +1338,12 @@ describe('CronScheduler', () => {
 
     it('attributes a per-run fire to its fresh session after dispatch', async () => {
       await writeCronTasks(tmpDir, [
-        { ...diskTask('fresh1'), sessionMode: 'per_run' },
+        {
+          ...diskTask('fresh1'),
+          sessionMode: 'per_run',
+          modelServiceId: 'qwen-max(openai)',
+          groupId: 'group-1',
+        },
       ]);
       await scheduler.enableDurable('session-1');
       const fired: CronJob[] = [];
@@ -1352,6 +1357,8 @@ describe('CronScheduler', () => {
         ]);
       });
       expect(fired[0]?.sessionMode).toBe('per_run');
+      expect(fired[0]?.modelServiceId).toBe('qwen-max(openai)');
+      expect(fired[0]?.groupId).toBe('group-1');
 
       await scheduler.annotateRunSession('fresh1', minute, {
         sessionId: 'child-1',
@@ -1377,6 +1384,41 @@ describe('CronScheduler', () => {
       await vi.waitFor(async () => {
         expect(await readCronTasks(tmpDir)).toHaveLength(0);
       });
+    });
+
+    it('restores the exact per-run one-shot when dispatch fails', async () => {
+      const createdAt = Date.now();
+      const original: DurableCronTask = {
+        ...diskTask('once-retry'),
+        cron: '7 18 * * *',
+        recurring: false,
+        createdAt,
+        name: 'Retry selected model',
+        enabled: true,
+        sessionId: 'session-1',
+        sessionOwnedByTask: false,
+        sessionMode: 'per_run',
+        modelServiceId: 'missing-model',
+        groupId: 'group-1',
+      };
+      const tasks = [
+        { ...diskTask('before'), enabled: false },
+        original,
+        { ...diskTask('after'), enabled: false },
+      ];
+      await writeCronTasks(tmpDir, tasks);
+      await scheduler.enableDurable('session-1');
+
+      let restoration: Promise<boolean> | undefined;
+      scheduler.start((job) => {
+        restoration = scheduler.restoreConsumedOneShot(job.id);
+      });
+      const fireAt = nextFireTime(original.cron, new Date(createdAt));
+      scheduler.tick(new Date(fireAt.getTime() + 1000));
+      scheduler.stop();
+
+      expect(await restoration).toBe(true);
+      expect(await readCronTasks(tmpDir)).toEqual(tasks);
     });
 
     // Settle + tear down a second scheduler sharing this tmpDir, so its

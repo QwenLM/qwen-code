@@ -108,6 +108,7 @@ import {
   createHookOutput,
   wrapUserPromptSubmitContext,
   generateToolUseId,
+  isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
@@ -233,6 +234,7 @@ import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
   scheduledTaskRunSourceId,
+  SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1469,12 +1471,15 @@ interface CronFire {
   id?: string;
   prompt: string;
   cronExpr?: string;
+  recurring?: boolean;
   missed?: boolean;
   /** The minute this fire was stamped for. The scheduler assigns it before
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   sessionMode?: 'persistent' | 'per_run';
+  modelServiceId?: string;
+  groupId?: string;
   name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -8671,6 +8676,33 @@ export class Session implements SessionContext {
           );
         });
     };
+    const restoreOneShot = async (): Promise<void> => {
+      if (job.recurring !== false || !job.id) return;
+      try {
+        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        if (!restored) {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not find its consumed one-shot to restore`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not restore its unexecuted one-shot: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    if (
+      (job.modelServiceId !== undefined &&
+        !isValidCronTaskRoutingId(job.modelServiceId)) ||
+      (job.groupId !== undefined && !isValidCronTaskRoutingId(job.groupId))
+    ) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} has invalid model or group routing; it was not dispatched`,
+      );
+      await record({ dispatchFailed: true });
+      await restoreOneShot();
+      return;
+    }
     let sessionId: string;
     try {
       const response = await this.client.extMethod(
@@ -8698,6 +8730,8 @@ export class Session implements SessionContext {
                 sourceId: scheduledTaskRunSourceId(job.id),
               }
             : {}),
+          ...(job.modelServiceId ? { model: job.modelServiceId } : {}),
+          ...(job.groupId ? { groupId: job.groupId } : {}),
           callerSessionId: this.sessionId,
         },
       );
@@ -8710,10 +8744,36 @@ export class Session implements SessionContext {
       }
       sessionId = responseSessionId;
     } catch (error) {
+      const errorRecord =
+        typeof error === 'object' && error !== null
+          ? (error as Record<string, unknown>)
+          : undefined;
+      const errorData = errorRecord?.['data'];
+      const modelSelectionFailed =
+        typeof errorData === 'object' &&
+        errorData !== null &&
+        (errorData as { errorKind?: unknown }).errorKind ===
+          SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE;
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : typeof errorRecord?.['message'] === 'string'
+            ? errorRecord['message']
+            : String(error);
       debugLogger.warn(
-        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+        modelSelectionFailed
+          ? `Scheduled task ${taskId} could not apply its selected model: ${errorMessage}`
+          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${errorMessage}`,
       );
-      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      await record(
+        modelSelectionFailed
+          ? { dispatchFailed: true }
+          : { sessionId: this.sessionId, dispatchFailed: true },
+      );
+      if (modelSelectionFailed) {
+        await restoreOneShot();
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: 'cron',

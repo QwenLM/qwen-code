@@ -4376,6 +4376,49 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('preserves bounded client request error kinds across the ACP transport', async () => {
+    const handle = makeChannel({});
+    const transportFailure = deferred<unknown>();
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: transportFailure.promise,
+      transportGuard: {
+        maxActiveHandlers: 256,
+        maxActiveHandlerBytes: 64 * 1024 * 1024,
+        reserveOutboundOperation: () => () => {},
+        reservePreparedResponse: vi.fn(),
+        fail: (error) => transportFailure.resolve(error),
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      clientMcpSender: () => {
+        throw new RequestError(-32603, 'model selection failed', {
+          errorKind: 'scheduled_task_model_selection_failed',
+        });
+      },
+    });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+          {
+            server: 'scheduled-task-model',
+            payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: -32603,
+        message: 'Internal error',
+        data: { errorKind: 'scheduled_task_model_selection_failed' },
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('keeps legacy ACP error text on an unbounded public bridge', async () => {
     const secret = 'legacy-server-name';
     const handle = makeChannel({});

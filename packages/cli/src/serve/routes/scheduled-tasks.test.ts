@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
   SessionService,
+  SessionOrganizationService,
   Storage,
   getCronFilePath,
   readCronTasks,
@@ -32,6 +33,13 @@ import type {
 import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
+const stderrLines = vi.hoisted(() => [] as string[]);
+
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/stdioHelpers.js')>()),
+  writeStderrLine: (line: string) => stderrLines.push(line),
+}));
+
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
     ? (req.body as Record<string, unknown>)
@@ -49,11 +57,12 @@ const SECONDARY_SESSION_ID = '10000000-0000-4000-8000-000000000005';
 interface StubBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
+    modelServiceId?: string;
     sessionScope?: 'single' | 'thread';
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
-  }): Promise<{ sessionId: string }>;
+  }): Promise<{ sessionId: string; modelApplied?: boolean }>;
   sendPrompt(
     sessionId: string,
     req: { sessionId: string; prompt: Array<{ type: 'text'; text: string }> },
@@ -95,6 +104,7 @@ interface StubBridge {
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
   spawnParents: Array<string | undefined>;
+  spawnModels: Array<string | undefined>;
   prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
   persisted: string[];
@@ -104,6 +114,7 @@ interface StubBridge {
     titleSource?: 'manual' | 'auto';
   }>;
   failNext: boolean;
+  modelApplied?: boolean;
   persistenceError?: Error;
 }
 
@@ -114,6 +125,7 @@ function makeStubBridge(): StubBridge {
     spawnScopes: [],
     spawnSources: [],
     spawnParents: [],
+    spawnModels: [],
     prompts: [],
     closed: [],
     persisted: [],
@@ -130,6 +142,7 @@ function makeStubBridge(): StubBridge {
       bridge.spawned.push(sessionId);
       bridge.spawnScopes.push(req.sessionScope);
       bridge.spawnParents.push(req.parentSessionId);
+      bridge.spawnModels.push(req.modelServiceId);
       bridge.spawnSources.push({
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
         ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
@@ -140,7 +153,13 @@ function makeStubBridge(): StubBridge {
         hasActivePrompt: false,
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
       });
-      return { sessionId };
+      return {
+        sessionId,
+        ...(req.modelServiceId !== undefined &&
+        bridge.modelApplied !== undefined
+          ? { modelApplied: bridge.modelApplied }
+          : {}),
+      };
     },
     async sendPrompt(sessionId, req, _signal, context) {
       bridge.prompts.push({ sessionId, text: req.prompt[0]?.text ?? '' });
@@ -294,6 +313,7 @@ describe('scheduled-tasks routes', () => {
   let h: Harness;
 
   beforeEach(async () => {
+    stderrLines.length = 0;
     h = await makeHarness();
   });
 
@@ -497,6 +517,161 @@ describe('scheduled-tasks routes', () => {
     expect(stored[0]?.runs?.at(-1)?.sessionId).toBe(childSessionId);
   });
 
+  it('applies the saved model and group to each manual per-run session', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(h.bridge.spawnModels[1]).toBe('qwen-max(openai)');
+    expect(
+      (await organization.readSnapshot()).sessions.get(childSessionId),
+    ).toMatchObject({ groupId: group.id });
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalled();
+  });
+
+  it('runs without a group when the saved group was deleted', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: group.id,
+    });
+    await organization.deleteGroup(group.id);
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(h.bridge.prompts).toContainEqual(
+      expect.objectContaining({ sessionId: childSessionId }),
+    );
+    expect(
+      (await organization.readSnapshot()).sessions.has(childSessionId),
+    ).toBe(false);
+    expect(stderrLines).toContainEqual(
+      expect.stringMatching(/could not be assigned.*group not found/i),
+    );
+  });
+
+  it('rejects a missing group before creating the task session', async () => {
+    const res = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: 'missing-group',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('group_not_found');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('validates per-run routing fields before creating the task session', async () => {
+    const persistent = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'persistent',
+      modelServiceId: 'qwen-max(openai)',
+    });
+    const emptyModel = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: '',
+    });
+    const longGroup = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: 'g'.repeat(129),
+    });
+    const unsafeModel = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: 'model\nqwen serve: forged',
+    });
+
+    expect(persistent.status).toBe(400);
+    expect(persistent.body.code).toBe('session_routing_requires_per_run');
+    expect(emptyModel.status).toBe(400);
+    expect(emptyModel.body.code).toBe('invalid_model_service_id');
+    expect(longGroup.status).toBe(400);
+    expect(longGroup.body.code).toBe('invalid_group_id');
+    expect(unsafeModel.status).toBe(400);
+    expect(unsafeModel.body.code).toBe('invalid_model_service_id');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('updates and clears per-run model and group routing', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+
+    const updated = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        modelServiceId: 'qwen-max(openai)',
+        groupId: group.id,
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+
+    const unsafeGroup = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ groupId: 'group\nqwen serve: forged' });
+    expect(unsafeGroup.status).toBe(400);
+    expect(unsafeGroup.body.code).toBe('invalid_group_id');
+
+    const persistent = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ sessionMode: 'persistent' });
+    expect(persistent.status).toBe(200);
+    expect(persistent.body).toMatchObject({
+      sessionMode: 'persistent',
+      modelServiceId: null,
+      groupId: null,
+    });
+  });
+
   it('restores a per-run one-shot when fresh-session admission fails', async () => {
     const created = await create({
       cron: '0 0 1 1 *',
@@ -523,11 +698,17 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('restores a per-run one-shot when prompt admission rejects asynchronously', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
     const created = await create({
       cron: '0 0 1 1 *',
       prompt: 'run once',
       recurring: false,
       sessionMode: 'per_run',
+      groupId: group.id,
     });
     h.bridge.sendPrompt = vi.fn(() =>
       Promise.reject(new SessionNotFoundError('sess-2')),
@@ -548,6 +729,31 @@ describe('scheduled-tasks routes', () => {
       sessionMode: 'per_run',
     });
     expect(stored[0]?.runs).toBeUndefined();
+    expect((await organization.readSnapshot()).sessions.has('sess-2')).toBe(
+      false,
+    );
+  });
+
+  it('fails a per-run dispatch when the selected model is not applied', async () => {
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'run with the selected model',
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    h.bridge.modelApplied = false;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(h.bridge.prompts).toEqual([]);
+    expect((await readCronTasks(h.workspace))[0]?.runs?.at(-1)).toMatchObject({
+      sessionDispatchFailed: true,
+    });
   });
 
   it('restores a consumed one-shot even when an unrelated write lands during dispatch', async () => {

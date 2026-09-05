@@ -97,6 +97,10 @@ export interface CronJob {
   /** Whether a daemon-backed consumer should execute this fire in the bound
    * task session or dispatch it into a fresh child session. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for a fresh per-run session. */
+  modelServiceId?: string;
+  /** Named group assigned to a fresh per-run session. */
+  groupId?: string;
   /** Human-readable task label used to name a fresh per-run session. */
   name?: string;
   delivery?: CronTaskDelivery;
@@ -294,6 +298,15 @@ export class CronScheduler {
   // eligible to fire them. Cleared on stop so a later enable still treats
   // genuinely overdue work as missed.
   private armedDurableOneShots = new Set<string>();
+  // Exact persisted snapshots for active per-run one-shots. The tick removes
+  // such a task before its async fresh-session dispatch finishes; retain the
+  // original so a rejected dispatch can put the unexecuted task back without
+  // dropping route-only fields such as session ownership.
+  private restorablePerRunOneShots = new Map<
+    string,
+    { task: DurableCronTask; index: number }
+  >();
+  private consumedPerRunOneShots = new Set<string>();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
   // precondition) already reported as skipped, so the fail-closed remediation
   // breadcrumb is logged once per task rather than on every file reload.
@@ -582,6 +595,8 @@ export class CronScheduler {
         throw error;
       }
     }
+    this.restorablePerRunOneShots.delete(id);
+    this.consumedPerRunOneShots.delete(id);
     this.armedDurableOneShots.delete(id);
     return true;
   }
@@ -935,6 +950,11 @@ export class CronScheduler {
     // Jobs mid-createDurable are on their way to disk — treat them as
     // present so this reload doesn't delete the live job it can't see yet.
     for (const id of this.pendingAdd) diskIds.add(id);
+    for (const id of this.restorablePerRunOneShots.keys()) {
+      if (!diskIds.has(id) && !this.consumedPerRunOneShots.has(id)) {
+        this.restorablePerRunOneShots.delete(id);
+      }
+    }
     for (const job of this.jobs.values()) {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
@@ -968,6 +988,15 @@ export class CronScheduler {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
       this.jobs.set(task.id, job);
+      if (!task.recurring && task.sessionMode === 'per_run') {
+        this.restorablePerRunOneShots.set(task.id, {
+          task,
+          index: read.findIndex((candidate) => candidate.id === task.id),
+        });
+      } else {
+        this.restorablePerRunOneShots.delete(task.id);
+        this.consumedPerRunOneShots.delete(task.id);
+      }
       if (!task.recurring && this.#shouldFireDurable(job)) {
         this.armedDurableOneShots.add(task.id);
       } else {
@@ -1267,6 +1296,9 @@ export class CronScheduler {
     firedAt: number,
     outcome: CronRunSessionOutcome,
   ): Promise<void> {
+    if (outcome.sessionId && this.consumedPerRunOneShots.delete(taskId)) {
+      this.restorablePerRunOneShots.delete(taskId);
+    }
     if (!this.projectRoot) return;
     // The onFire callback runs before tick() queues its run-history write.
     // Yield once, then wait for that write so the entry exists before editing it.
@@ -1279,6 +1311,35 @@ export class CronScheduler {
           : task,
       ),
     );
+  }
+
+  /** Restores a durable per-run one-shot that fired but never dispatched. */
+  async restoreConsumedOneShot(taskId: string): Promise<boolean> {
+    const projectRoot = this.projectRoot;
+    const snapshot = this.restorablePerRunOneShots.get(taskId);
+    if (!projectRoot || !snapshot || !this.consumedPerRunOneShots.has(taskId)) {
+      return false;
+    }
+
+    // onFire runs before tick() queues the removal write. Let tick finish, then
+    // wait for that write so the restore cannot be deleted immediately after
+    // it lands.
+    await Promise.resolve();
+    await this.pendingPersist;
+    this.pendingRemoval.delete(taskId);
+    this.armedDurableOneShots.delete(taskId);
+    await updateCronTasks(projectRoot, (tasks) => {
+      if (tasks.some((task) => task.id === taskId)) return tasks;
+      const restored = [...tasks];
+      restored.splice(
+        Math.min(snapshot.index, restored.length),
+        0,
+        snapshot.task,
+      );
+      return restored;
+    });
+    this.consumedPerRunOneShots.delete(taskId);
+    return true;
   }
 
   /**
@@ -1582,6 +1643,10 @@ export class CronScheduler {
       this.jobs.delete(job.id);
     }
 
+    if (!job.recurring && job.durable && job.sessionMode === 'per_run') {
+      this.consumedPerRunOneShots.add(job.id);
+    }
+
     if (this.onFire) {
       this.onFire(job);
     }
@@ -1697,6 +1762,8 @@ function durableTaskToJob(
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
     ...(task.sessionMode ? { sessionMode: task.sessionMode } : {}),
+    ...(task.modelServiceId ? { modelServiceId: task.modelServiceId } : {}),
+    ...(task.groupId ? { groupId: task.groupId } : {}),
     ...(task.name ? { name: task.name } : {}),
     ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
@@ -1712,6 +1779,12 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
     ...(job.sessionMode ? { sessionMode: job.sessionMode } : {}),
+    ...(job.sessionMode === 'per_run' && job.modelServiceId
+      ? { modelServiceId: job.modelServiceId }
+      : {}),
+    ...(job.sessionMode === 'per_run' && job.groupId
+      ? { groupId: job.groupId }
+      : {}),
     ...(job.name ? { name: job.name } : {}),
     ...(job.delivery ? { delivery: job.delivery } : {}),
   };

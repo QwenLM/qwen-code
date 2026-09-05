@@ -23,6 +23,7 @@ import type {
 import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
 import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
+  createDebugLogger,
   readSessionPrs,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -73,6 +74,8 @@ import {
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
+const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
+
 export type StandaloneSessionServiceErrorCode =
   | 'invalid_request'
   | 'standalone_session_not_found'
@@ -80,6 +83,7 @@ export type StandaloneSessionServiceErrorCode =
   | 'standalone_session_operation_failed'
   | 'session_archived'
   | 'session_busy'
+  | 'model_selection_failed'
   | 'standalone_creation_rolled_back'
   | 'standalone_creation_outcome_unknown'
   | 'working_directory_missing'
@@ -239,6 +243,7 @@ export interface StandaloneSessionServiceOptions {
     ConversationWorkspace,
     | 'assertExactRoot'
     | 'prepareStandaloneDirectory'
+    | 'discardEmptyConversationDirectory'
     | 'inspectStandaloneDirectory'
     | 'ensureStandaloneDirectory'
     | 'inspectStandaloneDeletionPaths'
@@ -326,6 +331,8 @@ function serviceError(
       'The standalone session operation failed.',
     session_archived: 'The standalone session is archived.',
     session_busy: 'The standalone session is busy.',
+    model_selection_failed:
+      'The selected model could not be applied to the standalone session.',
     standalone_creation_rolled_back:
       'Standalone session creation failed before durable source persistence and was rolled back.',
     standalone_creation_outcome_unknown:
@@ -2686,6 +2693,24 @@ export class StandaloneSessionService {
       this.beginTerminalQuarantine(runtime);
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
+    if (
+      parentSessionId !== undefined &&
+      request.modelServiceId !== undefined &&
+      session.modelApplied === false
+    ) {
+      await this.cleanRollbackBeforePersistence(runtime, sessionId);
+      try {
+        await this.options.workspace.discardEmptyConversationDirectory(
+          sessionId,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      this.directoryStates.delete(sessionId);
+      throw serviceError('model_selection_failed', sessionId, true);
+    }
     let initialPrompt:
       | CreatedStandaloneChildSession['initialPrompt']
       | undefined;

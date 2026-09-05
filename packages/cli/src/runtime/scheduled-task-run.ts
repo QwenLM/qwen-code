@@ -9,6 +9,9 @@ import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '@qwen-code/acp-bridge';
 
 export { SCHEDULED_TASK_RUN_SOURCE_TYPE } from '@qwen-code/acp-bridge';
 
+export const SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE =
+  'scheduled_task_model_selection_failed';
+
 export function scheduledTaskRunSourceId(taskId: string): string {
   return `${SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX}${taskId}`;
 }

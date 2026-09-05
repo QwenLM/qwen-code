@@ -31,6 +31,8 @@ interface MockTask {
   nextRunAt: number | null;
   sessionId: string | null;
   sessionMode?: 'persistent' | 'per_run';
+  modelServiceId: string | null;
+  groupId: string | null;
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
@@ -46,6 +48,9 @@ const { actions } = vi.hoisted(() => ({
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
     deleteScheduledTask: vi.fn(),
+    listSessionGroups: vi.fn(),
+    createSessionGroup: vi.fn(),
+    loadProviders: vi.fn(),
     loadExtensionsStatus: vi.fn(),
     loadSkillsStatus: vi.fn(),
     loadMcpStatus: vi.fn(),
@@ -104,6 +109,8 @@ async function mount(
   actions.loadMcpStatus.mockResolvedValue({
     servers: [],
   });
+  actions.listSessionGroups.mockReturnValue(new Promise(() => {}));
+  actions.loadProviders.mockReturnValue(new Promise(() => {}));
   container = document.createElement('div');
   portalRoot = document.createElement('div');
   portalRoot.setAttribute('data-web-shell-portal-root', '');
@@ -156,6 +163,17 @@ function click(el: Element | null | undefined) {
     el.dispatchEvent(
       new MouseEvent('click', { bubbles: true, cancelable: true }),
     );
+  });
+}
+
+function input(el: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  act(() => {
+    setter?.call(el, value);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
   });
 }
 
@@ -225,6 +243,8 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
   lastFiredAt: null,
   nextRunAt: null,
   sessionId: null,
+  modelServiceId: null,
+  groupId: null,
   runs: [],
   ...over,
 });
@@ -463,6 +483,143 @@ describe('ScheduledTasksDialog editing', () => {
     );
   });
 
+  it('persists the selected model and existing group for per-run sessions', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-1',
+          name: 'Automations',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-09-03T00:00:00.000Z',
+          updatedAt: '2026-09-03T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockResolvedValue({
+      providers: [
+        {
+          models: [
+            {
+              modelId: 'qwen-max(openai)',
+              baseModelId: 'qwen-max',
+              name: 'Qwen Max',
+            },
+          ],
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+    await flush();
+    const model = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="qwen-max(openai)"]'),
+    );
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="group-1"]'),
+    );
+    act(() => {
+      model!.value = 'qwen-max(openai)';
+      model!.dispatchEvent(new Event('change', { bubbles: true }));
+      group!.value = 'group-1';
+      group!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await enterPromptAndCreate('run with routing');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionMode: 'per_run',
+        modelServiceId: 'qwen-max(openai)',
+        groupId: 'group-1',
+      }),
+      undefined,
+    );
+  });
+
+  it('creates a group before saving the per-run task', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    actions.createSessionGroup.mockResolvedValue({
+      id: 'created-group',
+      name: 'Nightly',
+      color: 'purple',
+      order: 0,
+      createdAt: '2026-09-03T00:00:00.000Z',
+      updatedAt: '2026-09-03T00:00:00.000Z',
+    });
+    await mount([]);
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['blue', 'purple'],
+    });
+    click(findButton('New scheduled task'));
+    await flush();
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="__create_group__"]'),
+    );
+    act(() => {
+      group!.value = '__create_group__';
+      group!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const groupName = Array.from(document.querySelectorAll('label'))
+      .find((label) => label.textContent?.includes('New group name'))
+      ?.querySelector('input');
+    input(groupName!, 'Nightly');
+    await enterPromptAndCreate('nightly task');
+
+    expect(actions.createSessionGroup).toHaveBeenCalledWith(
+      { name: 'Nightly', color: 'blue' },
+      undefined,
+    );
+    expect(actions.createSessionGroup.mock.invocationCallOrder[0]).toBeLessThan(
+      actions.createScheduledTask.mock.invocationCallOrder[0]!,
+    );
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: 'created-group' }),
+      undefined,
+    );
+  });
+
+  it('reuses a newly created group when task creation is retried', async () => {
+    actions.createScheduledTask
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce(baseTask({}));
+    actions.createSessionGroup.mockResolvedValue({
+      id: 'created-group',
+      name: 'Nightly',
+      color: 'blue',
+      order: 0,
+      createdAt: '2026-09-03T00:00:00.000Z',
+      updatedAt: '2026-09-03T00:00:00.000Z',
+    });
+    await mount([]);
+    click(findButton('New scheduled task'));
+    await flush();
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="__create_group__"]'),
+    );
+    act(() => {
+      group!.value = '__create_group__';
+      group!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const groupName = Array.from(document.querySelectorAll('label'))
+      .find((label) => label.textContent?.includes('New group name'))
+      ?.querySelector('input');
+    input(groupName!, 'Nightly');
+
+    await enterPromptAndCreate('nightly task');
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createSessionGroup).toHaveBeenCalledOnce();
+    expect(actions.createScheduledTask).toHaveBeenCalledTimes(2);
+    expect(actions.createScheduledTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({ groupId: 'created-group' }),
+      undefined,
+    );
+  });
+
   it('prefills the form from the task and saves via updateScheduledTask', async () => {
     await mount([baseTask({})]);
 
@@ -492,10 +649,72 @@ describe('ScheduledTasksDialog editing', () => {
         prompt: 'summarize the day',
         name: 'Digest',
         sessionMode: 'persistent',
+        modelServiceId: null,
+        groupId: null,
       },
       undefined,
     );
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('preserves saved per-run model and group routing when editing', async () => {
+    const task = baseTask({
+      sessionMode: 'per_run',
+      modelServiceId: 'qwen-max(openai)',
+      groupId: 'group-1',
+    });
+    await mount([task]);
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-1',
+          name: 'Automations',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-09-03T00:00:00.000Z',
+          updatedAt: '2026-09-03T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockResolvedValue({
+      providers: [
+        {
+          models: [
+            {
+              modelId: 'qwen-max(openai)',
+              baseModelId: 'qwen-max',
+              name: 'Qwen Max',
+            },
+          ],
+        },
+      ],
+    });
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+
+    const model = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="qwen-max(openai)"]'),
+    );
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="group-1"]'),
+    );
+    expect(model?.value).toBe('qwen-max(openai)');
+    expect(group?.value).toBe('group-1');
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({
+        sessionMode: 'per_run',
+        modelServiceId: 'qwen-max(openai)',
+        groupId: 'group-1',
+      }),
+      undefined,
+    );
   });
 
   it('renders saved prompt references as inline tags when editing', async () => {
@@ -1311,6 +1530,8 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     actions.loadExtensionsStatus.mockResolvedValue({ extensions: [] });
     actions.loadSkillsStatus.mockResolvedValue({ skills: [] });
     actions.loadMcpStatus.mockResolvedValue({ servers: [] });
+    actions.listSessionGroups.mockReturnValue(new Promise(() => {}));
+    actions.loadProviders.mockReturnValue(new Promise(() => {}));
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -1364,6 +1585,11 @@ describe('ScheduledTasksDialog multi-workspace', () => {
 
   it('creates a task in the workspace chosen in the picker', async () => {
     await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockResolvedValue({ providers: [] });
     click(findButton('New scheduled task'));
 
     // The picker offers the two trusted workspaces (untrusted excluded).
@@ -1384,6 +1610,10 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       wsSelect!.value = 'id-other';
       wsSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    await flush();
+
+    expect(actions.listSessionGroups).toHaveBeenCalledWith('/repo/other');
+    expect(actions.loadProviders).toHaveBeenCalledWith('/repo/other');
 
     const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
     act(() => {
@@ -1398,6 +1628,280 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       expect.objectContaining({ prompt: 'do secondary work' }),
       'id-other',
     );
+  });
+
+  it('does not retain routing options when the target workspace load fails', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'primary-group',
+          name: 'Primary group',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-09-03T00:00:00.000Z',
+          updatedAt: '2026-09-03T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockResolvedValue({
+      providers: [
+        {
+          models: [
+            {
+              modelId: 'primary-model',
+              baseModelId: 'primary-model',
+              name: 'Primary model',
+            },
+          ],
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+    await flush();
+    expect(
+      document.querySelector('option[value="primary-group"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('option[value="primary-model"]'),
+    ).not.toBeNull();
+
+    actions.listSessionGroups.mockRejectedValueOnce(
+      new Error('secondary groups unavailable'),
+    );
+    actions.loadProviders.mockResolvedValueOnce({ providers: [] });
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    expect(document.querySelector('option[value="primary-group"]')).toBeNull();
+    expect(document.querySelector('option[value="primary-model"]')).toBeNull();
+    expect(document.body.textContent).toContain('secondary groups unavailable');
+  });
+
+  it('keeps loaded groups when provider options fail', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-1',
+          name: 'Automations',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-09-03T00:00:00.000Z',
+          updatedAt: '2026-09-03T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockRejectedValue(new Error('providers unavailable'));
+
+    click(findButton('New scheduled task'));
+    await flush();
+
+    expect(document.querySelector('option[value="group-1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain('providers unavailable');
+  });
+
+  it('keeps loaded models when group options fail', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockRejectedValue(
+      new Error('groups unavailable'),
+    );
+    actions.loadProviders.mockResolvedValue({
+      providers: [
+        {
+          models: [
+            {
+              modelId: 'qwen-max(openai)',
+              baseModelId: 'qwen-max',
+              name: 'Qwen Max',
+            },
+          ],
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    await flush();
+
+    expect(
+      document.querySelector('option[value="qwen-max(openai)"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain('groups unavailable');
+  });
+
+  it('reports both routing option failures', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockRejectedValue(
+      new Error('groups unavailable'),
+    );
+    actions.loadProviders.mockRejectedValue(new Error('providers unavailable'));
+
+    click(findButton('New scheduled task'));
+    await flush();
+
+    expect(document.body.textContent).toContain('groups unavailable');
+    expect(document.body.textContent).toContain('providers unavailable');
+  });
+
+  it('clears routing selections when the target workspace changes', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups
+      .mockResolvedValueOnce({
+        groups: [
+          {
+            id: 'primary-group',
+            name: 'Primary group',
+            color: 'blue',
+            order: 0,
+            createdAt: '2026-09-03T00:00:00.000Z',
+            updatedAt: '2026-09-03T00:00:00.000Z',
+          },
+        ],
+        colorOptions: ['blue'],
+      })
+      .mockResolvedValueOnce({ groups: [], colorOptions: ['blue'] });
+    actions.loadProviders
+      .mockResolvedValueOnce({
+        providers: [
+          {
+            models: [
+              {
+                modelId: 'primary-model',
+                baseModelId: 'primary-model',
+                name: 'Primary model',
+              },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ providers: [] });
+
+    click(findButton('New scheduled task'));
+    await flush();
+    const model = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="primary-model"]'),
+    )!;
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="primary-group"]'),
+    )!;
+    act(() => {
+      model.value = 'primary-model';
+      model.dispatchEvent(new Event('change', { bubbles: true }));
+      group.value = 'primary-group';
+      group.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    expect(model.value).toBe('');
+    expect(group.value).toBe('');
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'do secondary work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+
+    const input = actions.createScheduledTask.mock.calls.at(-1)?.[0];
+    expect(input).not.toHaveProperty('modelServiceId');
+    expect(input).not.toHaveProperty('groupId');
+  });
+
+  it('ignores routing options from a superseded workspace load', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    let resolvePrimaryGroups!: (value: {
+      groups: Array<{
+        id: string;
+        name: string;
+        color: string;
+        order: number;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+      colorOptions: string[];
+    }) => void;
+    let resolvePrimaryProviders!: (value: {
+      providers: Array<{
+        models: Array<{
+          modelId: string;
+          baseModelId: string;
+          name: string;
+        }>;
+      }>;
+    }) => void;
+    const primaryGroups = new Promise<
+      Parameters<typeof resolvePrimaryGroups>[0]
+    >((resolve) => {
+      resolvePrimaryGroups = resolve;
+    });
+    const primaryProviders = new Promise<
+      Parameters<typeof resolvePrimaryProviders>[0]
+    >((resolve) => {
+      resolvePrimaryProviders = resolve;
+    });
+    actions.listSessionGroups.mockImplementation((cwd?: string) =>
+      cwd === '/repo/main'
+        ? primaryGroups
+        : Promise.resolve({ groups: [], colorOptions: ['blue'] }),
+    );
+    actions.loadProviders.mockImplementation((cwd?: string) =>
+      cwd === '/repo/main'
+        ? primaryProviders
+        : Promise.resolve({ providers: [] }),
+    );
+
+    click(findButton('New scheduled task'));
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    await act(async () => {
+      resolvePrimaryGroups({
+        groups: [
+          {
+            id: 'primary-group',
+            name: 'Primary group',
+            color: 'blue',
+            order: 0,
+            createdAt: '2026-09-03T00:00:00.000Z',
+            updatedAt: '2026-09-03T00:00:00.000Z',
+          },
+        ],
+        colorOptions: ['blue'],
+      });
+      resolvePrimaryProviders({
+        providers: [
+          {
+            models: [
+              {
+                modelId: 'primary-model',
+                baseModelId: 'primary-model',
+                name: 'Primary model',
+              },
+            ],
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(document.querySelector('option[value="primary-group"]')).toBeNull();
+    expect(document.querySelector('option[value="primary-model"]')).toBeNull();
   });
 
   it('lists and creates tasks in a locked secondary workspace', async () => {
@@ -1481,6 +1985,48 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     // The picker is shown (so the user sees the workspace) but disabled — a
     // PATCH can't move a task between per-workspace files.
     expect(wsSelect?.disabled).toBe(true);
+  });
+
+  it('edits a secondary task with its saved routing and workspace', async () => {
+    const task = baseTask({
+      id: 's1',
+      name: 'Second task',
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+      groupId: 'missing-group',
+    });
+    await mountMulti({ primary: [], 'id-other': [task] });
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockResolvedValue({ providers: [] });
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+
+    expect(actions.listSessionGroups).toHaveBeenCalledWith('/repo/other');
+    expect(actions.loadProviders).toHaveBeenCalledWith('/repo/other');
+    const model = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="missing-model"]'),
+    );
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="missing-group"]'),
+    );
+    expect(model?.value).toBe('missing-model');
+    expect(group?.value).toBe('missing-group');
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({
+        modelServiceId: 'missing-model',
+        groupId: 'missing-group',
+      }),
+      'id-other',
+    );
   });
 
   it('keeps an untrusted primary in the aggregate and picker (trust-free route)', async () => {

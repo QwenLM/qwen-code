@@ -263,6 +263,10 @@ export interface DaemonScheduledTask {
   /** `persistent` reuses the task's bound session; `per_run` creates a fresh
    * child session for every scheduled or manual fire. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for each fresh per-run session. */
+  modelServiceId?: string | null;
+  /** Named group assigned to each fresh per-run session. */
+  groupId?: string | null;
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -288,6 +292,10 @@ export interface DaemonCreateScheduledTaskRequest {
   sessionId?: string | null;
   /** Defaults to `persistent` when omitted. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service for fresh per-run sessions. */
+  modelServiceId?: string;
+  /** Named group for fresh per-run sessions. */
+  groupId?: string;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -299,6 +307,10 @@ export interface DaemonUpdateScheduledTaskRequest {
   recurring?: boolean;
   enabled?: boolean;
   sessionMode?: 'persistent' | 'per_run';
+  /** Null clears the selected model. */
+  modelServiceId?: string | null;
+  /** Null clears the selected group. */
+  groupId?: string | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -380,9 +392,10 @@ export interface DaemonWorkspaceActions {
   listSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage>;
-  listSessionGroups(): Promise<DaemonSessionGroupCatalog>;
+  listSessionGroups(workspaceCwd?: string): Promise<DaemonSessionGroupCatalog>;
   createSessionGroup(
     input: DaemonSessionGroupInput,
+    workspaceCwd?: string,
   ): Promise<DaemonSessionGroup>;
   updateSessionGroup(
     groupId: string,
@@ -583,7 +596,7 @@ export interface DaemonWorkspaceActions {
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
-  loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
+  loadProviders(workspaceCwd?: string): Promise<DaemonWorkspaceProvidersStatus>;
   loadEnv(): Promise<DaemonWorkspaceEnvStatus>;
   loadPreflight(): Promise<DaemonWorkspacePreflightStatus>;
 
