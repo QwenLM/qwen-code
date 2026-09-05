@@ -18033,6 +18033,180 @@ describe('DaemonSessionProvider', () => {
       expect(result).toEqual({ ok: false, reason: 'unsupported' });
       expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
     });
+
+    it('seeds the switched-to session while the previous seed is in flight', async () => {
+      // The in-flight guard was a single flag with no owner, so the seed
+      // abandoned by a switch kept holding it. The switch armed the new session
+      // to `idle`, the seeding effect ran once for that state and bailed on the
+      // flag, and nothing changed the status afterwards — `idle` is the effect's
+      // only trigger, so the new session's index stayed empty for its whole life.
+      const first = pushSession('session-switch-in-flight-first');
+      const second = pushSession('session-switch-in-flight-second');
+      const staleSeed = createDeferred<DaemonSessionTurnIndexPage>();
+      sdkMocks.getSessionTurnIndexPage
+        .mockReturnValueOnce(staleSeed.promise)
+        .mockResolvedValueOnce(
+          turnIndexPage({
+            sessionId: second.sessionId,
+            snapshot: 'snapshot-second',
+            totalTurns: 7,
+            start: 0,
+            turns: turnEntries(0, 7),
+          }),
+        );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: first.sessionId,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(index?.status).toBe('loading');
+
+      act(() => {
+        root?.render(
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            autoConnect
+            reconnectDelayMs={1}
+            maxReconnectDelayMs={1}
+            sessionId={second.sessionId}
+          >
+            <Harness />
+          </DaemonSessionProvider>,
+        );
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(index).toMatchObject({
+        status: 'ready',
+        sessionId: second.sessionId,
+        snapshot: 'snapshot-second',
+        totalTurns: 7,
+      });
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(2);
+
+      // The abandoned seed settling late must neither commit over the new owner
+      // nor release the guard the new owner's request took.
+      staleSeed.resolve(
+        turnIndexPage({
+          sessionId: first.sessionId,
+          snapshot: 'snapshot-first',
+          totalTurns: 99,
+          start: 0,
+          turns: turnEntries(0, 2),
+        }),
+      );
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(index).toMatchObject({
+        sessionId: second.sessionId,
+        snapshot: 'snapshot-second',
+        totalTurns: 7,
+      });
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-seeds when a same-session reload replaces the client object mid-flight', async () => {
+      // A same-session reload with an empty replay snapshot takes the reconnect
+      // branch that neither resets the store nor the index, so it installs a new
+      // client object underneath a `loading` store. That status exits only
+      // through the request the replaced object was holding, and the arm block
+      // re-armed on a sessionId change alone — so the index was stranded on
+      // `loading` with no path back to `idle`.
+      const current = createMockSession({
+        sessionId: 'session-reload-in-flight',
+        clientId: 'client-reload-a',
+        events: createIdleEvents(),
+      });
+      const replacement = createMockSession({
+        sessionId: 'session-reload-in-flight',
+        clientId: 'client-reload-b',
+        events: createIdleEvents(),
+      });
+      sdkMocks.sessions.push(current);
+      const staleSeed = createDeferred<DaemonSessionTurnIndexPage>();
+      sdkMocks.getSessionTurnIndexPage
+        .mockReturnValueOnce(staleSeed.promise)
+        .mockResolvedValue(
+          turnIndexPage({
+            sessionId: current.sessionId,
+            snapshot: 'snapshot-reloaded',
+            totalTurns: 5,
+            start: 0,
+            turns: turnEntries(0, 5),
+          }),
+        );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: current.sessionId,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(index?.status).toBe('loading');
+
+      sdkMocks.sessions.push(replacement);
+      let reload: Promise<void> | undefined;
+      act(() => {
+        reload = requireActions(actions).reloadSession(
+          new AbortController().signal,
+        );
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      await expect(reload).resolves.toBeUndefined();
+      expect(index).toMatchObject({
+        status: 'ready',
+        sessionId: current.sessionId,
+        snapshot: 'snapshot-reloaded',
+        totalTurns: 5,
+      });
+
+      staleSeed.resolve(
+        turnIndexPage({
+          sessionId: current.sessionId,
+          snapshot: 'snapshot-stale',
+          totalTurns: 99,
+          start: 0,
+          turns: turnEntries(0, 2),
+        }),
+      );
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(index).toMatchObject({
+        snapshot: 'snapshot-reloaded',
+        totalTurns: 5,
+      });
+    });
   });
 });
 

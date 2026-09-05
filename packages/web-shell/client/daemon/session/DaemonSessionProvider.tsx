@@ -1042,6 +1042,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     useRef<ReturnType<typeof setTimeout>>(undefined);
   const turnIndexRefreshTimerRef =
     useRef<ReturnType<typeof setTimeout>>(undefined);
+  // The client object the index belongs to, and the request epoch that goes
+  // with it. A session switch and a same-session reconnect both replace that
+  // object, and the state machine's only re-entry point is `idle`, so an owner
+  // change has to be observable on its own instead of inferred from `sessionId`.
+  // Every async path captures the epoch before awaiting and re-checks it after
+  // each one, so a result minted for a superseded owner is dropped rather than
+  // committed over the new owner's state — and, unlike comparing session
+  // objects, bumping it also releases the in-flight guard the dead owner held.
+  const turnIndexEpochRef = useRef(0);
+  const turnIndexOwnerRef = useRef<DaemonSessionClient | undefined>(undefined);
   // Bumped per anchored open so a jump superseded by a newer one cannot commit
   // its page over the window the newer jump produced.
   const openTurnGenerationRef = useRef(0);
@@ -1059,15 +1069,51 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       turnIndexRefreshTimerRef.current = undefined;
     }
   }, []);
+  // Invalidates every request and timer minted for the current owner. The epoch
+  // bump is what stops an in-flight seed, refresh, or fill from committing, and
+  // releasing the in-flight guard here is what lets the next owner seed at all:
+  // the seeding effect's only trigger is a status change, so a guard left held
+  // by a request that is now certain to be dropped parks the store on `idle`
+  // permanently.
+  const abandonTurnIndexRequests = useCallback(() => {
+    turnIndexEpochRef.current += 1;
+    turnIndexInFlightRef.current = false;
+    turnIndexAttemptRef.current = 0;
+    clearTurnIndexTimers();
+  }, [clearTurnIndexTimers]);
+  // Records which client object the index belongs to and reports whether that
+  // changed. It changes on a session switch, on a same-session reconnect, and on
+  // the first attach alike — the three cases that leave an async continuation or
+  // a retry timer holding an object nothing will ever compare equal again.
+  const beginTurnIndexOwner = useCallback(
+    (session: DaemonSessionClient) => {
+      if (turnIndexOwnerRef.current === session) return false;
+      turnIndexOwnerRef.current = session;
+      abandonTurnIndexRequests();
+      return true;
+    },
+    [abandonTurnIndexRequests],
+  );
+  /**
+   * Whether a request minted for `session` under `epoch` still describes the
+   * live owner. Both halves earn their place: the object comparison catches a
+   * detach that never went through the arm path — the provider drops
+   * `sessionRef` on cleanup, epoch reset, and resync without wiping the index —
+   * and the epoch catches a wipe or an owner change that kept the same object.
+   */
+  const turnIndexRequestIsCurrent = useCallback(
+    (session: DaemonSessionClient, epoch: number) =>
+      sessionRef.current === session && turnIndexEpochRef.current === epoch,
+    [],
+  );
   // Wipes the index wherever the session's transcript window is wiped without a
   // load to rebuild it. `disabled` parks it: only a load that has read the
   // capabilities may arm seeding, so a wipe can never trigger a request against
   // a daemon that does not advertise turn navigation.
   const resetTurnIndex = useCallback(() => {
-    turnIndexAttemptRef.current = 0;
-    clearTurnIndexTimers();
+    abandonTurnIndexRequests();
     commitTurnIndex(INITIAL_TURN_INDEX);
-  }, [clearTurnIndexTimers, commitTurnIndex]);
+  }, [abandonTurnIndexRequests, commitTurnIndex]);
   // A rewind drops the newest records, so ordinals and turn ids past the cut
   // are no longer this chain's. Discard the pages and let the seeding effect
   // refetch the tail. A capability-absent or ceiling-latched store stays as it
@@ -1076,15 +1122,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const invalidateTurnIndexAfterRewind = useCallback(() => {
     const state = turnIndexRef.current;
     if (state.status === 'disabled' || state.status === 'unsupported') return;
-    turnIndexAttemptRef.current = 0;
-    // An anchored read in flight is bound to a snapshot this rewind just
-    // invalidated, and neither of its post-await guards would catch it: the
-    // session object survives a rewind and the jump generation is otherwise
-    // bumped only by another jump. Left alone it would splice the rewound-away
-    // turn back into the post-rewind window and report success.
+    // A seed, refresh, or fill in flight is bound to the snapshot this rewind
+    // just invalidated, and the session object survives a rewind, so comparing
+    // it would not catch one. Abandoning the epoch drops those results and
+    // releases the in-flight guard — without which the `idle` store this is
+    // about to commit could never be seeded, because the seeding effect's only
+    // trigger is the status change that already happened.
+    abandonTurnIndexRequests();
+    // An anchored read needs its own generation: it commits to the transcript
+    // window and the ledger rather than to the index, and the jump generation is
+    // otherwise bumped only by another jump. Left alone it would splice the
+    // rewound-away turn back into the post-rewind window and report success.
     openTurnGenerationRef.current += 1;
     commitTurnIndex(invalidateTurnIndexSnapshot(state));
-  }, [commitTurnIndex]);
+  }, [abandonTurnIndexRequests, commitTurnIndex]);
   const store = useMemo(
     () =>
       createDaemonTranscriptStore({
@@ -1338,7 +1389,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
    * history.
    */
   const failTurnIndex = useCallback(
-    (session: DaemonSessionClient, error: unknown) => {
+    (error: unknown) => {
       const current = turnIndexRef.current;
       const reaction = classifyTurnIndexFailure(error);
       if (reaction === 'unsupported') {
@@ -1361,10 +1412,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (turnIndexRetryTimerRef.current !== undefined) {
         clearTimeout(turnIndexRetryTimerRef.current);
       }
+      // The epoch, not the session object: this timer's job is to return the
+      // store to `idle` for whichever owner is current when it fires, and a
+      // reconnect replaces the object without replacing the session. Keying it
+      // to the object would leave the store on `error` with no timer that can
+      // ever run, which is terminal — `idle` is the seeding effect's only
+      // trigger.
+      const epoch = turnIndexEpochRef.current;
       turnIndexRetryTimerRef.current = setTimeout(
         () => {
           turnIndexRetryTimerRef.current = undefined;
-          if (sessionRef.current !== session) return;
+          if (turnIndexEpochRef.current !== epoch) return;
           if (turnIndexRef.current.status !== 'error') return;
           commitTurnIndex(withTurnIndexStatus(turnIndexRef.current, 'idle'));
         },
@@ -1380,6 +1438,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const seedTurnIndex = useCallback(
     async (session: DaemonSessionClient) => {
       if (turnIndexInFlightRef.current) return;
+      const epoch = turnIndexEpochRef.current;
       turnIndexInFlightRef.current = true;
       commitTurnIndex(withTurnIndexStatus(turnIndexRef.current, 'loading'));
       try {
@@ -1389,7 +1448,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           limit: clampTurnIndexPageSize(historyPageSizeRef.current),
           clientId: session.clientId,
         });
-        if (sessionRef.current !== session) return;
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
         turnIndexAttemptRef.current = 0;
         commitTurnIndex(
           admitSeedPage(
@@ -1398,13 +1457,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ),
         );
       } catch (error) {
-        if (sessionRef.current !== session) return;
-        failTurnIndex(session, error);
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
+        failTurnIndex(error);
       } finally {
-        turnIndexInFlightRef.current = false;
+        // Only the owner that took the guard may release it. An abandoned
+        // request settling after an owner change would otherwise clear the new
+        // owner's guard and let a second seed run concurrently with the first.
+        if (turnIndexEpochRef.current === epoch) {
+          turnIndexInFlightRef.current = false;
+        }
       }
     },
-    [commitTurnIndex, failTurnIndex],
+    [commitTurnIndex, failTurnIndex, turnIndexRequestIsCurrent],
   );
   const refreshTurnIndex = useCallback(
     async (session: DaemonSessionClient) => {
@@ -1416,6 +1480,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       ) {
         return;
       }
+      const epoch = turnIndexEpochRef.current;
       turnIndexInFlightRef.current = true;
       // Read once per refresh so the validation window and the fill page size
       // agree even if the host changes the prop mid-flight.
@@ -1425,7 +1490,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           limit: pageSize,
           clientId: session.clientId,
         });
-        if (sessionRef.current !== session) return;
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
         const current = turnIndexRef.current;
         const plan = planTailRefresh(current, validation, pageSize);
         if (plan.kind === 'divergent') {
@@ -1441,19 +1506,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             limit: fill.limit,
             clientId: session.clientId,
           });
-          if (sessionRef.current !== session) return;
+          if (!turnIndexRequestIsCurrent(session, epoch)) return;
           next = admitTurnIndexPage(next, page, plan.snapshot) ?? next;
         }
         turnIndexAttemptRef.current = 0;
         commitTurnIndex(next);
       } catch (error) {
-        if (sessionRef.current !== session) return;
-        failTurnIndex(session, error);
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
+        failTurnIndex(error);
       } finally {
-        turnIndexInFlightRef.current = false;
+        if (turnIndexEpochRef.current === epoch) {
+          turnIndexInFlightRef.current = false;
+        }
       }
     },
-    [commitTurnIndex, failTurnIndex],
+    [commitTurnIndex, failTurnIndex, turnIndexRequestIsCurrent],
   );
   /**
    * Coalesces the tail refresh onto a trailing timer: a burst of terminal
@@ -1466,13 +1533,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (turnIndexRefreshTimerRef.current !== undefined) {
         clearTimeout(turnIndexRefreshTimerRef.current);
       }
+      const epoch = turnIndexEpochRef.current;
       turnIndexRefreshTimerRef.current = setTimeout(() => {
         turnIndexRefreshTimerRef.current = undefined;
-        if (sessionRef.current !== session) return;
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
         void refreshTurnIndex(session);
       }, TURN_INDEX_REFRESH_COALESCE_MS);
     },
-    [refreshTurnIndex],
+    [refreshTurnIndex, turnIndexRequestIsCurrent],
   );
   /**
    * Admits one explicitly snapshot-bound metadata page. A page the store
@@ -1487,6 +1555,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       start: number,
       limit: number,
     ) => {
+      const epoch = turnIndexEpochRef.current;
       try {
         const page = await session.getTurnIndexPage({
           snapshot,
@@ -1494,14 +1563,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           limit,
           clientId: session.clientId,
         });
-        if (sessionRef.current !== session) return;
-        // Session identity is not enough: a fill does not take the in-flight
-        // guard, so it can still be pending when a rewind or a 409 invalidates
-        // the index, or when a re-seed adopts a newer snapshot. Admitting then
-        // would mix ordinals frozen by different snapshots, or flip an `idle`
-        // store to `ready` with no snapshot at all — which parks it, since the
-        // planners bail on an undefined snapshot and the seeding effect only
-        // runs on `idle`.
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
+        // Nor is the epoch: a fill does not take the in-flight guard, so it can
+        // still be pending when a 409 invalidates the index or a re-seed adopts
+        // a newer snapshot without either moving the owner. Admitting then would
+        // mix ordinals frozen by different snapshots, or flip an `idle` store to
+        // `ready` with no snapshot at all — which parks it, since the planners
+        // bail on an undefined snapshot and the seeding effect only runs on
+        // `idle`.
         if (turnIndexRef.current.snapshot !== snapshot) return;
         const admitted = admitTurnIndexPage(
           turnIndexRef.current,
@@ -1510,16 +1579,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         );
         if (admitted) commitTurnIndex(admitted);
       } catch (error) {
-        if (sessionRef.current !== session) return;
+        if (!turnIndexRequestIsCurrent(session, epoch)) return;
         // A hole stays a hole: only an invalidating failure may discard what the
         // store already holds, and a transient one leaves the caller free to
         // retry without the whole index being reset behind it.
         if (classifyTurnIndexFailure(error) !== 'retry') {
-          failTurnIndex(session, error);
+          failTurnIndex(error);
         }
       }
     },
-    [commitTurnIndex, failTurnIndex],
+    [commitTurnIndex, failTurnIndex, turnIndexRequestIsCurrent],
   );
   const ensureTurnIndexPage = useCallback(
     async (ordinal: number) => {
@@ -3150,6 +3219,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               attachCapabilities.features.includes(
                 SESSION_TURN_NAVIGATION_FEATURE,
               );
+            // Establishing the owner comes first: it drops any request still in
+            // flight for the previous client object and releases the in-flight
+            // guard that object held. Without the release, a store armed to
+            // `idle` below can never seed — the seeding effect already ran for
+            // this state, and a status change is its only trigger.
+            const ownerChanged = beginTurnIndexOwner(activeSession);
             if (
               loadedIndex.sessionId !== activeSession.sessionId ||
               (!turnNavigationSupported && loadedIndex.status !== 'disabled')
@@ -3160,6 +3235,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 createSessionTurnIndexState(
                   activeSession.sessionId,
                   turnNavigationSupported ? 'idle' : 'disabled',
+                ),
+              );
+            } else if (
+              ownerChanged &&
+              (loadedIndex.status === 'loading' ||
+                loadedIndex.status === 'error')
+            ) {
+              // A reconnect replaces the client object without replacing the
+              // session, and each of these two statuses exits only through
+              // something the dropped owner was holding — an in-flight request
+              // or a retry timer. Nothing else will ever set `idle` again, so
+              // the store is stranded. Cached pages survive when the snapshot
+              // that minted them still describes this chain; only a rewind
+              // changes that, and a rewind invalidates the snapshot itself.
+              commitTurnIndex(
+                withTurnIndexStatus(
+                  loadedIndex,
+                  loadedIndex.snapshot !== undefined ? 'ready' : 'idle',
                 ),
               );
             }
@@ -4375,6 +4468,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     clearTranscriptLedger,
     resetTurnIndex,
     clearTurnIndexTimers,
+    beginTurnIndexOwner,
     commitTurnIndex,
     scheduleTurnIndexRefresh,
     restoreSessionId,
@@ -4756,6 +4850,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const target = findTurnIndexEntry(index, turnId);
       if (!target) return { ok: false, reason: 'unavailable' };
       const generation = (openTurnGenerationRef.current += 1);
+      const epoch = turnIndexEpochRef.current;
       try {
         // The protocol requires an explicit record anchor to travel with the
         // snapshot that produced it, and rejects the pair combined with any
@@ -4768,7 +4863,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         });
         if (
           sessionRef.current !== session ||
-          generation !== openTurnGenerationRef.current
+          generation !== openTurnGenerationRef.current ||
+          // The epoch catches a transcript-window wipe that kept this client
+          // object — a fresh-session store reset or a resync — where neither of
+          // the guards above moves: the object survives it, and the jump
+          // generation is otherwise bumped only by a rewind or another jump.
+          // Splicing the page into the wiped window would report success against
+          // an index that no longer holds the turn.
+          turnIndexEpochRef.current !== epoch
         ) {
           // A newer jump, a session switch, or an unmount superseded this one.
           return { ok: false, reason: 'unavailable' };
