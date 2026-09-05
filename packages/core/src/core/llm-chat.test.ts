@@ -4471,7 +4471,7 @@ describe('LlmChat', async () => {
       );
     });
 
-    it('triggers cache-sharing compaction end-to-end when a provider token count is available (R3.4)', async () => {
+    it('persists estimated cache-sharing compaction end-to-end (R3.4)', async () => {
       // Reviewer R3.4: the "forwards the pending user message" test above
       // mocks the service entirely, so the real cheap-gate never runs there.
       // Exercise the full chain here with the provider token-count anchor
@@ -4479,7 +4479,7 @@ describe('LlmChat', async () => {
       //   sendMessageStream → tryCompress → service.compress (REAL) →
       //   cheap-gate (count-based estimate from the 172K anchor) →
       //   splitter (real) → cache-sharing request (mocked at baseLlmClient) →
-      //   persistence.
+      //   estimated visible-history accounting → persistence.
       const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
       const inheritedHistory: Content[] = [
         { role: 'user', parts: [{ text: largeChars }] },
@@ -4526,10 +4526,15 @@ describe('LlmChat', async () => {
       expect(compressed).toBeDefined();
       expect(
         (compressed as { type: StreamEventType; info: ChatCompressionInfo })
-          .info.compressionStatus,
-      ).toBe(CompressionStatus.COMPRESSED);
+          .info,
+      ).toEqual(
+        expect.objectContaining({
+          compressionStatus: CompressionStatus.COMPRESSED,
+          newTokenCountIsEstimated: true,
+        }),
+      );
       // Google GenAI uses the cache-sharing request rather than the cold side
-      // query, while still exercising the real splitter and accounting path.
+      // query, while still exercising the real splitter and local-delta path.
       expect(generateText).toHaveBeenCalled();
       expect(coldSpy).not.toHaveBeenCalled();
     });
@@ -16729,6 +16734,33 @@ describe('LlmChat', async () => {
       expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(1);
     });
 
+    it('counts an input-too-large admission rejection as a compression failure', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 1_000,
+            newTokenCount: 1_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+      await chat.tryCompress('input-too-large');
+      await chat.tryCompress('after-input-too-large');
+
+      expect(compressSpy.mock.calls[1][1].consecutiveFailures).toBe(1);
+    });
+
     it('forwards force=true to the compression service', async () => {
       const compressSpy = mockCompressionService('compressed');
 
@@ -16950,16 +16982,24 @@ describe('LlmChat', async () => {
       expect(compressSpy.mock.calls[0][1].originalTokenCount).not.toBe(
         adjustedAfterFast,
       );
+      expect(compressSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ originalTokenCountIsEstimated: true }),
+      );
       expect(info.originalTokenCountIsEstimated).toBe(true);
     });
 
     it('reports an authoritative original count when the API count is fresh', async () => {
-      mockCompressionService('compressed');
+      const compressSpy = mockCompressionService('compressed');
       chat.setHistory([userMsg('a'), modelMsg('b')]);
       chat.seedResumeTokenCounts(5000, 0, false);
 
       const info = await chat.tryCompress('p-authoritative-original', true);
 
+      expect(compressSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ originalTokenCountIsEstimated: false }),
+      );
       expect(info.originalTokenCountIsEstimated).toBe(false);
     });
 
