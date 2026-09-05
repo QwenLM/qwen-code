@@ -144,7 +144,7 @@ This landed in [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
 
 The transcript adapter lives outside this directory: `packages/web-shell/client/adapters/transcriptAdapter.ts` exports only `extractPendingPermission(blocks): PermissionRequest | null`, lifting unresolved SDK permission blocks for host UIs. Transcript blocks themselves flow through the SDK `ui/*` layer and `useDaemonTranscriptBlocks()`; there is no `UnifiedMessage` adapter in Web Shell.
 
-The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path was retired with `packages/webui`; webviews now embed Web Shell for rendering (see [`16-vscode-ide-adapter.md`](./16-vscode-ide-adapter.md)).
+The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path was retired with the legacy WebUI workspace; webviews now embed Web Shell for rendering (see [`16-vscode-ide-adapter.md`](./16-vscode-ide-adapter.md)).
 
 ### Later migrations
 
