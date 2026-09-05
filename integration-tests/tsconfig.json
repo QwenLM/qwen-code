@@ -60,6 +60,9 @@
       "@qwen-code/qwen-code-core/envVarResolver": [
         "../packages/core/src/utils/envVarResolver.ts"
       ],
+      "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
+        "../packages/core/src/utils/conversations-runtime-marker.ts"
+      ],
       "@qwen-code/qwen-code-core/*": ["../packages/core/src/*"],
       "@qwen-code/qwen-code-core/goalWire": [
         "../packages/core/src/goals/goal-wire.ts"
