@@ -469,8 +469,14 @@ function workspaceValues(workspaceCwd: string): {
   channels: Record<string, Record<string, unknown>>;
   startupNames: string[];
 } {
-  const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true })
-    .workspace.settings;
+  const loaded = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
+  // When the workspace directory is the user's home directory, the settings
+  // loader disables the workspace scope and attributes the shared settings
+  // file to the user scope. Fall back to that scope so channel configs
+  // written here remain readable in home-directory deployments.
+  const settings = loaded.workspaceSettingsActive
+    ? loaded.workspace.settings
+    : loaded.user.settings;
   const rawChannels = isRecord(settings.channels) ? settings.channels : {};
   const channels: Record<string, Record<string, unknown>> = {};
   for (const [name, config] of Object.entries(rawChannels)) {
