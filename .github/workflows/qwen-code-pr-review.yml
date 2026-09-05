@@ -2276,7 +2276,14 @@ jobs:
                 "${GIT_SAFE[@]}" branch -D "$review_ref" ||
                   echo "::warning::could not remove review branch: $review_ref"
               done || true
-          rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
+          # Both locations: leases moved to `.qwen/review-leases` (out of the
+          # directory the review sandbox mounts read-write), and a runner whose
+          # workspace persists can still be holding one written by an older
+          # build in the old place. `-r`, because the old path is inside that
+          # mounted directory and a reviewed PR can leave a DIRECTORY at the
+          # lease's name, which plain `rm -f` cannot remove.
+          rm -rf .qwen/review-leases/qwen-review-lease-pr-*.json 2>/dev/null || true
+          rm -rf .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
           echo "review worktrees cleaned"
 
   # A review job that dies abnormally — runner crash, host loss, or the

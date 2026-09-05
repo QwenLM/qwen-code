@@ -26,7 +26,6 @@
 //      LLM reads to drive the rest of Step 1.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -38,7 +37,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { untrustedGitfile, untrustedRepositoryFrom } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -639,17 +638,11 @@ function cleanStale(prNumber: string): void {
     );
   }
   const ref = reviewBranch(prNumber);
-  if (refExists(ref)) {
-    tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], {
-        stdio: 'pipe',
-        // Same reason as every other git spawn in this pipeline: a delete must
-        // land in the repository the caller named, not the one the shell's
-        // `GIT_DIR` points at.
-        env: sanitizedGitEnv(),
-      }),
-    );
-  }
+  // Through `lib/git`'s wrapper, not a direct spawn: `branch -D` finds its
+  // repository from `process.cwd()` and is a reference-transaction hook
+  // channel, so an ungated one runs whatever hooks a planted pointer
+  // configures. `gitOpt` never throws, which is what `tryRemove` was for.
+  if (refExists(ref)) gitOpt('branch', '-D', ref);
 }
 
 /** sha256 of a file's raw bytes, or null when it cannot be read. */
@@ -709,11 +702,35 @@ function tryResume(
   const markerResumes = marker.resumes.filter(
     (r) => r.sessionId.toLowerCase() !== currentKey,
   ).length;
+  // Before reading anything through this tree's own pointer: `--resume`
+  // coexists with the sandbox on the very lane it polices, and the tree it
+  // reads is the one the previous run's containerized commands could write.
+  // `status` REFRESHES THE INDEX, so a planted `core.fsmonitor` runs on the
+  // host inside the very command that collects the ruling's evidence — the
+  // attack does not need the resume to succeed. See `untrustedGitfile`.
+  // REFUSE TO FRESH, not refuse to crash. Throwing here propagates out of
+  // `runFetchPr`, the enclosing catch rolls the lease back and re-throws, and
+  // `cleanStale` — the thing that would REMOVE the planted tree — is never
+  // reached. That contradicts what this file, the `--resume` describe and the
+  // docs all promise: the flag never fails a run that could start over. So
+  // this returns a refusal like every other one, the fresh path runs, and the
+  // planted tree is swept on the way.
+  if (untrustedGitfile(wt) !== null) {
+    return {
+      resumed: false,
+      reason: 'worktree-untrusted',
+      priorFetchedSha: null,
+    };
+  }
   // `--porcelain` prints nothing on a clean tree; a null (the command could
   // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
   // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
-  // in the PR.
+  // in the PR. `core.fsmonitor` inert here too: the gate above proves the
+  // pointer, this proves the command cannot be turned into an execution even
+  // if some future path reaches it ungated.
   const status = gitOpt(
+    '-c',
+    'core.fsmonitor=',
     '-C',
     wt,
     'status',
@@ -825,6 +842,46 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
+
+  // BEFORE the first git command of the run, not at step 4. Every git
+  // invocation this command makes without an explicit `-C` — `cleanStale`'s
+  // `worktree remove --force`, step 2's `git fetch`, the branch rollbacks —
+  // discovers its repository from `process.cwd()`, and in the nested geometry
+  // `mountRootFor` documents (a review running inside another review's
+  // worktree) that launch directory sits inside the outer review's read-write
+  // mount: the outer PR's containerized build can rewrite the pointer git
+  // resolves here. `git fetch` through a rewritten pointer loads the planted
+  // repository's transport config — `core.sshCommand`, `remote.*.uploadpack`,
+  // a `url.*.insteadOf` rewrite — and runs it on the host. Gating only the
+  // `worktree add` at step 4 left every command before it resolving through
+  // exactly the pointer the gate exists to distrust.
+  //
+  // Kept at this call site even though `lib/git`'s wrappers now ask the same
+  // question (see `assertTrustedLaunchDir`), because this command changes
+  // state that is NOT a git call before it makes one: the lease read and the
+  // lease write both land before `cleanStale`, and a run that registers a
+  // lease and then dies at the first git command has taken the lock for
+  // nothing. The ordering test pins exactly that — no lease read, no sweep,
+  // no git call.
+  //
+  // A throw, not a refusal-to-fresh like the `--resume` gate's: that one can
+  // fall back because the fresh path is the safe one, and here the fresh path
+  // is what has been poisoned. There is no command left to run in a
+  // repository this process cannot locate honestly — `cleanStale` would sweep
+  // through the same pointer.
+  //
+  // Says nothing outside a mount (`mountRootFor` answers null), so an ordinary
+  // `qwen review` from a normal checkout never reaches the question.
+  const launchUntrusted = untrustedRepositoryFrom(process.cwd());
+  if (launchUntrusted !== null) {
+    throw new Error(
+      `refusing to review PR #${prNumber} from this directory: ` +
+        `${launchUntrusted}. Every git command below — the stale-worktree ` +
+        `sweep, the PR fetch, the worktree creation — would resolve through ` +
+        `that pointer and run whatever the repository it names configures. ` +
+        `Run the review from a checkout outside the review temp dir.`,
+    );
+  }
 
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively
@@ -978,16 +1035,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     } catch (err) {
-      // Roll back the fetched ref so the next run starts clean.
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      // Roll back the fetched ref so the next run starts clean — through the
+      // gated wrapper, for the reason `cleanStale` gives.
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
@@ -997,19 +1047,41 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
+    //
+    // Asked a SECOND time, immediately before the write. The hoisted gate at
+    // the top of this function is what keeps the fetch and the sweep from
+    // running through a poisoned pointer; this one narrows the window between
+    // that answer and the checkout `worktree add` performs, which is the step
+    // that executes a planted filter. Neither closes the TOCTOU window a
+    // same-user writer has — `scratch-tree` documents the same residual — and
+    // one spawn is a cheap price for making the window one function long
+    // instead of one command long.
+    //
+    // The pointer it judges is the LAUNCH directory's, not the new tree's:
+    // `git()` sets no cwd, so `worktree add` finds the repository from
+    // `process.cwd()`. Gating `wt` was a no-op — `cleanStale` above has just
+    // removed whatever stood there, and a tree that does not exist has no
+    // pointer to distrust.
+    //
+    // OUTSIDE the try, because the catch below is a rollback. Thrown from
+    // inside, the refusal was caught by the path that deletes the fetched ref,
+    // and `branch -D` is a reference-transaction hook channel: the gate said
+    // "do not resolve through this pointer" and its own refusal immediately
+    // did, running the plant's hooks and then reporting the run as `Failed to
+    // create worktree at …` — indistinguishable from an infrastructure
+    // failure. Outside, it propagates to the lease rollback, which spawns no
+    // git at all, and reaches the user unmangled.
+    const freshUntrusted = untrustedRepositoryFrom(process.cwd());
+    if (freshUntrusted !== null) {
+      throw new Error(
+        `refusing to create a review worktree: ${freshUntrusted}`,
+      );
+    }
     try {
       mkdirSync(dirname(wt), { recursive: true });
       git('worktree', 'add', wt, ref);
     } catch (err) {
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );

@@ -23,6 +23,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
   LEASE_PREFIX,
+  REVIEW_LEASE_DIR,
   REVIEW_TMP_DIR,
   reviewBranch,
   worktreePath,
@@ -576,8 +577,19 @@ describe('review worktree cleanup steps', () => {
     expect(reviewCleanStep).toContain(`for leftover in ${worktreePrefix}*; do`);
     // Leases are session+prompt scoped so a stale one is inert, but the glob
     // must stay in sync with LEASE_PREFIX or it silently never matches.
+    //
+    // BOTH locations, because leases moved out of the mounted directory: the
+    // new one is where this job's own runs leave them, and the old one is
+    // where a persisted workspace can still be holding one written by an
+    // earlier build. `-r`, because the OLD path is inside the directory the
+    // review sandbox mounts read-write and a reviewed PR can leave a
+    // DIRECTORY at the lease's name — which plain `rm -f` cannot remove, and
+    // which then wedges every later review of that PR on that runner.
     expect(reviewCleanStep).toContain(
-      `rm -f ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json`,
+      `rm -rf ${toPosix(REVIEW_LEASE_DIR)}/${LEASE_PREFIX}pr-*.json`,
+    );
+    expect(reviewCleanStep).toContain(
+      `rm -rf ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json`,
     );
     // A failed rm must not be left to poison the next job's checkout: the
     // sweep owns its own permission repair — chmod, then passwordless sudo

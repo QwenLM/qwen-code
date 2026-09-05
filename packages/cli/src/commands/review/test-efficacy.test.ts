@@ -37,6 +37,7 @@ import { isolateHostGitConfig } from './lib/test-utils.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
+  realpathSync,
   mkdirSync,
   writeFileSync,
   symlinkSync,
@@ -71,6 +72,13 @@ const GLOBS = [
   'packages/channels/telegram',
   '!packages/desktop-shell',
 ];
+
+// Skipped on win32, and not for convenience: `mountRootFor` refuses every
+// absolute Windows path (a drive letter is a colon, which the `-v` grammar
+// cannot spell), so containment is unavailable there BY DESIGN and these gates
+// never speak. The assertions would fail for that reason and nothing else —
+// first inside the merge queue, where the Windows lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 describe('isWorkspaceMember', () => {
   it('places the integration-tests directory outside every workspace', () => {
@@ -564,6 +572,41 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  itWhereContainmentExists(
+    'refuses a probe tree whose admin entry sits inside the mounted dir',
+    () => {
+      // THROUGH the production call site, not at predicate level. Every other
+      // fixture here builds its tree under a bare `tmpdir()`, which contains no
+      // `.qwen/tmp` segment, so `mountRootFor` answers null and the gate
+      // short-circuits before its logic runs — the wiring could be deleted, or
+      // handed the wrong arguments, and the whole suite would stay green.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-mounted-')));
+      const probeTree = join(root, '.qwen', 'tmp', 'review-pr-1-probe');
+      try {
+        mkdirSync(probeTree, { recursive: true });
+        writeFileSync(join(probeTree, 'a.ts'), 'gone.clear();\n');
+        asCheckout(probeTree);
+        // The shape the round-trip gate cannot see: `.git` replaced by a
+        // pointer into the mount. `asCheckout` leaves a `.git` DIRECTORY, which
+        // is itself one of the two refused shapes — so this covers the branch
+        // the identity gates all sit behind.
+        const r = runOneMutant(
+          probeTree,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        );
+
+        expect(r.verdict).toBe('inconclusive');
+        expect(r.detail).toContain('review temp dir');
+        expect(readFileSync(join(probeTree, 'a.ts'), 'utf8')).toBe(
+          'gone.clear();\n',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('refuses to run when the index hides a tracked file from the restore', () => {
     // `checkout --force` SILENTLY skips a file carrying skip-worktree, and

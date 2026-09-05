@@ -15,6 +15,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   LEASE_PREFIX,
   REVIEW_TMP_DIR,
+  REVIEW_LEASE_DIR,
   reviewBranch,
 } from '../commands/review/lib/paths.js';
 
@@ -34,7 +35,7 @@ function validTarget(target: string): boolean {
 }
 
 /**
- * Whether a filename under `REVIEW_TMP_DIR` is a review-worktree lease.
+ * Whether a filename under `REVIEW_LEASE_DIR` is a review-worktree lease.
  * Derived from `validTarget` so the writer, `cleanup`'s sweep guard, and the
  * `cleanupReviewWorktreeLeases` scan share one definition of the lease shape
  * (see the `LEASE_PREFIX` comment in `lib/paths.ts`).
@@ -60,7 +61,16 @@ export interface ReviewWorktreeLease {
 }
 
 function leaseDirectory(repositoryRoot: string): string {
-  return join(repositoryRoot, REVIEW_TMP_DIR);
+  return join(repositoryRoot, REVIEW_LEASE_DIR);
+}
+
+/**
+ * Where leases lived before they moved out of the mounted directory. Still
+ * READ as well as deleted, for one release: a runner whose workspace persists
+ * can be holding a live lock an older build wrote here.
+ */
+function legacyLeasePath(repositoryRoot: string, target: string): string {
+  return join(repositoryRoot, REVIEW_TMP_DIR, `${LEASE_PREFIX}${target}.json`);
 }
 
 function leasePath(repositoryRoot: string, target: string): string {
@@ -130,6 +140,32 @@ export function createReviewWorktreeLease(params: {
   const data = `${JSON.stringify(lease, null, 2)}\n`;
   const path = leasePath(repositoryRoot, params.target);
   mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
+  // A lease written by a build from before the move would sit in the mounted
+  // directory forever, because the sweep still skips the lease shape. Remove
+  // the one this call supersedes, and only that one — which is NOT one another
+  // session is holding: the gate read above now sees it and `fetch-pr` refuses
+  // before getting here, so this is the second half of the same answer. Taking
+  // the lock anyway would leave two leases for one target, and the older
+  // session's rollback would clear nothing while this run swept its tree.
+  const legacy = legacyLeasePath(repositoryRoot, params.target);
+  const legacyLease = readLease(legacy);
+  if (legacyLease !== null && legacyLease.sessionId !== params.sessionId) {
+    throw new Error(
+      `review worktree lease for ${params.target} is held by another ` +
+        `session (session ${legacyLease.sessionId}) at the pre-move path ` +
+        `${legacy} — an older build acquired it; retry`,
+    );
+  }
+  //
+  // `recursive`, because `force` only swallows ENOENT. That path is in the
+  // one directory reviewed code can still write, and a DIRECTORY at the
+  // lease's name would otherwise throw EISDIR out of here on every future
+  // acquisition — `mkdir .qwen/tmp/qwen-review-lease-pr-<n>.json` is a
+  // one-command permanent wedge on that PR, and nothing else removes it: the
+  // rollback rethrows, the sweep skips the lease shape, and `rm -f` cannot
+  // remove a directory. A directory parses to no lease, so the check above
+  // still lets this remove it.
+  rmSync(legacy, { force: true, recursive: true });
   try {
     // `flag: 'wx'` fails EEXIST instead of overwriting: two concurrent
     // fetch-prs can both pass the gate's read, and a plain write would let
@@ -180,7 +216,23 @@ export function readReviewWorktreeLease(
   target: string,
 ): ReviewWorktreeLease | null {
   if (!validTarget(target)) return null;
-  return readLease(reviewLeasePath(repositoryRoot, target));
+  const root = resolve(repositoryRoot);
+  // BOTH locations, for one release. The move changed where this reads with no
+  // fallback for the population already on disk, so for the length of a rollout
+  // a lock an older build was holding was invisible to the gate:
+  // `reviewLeaseHeldByAnotherSession(null)` answers false, the newer run
+  // proceeds, its acquisition deletes the older session's live lock, and
+  // `cleanStale` force-removes its worktree and deletes its branch mid-run —
+  // #9205, the incident this lease exists to prevent, with the older session's
+  // rollback then clearing nothing so the destruction goes unannounced.
+  //
+  // A READ only, never a second write path: `flag: 'wx'` in
+  // `createReviewWorktreeLease` is what makes acquisition atomic, and writing
+  // at the legacy path too would give that guarantee up.
+  return (
+    readLease(leasePath(root, target)) ??
+    readLease(legacyLeasePath(root, target))
+  );
 }
 
 /**

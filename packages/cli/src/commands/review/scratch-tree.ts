@@ -56,6 +56,7 @@ import {
 } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  untrustedGitfile,
   RESIDUE_PATH_CAP,
   discardWorktree,
   exposeDependencies,
@@ -545,7 +546,28 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       : '';
 
   const tree = scratchWorktreePath(worktree, label);
-  if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
+  // The REUSE path reaches a `checkout --force` of its own, through the SCRATCH
+  // tree's gitfile — inside the mount just like the review worktree's — so
+  // gating only the rebuild below left the cheaper route open.
+  //
+  // Not a refusal, though: an unusable leftover is exactly what the rebuild
+  // exists for, and refusing here turned "rebuild over it" into "fail the
+  // command". A pointer that cannot be trusted simply is not reusable — the
+  // rebuild below discards the tree (removing the plant with it) and creates a
+  // fresh one through the review worktree's pointer, which the gate after this
+  // one checks.
+  if (
+    existsSync(tree) &&
+    untrustedGitfile(tree) === null &&
+    // ...and of the REVIEW worktree's pointer, which is what `headSha` and
+    // every comparison inside the reset resolve through. Rewritten to the
+    // repository's own common dir, the route answered `available: true` with
+    // the MAIN head and reset this tree to the user's own commit. Suspicion
+    // falls through to the rebuild, whose gate refuses — not a refusal here:
+    // an unusable leftover is what the rebuild exists for.
+    untrustedGitfile(worktree) === null &&
+    resetScratchTree(tree, headSha, worktree)
+  ) {
     // The reset clears the ignored state too, so the farm went with it: this
     // re-links it. `rebuild` rather than trusting a marker, because
     // `node_modules` is where a probe is told it may install, and anything a
@@ -584,6 +606,16 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // Clears both a leftover from a crashed run and a tree the reset above
     // could not rescue; either would fail `add` with `already exists`.
     sweep = discardWorktree(worktree, tree);
+    // The same question the probe phase asks before its own `worktree add`:
+    // this resolves the repository through the REVIEW worktree's gitfile,
+    // which lives inside the directory the sandbox mounts read-write and
+    // which the build/test phase already gave the reviewed code a chance to
+    // rewrite. `worktree add` checks files out, so it runs whatever that
+    // pointer leads to, on the host. See `untrustedGitfile`.
+    const untrusted = untrustedGitfile(worktree);
+    if (untrusted !== null) {
+      throw new Error(`refusing to create a scratch tree: ${untrusted}`);
+    }
     git(worktree, 'worktree', 'add', '--detach', tree, headSha);
   } catch (e) {
     // Not `unavailable()`: the residue was already measured, and a report whose

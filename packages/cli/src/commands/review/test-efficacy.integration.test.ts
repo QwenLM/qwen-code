@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
+  cpSync,
   mkdirSync,
   writeFileSync,
   readFileSync,
@@ -25,7 +26,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   runOneMutant,
@@ -34,8 +35,11 @@ import {
   testEfficacyCommand,
 } from './test-efficacy.js';
 import {
+  adminEntryOf,
   isolateHostGitConfig,
   isolateOperatorReviewSettings,
+  plantAdminEntry,
+  plantRepository,
 } from './lib/test-utils.js';
 
 type Handler = (args: {
@@ -87,7 +91,14 @@ function treeState(wt: string): string {
  * passes regardless (so a revert probe reads it as inert). Returns the shared
  * worktree and base SHA, with the report already written to `report.json`.
  */
-function scaffoldModifiedPr(): { wt: string; base: string } {
+function scaffoldModifiedPr(
+  // The gate tests need the worktree UNDER `.qwen/tmp`, because that is the
+  // only place `mountRootFor` answers and so the only place the gates speak.
+  // A parameter rather than a fork: the fixture's shape — the report schema,
+  // the workspace layout the handler requires, the fake runner's contract —
+  // stays in one place when any of them moves.
+  wtPath: string = join(repo, 'wt'),
+): { wt: string; base: string } {
   write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
   write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
   const base = commitAll('base');
@@ -97,8 +108,8 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
     'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
   );
   commitAll('pr');
-  const wt = join(repo, 'wt');
-  git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+  mkdirSync(dirname(wtPath), { recursive: true });
+  git(repo, 'worktree', 'add', '-q', '--detach', wtPath, 'HEAD');
   writeFileSync(
     join(repo, 'report.json'),
     JSON.stringify({
@@ -108,7 +119,7 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
       ],
     }),
   );
-  return { wt, base };
+  return { wt: wtPath, base };
 }
 
 function vitestScript(): string {
@@ -256,6 +267,13 @@ afterEach(() => {
   reviewSettingsIsolation?.dispose();
 });
 
+// Skipped on win32, and not for convenience: `mountRootFor` refuses every
+// absolute Windows path (a drive letter is a colon, which the `-v` grammar
+// cannot spell), so containment is unavailable there BY DESIGN and these gates
+// never speak. The assertions would fail for that reason and nothing else —
+// first inside the merge queue, where the Windows lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
 describe('fixture git-config isolation', () => {
   it('spawned git reads the throwaway global config, not the host user config', () => {
     // Tripwire for every leg of the beforeEach isolation. Global leg: if
@@ -289,6 +307,141 @@ describe('fixture git-config isolation', () => {
     });
     expect(sys.status).not.toBe(0);
   });
+});
+
+describe('the review worktree is the first pointer a probe run trusts', () => {
+  itWhereContainmentExists(
+    'refuses to create a probe tree through a rewritten gitfile',
+    async () => {
+      // `worktree add` is the first host-side git write of the probe phase that
+      // CHECKS FILES OUT — `discardWorktree` above writes too, but materialises
+      // nothing, so no filter runs there — and it resolves the repository
+      // through the REVIEW worktree's own gitfile —
+      // which lives inside the directory the sandbox mounts read-write, and
+      // which the build/test phase already gave the PR's code a chance to
+      // rewrite. It checks files out, so it runs whatever filter the pointer
+      // leads to, on the host, before any gate inside the restore could fire.
+      //
+      // The fixture has to sit under `.qwen/tmp`: everywhere else `mountRootFor`
+      // answers null and the gate short-circuits, which is how deleting it
+      // shipped green.
+      const { wt, base } = scaffoldModifiedPr(
+        join(repo, '.qwen', 'tmp', 'review-pr-1'),
+      );
+
+      // The rewrite reviewed code can make from inside the mount — and a
+      // COHERENT one, which is the point: the planted entry answers `rev-parse
+      // HEAD` with the real sha, so every read before the write agrees and the
+      // run reaches the checkout. An empty directory would fail earlier for a
+      // reason that has nothing to do with the gate.
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(wt),
+        wt,
+        join(repo, '.git'),
+      );
+      // Coherence check, so a fixture that breaks silently fails HERE and not as
+      // a green assertion below.
+      expect(git(wt, 'rev-parse', 'HEAD').trim()).toBe(
+        git(repo, 'rev-parse', 'HEAD').trim(),
+      );
+
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+
+      const out = JSON.parse(
+        readFileSync(join(repo, 'out.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(JSON.stringify(out)).toContain('review temp dir');
+      // ORDER, which the message alone cannot show: the same detail is
+      // serialized whether the gate throws before the spawn or after it, so a
+      // refactor that moves `worktree add` above the gate — the very thing the
+      // comment beside it warns against — would check files out through the
+      // planted pointer, execute its filters on the host, and still produce
+      // this string. The tree not existing is what says the spawn never ran.
+      expect(existsSync(`${wt}-probe`)).toBe(false);
+    },
+  );
+});
+
+describe('the revert phase is reached after the gates refuse', () => {
+  itWhereContainmentExists(
+    'refuses to revert through a gitfile the probe run rewrote',
+    async () => {
+      // The route R1-13 names: a restore refusal becomes `inconclusive` without
+      // throwing, and the mutation phase's catch continues on purpose so the
+      // revert probe still runs — so the revert is reached PRECISELY WHEN the
+      // earlier gates fired. Guarding the first two writes and not this one
+      // leaves the route open exactly where the others closed it.
+      //
+      // The rewrite is done by the PR's own suite, which is who does it in
+      // production: the fake runner below runs with the probe tree as its cwd.
+      const { wt, base } = scaffoldModifiedPr(
+        join(repo, '.qwen', 'tmp', 'review-pr-1'),
+      );
+
+      // A runner that rewrites its own tree's `.git` the first time it is
+      // asked to run anything, then answers normally.
+      // A COHERENT planted repository carrying a real smudge filter, so the
+      // oracle can be the thing itself — a canary the host writes only if a
+      // checkout ran through this pointer — rather than the refusal message,
+      // which reads the same whichever side of the write the gate fires on.
+      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+      const canary = join(repo, 'PWNED');
+      const fakeCommon = plantRepository(
+        join(repo, '.qwen', 'tmp', '.evil-common'),
+        join(repo, '.git'),
+        canary,
+        'smudge',
+      );
+      // Staged but not pointed at yet: the runner script below rewrites
+      // `<wt>/.git` itself, the first time it is asked to run anything.
+      cpSync(adminEntryOf(wt), planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${fakeCommon}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(wt, '.git')}\n`);
+      writeFileSync(
+        vitestScript(),
+        `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+try {
+  const dotGit = path.join(process.cwd(), '.git');
+  if (fs.existsSync(dotGit) && fs.lstatSync(dotGit).isFile()) {
+    fs.writeFileSync(dotGit, ${JSON.stringify(`gitdir: ${planted}\n`)});
+  }
+} catch {}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+      );
+
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+
+      const out = readFileSync(join(repo, 'out.json'), 'utf8');
+      // The refusal names why...
+      expect(out).toContain('review temp dir');
+      // ...and nothing checked out through the planted pointer. This is the
+      // property; the message above is only its explanation, and it reads the
+      // same whether the gate fires before the write or after it.
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
 });
 
 describe('test-efficacy probe isolation (#6832)', () => {
