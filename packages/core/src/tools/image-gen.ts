@@ -28,6 +28,7 @@ const MAX_PROMPT_CHARS = 10_000;
 export interface ImageGenParams {
   prompt: string;
   size?: string;
+  referenceImage?: string;
 }
 
 class ImageGenInvocation extends BaseToolInvocation<
@@ -59,7 +60,10 @@ class ImageGenInvocation extends BaseToolInvocation<
   override getDescription(): string {
     const imageConfig = this.config.getImageGenerationConfig();
     const size = this.params.size ? ` at ${this.params.size}` : '';
-    return `Generate an image with ${imageConfig?.model ?? 'the configured model'}${size}: ${this.params.prompt}`;
+    const reference = this.params.referenceImage
+      ? ' using a reference image'
+      : '';
+    return `Generate an image with ${imageConfig?.model ?? 'the configured model'}${size}${reference}: ${this.params.prompt}`;
   }
 
   override getDefaultPermission(): Promise<'ask'> {
@@ -101,6 +105,7 @@ class ImageGenInvocation extends BaseToolInvocation<
         model: imageConfig.model,
         prompt: this.params.prompt,
         size: this.params.size,
+        referenceImage: this.params.referenceImage,
         signal,
       });
       signal.throwIfAborted();
@@ -174,7 +179,7 @@ export class ImageGenTool extends BaseDeclarativeTool<
     super(
       ImageGenTool.Name,
       ToolDisplayNames.IMAGE_GEN,
-      'Generates a PNG image with the configured image model and saves it as a workspace artifact. Use size in width*height form when the user requests a specific aspect ratio.',
+      'Generates or edits a PNG image with the configured image model and saves it as a workspace artifact. Use referenceImage for character-preserving image-to-image generation. Use size in width*height form when the user requests a specific aspect ratio.',
       Kind.Execute,
       {
         type: 'object',
@@ -191,6 +196,12 @@ export class ImageGenTool extends BaseDeclarativeTool<
             description:
               'Optional output size in width*height form, for example 1536*864.',
           },
+          referenceImage: {
+            type: 'string',
+            minLength: 1,
+            description:
+              'Optional public HTTPS URL or PNG/JPEG data URL for a portrait subject to preserve.',
+          },
         },
         required: ['prompt'],
       },
@@ -198,7 +209,7 @@ export class ImageGenTool extends BaseDeclarativeTool<
       false,
       false,
       false,
-      'image generation picture poster illustration',
+      'image generation edit reference portrait picture poster illustration',
     );
   }
 
@@ -211,6 +222,12 @@ export class ImageGenTool extends BaseDeclarativeTool<
     }
     if (params.prompt.length > MAX_PROMPT_CHARS) {
       return `The image prompt must not exceed ${MAX_PROMPT_CHARS} characters.`;
+    }
+    if (params.referenceImage !== undefined) {
+      params.referenceImage = params.referenceImage.trim();
+      if (!params.referenceImage) {
+        return 'The reference image must be non-empty.';
+      }
     }
     if (!params.size) {
       return null;

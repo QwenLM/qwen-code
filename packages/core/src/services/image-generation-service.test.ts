@@ -271,6 +271,111 @@ describe('generateImage', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('sends a public reference image with the MiniMax image generation schema', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: 'request-3',
+            base_resp: { status_code: 0, status_msg: 'success' },
+            data: {
+              image_urls: ['https://cdn.example.com/generated/mm.png'],
+            },
+            metadata: { success_count: 1, failed_count: 0 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(PNG_BYTES, {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+      );
+
+    const result = await generateImage({
+      baseUrl: 'https://api.minimax.io/v1',
+      apiKey: 'secret',
+      model: 'image-01',
+      prompt: 'Preserve the character in a library',
+      size: '1024*1024',
+      referenceImage: 'https://reference.example.com/portrait.png',
+      signal: new AbortController().signal,
+      fetchFn,
+    });
+
+    expect(result).toEqual({
+      bytes: Buffer.from(PNG_BYTES),
+      mimeType: 'image/png',
+      requestId: 'request-3',
+    });
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      'https://api.minimax.io/v1/image_generation',
+    );
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual({
+      model: 'image-01',
+      prompt: 'Preserve the character in a library',
+      n: 1,
+      prompt_optimizer: true,
+      response_format: 'url',
+      width: 1024,
+      height: 1024,
+      subject_reference: [
+        {
+          type: 'character',
+          image_file: 'https://reference.example.com/portrait.png',
+        },
+      ],
+    });
+  });
+
+  it('accepts a data URL reference and a base64 image response', async () => {
+    const base64Png = Buffer.from(PNG_BYTES).toString('base64');
+    const referenceImage = `data:image/png;base64,${base64Png}`;
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: { image_urls: [`data:image/png;base64,${base64Png}`] },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await generateImage({
+      baseUrl: 'https://api.minimaxi.com/v1/image_generation',
+      apiKey: 'secret',
+      model: 'image-01-live',
+      prompt: 'Portrait variation',
+      referenceImage,
+      signal: new AbortController().signal,
+      fetchFn,
+    });
+
+    expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toMatchObject({
+      subject_reference: [{ type: 'character', image_file: referenceImage }],
+    });
+  });
+
+  it('rejects private reference image URLs before sending a request', async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+
+    await expect(
+      generateImage({
+        baseUrl: 'https://api.minimax.io/v1',
+        apiKey: 'secret',
+        model: 'image-01',
+        prompt: 'Portrait variation',
+        referenceImage: 'https://127.0.0.1/portrait.png',
+        signal: new AbortController().signal,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/public HTTPS URL/i);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it('pins the validated result hostname for the download connection', async () => {
     const lookup = vi.fn();
     networkPolicyMocks.resolveNetworkTarget.mockResolvedValueOnce({
