@@ -16,7 +16,10 @@ import {
 import {
   assembleSystemPrompt,
   getCoreSystemPrompt,
+  resolveMainSessionOutputStyle,
 } from '../../core/prompts.js';
+import type { OutputStyleDefinition } from '../../core/output-styles.js';
+import { resolveEffectiveOutputStyle } from '../../core/output-styles.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -1013,6 +1016,23 @@ export class ArenaManager {
   }
 
   /**
+   * The output style an arena peer inherits from the main session.
+   *
+   * A peer is a headless agent whose whole job is to produce a diff, so it
+   * follows the main session's own rules — no style when a custom system
+   * prompt replaces the base one, and the headless drop — and additionally
+   * refuses a style that removes the software-engineering guidance the peers
+   * are judged on.
+   */
+  private resolvePeerOutputStyle(): OutputStyleDefinition | undefined {
+    const style = resolveEffectiveOutputStyle(
+      resolveMainSessionOutputStyle(this.config),
+      'headless',
+    );
+    return style?.keepCodingInstructions ? style : undefined;
+  }
+
+  /**
    * Build the spawn configuration for an agent subprocess.
    *
    * The agent is launched as a full interactive CLI instance, running in
@@ -1090,7 +1110,7 @@ export class ArenaManager {
                 model.modelId,
                 undefined,
                 'headless',
-                this.config.getOutputStyle(),
+                this.resolvePeerOutputStyle(),
               ),
               contextFiles: this.config.getUserMemory(),
             }),
