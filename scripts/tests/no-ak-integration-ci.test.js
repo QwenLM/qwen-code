@@ -181,6 +181,7 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-inject.test.ts',
         './qwen-live-m2-permission.test.ts',
         './qwen-live-m2-steering.test.ts',
+        './cli/_prompt-latency-policy.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
@@ -302,10 +303,18 @@ describe('no-AK integration CI wiring', () => {
     expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
     expect(classifyJob).not.toContain('CI_BOT_PAT');
 
-    // Both consumers use the profile that was already computed from the
-    // base checkout. Neither may execute a classifier from the PR checkout.
+    // Every consumer uses the profile that was already computed from the
+    // base checkout. None may execute a classifier from the PR checkout —
+    // and none may repoint the env binding to a literal: `profile=
+    // "\${TRUSTED_CI_PROFILE:-full}"` falls back silently, so a dropped
+    // binding turns every docs_only/github_ci_only PR into a full 34-step
+    // pool run with no degraded-path warning.
     for (const profileStep of [
       getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(
+        getWorkflowJob(workflow, 'lint_and_static'),
+        'Use trusted CI profile',
+      ),
       getWorkflowStep(gateJob, 'Use trusted CI profile'),
     ]) {
       expect(profileStep).toContain("id: 'ci_profile'");

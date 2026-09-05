@@ -477,6 +477,7 @@ export default {
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
   'Hide Tips': 'Amaga els consells',
+  'Show Tool Call Arguments': 'Mostra els arguments de les crides a eines',
   'Show Line Numbers in Code': 'Mostra els números de línia al codi',
   'Show Citations': 'Mostra les cites',
   'Custom Witty Phrases': 'Frases enginyoses personalitzades',
