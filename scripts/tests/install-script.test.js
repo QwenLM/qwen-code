@@ -1918,6 +1918,16 @@ describe('standalone release packaging', () => {
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
         ).toBe(false);
+        expect(
+          existsSync(
+            path.join(
+              extractDir,
+              'qwen-code',
+              'lib',
+              'export-transcript-document.js',
+            ),
+          ),
+        ).toBe(false);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);
@@ -4609,6 +4619,10 @@ function ensureMinimalDist({
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
   }
   if (includeNpmPackageArtifacts) {
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.js'),
+      'window.QwenExportRenderer = true;\n',
+    );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
       'console.log("postinstall");\n',

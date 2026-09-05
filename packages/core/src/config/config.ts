@@ -3008,7 +3008,8 @@ export class Config {
   /**
    * Must only be called once, throws if called again after the first call
    * settled. Callers arriving while the first call is still in flight join
-   * that flight instead of throwing.
+   * that flight instead of throwing; a joining caller's options are ignored
+   * — the first caller's options win.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -3021,6 +3022,12 @@ export class Config {
       // a config whose chat had not started yet, and the first prompt died
       // with "Chat not initialized" (#11002).
       if (!this.initializationSettled) {
+        // A joining caller's options cannot be honored, so an already-aborted
+        // signal must fail fast instead of blocking on the foreign flight.
+        options?.signal?.throwIfAborted();
+        this.debugLogger.debug(
+          'Config.initialize() called while initialization is in flight; joining the existing run',
+        );
         await this.initializationPromise;
         return;
       }

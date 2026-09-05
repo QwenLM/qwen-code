@@ -554,7 +554,7 @@ export class DaemonChannelBridge
         removeAttachment
       ) {
         try {
-          // Fan the uploads out like the webui's attachment path: names are
+          // Fan the uploads out like the browser attachment path: names are
           // index-disambiguated and prompt order comes from the array order,
           // so nothing serializes the uploads themselves.
           const uploads = await Promise.allSettled(

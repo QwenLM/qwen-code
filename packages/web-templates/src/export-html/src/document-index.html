@@ -26,6 +26,14 @@
     ></script>
     <script nonce="__EXPORT_NONCE__">
       (function () {
+        var showLoadError = function () {
+          if (document.body.dataset.renderComplete) return;
+          document.body.dataset.renderComplete = 'error';
+          var app = document.getElementById('app');
+          app.setAttribute('role', 'alert');
+          app.textContent =
+            'Unable to load this chat export. This Qwen Code build may not have a published renderer yet; also check your network connection.';
+        };
         var createElement = document.createElement.bind(document);
         document.createElement = function (name, options) {
           var element = createElement(name, options);
@@ -34,10 +42,27 @@
           }
           return element;
         };
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (
+              event.target === window ||
+              (event.target && event.target.id === 'transcript-renderer')
+            ) {
+              showLoadError();
+            }
+          },
+          true,
+        );
+        window.addEventListener('unhandledrejection', showLoadError);
       })();
     </script>
-    <script nonce="__EXPORT_NONCE__">
-      __DOCUMENT_INLINE_SCRIPT__;
-    </script>
+    <script
+      nonce="__EXPORT_NONCE__"
+      id="transcript-renderer"
+      integrity="__DOCUMENT_RENDERER_INTEGRITY__"
+      crossorigin="anonymous"
+      src="__DOCUMENT_RENDERER_URL__"
+    ></script>
   </body>
 </html>

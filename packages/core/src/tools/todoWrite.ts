@@ -307,6 +307,11 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
       const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
+      // Not gated on `isSessionWorkflowEnabled()` on purpose, and neither is
+      // the `blockedBy` schema description: dependencies are plan data-model
+      // semantics, not presentation. Gating them on a visualization switch
+      // would make the same `todo_write` call store a different plan
+      // depending on whether anyone is looking at the graph.
       const hasActivePlan = oldTodos.some(
         (todo) => todo.status !== 'completed',
       );
@@ -317,6 +322,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
+        // Preservation only fires when the previous plan still has an
+        // unfinished item and the same id carried a non-empty `blockedBy`
+        // that this call omits; `[]` is not nullish, so it still clears.
         let preservedAnyBlockedBy = false;
         candidateTodos = todos.map((todo) => {
           // Preserved edges may only reference ids that survive this update:
