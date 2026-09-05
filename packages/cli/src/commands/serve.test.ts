@@ -1042,9 +1042,12 @@ describe('maybeOpenWebShellBrowser', () => {
 });
 
 describe('serve startup import boundary', () => {
-  const ecs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-');
-  const startupMs = ecs ? 60_000 : 30_000;
-  const testMs = ecs ? 70_000 : 40_000;
+  // The dev entrypoint pays a cold tsx transform before the daemon can listen,
+  // so this wait is CPU-bound, not a fixed cost: measured 12s on an idle host
+  // and 88s on a shared one running several jobs at once. RUNNER_NAME is unset
+  // on some shared pools, so the budget cannot be keyed to it.
+  const startupMs = 180_000;
+  const testMs = 200_000;
 
   it(
     'reaches listening through the dev entrypoint without loading interactive Ink internals first',
