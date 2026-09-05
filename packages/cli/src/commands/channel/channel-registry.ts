@@ -124,7 +124,7 @@ function managementFieldsWithSharedControls(
             kind: 'string' as const,
             multiline: true,
             description:
-              'Extra guidance prepended to the session context of each channel session',
+              'Guidance injected into each channel session context; some channels replace their own default guidance when this is set',
           },
         ]),
   ];
