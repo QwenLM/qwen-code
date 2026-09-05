@@ -248,6 +248,95 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('macOS shard retry', () => {
+    // Run 33982750226 failed the macOS leg at 'Run E2E tests' with zero
+    // vitest FAIL lines — the all-green-under-host-pressure signature the
+    // sandbox:none retry above was built for (runs 33293739505, 33302550436,
+    // 33317457036) — while shard 2/2 of the same run passed. The leg carries
+    // the same bounded retry; these pins mirror the Linux ones.
+    const steps = yml.jobs['e2e-test-macos'].steps;
+    const runStep = steps.find((step) => step.name === 'Run E2E tests');
+    const epochStep = steps.find(
+      (step) => step.name === 'Record job start epoch',
+    );
+
+    it('records the job start epoch before the expensive setup steps', () => {
+      // Same budgeting premise as on Linux: an epoch recorded at the test
+      // step would hide the install/unpack spend from the gate.
+      expect(epochStep.run).toContain(
+        'echo "E2E_JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"',
+      );
+      expect(steps.indexOf(epochStep)).toBeLessThan(
+        steps.indexOf(
+          steps.find((step) => step.name === 'Install dependencies'),
+        ),
+      );
+      // An `if:` here would skip the record on one leg, where the gate's
+      // ${E2E_JOB_START_EPOCH:-0} fallback then always takes the ::error::
+      // branch and the retry never fires on the leg it exists for.
+      expect(epochStep.if).toBeUndefined();
+    });
+
+    it('wraps the shard command in a retryable function', () => {
+      expect(runStep.run).toContain('run_shard() {');
+    });
+
+    it('retries the full shard command, shard and excludes included', () => {
+      // The excludes are shared verbatim with the other legs: dropping one
+      // here would let the retried macOS shard run a suite the first
+      // attempt did not.
+      expect(runStep.run).toContain(
+        'npx cross-env QWEN_E2E_RENDERER=ink VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/chat-transcript-document.test.ts" --shard="${{ matrix.shard }}"',
+      );
+    });
+
+    it('retries the shard exactly once', () => {
+      expect(runStep.run).toContain('run_shard || {');
+      // Definition + first attempt + one retry: the second attempt's exit
+      // status is the step's, and a third attempt would burn runner time
+      // for nothing.
+      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+      // End-anchored scope: the retry is the script's last statement. A
+      // retry moved outside the `|| { ... }` would run unconditionally,
+      // re-running green shards too.
+      expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*$/);
+    });
+
+    it('gates the retry on the remaining job budget', () => {
+      // The retried run_shard is reachable only behind an elapsed-time
+      // check that exits the step when the job cannot fit another shard.
+      // Shape only — bash itself witnesses the execution semantics in
+      // e2e-shard-retry.test.js.
+      const group = runStep.run.slice(runStep.run.indexOf('run_shard || {'));
+      expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
+    });
+
+    it('pins the job budget the budget-gate arithmetic is built on', () => {
+      // The 18000s threshold is 21600s minus a 60-minute reserve; 21600s is
+      // GitHub's default job budget, stated on the job so the subtraction
+      // has a pinned operand the way the Linux leg's 60 does. Editing one
+      // without the other mis-budgets the retry with every other witness
+      // green.
+      expect(yml.jobs['e2e-test-macos']['timeout-minutes']).toBe(360);
+    });
+
+    it('keeps the run step red when the shard stays red', () => {
+      // Same two levels as the Linux pin: continue-on-error on either would
+      // report two failing attempts green.
+      expect(runStep['continue-on-error']).toBeUndefined();
+      expect(yml.jobs['e2e-test-macos']['continue-on-error']).toBeUndefined();
+    });
+
+    it('keeps the default step shell the execution harness assumes', () => {
+      // e2e-shard-retry.test.js executes this step's script under
+      // `bash -e`, GitHub's default step shell only while the step carries
+      // no `shell:` override and the job no `defaults:` block. The
+      // workflow-level absence is pinned by the Linux describe above.
+      expect(runStep.shell).toBeUndefined();
+      expect(yml.jobs['e2e-test-macos'].defaults).toBeUndefined();
+    });
+  });
+
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
