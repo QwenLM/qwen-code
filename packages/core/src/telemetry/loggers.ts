@@ -139,7 +139,10 @@ import type { HookCallEvent } from './types.js';
 import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
-import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
+import {
+  recordTokenUsageFromApiResponseBestEffort,
+  recordTokenUsageOutcomeBestEffort,
+} from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -537,6 +540,13 @@ export function logApiError(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  if (config.getUsageStatisticsEnabled()) {
+    if (sessionId === undefined) {
+      recordTokenUsageOutcomeBestEffort(config, event, 'error');
+    } else {
+      recordTokenUsageOutcomeBestEffort(config, event, 'error', sessionId);
+    }
+  }
   // Feed the daemon-status model-API-health charts: one model API error per
   // failed attempt, drained per live model round by the ACP MessageEmitter.
   apiActivityTracker.recordError();
@@ -584,6 +594,9 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  if (config.getUsageStatisticsEnabled()) {
+    recordTokenUsageOutcomeBestEffort(config, event, 'cancelled');
+  }
   QwenLogger.getInstance(config)?.logApiCancelEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -622,10 +635,14 @@ export function logApiResponse(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  if (!isInternalPromptId(event.prompt_id)) {
-    if (config.getUsageStatisticsEnabled()) {
+  if (config.getUsageStatisticsEnabled()) {
+    if (sessionId === undefined) {
       recordTokenUsageFromApiResponseBestEffort(config, event);
+    } else {
+      recordTokenUsageFromApiResponseBestEffort(config, event, sessionId);
     }
+  }
+  if (!isInternalPromptId(event.prompt_id)) {
     recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
