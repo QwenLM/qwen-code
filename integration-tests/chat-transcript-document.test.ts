@@ -21,6 +21,7 @@ import {
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
+const RENDERER_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const MAX_DOCUMENT_DURATION_MS = 60_000;
@@ -36,6 +37,12 @@ interface ExpectedNetwork {
   readonly cspViolations: number;
   readonly allowedImageSources: readonly string[];
 }
+
+const rendererAssetPath = resolve(
+  repoRoot,
+  'packages/web-templates/src/export-html/dist/export-transcript-document.js',
+);
+const rendererAsset = readFileSync(rendererAssetPath, 'utf8');
 
 const expectedNetwork = JSON.parse(
   readFileSync(
@@ -272,20 +279,33 @@ function createMaximumDocument(): ExportTranscriptDocumentV1 {
   return { ...document, blocks };
 }
 
-async function installNetworkAndCspProbe(
-  page: Page,
-): Promise<{ requests: string[]; cspErrors: string[] }> {
-  const requests: string[] = [];
+async function installNetworkAndCspProbe(page: Page): Promise<{
+  allowedScriptRequests: string[];
+  unexpectedRequests: string[];
+  cspErrors: string[];
+}> {
+  const allowedScriptRequests: string[] = [];
+  const unexpectedRequests: string[] = [];
   const cspErrors: string[] = [];
   await page.route('**/*', async (route) => {
-    requests.push(route.request().url());
+    const url = route.request().url();
+    if (url === RENDERER_URL) {
+      allowedScriptRequests.push(url);
+      await route.fulfill({
+        body: rendererAsset,
+        contentType: 'text/javascript',
+        headers: { 'access-control-allow-origin': '*' },
+      });
+      return;
+    }
+    unexpectedRequests.push(url);
     await route.abort('blockedbyclient');
   });
   page.on('console', (message) => {
     const text = message.text();
     if (/content security policy|refused to/i.test(text)) cspErrors.push(text);
   });
-  return { requests, cspErrors };
+  return { allowedScriptRequests, unexpectedRequests, cspErrors };
 }
 
 async function expectConnectSrcCspEnforced(page: Page): Promise<void> {
@@ -395,7 +415,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     visit(schema);
   });
 
-  it('opens, searches, copies, and prints the maximum document with zero network', async () => {
+  it('opens, searches, copies, and prints the maximum document with its pinned npm runtime', async () => {
     const exportDocument = createMaximumDocument();
     const serialized = JSON.stringify(exportDocument);
     const html = renderExportTranscriptDocumentToHtml(exportDocument);
@@ -434,6 +454,22 @@ describe('ExportTranscriptDocument browser gate', () => {
     await expect
       .poll(() => page.locator('body').getAttribute('data-render-complete'))
       .toBe('true');
+    expect(await page.locator('[data-document-metadata]').isVisible()).toBe(
+      true,
+    );
+    const expandAll = page.locator('[data-document-expand-all]');
+    const collapseAll = page.locator('[data-document-collapse-all]');
+    const themeToggle = page.locator('[data-document-theme-toggle]');
+    expect(await expandAll.isDisabled()).toBe(true);
+    expect(await collapseAll.isEnabled()).toBe(true);
+    expect(await themeToggle.isVisible()).toBe(true);
+    await collapseAll.click();
+    expect(await expandAll.isEnabled()).toBe(true);
+    expect(await collapseAll.isDisabled()).toBe(true);
+    await expandAll.click();
+    expect(await expandAll.isDisabled()).toBe(true);
+    await themeToggle.click();
+    expect(await page.locator('html').getAttribute('class')).toContain('light');
     await expect
       .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
       .toBeGreaterThan(0);
@@ -515,7 +551,12 @@ describe('ExportTranscriptDocument browser gate', () => {
     });
     expect(interaction.copiedLength).toBeGreaterThan(7_000_000);
     expect(pdf.byteLength).toBeGreaterThan(1_000);
-    expect(probe.requests).toHaveLength(expectedNetwork.unexpectedRequests);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.allowedScriptRequests).toEqual(
+      expect.arrayContaining([RENDERER_URL]),
+    );
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );
@@ -557,8 +598,9 @@ describe('ExportTranscriptDocument browser gate', () => {
     ];
 
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
     for (const invalidDocument of invalidDocuments) {
+      const page = await browser.newPage();
+      const probe = await installNetworkAndCspProbe(page);
       await page.setContent(replaceDocumentEnvelope(html, invalidDocument), {
         waitUntil: 'load',
       });
@@ -568,10 +610,62 @@ describe('ExportTranscriptDocument browser gate', () => {
       expect(await page.getByRole('alert').textContent()).toContain(
         'Unable to open this chat export',
       );
+      expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
+      await page.close();
     }
   });
 
-  it('runs the real HTML export entry point with zero network', async () => {
+  it('fails closed when the CDN renderer is unavailable or fails integrity', async () => {
+    const document = createExportTranscriptDocumentV1(
+      [record('cdn-error', null, 'user', 'CDN error probe')],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'cdn-error',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+
+    browser = await chromium.launch({ headless: true });
+    for (const rendererBody of [null, 'throw new Error("broken renderer");']) {
+      const page = await browser.newPage();
+      await page.route('**/*', async (route) => {
+        if (rendererBody && route.request().url() === RENDERER_URL) {
+          await route.fulfill({
+            body: rendererBody,
+            contentType: 'text/javascript',
+            headers: { 'access-control-allow-origin': '*' },
+          });
+        } else {
+          await route.abort('blockedbyclient');
+        }
+      });
+      await page.setContent(renderExportTranscriptDocumentToHtml(document), {
+        waitUntil: 'load',
+      });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to load this chat export',
+      );
+      await page.close();
+    }
+  });
+
+  it('runs the real HTML export entry point with its pinned npm runtime', async () => {
     const records = [
       {
         ...record(
@@ -637,7 +731,10 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(
       await page.locator('img[alt="inline-safe"]').getAttribute('src'),
     ).toBe('data:image/png;base64,iVBORw0KGgo=');
-    expect(probe.requests).toHaveLength(expectedNetwork.unexpectedRequests);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );
