@@ -459,6 +459,61 @@ describe('BackgroundAgentResumeService', () => {
     ).toBeUndefined();
   });
 
+  it.each(['persisted', 'definition', 'legacy-model', 'legacy-flags'] as const)(
+    'blocks cold external resume using %s provenance',
+    async (provenance) => {
+      const sessionId = 'session-external';
+      const agentId = 'external-agent';
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: 'External task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: new Date().toISOString(),
+        status: 'running',
+        ...(provenance === 'persisted' ? { executor: 'acp' as const } : {}),
+        ...(provenance === 'legacy-model'
+          ? { model: 'external-acp:claude' }
+          : {}),
+        ...(provenance === 'legacy-flags'
+          ? { persistedCliFlags: { model: 'external-acp:claude' } }
+          : {}),
+      });
+      fs.writeFileSync(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        JSON.stringify({
+          uuid: 'u1',
+          sessionId,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'External task' }] },
+        }) + '\n',
+      );
+      const { service, subagentManager } = createService();
+      if (provenance === 'definition') {
+        subagentManager.loadSubagent.mockResolvedValue({
+          name: 'researcher',
+          color: 'cyan',
+          model: undefined,
+          approvalMode: undefined,
+          executor: { kind: 'acp', command: 'claude' },
+        } as Awaited<ReturnType<typeof subagentManager.loadSubagent>>);
+      }
+      const recovered = await service.loadPausedBackgroundAgents(sessionId);
+      expect(recovered[0]?.resumeBlockedReason).toContain(
+        'External subagent session cannot be restored',
+      );
+      expect(await service.resumeBackgroundAgent(agentId)).toBeUndefined();
+      // Recheck provenance at execution time, not only during discovery.
+      recovered[0]!.resumeBlockedReason = undefined;
+      expect(await service.resumeBackgroundAgent(agentId)).toBeUndefined();
+      expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+        'External subagent session cannot be restored',
+      );
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    },
+  );
+
   it('preserves model on recovered paused agents for per-model caps', async () => {
     const sessionId = 'session-model';
     const agentId = 'agent-model';

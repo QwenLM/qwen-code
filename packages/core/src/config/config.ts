@@ -46,6 +46,7 @@ import {
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -2375,6 +2376,12 @@ export class Config {
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
   private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
+  /**
+   * Host-supplied factory for subagents that declare an `executor` block.
+   * `packages/core` has no ACP dependency, so the implementation lives in the
+   * host package. See `ExternalAgentExecutor` and `setExternalAgentExecutor`.
+   */
+  private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
@@ -7847,6 +7854,23 @@ export class Config {
     if (!this.isSessionWorkflowEnabled()) {
       this.sessionWorkflowPlanRevision = undefined;
     }
+  }
+
+  /**
+   * Registers the host's factory for subagents that declare an `executor`
+   * block. `packages/core` has no ACP dependency, so the implementation lives
+   * in the host package; see `ExternalAgentExecutor`.
+   *
+   * A definition that declares an executor while none is registered fails
+   * loudly at spawn time rather than silently running in-process — silent
+   * substitution is the exact failure mode this seam exists to prevent.
+   */
+  setExternalAgentExecutor(executor?: ExternalAgentExecutor): void {
+    this.externalAgentExecutor = executor;
+  }
+
+  getExternalAgentExecutor(): ExternalAgentExecutor | undefined {
+    return this.externalAgentExecutor;
   }
 
   getSessionWorkflowPlanRevision(): SessionWorkflowPlanRevision | undefined {

@@ -1193,6 +1193,22 @@ describe('loadCliConfig', () => {
     ]);
   });
 
+  it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    // This single host-side registration is what the whole external-subagent
+    // feature dispatches through. Every dispatch test mocks
+    // getExternalAgentExecutor, so without this assertion deleting the
+    // injection would regress every valid executor definition to "registered no
+    // external agent executor" with the whole suite still green.
+    const factory = config.getExternalAgentExecutor();
+    expect(factory).toBeDefined();
+    expect(typeof factory?.create).toBe('function');
+  });
+
   it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
     delete process.env['QWEN_DEBUG_LOG_FILE'];
     process.argv = ['node', 'script.js', '--debug'];

@@ -511,6 +511,13 @@ export function createProductionDispatch(
     // agentType definition rides along so the override path reuses it
     // instead of re-scanning subagent files per attempt.
     const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
+    if (agentIdentity.resolvedAgentType?.executor !== undefined) {
+      throw new Error(
+        'Workflow agent() does not support external-executor agents: ' +
+          'token budgets, schema output, and workflow tool restrictions ' +
+          'cannot be enforced. Use an in-process agent definition instead.',
+      );
+    }
     let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {

@@ -2461,6 +2461,14 @@ export async function loadCliConfig(
 
   const config = new Config(configParams);
 
+  // Load the ACP transport only when an external subagent is requested.
+  config.setExternalAgentExecutor({
+    create: (params) =>
+      import('../external-agents/acp-subagent-executor.js').then((module) =>
+        module.acpExternalAgentExecutor.create(params),
+      ),
+  });
+
   if (lspEnabled) {
     try {
       const lspService = new NativeLspService(

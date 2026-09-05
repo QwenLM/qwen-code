@@ -391,6 +391,37 @@ export interface ExecutionStats {
   totalTokens?: number;
 }
 
+export function renderSubagentSystemPrompt(
+  promptConfig: PromptConfig,
+  context: ContextState,
+  runtimeContext: Config,
+  interactive?: boolean,
+): string {
+  if (!promptConfig.systemPrompt) {
+    return '';
+  }
+
+  let finalPrompt = templateString(promptConfig.systemPrompt, context);
+
+  // Only add non-interactive instructions when NOT in interactive mode
+  if (!interactive) {
+    finalPrompt += `
+
+Important Rules:
+ - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
+ - Use tools only when necessary to obtain facts or make changes.
+ - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
+  }
+
+  // Context files (QWEN.md + output-language.md) keep the subagent aligned
+  // with project conventions; the volatile auto-memory section stays last.
+  return assembleSystemPrompt({
+    base: finalPrompt,
+    contextFiles: runtimeContext.getUserMemory(),
+    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+  });
+}
+
 /**
  * AgentCore — shared execution engine for model reasoning and tool scheduling.
  *
@@ -2623,29 +2654,12 @@ export class AgentCore {
     context: ContextState,
     options?: CreateChatOptions,
   ): string {
-    if (!this.promptConfig.systemPrompt) {
-      return '';
-    }
-
-    let finalPrompt = templateString(this.promptConfig.systemPrompt, context);
-
-    // Only add non-interactive instructions when NOT in interactive mode
-    if (!options?.interactive) {
-      finalPrompt += `
-
-Important Rules:
- - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
- - Use tools only when necessary to obtain facts or make changes.
- - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
-    }
-
-    // Context files (QWEN.md + output-language.md) keep the subagent aligned
-    // with project conventions; the volatile auto-memory section stays last.
-    return assembleSystemPrompt({
-      base: finalPrompt,
-      contextFiles: this.runtimeContext.getUserMemory(),
-      autoMemory: this.runtimeContext.getAutoMemoryPrompt(),
-    });
+    return renderSubagentSystemPrompt(
+      this.promptConfig,
+      context,
+      this.runtimeContext,
+      options?.interactive,
+    );
   }
 
   /**

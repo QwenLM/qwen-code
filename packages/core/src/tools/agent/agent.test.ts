@@ -6073,6 +6073,85 @@ describe('AgentTool', () => {
       });
     });
 
+    it.each([true, false])(
+      'omits parent attribution and unknown usage for external agents (background=%s)',
+      async (background) => {
+        const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          executor: { kind: 'acp', command: 'claude' },
+        });
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'External task',
+          prompt: 'Do the task',
+          subagent_type: 'monitor',
+          run_in_background: background,
+        });
+        const result = await invocation.execute();
+        expect(partToString(result.llmContent)).toContain(
+          background ? 'Background agent launched' : 'Monitor done',
+        );
+        const meta = writeMetaSpy.mock.calls.at(-1)?.[1];
+        expect(meta?.executor).toBe('acp');
+        expect(meta?.persistedCliFlags).toBeUndefined();
+        expect(meta?.model).toBeUndefined();
+        expect(
+          (result.returnDisplay as AgentResultDisplay).executionSummary,
+        ).toBeUndefined();
+        if (background) {
+          await vi.waitFor(() =>
+            expect(mockRegistry.complete).toHaveBeenCalled(),
+          );
+          expect(mockRegistry.complete.mock.calls[0]?.[2]).toBeUndefined();
+          expect(mockRegistry.complete.mock.calls[0]?.[1]).toContain(
+            'token usage and cost are unavailable',
+          );
+          expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+            undefined,
+            null,
+          );
+          const resident = mockRegistry.registerResidentAgent.mock
+            .calls[0]?.[1] as {
+            continue: (message: string) => boolean;
+          };
+          expect(resident.continue('Continue externally')).toBe(true);
+          await vi.waitFor(() =>
+            expect(mockAgent.execute).toHaveBeenCalledTimes(2),
+          );
+          expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(
+            1,
+          );
+        }
+      },
+    );
+
+    it('publishes the real failure reason, not just the usage notice, for a background external agent that produced no text', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        executor: { kind: 'acp', command: 'claude' },
+      });
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'External task',
+        prompt: 'Do the task',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      });
+      await invocation.execute();
+      await vi.waitFor(() => expect(mockRegistry.fail).toHaveBeenCalled());
+      const failureMessage = mockRegistry.fail.mock.calls[0]?.[1] as string;
+      // The notice must be appended AFTER the fallback, never in place of it.
+      expect(failureMessage).toContain('Agent terminated with mode: TIMEOUT');
+      expect(failureMessage).toContain('token usage and cost are unavailable');
+    });
+
     it('should run in background when agent definition has background: true', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');

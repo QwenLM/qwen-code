@@ -3137,6 +3137,98 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     };
   }
 
+  it.each([
+    { label: 'plain', options: {}, tokenLimit: null },
+    { label: 'budgeted', options: {}, tokenLimit: 100 },
+    {
+      label: 'schema',
+      options: { schema: { type: 'object' } },
+      tokenLimit: null,
+    },
+    {
+      label: 'budgeted schema',
+      options: { schema: { type: 'object' } },
+      tokenLimit: 100,
+    },
+    {
+      label: 'worktree',
+      options: { isolation: 'worktree' as const },
+      tokenLimit: null,
+    },
+    {
+      label: 'pinned worktree',
+      options: { workingDir: '/fake/repo/worktree' },
+      tokenLimit: null,
+    },
+  ])(
+    'rejects $label external workflow dispatch before agent creation',
+    async ({ options, tokenLimit }) => {
+      const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+      const budget = new WorkflowBudgetImpl(tokenLimit);
+      const onTokens = vi.fn((tokens: number) => budget.recordSpent(tokens));
+      const onCreate = vi.fn(async () => ({
+        finalText: 'external output',
+        terminateMode: 'GOAL',
+      }));
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'external-agent',
+          description: 'External agent',
+          systemPrompt: 'Complete the task.',
+          level: 'session',
+          executor: { kind: 'acp', command: 'external-agent' },
+        }),
+        onCreate,
+      });
+      const createRegistry = vi.spyOn(config, 'createToolRegistry');
+      const dispatch = createProductionDispatch(config, undefined, onTokens);
+
+      await expect(
+        dispatch('do work', { agentType: 'external-agent', ...options }),
+      ).rejects.toThrow(
+        'Workflow agent() does not support external-executor agents: ' +
+          'token budgets, schema output, and workflow tool restrictions ' +
+          'cannot be enforced. Use an in-process agent definition instead.',
+      );
+
+      // The manager owns external factory/process creation; never enter it.
+      expect(calls).toEqual([]);
+      expect(onCreate).not.toHaveBeenCalled();
+      expect(createRegistry).not.toHaveBeenCalled();
+      expect(worktreeStubs.instances).toHaveLength(0);
+      expect(pinStub.seenLabels).toEqual([]);
+      expect(onTokens).not.toHaveBeenCalled();
+    },
+  );
+
+  it('continues to account tokens for an in-process workflow agent', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'ordinary-agent',
+        description: 'In-process agent',
+        systemPrompt: 'Complete the task.',
+        level: 'session',
+      }),
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const previousTokens = nextOutputTokens.value;
+    nextOutputTokens.value = 25;
+    try {
+      const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+        budget.recordSpent(tokens),
+      );
+      await expect(
+        dispatch('do work', { agentType: 'ordinary-agent' }),
+      ).resolves.toBe('done');
+      expect(calls).toHaveLength(1);
+      expect(budget.remaining()).toBe(75);
+    } finally {
+      nextOutputTokens.value = previousTokens;
+    }
+  });
+
   it('agentType resolves SubagentConfig and routes through createAgentHeadless', async () => {
     const { config, calls } = fakeConfigWithMgr({
       findSubagentByName: async () => ({

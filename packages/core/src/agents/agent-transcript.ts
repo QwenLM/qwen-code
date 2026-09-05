@@ -147,6 +147,8 @@ export interface AgentMeta {
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
+  /** External launch provenance; transcript replay cannot restore its session. */
+  executor?: 'acp';
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */

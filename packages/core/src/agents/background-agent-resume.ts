@@ -17,6 +17,7 @@ import {
 } from './runtime/agent-events.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
+import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
   buildAgentTranscriptAttach,
   getAgentJsonlPath,
@@ -388,7 +389,7 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
 }
 
 function getCompletionStats(
-  subagent: AgentHeadless,
+  subagent: SubagentExecutor,
   liveToolCallCount: number,
 ): AgentCompletionStats {
   const summary = subagent.getExecutionSummary();
@@ -503,7 +504,12 @@ export class BackgroundAgentResumeService {
         if (registry.get(meta.agentId)) continue;
         const subagentName = meta.subagentName ?? meta.agentType;
         if (typeof subagentName !== 'string' || !subagentName) continue;
-        const target = await this.resolveResumeTarget(subagentName);
+        const target = await this.resolveResumeTarget(
+          subagentName,
+          meta.executor,
+          meta.model,
+          meta.persistedCliFlags?.model,
+        );
 
         const outputFile = getAgentJsonlPath(
           projectDir,
@@ -863,7 +869,12 @@ export class BackgroundAgentResumeService {
 
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
-      const target = await this.resolveResumeTarget(subagentName);
+      const target = await this.resolveResumeTarget(
+        subagentName,
+        meta.executor,
+        meta.model,
+        meta.persistedCliFlags?.model,
+      );
       if (!target.subagentConfig && !target.isFork) {
         const reason =
           target.unavailableReason ||
@@ -992,7 +1003,7 @@ export class BackgroundAgentResumeService {
 
       const bgEventEmitter = new AgentEventEmitter();
       const launchModel = meta.model ?? meta.persistedCliFlags?.model;
-      let subagent: AgentHeadless;
+      let subagent: SubagentExecutor;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
           activeAgentConfig,
@@ -1545,7 +1556,22 @@ export class BackgroundAgentResumeService {
 
   private async resolveResumeTarget(
     subagentName: string,
+    executor?: AgentMeta['executor'],
+    ...legacyModels: Array<string | undefined>
   ): Promise<ResolvedResumeTarget> {
+    // Older external runs wrote a synthetic model label instead of provenance.
+    // It can deny replay, but never authorizes selecting an executor.
+    if (
+      executor !== undefined ||
+      legacyModels.some((model) => model?.startsWith('external-acp:'))
+    ) {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason:
+          'External subagent session cannot be restored from a Qwen transcript. Start a new agent instead.',
+      };
+    }
     if (subagentName === FORK_SUBAGENT_TYPE) {
       return {
         agentName: FORK_AGENT.name,
@@ -1565,6 +1591,9 @@ export class BackgroundAgentResumeService {
       };
     }
 
+    if (subagentConfig.executor !== undefined) {
+      return this.resolveResumeTarget(subagentName, 'acp');
+    }
     return {
       agentName: subagentConfig.name,
       isFork: false,
@@ -1784,7 +1813,7 @@ export class BackgroundAgentResumeService {
   }
 
   private async runSubagentStopHookLoop(
-    subagent: AgentHeadless,
+    subagent: SubagentExecutor,
     opts: {
       agentId: string;
       agentType: string;
