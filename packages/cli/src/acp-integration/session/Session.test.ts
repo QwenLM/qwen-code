@@ -24074,72 +24074,106 @@ describe('Session', () => {
           expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
         });
 
-        it('publishes a channel final after a Stop hook continuation ends a Goal turn', async () => {
-          const permit: core.GoalTurnPermit = {
-            goalId: 'goal-1',
-            revision: 1,
-            turnId: 'turn-channel-stop-hook',
-          };
-          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
-          mockGoalRuntime.beginTurn.mockReturnValue(permit);
-          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
-          mockToolsWithTerminatingUpdateGoal();
-          let stopCalls = 0;
-          mockConfig.getMessageBus = vi.fn().mockReturnValue({
-            request: vi.fn().mockImplementation(async (request) => {
-              if (request.eventName !== 'Stop') {
-                return { success: true, output: {} };
-              }
-              stopCalls++;
-              return stopCalls === 1
-                ? {
-                    success: true,
-                    output: { decision: 'block', reason: 'keep going' },
-                  }
-                : { success: true, output: {} };
-            }),
-          });
-          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-          mockConfig.hasHooksForEvent = vi
-            .fn()
-            .mockImplementation((name: string) => name === 'Stop');
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(createEmptyStream())
-            .mockResolvedValueOnce(
-              streamCalling({ id: 'call-update', name: 'update_goal' }),
-            )
-            .mockResolvedValueOnce(
-              createStreamWithChunks([
-                {
-                  type: core.StreamEventType.CHUNK,
-                  value: {
-                    candidates: [
-                      {
-                        content: { parts: [{ text: 'channel final' }] },
-                        finishReason: 'STOP',
-                      },
-                    ],
-                  },
+        it.each([
+          {
+            route: 'channel prompt',
+            meta: { 'qwen.channel.prompt': true },
+          },
+          {
+            route: 'requested delivery',
+            meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'goal-channel-stop-hook',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
                 },
-              ]),
-            );
+              },
+            },
+            deliveryId: 'goal-channel-stop-hook',
+          },
+        ])(
+          'publishes a $route final after a Stop hook continuation ends a Goal turn',
+          async ({ meta, deliveryId }) => {
+            const permit: core.GoalTurnPermit = {
+              goalId: 'goal-1',
+              revision: 1,
+              turnId: `turn-channel-stop-hook-${deliveryId ?? 'prompt'}`,
+            };
+            mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+            mockGoalRuntime.beginTurn.mockReturnValue(permit);
+            mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+            mockToolsWithTerminatingUpdateGoal();
+            let stopCalls = 0;
+            mockConfig.getMessageBus = vi.fn().mockReturnValue({
+              request: vi.fn().mockImplementation(async (request) => {
+                if (request.eventName !== 'Stop') {
+                  return { success: true, output: {} };
+                }
+                stopCalls++;
+                return stopCalls === 1
+                  ? {
+                      success: true,
+                      output: { decision: 'block', reason: 'keep going' },
+                    }
+                  : { success: true, output: {} };
+              }),
+            });
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.hasHooksForEvent = vi
+              .fn()
+              .mockImplementation((name: string) => name === 'Stop');
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createEmptyStream())
+              .mockResolvedValueOnce(
+                streamCalling({ id: 'call-update', name: 'update_goal' }),
+              )
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      candidates: [
+                        {
+                          content: { parts: [{ text: 'channel final' }] },
+                          finishReason: 'STOP',
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              );
 
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'finish the goal' }],
-            _meta: { 'qwen.channel.prompt': true },
-          });
+            await session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'finish the goal' }],
+              _meta: meta,
+            });
 
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
-          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
-            expect.objectContaining({
-              update: expect.objectContaining({
-                content: expect.objectContaining({ text: 'channel final' }),
-              }) as unknown,
-            }),
-          );
-        });
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+            if (deliveryId) {
+              await vi.waitFor(() => {
+                expect(mockClient.extMethod).toHaveBeenCalledWith(
+                  'qwen/control/channel-delivery',
+                  expect.objectContaining({
+                    deliveryId,
+                    text: 'channel final',
+                  }),
+                );
+              });
+            } else {
+              expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+                expect.objectContaining({
+                  update: expect.objectContaining({
+                    content: expect.objectContaining({ text: 'channel final' }),
+                  }) as unknown,
+                }),
+              );
+            }
+          },
+        );
 
         it.each([
           ['before the Stop hook', false],
@@ -24152,7 +24186,10 @@ describe('Session', () => {
               mockSettings as unknown as {
                 merged: Record<string, unknown>;
               }
-            ).merged = { experimental: { todoStopGuard: true } };
+            ).merged = {
+              experimental: { todoStopGuard: true },
+              tools: { todoWrite: { enabled: true } },
+            };
             mockConfig.getBareMode = vi.fn().mockReturnValue(false);
             mockConfig.isSafeMode = vi.fn().mockReturnValue(false);
             session = new Session(
