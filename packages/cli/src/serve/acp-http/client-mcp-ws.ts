@@ -62,6 +62,14 @@ export interface McpRegisterFrame {
   type: 'mcp_register';
   /** Logical server name; tools are discovered via the MCP handshake. */
   server: string;
+  /**
+   * Optional session binding. When present the server is added to THAT live
+   * session only: sibling sessions never discover it, sessions created later
+   * never inherit it, and a call arriving from another session is rejected by
+   * the sender registry. Omit it for the original workspace-wide registration,
+   * which fans out to every active session and is copied onto every future one.
+   */
+  sessionId?: string;
 }
 
 /** Bidirectional `mcp_message` frame (request/response correlated by `id`). */
@@ -76,6 +84,14 @@ export interface McpMessageFrame {
 export interface McpUnregisterFrame {
   type: 'mcp_unregister';
   server: string;
+}
+
+/**
+ * Where a client-hosted server is registered. `{ sessionId }` binds it to one
+ * live session; `undefined` keeps the workspace-wide registration.
+ */
+export interface ClientMcpServerScope {
+  sessionId?: string;
 }
 
 /**
@@ -96,9 +112,17 @@ export interface ClientMcpServerProvider {
       serverName: string,
       message: JSONRPCMessage,
     ) => Promise<JSONRPCMessage>,
+    scope?: ClientMcpServerScope,
   ): Promise<{ toolCount: number }>;
-  /** Remove a previously-registered client-hosted MCP server. Idempotent. */
-  unregisterClientMcpServer(serverName: string): Promise<void>;
+  /**
+   * Remove a previously-registered client-hosted MCP server. Idempotent. The
+   * scope must be the one it was registered with — a session-scoped server is
+   * removed from that session, not from the workspace.
+   */
+  unregisterClientMcpServer(
+    serverName: string,
+    scope?: ClientMcpServerScope,
+  ): Promise<void>;
 }
 
 /** A minimal sink for pushing frames down the owning WS. */
@@ -119,6 +143,12 @@ export type ClientMcpHandleResult =
 export class ClientMcpWsConnection {
   private readonly registrar: ClientMcpRegistrar;
   private disposed = false;
+  /**
+   * The scope each server was registered with, so unregister / dispose tear
+   * down the SAME registration. A session-scoped server removed without its
+   * session id would either miss the session's copy or hit the workspace path.
+   */
+  private readonly serverScopes = new Map<string, ClientMcpServerScope>();
 
   constructor(
     private readonly sendFrame: WsFrameSender,
@@ -146,13 +176,14 @@ export class ClientMcpWsConnection {
     server?: unknown;
     id?: unknown;
     payload?: unknown;
+    sessionId?: unknown;
   }): Promise<ClientMcpHandleResult> {
     if (this.disposed) {
       return { kind: 'error', code: 'closed', message: 'connection closed' };
     }
     switch (frame.type) {
       case CLIENT_MCP_FRAME_TYPES.register:
-        return this.handleRegister(frame.server);
+        return this.handleRegister(frame.server, frame.sessionId);
       case CLIENT_MCP_FRAME_TYPES.unregister:
         return this.handleUnregister(frame.server);
       case CLIENT_MCP_FRAME_TYPES.message:
@@ -176,6 +207,7 @@ export class ClientMcpWsConnection {
 
   private async handleRegister(
     server: unknown,
+    sessionId: unknown,
   ): Promise<ClientMcpHandleResult> {
     if (!isValidServerName(server)) {
       return {
@@ -184,6 +216,17 @@ export class ClientMcpWsConnection {
         message:
           'server must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
       };
+    }
+    let scope: ClientMcpServerScope | undefined;
+    if (sessionId !== undefined) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        return {
+          kind: 'error',
+          code: 'invalid_session_id',
+          message: '`sessionId` must be a non-empty string when provided',
+        };
+      }
+      scope = { sessionId };
     }
     if (this.registrar.hasServer(server)) {
       return {
@@ -212,10 +255,12 @@ export class ClientMcpWsConnection {
     // Advertise to the registrar BEFORE registering so the SDK discovery
     // handshake (which the provider triggers synchronously) can route frames.
     this.registrar.registerServer(server);
+    if (scope) this.serverScopes.set(server, scope);
     try {
       const { toolCount } = await this.provider.registerClientMcpServer(
         server,
         this.registrar.sendSdkMcpMessage,
+        scope,
       );
       // The WS may have closed (dispose() ran) while we awaited the provider
       // round-trip. dispose() snapshots its server set before this register
@@ -223,7 +268,8 @@ export class ClientMcpWsConnection {
       // runtime MCP server. Re-check and tear it back down.
       if (this.disposed) {
         this.registrar.unregisterServer(server);
-        await this.provider.unregisterClientMcpServer(server);
+        this.serverScopes.delete(server);
+        await this.provider.unregisterClientMcpServer(server, scope);
         return {
           kind: 'error',
           code: 'closed',
@@ -234,6 +280,7 @@ export class ClientMcpWsConnection {
     } catch (err) {
       // Roll back the registrar advertisement on failure.
       this.registrar.unregisterServer(server);
+      this.serverScopes.delete(server);
       return {
         kind: 'error',
         code: 'register_failed',
@@ -255,10 +302,12 @@ export class ClientMcpWsConnection {
         message: 'server name is invalid',
       };
     }
+    const scope = this.serverScopes.get(server);
     const existed = this.registrar.unregisterServer(server);
+    this.serverScopes.delete(server);
     if (existed && this.provider) {
       try {
-        await this.provider.unregisterClientMcpServer(server);
+        await this.provider.unregisterClientMcpServer(server, scope);
       } catch {
         // Best-effort teardown — the registrar already rejected pending.
       }
@@ -316,9 +365,13 @@ export class ClientMcpWsConnection {
     if (this.provider) {
       await Promise.allSettled(
         servers.map((server) =>
-          this.provider!.unregisterClientMcpServer(server),
+          this.provider!.unregisterClientMcpServer(
+            server,
+            this.serverScopes.get(server),
+          ),
         ),
       );
     }
+    this.serverScopes.clear();
   }
 }
