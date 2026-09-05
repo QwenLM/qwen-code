@@ -192,12 +192,13 @@ function createDaemonFollowupController(options: {
 export interface UseDaemonFollowupSuggestionReturn {
   /**
    * Current follow-up suggestion display state — pass directly to
-   * `<InputForm followupState={...} />`. Reflects the controller's
+   * `<ChatEditor followupState={...} />`. Reflects the controller's
    * post-debounce visible state, not the raw daemon push.
    */
   followupState: FollowupState;
   /**
-   * Accept the visible suggestion. Wire to `<InputForm onAcceptFollowup={...} />`.
+   * Accept the visible suggestion. Wire to
+   * `<ChatEditor onAcceptFollowup={...} />`.
    * Calls the underlying controller's accept (which invokes the
    * consumer-provided `onAccept` from options) AND clears the daemon
    * store's `lastFollowupSuggestion` so the same suggestion does not
@@ -208,7 +209,8 @@ export interface UseDaemonFollowupSuggestionReturn {
     options?: { skipOnAccept?: boolean },
   ) => void;
   /**
-   * Dismiss the visible suggestion. Wire to `<InputForm onDismissFollowup={...} />`.
+   * Dismiss the visible suggestion. Wire to
+   * `<ChatEditor onDismissFollowup={...} />`.
    * Same store-clear semantics as `onAcceptFollowup`.
    */
   onDismissFollowup: () => void;
@@ -226,8 +228,11 @@ export interface UseDaemonFollowupSuggestionReturn {
  * Wire the daemon's server-pushed `followup_suggestion` event into the
  * Web Shell's composer. Consumers:
  *
- *   1. Render `<InputForm followupState={...} onAcceptFollowup={...}
+ *   1. Render `<ChatEditor followupState={...} onAcceptFollowup={...}
  *      onDismissFollowup={...} />` with the three values returned here.
+ *      `ChatEditor` declares exactly these three props, typed from this
+ *      interface; `ChatPane` and `App` are the two in-tree hosts that call
+ *      this hook and thread them down.
  *   2. Call `clear()` from the hook just before `actions.sendPrompt(...)`
  *      so the prior turn's ghost-text disappears immediately.
  *
