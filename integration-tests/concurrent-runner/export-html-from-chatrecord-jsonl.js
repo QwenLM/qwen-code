@@ -101,6 +101,28 @@ export function looksLikeExportJsonl(objects) {
   );
 }
 
+/**
+ * Gate the input before any rendering happens, so a legacy exported JSONL gets
+ * its own remediation hint instead of the generic "unrecognized format" one.
+ * Returns the ChatRecord lines to render.
+ */
+export function assertRenderableJsonl(objects) {
+  if (objects.length === 0) throw new Error('Input JSONL is empty.');
+
+  if (looksLikeExportJsonl(objects)) {
+    throw new Error(
+      'Legacy exported JSONL cannot be rendered safely; provide source ChatRecord JSONL.',
+    );
+  }
+  const records = objects.filter(looksLikeChatRecord);
+  if (records.length === 0) {
+    throw new Error(
+      'Unrecognized JSONL format (expected ChatRecord-per-line).',
+    );
+  }
+  return records;
+}
+
 function startTimeFor(records) {
   let earliest = Number.POSITIVE_INFINITY;
   for (const record of records) {
@@ -139,19 +161,7 @@ async function main() {
   if (!input) printUsage(1);
 
   const objects = await readJsonlObjects(input);
-  if (objects.length === 0) throw new Error('Input JSONL is empty.');
-
-  if (looksLikeExportJsonl(objects)) {
-    throw new Error(
-      'Legacy exported JSONL cannot be rendered safely; provide source ChatRecord JSONL.',
-    );
-  }
-  const records = objects.filter(looksLikeChatRecord);
-  if (records.length === 0) {
-    throw new Error(
-      'Unrecognized JSONL format (expected ChatRecord-per-line).',
-    );
-  }
+  const records = assertRenderableJsonl(objects);
   const sessionData = await buildProductSessionData(
     records,
     collectSessionMetadata,
@@ -164,9 +174,24 @@ async function main() {
   console.log(`Wrote HTML export to: ${outputPath}`);
 }
 
-const isMain =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+/**
+ * Node realpath-resolves `import.meta.url` for the ESM main module but leaves
+ * `process.argv[1]` as it was invoked, so compare realpaths. Comparing the raw
+ * spellings makes any symlinked invocation skip `main()` and exit 0 having
+ * written nothing.
+ */
+export function isMainModule(argv1, metaUrl) {
+  if (argv1 === undefined) return false;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(argv1);
+  } catch {
+    resolved = path.resolve(argv1);
+  }
+  return metaUrl === pathToFileURL(resolved).href;
+}
+
+const isMain = isMainModule(process.argv[1], import.meta.url);
 
 if (isMain) {
   main().catch((error) => {
