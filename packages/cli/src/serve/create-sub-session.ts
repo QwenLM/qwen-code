@@ -1221,6 +1221,22 @@ export function createSubSessionLauncher(
       writeStderrLine(
         `qwen serve: create_sub_session failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      if (
+        standalone &&
+        isScheduledTaskRunSource(info) &&
+        typeof err === 'object' &&
+        err !== null &&
+        'code' in err &&
+        err.code === 'model_selection_failed'
+      ) {
+        throw new RequestError(
+          -32603,
+          err instanceof Error
+            ? err.message
+            : 'Sub-session model selection failed.',
+          { errorKind: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
+        );
+      }
       throw err instanceof Error ? err : new Error(String(err));
     }
   };

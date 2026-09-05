@@ -728,7 +728,7 @@ describe('sub-session launcher', () => {
     ]);
   });
 
-  it('rejects a standalone child when its selected model is not applied', async () => {
+  it('preserves standalone scheduled-task model selection failures', async () => {
     const fake = makeFakeBridge({
       callerSourceTypes: { 'caller-standalone': 'standalone' },
     });
@@ -741,24 +741,17 @@ describe('sub-session launcher', () => {
         modelServiceId?: string;
       }) => {
         childSessionId = request.sessionId;
-        return {
-          session: {
+        throw Object.assign(
+          new Error(
+            'The selected model could not be applied to the standalone session.',
+          ),
+          {
+            name: 'StandaloneSessionServiceError',
+            code: 'model_selection_failed',
             sessionId: request.sessionId,
-            workspaceCwd: WS,
-            attached: false,
-            sourceType: 'standalone',
-            sourcePersisted: true,
-            parentSessionPersisted: true,
-            modelApplied: false,
+            retryable: true,
           },
-          projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
-          workingDirectory: { state: 'ready' as const },
-          initialPrompt: {
-            promptId: request.promptId,
-            lastEventId: 37,
-            turn: new Promise<never>(() => {}),
-          },
-        };
+        );
       },
     );
     const launcher = createSubSessionLauncher({
@@ -776,9 +769,14 @@ describe('sub-session launcher', () => {
         prompt: 'standalone child task',
         completion: 'sent',
         model: 'missing-model',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
         callerSessionId: 'caller-standalone',
       }),
-    ).rejects.toThrow(/model selection failed.*missing-model/i);
+    ).rejects.toMatchObject({
+      code: -32603,
+      data: { errorKind: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
+    });
 
     expect(childSessionId).not.toBe('');
     expect(fake.prompts).toEqual([]);
