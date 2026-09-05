@@ -501,14 +501,18 @@ describe('mergeSessionRows', () => {
     // the worker registered with, which adoption preserves on purpose
     // because the native session store is case-sensitive. A raw string
     // comparison lets this record through and the table lists one session
-    // twice — once with its real state, once as `interactive`.
+    // twice — once with its real state, once as `interactive`. The
+    // record's raw spelling still survives the dedupe: with no launch
+    // file to read it from, the row had degraded to the sanitized store
+    // id, and the record is the only carrier left of the spelling the
+    // case-sensitive native store needs for `--resume`.
     const rows = mergeSessionRows(
       [record({ sessionId: 'Managed-1', name: 'app-ab' })],
       managedSessionRows([snapshot({ state: state() })], NOW),
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
-    expect(rows[0].sessionId).toBe('managed-1');
+    expect(rows[0].sessionId).toBe('Managed-1');
   });
 
   it('keeps the resumable spelling when it dedupes a mixed-case session', () => {
@@ -531,6 +535,42 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].sessionId).toBe('Managed-1');
+  });
+
+  it('carries the deduped record’s verified pid onto a worker-less managed row', () => {
+    // The store fails soft on an unreadable worker file, so the managed
+    // row has no pid while the session is still live and owned. The
+    // registry record it dedupes against verified that very pid under the
+    // same identity contract every registry row answers to, so the
+    // surviving row reports it instead of `-`.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'managed-1', pid: 4242 })],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(true);
+    expect(rows[0].pid).toBe(4242);
+  });
+
+  it('keeps the managed row’s own live pid over the deduped record’s', () => {
+    // The carry only fills what the degraded row lost: a pid the worker
+    // file still vouches for outranks the record's.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'managed-1', pid: 4242 })],
+      managedSessionRows(
+        [
+          snapshot({
+            worker: workerFile({
+              workerPid: 200,
+              workerProcStart: 'start-200',
+            }),
+          }),
+        ],
+        NOW,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].pid).toBe(200);
   });
 
   it('lets a live registry record survive the adopting window', () => {

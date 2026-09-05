@@ -245,13 +245,61 @@ function registryRow(record: SessionRegistryRecord): SessionRow {
 }
 
 /**
+ * What a deduped registry record still carries onto the managed row that
+ * replaced it.
+ *
+ * The store fails soft on any read or parse error — `readJsonRecord`
+ * answers undefined for an EMFILE or a corrupt entry while the session is
+ * still live and owned — so a managed row can be degraded to the
+ * sanitized store id and no pid, and the registry record the dedupe drops
+ * may be the only other carrier of what it lost. The row still wins — it
+ * knows the group, the supervisor and the session's title, where the
+ * record knows only that a process is alive — but what the record alone
+ * still has survives on it:
+ *
+ * - the record's raw spelling when the row fell back to the sanitized id,
+ *   which is the only case where the record knows a spelling the row
+ *   lost: the native session store is case-sensitive, so a row reporting
+ *   the sanitized id hands `--resume` an id it cannot act on. The carry
+ *   fires only while the row reports the sanitized form, so a launch-file
+ *   spelling keeps winning while present;
+ * - the record's pid when the row has none, which `listLiveSessions`
+ *   verified under the same identity contract every registry row in this
+ *   table answers to. The carry only fills a gap: a pid the worker file
+ *   still vouches for stays.
+ */
+function carryDedupedRecord(
+  row: SessionRow,
+  records: readonly SessionRegistryRecord[],
+): SessionRow {
+  const sanitized = sanitizeSessionId(row.sessionId);
+  let sessionId = row.sessionId;
+  let pid = row.pid;
+  for (const record of records) {
+    if (sanitizeSessionId(record.sessionId) !== sanitized) continue;
+    // True only while the row reports the sanitized id; once the raw
+    // spelling is carried it no longer equals its sanitized form, so a
+    // later record cannot overwrite it.
+    if (sessionId === sanitizeSessionId(record.sessionId)) {
+      sessionId = record.sessionId;
+    }
+    pid ??= record.pid;
+  }
+  return sessionId === row.sessionId && pid === row.pid
+    ? row
+    : { ...row, sessionId, pid };
+}
+
+/**
  * One listing from both sources, managed sessions first.
  *
  * A managed worker is a Qwen Code session like any other, so it can also
  * write a registry record — and then the same session would be listed
  * twice, once as `interactive` and once with its real state. The managed
  * row wins: it knows the group, the supervisor and the session's title,
- * where the registry record knows only that a process is alive.
+ * where the registry record knows only that a process is alive — but a
+ * degraded row carries what the deduped record alone still has rather
+ * than losing it (see `carryDedupedRecord`).
  *
  * Ordering is managed-before-interactive rather than by age, because the
  * reason to run this command is usually a session waiting on an answer.
@@ -274,7 +322,7 @@ export function mergeSessionRows(
     managed.map((row) => sanitizeSessionId(row.sessionId)),
   );
   return [
-    ...managed,
+    ...managed.map((row) => carryDedupedRecord(row, records)),
     ...records
       .filter((record) => !managedIds.has(sanitizeSessionId(record.sessionId)))
       .map(registryRow),
