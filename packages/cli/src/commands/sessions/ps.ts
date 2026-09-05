@@ -26,7 +26,7 @@ import type { CommandModule, Argv } from 'yargs';
 import { listLiveSessions } from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
 import {
-  sanitizeTerminalText,
+  sanitizeSingleLineTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -46,21 +46,6 @@ export const STATE_COL = 13;
 
 interface PsArgs {
   json?: boolean;
-}
-
-/**
- * Sanitize a record field for terminal output.
- *
- * `cwd` and `name` are written by another process, so they are
- * attacker-influenced: an ANSI sequence could repaint the table, a bare
- * control byte could misalign it, and a bidi override (Trojan Source,
- * CVE-2021-42572) could make a directory render as a path that does not
- * exist. `sanitizeTerminalText` is the single source of truth for all
- * three classes; it deliberately preserves TAB and LF for multi-line
- * render sites, so a one-line table cell drops those two on top of it.
- */
-function sanitize(value: string): string {
-  return sanitizeTerminalText(value).replace(/[\t\n]/g, '');
 }
 
 function padDisplay(str: string, width: number): string {
@@ -126,14 +111,17 @@ function outputHuman(rows: SessionRow[], now: number): void {
   );
   for (const row of rows) {
     writeStdoutLine(
-      padDisplay(truncateToWidth(sanitize(row.name), NAME_COL - 2), NAME_COL) +
+      padDisplay(
+        truncateToWidth(sanitizeSingleLineTerminalText(row.name), NAME_COL - 2),
+        NAME_COL,
+      ) +
         padDisplay(row.pid === undefined ? '-' : String(row.pid), PID_COL) +
         padDisplay(
           row.startedAt === undefined ? '-' : formatAge(now - row.startedAt),
           AGE_COL,
         ) +
         padDisplay(stateLabel(row), STATE_COL) +
-        sanitize(row.cwd),
+        sanitizeSingleLineTerminalText(row.cwd),
     );
   }
 }
@@ -153,7 +141,7 @@ async function readManagedRows(now: number): Promise<SessionRow[]> {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     writeStderrLine(
-      `Managed sessions could not be listed: ${sanitize(reason)}`,
+      `Managed sessions could not be listed: ${sanitizeSingleLineTerminalText(reason)}`,
     );
     return [];
   }

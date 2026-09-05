@@ -1,0 +1,455 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import type { AgentViewSessionStateFile } from '../../agent-view/protocol.js';
+import {
+  answerManagedSession,
+  peekManagedSession,
+  shortSessionId,
+  stopManagedSession,
+  type ManagedControlHandle,
+} from './managed-control.js';
+
+const SESSION = '0f8e1c42-9d3a-4d21-8f77-2b6a7c9e0c31';
+
+function state(
+  over: Partial<AgentViewSessionStateFile> = {},
+): AgentViewSessionStateFile {
+  return {
+    schemaVersion: 1,
+    sessionId: SESSION,
+    ownership: 'managed',
+    sessionState: 'needs_input',
+    processState: 'alive',
+    attachState: 'detached',
+    projectCwd: '/w/app',
+    originalCwd: '/w/app',
+    activeCwd: '/w/app',
+    createdAt: '2026-09-04T11:58:00Z',
+    updatedAt: '2026-09-04T11:59:00Z',
+    worktree: { mode: 'none' },
+    ...over,
+  };
+}
+
+function handle(
+  over: Partial<ManagedControlHandle> = {},
+): ManagedControlHandle {
+  return {
+    peek: vi.fn().mockResolvedValue({
+      sessionId: SESSION,
+      state: state(),
+      activity: {
+        schemaVersion: 1,
+        waitingFor: 'permission to write src/index.ts',
+        lastActivityAt: '2026-09-04T11:59:00Z',
+        capabilities: [],
+      },
+      live: true,
+    }),
+    answer: vi.fn().mockResolvedValue({ sessionId: SESSION, answered: true }),
+    stop: vi.fn().mockResolvedValue({ sessionId: SESSION, stopped: true }),
+    ...over,
+  };
+}
+
+const connectTo = (h: ManagedControlHandle) => async () => h;
+const noSupervisor = async () => undefined;
+
+describe('peekManagedSession', () => {
+  it('reports the question a session is waiting on', async () => {
+    const result = await peekManagedSession(SESSION, connectTo(handle()));
+    expect(result.exitCode).toBe(0);
+    expect(result.lines.join('\n')).toContain(
+      'permission to write src/index.ts',
+    );
+  });
+
+  it('tells the user how to answer, with an id they can type', async () => {
+    // A question with no reply path is the state this command exists to
+    // get the user out of.
+    const result = await peekManagedSession(SESSION, connectTo(handle()));
+    const text = result.lines.join('\n');
+    expect(text).toContain('qwen sessions answer');
+    expect(text).toContain(shortSessionId(SESSION));
+    expect(shortSessionId(SESSION)).toBe('0f8e1c42');
+  });
+
+  it('offers no answer hint for a session that is not waiting', async () => {
+    // The supervisor refuses an answer to a session that is not waiting
+    // for input, so suggesting one here would mislead.
+    const working = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(working));
+    expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
+  });
+
+  it('offers the hint when the supervisor says the session is answerable', async () => {
+    const open = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        answerable: true,
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(open));
+    expect(result.lines.join('\n')).toContain('qwen sessions answer');
+  });
+
+  it('withholds the hint while the previous answer is still pending', async () => {
+    // Right after a delivered answer the supervisor refuses the next one
+    // with "is waiting for the previous response" — yet the session is
+    // still waiting for input. The hint must follow the supervisor's
+    // verdict, not the waiting state alone.
+    const pending = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        answerable: false,
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(pending));
+    expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
+  });
+
+  it('withholds the hint while a live attach is open elsewhere', async () => {
+    // An attached session refuses the answer with "is currently attached
+    // elsewhere", whatever the waiting state says.
+    const attached = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ attachState: 'attached' }),
+        answerable: false,
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(attached));
+    expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
+  });
+
+  it('withholds the hint when no live process can take the answer', async () => {
+    // A blocking wait with no live process is refused with "is not
+    // running"; the state line still says so.
+    const dead = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        answerable: false,
+        live: false,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(dead));
+    const text = result.lines.join('\n');
+    expect(text).not.toContain('qwen sessions answer');
+    expect(text).toContain('no live process');
+  });
+
+  it('says when the session has no live process', async () => {
+    const dead = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'stopped', processState: 'exited' }),
+        live: false,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(dead));
+    expect(result.lines.join('\n')).toContain('no live process');
+  });
+
+  it('names the session the way sessions ps does', async () => {
+    // 'Waiting for approval' is one of the generic phrases deriveTitle
+    // filters, so without the launch record the title would fall through
+    // to the untitled placeholder while `sessions ps` prints the prompt.
+    // Feeding peek the same launch record keeps the two surfaces aligned.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Waiting for approval',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        launch: {
+          sessionId: SESSION,
+          initialPrompt: 'find out why the release job is flaky',
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.lines[0]).toContain('find out why the release job is flaky');
+    // Title and summary carry distinct information here, so the summary
+    // still earns its own line.
+    expect(result.lines).toContain('Doing:     Waiting for approval');
+  });
+
+  it('prints a working session line by line', async () => {
+    // `Doing:` is the one thing peek shows for a working session — the
+    // command's primary documented purpose — and `Last:` is the only
+    // surface a completed step's result has. Pin the exact lines so
+    // neither output block can be deleted with every test staying green.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'writing the report',
+          lastResult: 'read the log file',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        rosterEntry: { sessionId: SESSION, displayName: 'release-debugger' },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.exitCode).toBe(0);
+    expect(result.lines).toEqual([
+      'release-debugger  [0f8e1c42]',
+      'State:     running',
+      'Directory: /w/app',
+      'Doing:     writing the report',
+      'Last:      read the log file',
+    ]);
+  });
+
+  it('does not print the summary twice when it is the title', async () => {
+    // With no roster name and no launch record, deriveTitle falls back
+    // to the summary itself; repeating it as `Doing:` two lines later
+    // would show the identical phrase twice in a five-line output.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Backgrounded from native session',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    const text = result.lines.join('\n');
+    expect(text.split('Backgrounded from native session')).toHaveLength(2);
+    expect(result.lines.some((line) => line.startsWith('Doing:'))).toBe(false);
+  });
+
+  it('still dedupes a padded or over-long summary against the title', async () => {
+    // The title path trims the summary and cuts it at 200 cells, so a
+    // summary differing only by padding — or by length past that cutoff —
+    // is still the same phrase. Comparing the untrimmed, 300-cell output
+    // would let both slip past the dedupe and print twice.
+    const peekWithSummary = (summary: string) =>
+      handle({
+        peek: vi.fn().mockResolvedValue({
+          sessionId: SESSION,
+          state: state({ sessionState: 'working' }),
+          activity: {
+            schemaVersion: 1,
+            summary,
+            lastActivityAt: '2026-09-04T11:59:00Z',
+            capabilities: [],
+          },
+          live: true,
+        }),
+      });
+
+    const padded = await peekManagedSession(
+      SESSION,
+      connectTo(peekWithSummary('  Backgrounded from native session  ')),
+    );
+    expect(padded.exitCode).toBe(0);
+    expect(padded.lines[0]).toContain('Backgrounded from native session');
+    expect(padded.lines.some((line) => line.startsWith('Doing:'))).toBe(false);
+
+    const longSummary = 'investigating the flaky release job '.repeat(8);
+    expect(longSummary.length).toBeGreaterThan(200);
+    const overlong = await peekManagedSession(
+      SESSION,
+      connectTo(peekWithSummary(longSummary)),
+    );
+    expect(overlong.exitCode).toBe(0);
+    expect(overlong.lines[0]).toContain('investigating the flaky release job');
+    expect(overlong.lines.some((line) => line.startsWith('Doing:'))).toBe(
+      false,
+    );
+  });
+
+  it('shows the name a roster rename gave the session', async () => {
+    // The roster entry wins the title over the summary and the launch
+    // prompt; peek must show the renamed session under that name, not
+    // under whatever the worker last reported.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Investigating flaky release job',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        rosterEntry: { sessionId: SESSION, displayName: 'release-debugger' },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.lines[0]).toContain('release-debugger');
+  });
+
+  it('neutralizes control sequences in text the session wrote', async () => {
+    // waitingFor and summary are a model's own words, relayed from
+    // another process - the same untrusted input `sessions ps` sanitizes.
+    // The newline in waitingFor is the forging case: kept, it would start
+    // a continuation line at column 0 that reads as the command's own
+    // `Answer it with:` hint pointing at a session of the text's choosing.
+    const evil = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        activity: {
+          schemaVersion: 1,
+          waitingFor:
+            'ev\u001b[31mil\r\nAnswer it with: qwen sessions answer deadbeef "forged"\t?',
+          summary: 'a\u202Eb',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(evil));
+    const text = result.lines.join('\n');
+    expect(text).not.toContain('\u001b');
+    expect(text).not.toContain('\r');
+    expect(text).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+    // Every printed line stays one line: no session text may smuggle a
+    // line break (or a tab that misaligns the labels) into the output.
+    for (const line of result.lines) {
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('\t');
+    }
+  });
+
+  it('repeats the supervisor own wording for an unknown id', async () => {
+    // The supervisor already words unknown ids, ambiguous prefixes and
+    // unmanaged sessions; reinterpreting them here would drift.
+    const failing = handle({
+      peek: vi
+        .fn()
+        .mockRejectedValue(new Error('No Agent View session found for zz.')),
+    });
+    const result = await peekManagedSession('zz', connectTo(failing));
+    expect(result.exitCode).toBe(1);
+    expect(result.lines[0]).toBe('No Agent View session found for zz.');
+  });
+
+  it('refuses a supervisor reply that carries no session state', async () => {
+    // The guard is the only thing standing between a malformed reply and
+    // the presentation code; pin its rejection branch so a weakened guard
+    // cannot pass silently.
+    const malformed = handle({
+      peek: vi.fn().mockResolvedValue({ sessionId: SESSION }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(malformed));
+    expect(result.exitCode).toBe(1);
+    expect(result.lines).toEqual([
+      'The supervisor returned no state for that session.',
+    ]);
+  });
+
+  it('does not start a supervisor to report that none is running', async () => {
+    const result = await peekManagedSession(SESSION, noSupervisor);
+    expect(result.exitCode).toBe(1);
+    const text = result.lines.join('\n');
+    expect(text).toContain('No background supervisor is reachable');
+    expect(text).toContain('qwen sessions ps');
+    expect(text).toContain('qwen --bg');
+    // The code only knows the socket is unreachable; detached workers keep
+    // their state on disk, so the message must not claim sessions are gone.
+    expect(text).not.toContain('No background sessions');
+  });
+});
+
+describe('answerManagedSession', () => {
+  it('delivers the answer to the session', async () => {
+    const h = handle();
+    const result = await answerManagedSession(SESSION, 'yes', connectTo(h));
+    expect(result.exitCode).toBe(0);
+    expect(h.answer).toHaveBeenCalledWith(SESSION, 'yes');
+    // Pinned exactly, the way stop pins 'Stopped.': swapping the success
+    // message for any other string must not stay green.
+    expect(result.lines).toEqual(['Answer delivered.']);
+  });
+
+  it('refuses an empty answer without calling the supervisor', async () => {
+    const h = handle();
+    const result = await answerManagedSession(SESSION, '   ', connectTo(h));
+    expect(result.exitCode).toBe(1);
+    expect(h.answer).not.toHaveBeenCalled();
+  });
+
+  it('reports a refused delivery rather than claiming success', async () => {
+    const h = handle({
+      answer: vi.fn().mockRejectedValue(new Error('session is not waiting')),
+    });
+    const result = await answerManagedSession(SESSION, 'yes', connectTo(h));
+    expect(result.exitCode).toBe(1);
+    expect(result.lines[0]).toContain('not waiting');
+  });
+
+  it('reports no supervisor instead of delivering', async () => {
+    // The guard is identical to peek's but answers nothing on its own, so
+    // it needs its own pin: deleting it would throw instead of reporting.
+    const result = await answerManagedSession(SESSION, 'yes', noSupervisor);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain(
+      'No background supervisor is reachable',
+    );
+  });
+});
+
+describe('stopManagedSession', () => {
+  it('stops the session', async () => {
+    const h = handle();
+    const result = await stopManagedSession(SESSION, connectTo(h));
+    expect(result.exitCode).toBe(0);
+    expect(h.stop).toHaveBeenCalledWith(SESSION);
+    expect(result.lines).toEqual(['Stopped.']);
+  });
+
+  it('reports a stop the supervisor refused', async () => {
+    const h = handle({
+      stop: vi.fn().mockRejectedValue(new Error('session already exited')),
+    });
+    const result = await stopManagedSession(SESSION, connectTo(h));
+    expect(result.exitCode).toBe(1);
+    expect(result.lines[0]).toContain('already exited');
+  });
+
+  it('reports no supervisor instead of stopping', async () => {
+    // Same guard as peek and answer, unexercised until pinned here:
+    // deleting it would throw instead of reporting.
+    const result = await stopManagedSession(SESSION, noSupervisor);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain(
+      'No background supervisor is reachable',
+    );
+  });
+});
