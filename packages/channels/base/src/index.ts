@@ -91,7 +91,11 @@ export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
-export { SessionRouter } from './SessionRouter.js';
+export {
+  SessionRouter,
+  isValidRotationBound,
+  isValidTurnCount,
+} from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
@@ -148,6 +152,7 @@ export type {
   ObservedChannelContactGraph,
   SanitizedToolCallEvent,
   SenderPolicy,
+  SessionRotationConfig,
   SessionScope,
   SessionTarget,
   UserInputPresentationResult,

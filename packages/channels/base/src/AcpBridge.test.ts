@@ -117,6 +117,7 @@ type TestableAcpBridge = AcpBridge & {
   };
   knownSessionIds: Set<string>;
   sessionBindingTokens: Map<string, object | undefined>;
+  pendingSessionRequests: Set<{ reject: (error: Error) => void }>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
@@ -1184,6 +1185,87 @@ describe('AcpBridge', () => {
     bridge.channelLoopToolHandlers = [handler];
 
     expect(bridge.resolveChannelLoopToolHandler('s-1')).toBe(handler);
+  });
+
+  it('rejects in-flight session requests when the ACP child exits', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    const connection = child.connections[0] as unknown as {
+      newSession: ReturnType<typeof vi.fn>;
+      loadSession: ReturnType<typeof vi.fn>;
+    };
+    // The SDK never settles requests still awaiting a response once the
+    // stream ends, so neither call can finish on its own.
+    connection.newSession = vi.fn(() => new Promise(() => {}));
+    connection.loadSession = vi.fn(() => new Promise(() => {}));
+
+    const pendingNew = bridge.newSession('/tmp');
+    const pendingLoad = bridge.loadSession('s-1', '/tmp');
+
+    proc.emit('exit', 1, null);
+
+    const reason =
+      'ACP agent process exited while a session request was in flight';
+    await expect(pendingNew).rejects.toThrow(reason);
+    await expect(pendingLoad).rejects.toThrow(reason);
+    expect(
+      (bridge as unknown as TestableAcpBridge).pendingSessionRequests.size,
+    ).toBe(0);
+  });
+
+  it('rejects in-flight session requests when the bridge stops', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const connection = child.connections[0] as unknown as {
+      newSession: ReturnType<typeof vi.fn>;
+    };
+    connection.newSession = vi.fn(() => new Promise(() => {}));
+
+    const pending = bridge.newSession('/tmp');
+    bridge.stop();
+
+    await expect(pending).rejects.toThrow(
+      'ACP agent process exited while a session request was in flight',
+    );
+  });
+
+  it('drops a settled session request from the pending set', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-1' }),
+    };
+
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+    expect(bridge.pendingSessionRequests.size).toBe(0);
+  });
+
+  it('drops a failed session request from the pending set', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockRejectedValue(new Error('spawn failed')),
+    };
+
+    await expect(bridge.newSession('/tmp')).rejects.toThrow('spawn failed');
+    expect(bridge.pendingSessionRequests.size).toBe(0);
   });
 
   it('kills the ACP child when it reports a large event loop stall', async () => {

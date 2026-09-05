@@ -52,6 +52,20 @@ export interface BlockStreamingCoalesceConfig {
   idleMs?: number;
 }
 
+/**
+ * Bounds on how long a single routed session keeps accumulating context before
+ * the router starts a fresh one. Without a bound a long-lived route (a busy
+ * group thread, say) grows monotonically until it hits provider context limits,
+ * at which point every later message on that route fails while the rest of the
+ * channel stays healthy.
+ */
+export interface SessionRotationConfig {
+  /** Route to a new session once this many messages have used the current one. */
+  maxTurns?: number;
+  /** Route to a new session once the current one is older than this many hours. */
+  maxAgeHours?: number;
+}
+
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -63,6 +77,8 @@ export interface ChannelConfig {
   sessionScope: SessionScope;
   /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
   multiSession?: boolean;
+  /** Auto-rotation bounds for sessions on this channel. Unset means never rotate. */
+  sessionRotation?: SessionRotationConfig;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
