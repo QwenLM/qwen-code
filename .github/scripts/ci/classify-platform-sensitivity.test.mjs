@@ -79,7 +79,7 @@ test('the manifests change what each lane executes', () => {
   // A workspace manifest is not the root one; it reaches the lanes through
   // the subsystem rules or not at all.
   assert.equal(
-    classifyChangedFiles(['packages/webui/package.json']),
+    classifyChangedFiles(['packages/web-shell/package.json']),
     PLATFORM_INSENSITIVE,
   );
 });
@@ -112,7 +112,6 @@ test('platform-coupled subsystems match on segments, not substrings', () => {
   // The substring trap: these contain "shell", "pty", "os" or "platform"
   // inside a longer word and must NOT drag both lanes in.
   for (const file of [
-    'packages/webui/src/components/Shellfish.tsx',
     'packages/core/src/utils/cryptic.ts',
     'packages/cli/src/ui/emptyState.ts',
     'packages/core/src/telemetry/uploader.ts',

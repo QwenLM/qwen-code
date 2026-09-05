@@ -494,7 +494,8 @@ function getAgentDisplayInfo(
     0;
 
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])
@@ -1164,9 +1165,9 @@ export const ToolLine = memo(function ToolLine({
   const hasApproval = approval?.toolCallId === tool.callId;
   const isHostOwnedEditApproval = Boolean(
     hostOwnsEditDiffPreview &&
-    hasApproval &&
-    approval?.hasDiffPreview &&
-    isEditToolName(approval?.toolName ?? tool.toolName),
+      hasApproval &&
+      approval?.hasDiffPreview &&
+      isEditToolName(approval?.toolName ?? tool.toolName),
   );
   const locksPendingEditApproval = isHostOwnedEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
@@ -1211,10 +1212,10 @@ export const ToolLine = memo(function ToolLine({
     toolContainsCallId(tool, approval.toolCallId);
   const waitingForApproval = Boolean(
     isHostOwnedEditApproval ||
-    (hostOwnsEditDiffPreview &&
-      hasSubToolApproval &&
-      approval?.hasDiffPreview &&
-      isEditToolName(approval.toolName ?? '')),
+      (hostOwnsEditDiffPreview &&
+        hasSubToolApproval &&
+        approval?.hasDiffPreview &&
+        isEditToolName(approval.toolName ?? '')),
   );
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
@@ -1822,9 +1823,9 @@ export const ToolGroup = memo(function ToolGroup({
   );
   const opensMonitorDetails = Boolean(
     !compactSummary &&
-    singleMonitor &&
-    monitorDetailsAvailable &&
-    !monitorDetailsUnavailable,
+      singleMonitor &&
+      monitorDetailsAvailable &&
+      !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
