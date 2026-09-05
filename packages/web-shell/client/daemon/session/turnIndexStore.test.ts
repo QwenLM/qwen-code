@@ -272,6 +272,27 @@ describe('admitTurnIndexPage', () => {
     ]);
   });
 
+  it('never lets a fill move totalTurns', () => {
+    // `planEnsurePageRequest` gates every jump on the store's turn count, so the
+    // count belongs to the tail refresh that adopted it and not to a hole-fill: a
+    // page reporting a different one must leave it where it was. Every other
+    // fixture here admits pages carrying the store's own count, which is why the
+    // invariant needs a page that disagrees.
+    const filled = admitTurnIndexPage(
+      seededState(),
+      indexPage({
+        snapshot: 'snap-1',
+        totalTurns: 99,
+        start: 0,
+        turns: turns([0, 1]),
+      }),
+      'snap-1',
+    );
+    expect(filled?.pages.has(0)).toBe(true);
+    expect(filled?.totalTurns).toBe(10);
+    expect(filled?.snapshot).toBe('snap-1');
+  });
+
   it('refuses a page minted by a different snapshot', () => {
     expect(
       admitTurnIndexPage(
@@ -533,18 +554,21 @@ describe('cached-page bounds', () => {
     start: number,
     label = `Turn ${start}`,
   ): SessionTurnIndexState {
-    return (
-      admitTurnIndexPage(
-        state,
-        indexPage({
-          snapshot: 'snap-1',
-          totalTurns: 1000,
-          start,
-          turns: [turn(start, { label })],
-        }),
-        'snap-1',
-      ) ?? state
+    const admitted = admitTurnIndexPage(
+      state,
+      indexPage({
+        snapshot: 'snap-1',
+        totalTurns: 1000,
+        start,
+        turns: [turn(start, { label })],
+      }),
+      'snap-1',
     );
+    // A refused admission must not pass silently. Falling back to the previous
+    // state would let every assertion below be satisfied by the seed page alone,
+    // so a change that refuses all of them would still look green.
+    if (!admitted) throw new Error(`admission refused for start ${start}`);
+    return admitted;
   }
 
   it('evicts by page count without touching totalTurns', () => {
@@ -552,10 +576,31 @@ describe('cached-page bounds', () => {
     for (let start = 0; start < 40; start += 1) {
       state = admitSingleTurnPage(state, start);
     }
-    expect(state.pages.size).toBeLessThanOrEqual(32);
+    // 40 admitted plus the pinned tail page, held to the 32-page cap: the nine
+    // lowest starts are gone and the rest are exactly the survivors.
+    expect(state.pages.size).toBe(32);
+    expect(state.pages.has(0)).toBe(false);
+    expect(state.pages.has(8)).toBe(false);
+    expect(state.pages.has(9)).toBe(true);
+    expect(state.pages.has(39)).toBe(true);
     // Evicting metadata shortens the cache, never the session.
     expect(state.totalTurns).toBe(1000);
+  });
+
+  it('evicts by page start, not by admission order', () => {
+    // Admitting newest-first makes "lowest start" and "earliest admitted" point
+    // at opposite pages, so this pins which of the two the eviction follows.
+    let state = longChainState();
+    for (let start = 39; start >= 0; start -= 1) {
+      state = admitSingleTurnPage(state, start);
+    }
+    expect(state.pages.size).toBe(32);
+    // The lowest starts are evicted even though they were admitted last.
     expect(state.pages.has(0)).toBe(false);
+    expect(state.pages.has(8)).toBe(false);
+    expect(state.pages.has(9)).toBe(true);
+    expect(state.pages.has(39)).toBe(true);
+    expect(state.pages.has(990)).toBe(true);
   });
 
   it('pins the newest page so a refresh always has overlap', () => {

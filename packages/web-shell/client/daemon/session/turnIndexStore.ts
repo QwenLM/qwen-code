@@ -218,14 +218,17 @@ function evictCachedPages(
   pages: Map<number, TurnIndexPageCacheEntry>,
 ): Map<number, TurnIndexPageCacheEntry> {
   if (pages.size <= 1) return pages;
-  let pinnedStart: number | undefined;
-  for (const start of pages.keys()) {
-    if (pinnedStart === undefined || start > pinnedStart) pinnedStart = start;
-  }
+  // Ascending by start, not by insertion order. A Map iterates in insertion
+  // order, so evicting in that order drops whichever page was admitted first —
+  // after a newest-first fill sequence that is the newest metadata, which is
+  // exactly what the rail reads first and what a tail refresh needs to overlap.
+  // Ascending admission hides it, so the order needs a test of its own.
+  const starts = [...pages.keys()].sort((a, b) => a - b);
+  const pinnedStart = starts[starts.length - 1];
   let bytes = 0;
   for (const page of pages.values()) bytes += estimatePageBytes(page);
   const drop: number[] = [];
-  for (const start of pages.keys()) {
+  for (const start of starts) {
     if (
       pages.size - drop.length <= MAX_CACHED_PAGES &&
       bytes <= MAX_CACHED_BYTES
