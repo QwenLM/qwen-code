@@ -304,6 +304,12 @@ export {
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
+export {
+  isApiUserPrompt,
+  findApiRewindCutPoint,
+  countApiUserPrompts,
+  type ApiUserPromptOptions,
+} from './services/api-user-prompt.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
