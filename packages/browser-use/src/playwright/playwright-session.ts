@@ -280,6 +280,12 @@ export class PlaywrightSession {
       let page: Page;
       try {
         [, page] = await Promise.all([targetIdPromise, pagePromise]);
+        // noDefaults skips Playwright's focus emulation for background pages.
+        await this.bridge.request('cdp.send', {
+          tabId: provider.providerTabId,
+          method: 'Emulation.setFocusEmulationEnabled',
+          params: { enabled: true },
+        });
       } catch (error) {
         await this.bridge
           .request('tabs.detach', { tabId: provider.providerTabId })

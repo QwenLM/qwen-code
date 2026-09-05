@@ -310,7 +310,6 @@ export class PlaywrightRuntime {
     tab: TabState,
     action: () => Promise<DispatchResult>,
   ): Promise<DispatchResult> {
-    await tab.page.bringToFront();
     const result = await action();
     if (tab.dialog !== undefined || tab.page.isClosed()) return result;
     try {

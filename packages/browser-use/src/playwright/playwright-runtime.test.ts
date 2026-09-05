@@ -75,6 +75,53 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.reload).toHaveBeenCalledWith();
   });
 
+  it('enables tab-scoped focus emulation once without activating the window', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    await fixture.runtime.dispatch('tabs.get', {
+      browserId: 'chrome',
+      tabId: tab.id,
+    });
+    await createTab(fixture.runtime);
+
+    const focusCalls = fixture.request.mock.calls.filter(
+      ([method, params]) =>
+        method === 'cdp.send' &&
+        params?.method === 'Emulation.setFocusEmulationEnabled',
+    );
+    expect(focusCalls).toEqual([
+      [
+        'cdp.send',
+        {
+          tabId: 17,
+          method: 'Emulation.setFocusEmulationEnabled',
+          params: { enabled: true },
+        },
+      ],
+    ]);
+    expect(fixture.page.bringToFront).not.toHaveBeenCalled();
+  });
+
+  it('detaches the tab if background focus setup fails', async () => {
+    const fixture = await runtimeFixture();
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (params.method === 'Emulation.setFocusEmulationEnabled')
+          throw new Error('focus setup failed');
+        return await request(method, params);
+      },
+    );
+
+    await expect(createTab(fixture.runtime)).rejects.toThrow(
+      'focus setup failed',
+    );
+    expect(fixture.request).toHaveBeenCalledWith('tabs.detach', { tabId: 17 });
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([]);
+  });
+
   it('builds locator plans and delegates read and input operations', async () => {
     const fixture = await runtimeFixture();
     fixture.locator.evaluate
@@ -127,7 +174,7 @@ describe('PlaywrightRuntime command contracts', () => {
       timeout: 789,
     });
     expect(fixture.locator.press).not.toHaveBeenCalled();
-    expect(fixture.page.bringToFront).toHaveBeenCalledTimes(2);
+    expect(fixture.page.bringToFront).not.toHaveBeenCalled();
     expect(fixture.page.evaluate).toHaveBeenCalledTimes(2);
   });
 
@@ -176,7 +223,7 @@ describe('PlaywrightRuntime command contracts', () => {
     });
   });
 
-  it('brings the target page forward and drains renderer input tasks', async () => {
+  it('drains renderer input tasks without bringing the page forward', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
 
@@ -185,12 +232,9 @@ describe('PlaywrightRuntime command contracts', () => {
       steps: [{ kind: 'locator', selector: '#button' }],
     });
 
-    expect(fixture.page.bringToFront).toHaveBeenCalledOnce();
+    expect(fixture.page.bringToFront).not.toHaveBeenCalled();
     expect(fixture.locator.click).toHaveBeenCalledOnce();
     expect(fixture.page.evaluate).toHaveBeenCalledOnce();
-    expect(fixture.page.bringToFront.mock.invocationCallOrder[0]).toBeLessThan(
-      fixture.locator.click.mock.invocationCallOrder[0] ?? 0,
-    );
     expect(fixture.locator.click.mock.invocationCallOrder[0]).toBeLessThan(
       fixture.page.evaluate.mock.invocationCallOrder[0] ?? 0,
     );
@@ -219,7 +263,7 @@ describe('PlaywrightRuntime command contracts', () => {
     });
     expect(fixture.page.keyboard.up).toHaveBeenCalledWith('Alt');
     expect(fixture.page.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
-    expect(fixture.page.bringToFront).toHaveBeenCalledTimes(1);
+    expect(fixture.page.bringToFront).not.toHaveBeenCalled();
   });
 
   it('delegates snapshot ref actions to Playwright aria-ref locators', async () => {
@@ -266,7 +310,7 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.mouse.wheel).toHaveBeenCalledWith(0, 200);
     expect(fixture.locator.pressSequentially).not.toHaveBeenCalled();
     expect(fixture.locator.press).not.toHaveBeenCalled();
-    expect(fixture.page.bringToFront).toHaveBeenCalledTimes(4);
+    expect(fixture.page.bringToFront).not.toHaveBeenCalled();
   });
 
   it('dispatches the browser back mouse button through CDP', async () => {
