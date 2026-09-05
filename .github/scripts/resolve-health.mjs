@@ -179,6 +179,15 @@ function headline(body) {
 // permission API itself is not an option here — it needs a PAT (see
 // qwen-code-pr-review.yml's authorize job), which a scheduled watch has no
 // reason to hold.
+//
+// The field is evaluated at READ time, not comment-creation time, so it
+// drifts with permission changes inside the window: a requester whose org
+// membership lapses would silently leave the roster their request belonged
+// on, and a fork author granted write would retroactively enter it. The
+// watch therefore judges once — the first tick to see a request records the
+// association in the state marker (stateOf's `requests`), and a later tick
+// reads the record, never the live field, so a mid-window permission change
+// moves nothing in either direction.
 export const ANSWERABLE_ASSOCIATIONS = new Set([
   'OWNER',
   'MEMBER',
@@ -186,6 +195,9 @@ export const ANSWERABLE_ASSOCIATIONS = new Set([
 ]);
 
 // prs: [{ number, state, comments: [{ id, user, author_association, created_at, updated_at, body, html_url }] }]
+// options.recorded: [[id, created_at, association], ...] — the first-sight
+// judgments carried in the tracking issue's state; a recorded id is judged
+// by the record, never by the live field (see ANSWERABLE_ASSOCIATIONS).
 export function assess(prs, options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const now = opts.now instanceof Date ? opts.now : new Date();
@@ -219,15 +231,22 @@ export function assess(prs, options = {}) {
   // REFUSES a close). It floors with `created_at`, which no edit moves, so an
   // old comment edited today cannot outrank a recent push.
   let newestRequest = null;
-  // The newest request with no result of its own — see the roster loop below.
-  // Deliberately read WITHOUT `staleHours`: the roster needs it so a run still
-  // in flight does not raise the alarm, and the recovery gate needs the
-  // opposite reading, since a run in flight is precisely a reason not to
+  // The newest request with no result of its own — see the pairing loop
+  // below. Deliberately read WITHOUT `staleHours`: the roster needs it so a
+  // run still in flight does not raise the alarm, and the recovery gate needs
+  // the opposite reading, since a run in flight is precisely a reason not to
   // certify that the lane works again. Read by decide(), never by the alarm.
   let unserved = null;
+  // The judgments the first tick to see each request recorded in the
+  // tracking issue's state, keyed by comment id. A comment with no record
+  // yet is judged live, and this tick's sightings record it for the next.
+  const recorded = new Map(
+    (opts.recorded ?? []).map(([id, , association]) => [id, association]),
+  );
+  const requestSightings = [];
   const isRequestShaped = (c) =>
     c.user !== opts.bot &&
-    ANSWERABLE_ASSOCIATIONS.has(c.author_association) &&
+    ANSWERABLE_ASSOCIATIONS.has(recorded.get(c.id) ?? c.author_association) &&
     isRequest(c.body);
   const isAnswerableRequest = (c) =>
     isRequestShaped(c) && c.updated_at === c.created_at;
@@ -236,6 +255,17 @@ export function assess(prs, options = {}) {
       .filter((c) => c.created_at >= windowStart)
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
     for (const c of comments) {
+      // Every request-shaped comment is sighted with its LIVE association,
+      // answerable or not: stateOf() records the first sighting, so a later
+      // promotion can no more admit the request than a later demotion can
+      // drop it.
+      if (c.user !== opts.bot && isRequest(c.body)) {
+        requestSightings.push({
+          id: c.id,
+          at: c.created_at,
+          association: c.author_association ?? '',
+        });
+      }
       if (
         isRequestShaped(c) &&
         (!newestRequest || c.created_at > newestRequest)
@@ -277,10 +307,19 @@ export function assess(prs, options = {}) {
     if (pr.state !== 'open') {
       continue;
     }
-    // Same predicate as the barrier scan above: the producer fires on comment
-    // creation only (so a comment edited into request shape never ran), and
-    // only for someone it would have served (ANSWERABLE_ASSOCIATIONS).
+    // The roster and the close gate read different edit predicates, on
+    // purpose. The roster stays strict (unedited only): the producer fires
+    // on comment creation only, so a comment edited into request shape never
+    // ran a lane, and a trusted account must not manufacture an unanswered
+    // entry out of an old comment. The gate pairs over the barrier's looser
+    // predicate: an edited request it cannot see re-pairs this PR's results
+    // onto a later request, or vanishes while the barrier still floors at
+    // its created_at — either way certifying a recovery on a push that
+    // predates the request. Under the loose predicate an edited request can
+    // only REFUSE a close — by claiming a result of its own or holding the
+    // gate as unserved — never certify one.
     const requests = comments.filter(isAnswerableRequest);
+    const gateRequests = comments.filter(isRequestShaped);
     // The close gate's own attribution, which the roster's proxy below cannot
     // give it. Match each request, oldest first, to the earliest result that
     // postdates it and no earlier request has taken. Runs on one PR are
@@ -291,7 +330,7 @@ export function assess(prs, options = {}) {
     // result" reading would otherwise spend twice: once as proof the lane
     // recovered, and again as proof this request was served.
     let cursor = 0;
-    for (const req of requests) {
+    for (const req of gateRequests) {
       while (
         cursor < prResults.length &&
         prResults[cursor].at <= req.created_at
@@ -350,6 +389,7 @@ export function assess(prs, options = {}) {
     infraInStreak: infra,
     pushFailedInStreak: pushFailed,
     unanswered,
+    requestSightings,
     newestRequest,
     unserved,
     latestAttempt: attempts.at(-1) ?? null,
@@ -362,7 +402,9 @@ export function assess(prs, options = {}) {
 // whether the picture moved. `unanswered` is the MEMBERSHIP (request ids),
 // not the count: during a never-ran outage one request gets answered by a
 // skip while another ages past the stale window, the count holds and the
-// roster the issue shows would otherwise freeze on week one.
+// roster the issue shows would otherwise freeze on week one. `requests` is
+// the first-sight association judgments, each [id, created_at, association]
+// (see ANSWERABLE_ASSOCIATIONS).
 // Kept single-line (STATE_RE) — JSON.stringify of a flat object never emits
 // a newline.
 function stateOf(assessment, previous = null) {
@@ -374,10 +416,29 @@ function stateOf(assessment, previous = null) {
   // plus answered ones and ones on closed PRs, so it is never older.
   const carried = previous?.newestRequest ?? null;
   const seen = assessment.newestRequest ?? null;
+  // The association judgments carry the same way, first sight wins: merge
+  // the record with this tick's sightings, dropping only entries that aged
+  // out of the window — their comments are invisible to assess() now, so the
+  // entry could never apply again, and an unbounded record would eventually
+  // overflow the comment the state rides in.
+  const judgments = new Map();
+  for (const entry of previous?.requests ?? []) {
+    if (entry[1] >= assessment.windowStart) {
+      judgments.set(entry[0], entry);
+    }
+  }
+  for (const s of assessment.requestSightings) {
+    if (!judgments.has(s.id)) {
+      judgments.set(s.id, [s.id, s.at, s.association]);
+    }
+  }
   return {
     streak: assessment.streak,
     unanswered: assessment.unanswered.map((u) => u.id),
     newestRequest: carried && (!seen || carried > seen) ? carried : seen,
+    requests: [...judgments.values()].sort(
+      (a, b) => a[1].localeCompare(b[1]) || a[0] - b[0],
+    ),
     latest: assessment.latestAttempt?.id ?? null,
   };
 }
@@ -410,7 +471,8 @@ function validState(state) {
   // A field that is absent reads as "not recorded", which every gate already
   // handles; a field that is PRESENT must have the type the watch writes.
   const ok = (v, type) => v === undefined || v === null || typeof v === type;
-  const { streak, unanswered, newestRequest, latest, recovered } = state;
+  const { streak, unanswered, newestRequest, latest, recovered, requests } =
+    state;
   if (!ok(streak, 'number') || !ok(newestRequest, 'string')) {
     return null;
   }
@@ -422,6 +484,21 @@ function validState(state) {
     unanswered !== null &&
     (!Array.isArray(unanswered) ||
       unanswered.some((v) => typeof v !== 'number'))
+  ) {
+    return null;
+  }
+  if (
+    requests !== undefined &&
+    requests !== null &&
+    (!Array.isArray(requests) ||
+      requests.some(
+        (v) =>
+          !Array.isArray(v) ||
+          v.length !== 3 ||
+          typeof v[0] !== 'number' ||
+          typeof v[1] !== 'string' ||
+          typeof v[2] !== 'string',
+      ))
   ) {
     return null;
   }
@@ -737,7 +814,14 @@ export function fetchPrs(gh, repo, since) {
       'GET',
       'search/issues',
       '-f',
-      `q=repo:${repo} is:pr "@qwen-code /resolve" in:comments updated:>=${since}`,
+      // Two quoted TOKENS, never the contiguous phrase: GitHub search
+      // measurably fails to match "@qwen-code /resolve" against PRs whose
+      // comments contain it byte-exactly, and every PR it drops takes its
+      // attempts, requests, and recovery evidence with it — the failure
+      // find-marked-issue.sh's client-side marker rule names. The token form
+      // is a superset, and the precision it gives up was never needed:
+      // assess() re-validates every comment client-side with isRequest().
+      `q=repo:${repo} is:pr "@qwen-code" "/resolve" in:comments updated:>=${since}`,
       '-f',
       'per_page=100',
       '--paginate',
@@ -942,8 +1026,11 @@ export function main({
     .toISOString()
     .slice(0, 10);
   const prs = fetchPrs(gh, repo, since);
-  const assessment = assess(prs, opts);
   const existing = findOpenIssue(gh, repo, opts.label);
+  // The issue's state carries the first-sight association judgments; without
+  // them assess() would judge every request by the live, read-time field.
+  const previous = existing ? readState(existing.texts) : null;
+  const assessment = assess(prs, { ...opts, recorded: previous?.requests });
   const actions = decide(assessment, existing, opts);
   console.log(
     `resolve-health: ${prs.length} PRs since ${since}, ${assessment.attempts.length} attempts, streak=${assessment.streak}, unanswered=${assessment.unanswered.length}, alarm=${assessment.alarm}, issue=${existing?.number ?? 'none'}, actions=${actions.map((a) => a.type).join(',') || 'none'}`,

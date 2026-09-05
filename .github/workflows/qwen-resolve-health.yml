@@ -38,7 +38,10 @@ jobs:
   check:
     if: "github.repository == 'QwenLM/qwen-code'"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 10
+    # One paginated comments call per discovered PR, serially: the two-token
+    # discovery query admits ~2.7x the candidate set (measured ~430 s of
+    # fan-out), so the ceiling rises with it rather than bounding the set.
+    timeout-minutes: 20
     permissions:
       contents: 'read'
       issues: 'write'
