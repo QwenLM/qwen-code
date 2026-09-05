@@ -23,6 +23,7 @@ import type {
 import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
 import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
+  createDebugLogger,
   readSessionPrs,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -72,6 +73,8 @@ import {
   type StandaloneDeletionJournal,
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
+
+const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
 
 export type StandaloneSessionServiceErrorCode =
   | 'invalid_request'
@@ -2696,7 +2699,15 @@ export class StandaloneSessionService {
       session.modelApplied === false
     ) {
       await this.cleanRollbackBeforePersistence(runtime, sessionId);
-      await this.options.workspace.discardEmptyConversationDirectory(sessionId);
+      try {
+        await this.options.workspace.discardEmptyConversationDirectory(
+          sessionId,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       this.directoryStates.delete(sessionId);
       throw serviceError('model_selection_failed', sessionId, true);
     }

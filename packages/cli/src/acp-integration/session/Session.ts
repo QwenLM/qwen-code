@@ -1464,6 +1464,7 @@ interface CronFire {
   id?: string;
   prompt: string;
   cronExpr?: string;
+  recurring?: boolean;
   missed?: boolean;
   /** The minute this fire was stamped for. The scheduler assigns it before
    * calling `onFire` and writes the run record under the same value, so it
@@ -8540,6 +8541,21 @@ export class Session implements SessionContext {
           );
         });
     };
+    const restoreOneShot = async (): Promise<void> => {
+      if (job.recurring !== false || !job.id) return;
+      try {
+        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        if (!restored) {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not find its consumed one-shot to restore`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not restore its unexecuted one-shot: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
     if (
       (job.modelServiceId !== undefined &&
         !isValidCronTaskRoutingId(job.modelServiceId)) ||
@@ -8549,6 +8565,7 @@ export class Session implements SessionContext {
         `Scheduled task ${taskId} has invalid model or group routing; it was not dispatched`,
       );
       await record({ dispatchFailed: true });
+      await restoreOneShot();
       return;
     }
     let sessionId: string;
@@ -8618,7 +8635,10 @@ export class Session implements SessionContext {
           ? { dispatchFailed: true }
           : { sessionId: this.sessionId, dispatchFailed: true },
       );
-      if (modelSelectionFailed) return;
+      if (modelSelectionFailed) {
+        await restoreOneShot();
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: 'cron',

@@ -4455,8 +4455,9 @@ describe('Session', () => {
     }
   });
 
-  it('does not dispatch a scheduled task with an over-long model id', async () => {
+  it('restores a consumed one-shot when model selection fails', async () => {
     const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const restoreConsumedOneShot = vi.fn().mockResolvedValue(true);
     const scheduler = {
       hasPendingWork: true,
       enableDurable: vi.fn().mockResolvedValue(undefined),
@@ -4466,6 +4467,7 @@ describe('Session', () => {
             id: string;
             prompt: string;
             cronExpr: string;
+            recurring: false;
             lastFiredAt: number;
             sessionMode: 'per_run';
             modelServiceId: string;
@@ -4475,6 +4477,60 @@ describe('Session', () => {
             id: 'task-1',
             prompt: 'review the next PR',
             cronExpr: '0 * * * *',
+            recurring: false,
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            modelServiceId: 'missing-model',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      restoreConsumedOneShot,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
+      new RequestError(-32603, 'selected model is unavailable', {
+        errorKind: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE,
+      }),
+    );
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+    });
+    expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+      dispatchFailed: true,
+    });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch a scheduled task with an over-long model id', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const restoreConsumedOneShot = vi.fn().mockResolvedValue(true);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            recurring: false;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            modelServiceId: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            recurring: false,
             lastFiredAt: 123,
             sessionMode: 'per_run',
             modelServiceId: 'm'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
@@ -4483,6 +4539,7 @@ describe('Session', () => {
       ),
       stop: vi.fn(),
       annotateRunSession,
+      restoreConsumedOneShot,
       getExitSummary: vi.fn().mockReturnValue(undefined),
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
@@ -4494,6 +4551,7 @@ describe('Session', () => {
       expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
         dispatchFailed: true,
       });
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
     });
     expect(mockClient.extMethod).not.toHaveBeenCalled();
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();

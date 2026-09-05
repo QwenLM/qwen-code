@@ -1386,6 +1386,41 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('restores the exact per-run one-shot when dispatch fails', async () => {
+      const createdAt = Date.now();
+      const original: DurableCronTask = {
+        ...diskTask('once-retry'),
+        cron: '7 18 * * *',
+        recurring: false,
+        createdAt,
+        name: 'Retry selected model',
+        enabled: true,
+        sessionId: 'session-1',
+        sessionOwnedByTask: false,
+        sessionMode: 'per_run',
+        modelServiceId: 'missing-model',
+        groupId: 'group-1',
+      };
+      const tasks = [
+        { ...diskTask('before'), enabled: false },
+        original,
+        { ...diskTask('after'), enabled: false },
+      ];
+      await writeCronTasks(tmpDir, tasks);
+      await scheduler.enableDurable('session-1');
+
+      let restoration: Promise<boolean> | undefined;
+      scheduler.start((job) => {
+        restoration = scheduler.restoreConsumedOneShot(job.id);
+      });
+      const fireAt = nextFireTime(original.cron, new Date(createdAt));
+      scheduler.tick(new Date(fireAt.getTime() + 1000));
+      scheduler.stop();
+
+      expect(await restoration).toBe(true);
+      expect(await readCronTasks(tmpDir)).toEqual(tasks);
+    });
+
     // Settle + tear down a second scheduler sharing this tmpDir, so its
     // fire-and-forget writes don't race the afterEach rm.
     async function settle(s: CronScheduler): Promise<void> {
