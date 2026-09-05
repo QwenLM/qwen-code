@@ -6,6 +6,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import sidebarStyles from './WebShellSidebar.module.css';
+import {
+  clickSidebarElement as click,
+  flushSidebar,
+  installSidebarDomShims,
+  makeSidebarSession as makeSession,
+  resolveWebShellSessions,
+} from './WebShellSidebar.test-harness';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
@@ -114,14 +121,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
       workspaceCwd: connection.workspaceCwd,
       options,
     };
-    if (options?.enabled === false) {
-      return { ...state, sessions: [], data: undefined, catalogQuery };
-    }
-    return {
-      ...state,
-      data: state.data ?? state.sessions,
+    return resolveWebShellSessions(
+      state,
+      options?.enabled !== false,
       catalogQuery,
-    };
+    );
   },
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
@@ -164,42 +168,7 @@ const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
-
-function makeSession(
-  sessionId: string,
-  over: Partial<DaemonSessionSummary> = {},
-): DaemonSessionSummary {
-  return {
-    sessionId,
-    workspaceCwd: '/tmp/project',
-    displayName: `Session ${sessionId}`,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    clientCount: 0,
-    hasActivePrompt: false,
-    isArchived: false,
-    isPinned: false,
-    groupId: null,
-    color: null,
-    ...over,
-  } as DaemonSessionSummary;
-}
+installSidebarDomShims();
 
 const organizationCapabilities = {
   qwenCodeVersion: '1.2.3',
@@ -260,13 +229,6 @@ function renderSidebar(
   });
 }
 
-async function flushSidebar() {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
 function groupHeader(label: string): HTMLButtonElement {
   const section = container.querySelector<HTMLElement>(
     `section[aria-label="${label}"]`,
@@ -277,10 +239,6 @@ function groupHeader(label: string): HTMLButtonElement {
   );
   expect(header).not.toBeNull();
   return header!;
-}
-
-function click(element: HTMLElement): void {
-  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
 beforeEach(() => {

@@ -9,6 +9,11 @@ import {
   type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import {
+  clickSidebarElement,
+  installSidebarDomShims,
+  resolveWebShellSessions,
+} from './WebShellSidebar.test-harness';
 
 const {
   connection,
@@ -201,20 +206,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         workspaceCwd: connection.workspaceCwd,
         options,
       };
-      if (options?.enabled === false) {
-        return { ...state, sessions: [], data: undefined, catalogQuery };
-      }
-      // A useSessions implementation may model an unsettled catalog page with
-      // an explicit `data` key (undefined until the fetch settles), matching
-      // the real store's empty snapshot on a query-key change.
-      return {
-        ...state,
-        data:
-          'data' in state
-            ? (state as { data?: DaemonSessionSummary[] }).data
-            : state.sessions,
+      return resolveWebShellSessions(
+        state,
+        options?.enabled !== false,
         catalogQuery,
-      };
+      );
     },
     useSessionCatalogController: () => ({
       refreshQueries: refreshSessionCatalogQueries,
@@ -339,22 +335,7 @@ const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 const capabilities = {
   qwenCodeVersion: '1.2.3',
@@ -501,11 +482,7 @@ function menuItemLabels(): string[] {
 }
 
 function click(element: HTMLElement): void {
-  element.dispatchEvent(
-    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-  );
-  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  clickSidebarElement(element, true);
 }
 
 function setInputValue(input: HTMLInputElement, value: string): void {
