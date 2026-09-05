@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import MarkdownIt from 'markdown-it';
+
 import { stripSeverityPrefix } from './inline-counts.js';
 
 // The attribution footer every posted review carries, stated once.
@@ -432,51 +434,122 @@ const STRIP_TAIL_LIMIT = 8192;
  * the marker phrase cannot hide a trailing forged footer (or forge one:
  * the cut maps back to the original bytes) — and the projection of a
  * marker-less tail returns the body byte-identical without the regex.
+ * Quoted code is blanked out of the projection first, for the reason
+ * `blankQuotedCode` states; a body that cannot project the marker at all
+ * returns before paying for that structural scan.
  */
 export function stripReviewFooter(body: string): string {
-  const tail = body.slice(-STRIP_TAIL_LIMIT);
+  if (!canProjectFooterMarker(body)) return body;
+  return stripTrailingFooter(body, blankQuotedCode(body));
+}
+
+/**
+ * The trailing strip for ONE folded line — the shape the one-line channels
+ * post: `compose-review`'s collapsed deferral titles, reroute records and
+ * ingested entries, and `submit`'s relocated claim. A folded line carries
+ * no block structure — the collapse flattened it — so a footer on it is
+ * never the quotation `stripReviewFooter`'s blanking keeps: a fence
+ * delimiter leading the line is posted text, not a code edge, and must
+ * not blind the strip.
+ */
+export function stripReviewFooterLine(line: string): string {
+  return stripTrailingFooter(line, line);
+}
+
+/**
+ * Whether the string can project the footer marker at all: the projection
+ * assembles it only out of literal characters, entity decodes (which need
+ * a literal `&`), or a dropped comment joining the halves a literal `<`
+ * sits between. `/review`, not FOOTER_MARKER: re-wrapping can split the
+ * phrase across a soft break, and only `/review` survives every split
+ * point short of the word itself.
+ */
+function canProjectFooterMarker(s: string): boolean {
+  return s.includes('/review') || s.includes('&') || s.includes('<');
+}
+
+/**
+ * The strip proper. `scanned` is `body` with its quoted code blanked — or
+ * `body` itself — and the SAME length, so an index into the projection of
+ * its tail is an index into the original bytes the cut slices.
+ */
+function stripTrailingFooter(body: string, scanned: string): string {
+  const tail = scanned.slice(-STRIP_TAIL_LIMIT);
   const proj = projectInvisibles(tail);
   if (!proj.text.includes(FOOTER_MARKER)) return body;
   const m = REVIEW_FOOTER_RE.exec(proj.text);
   if (m === null) return body;
   const keep = proj.starts[m.index];
-  return body.slice(0, body.length - tail.length) + tail.slice(0, keep);
+  return body.slice(0, body.length - tail.length + keep);
 }
+
+/**
+ * The body's code lines blanked to same-length NULs — fenced and indented
+ * code, fence delimiters included — in the one shape a trailing-anchored
+ * strip can use: blanking is length-preserving, so the projection's index
+ * map still points into the original bytes.
+ *
+ * Code content is a quotation. GitHub renders it literally, so it can
+ * neither BE attribution nor hide any: unblanked, a `<!--` with no `-->`
+ * quoted in a witness block (a review of an HTML marker quotes exactly
+ * that) projects as a comment running to the END of the input and takes
+ * the real trailing footer out of the projection with it — the strip then
+ * sees no footer, leaves the model's own, and the canonical one lands
+ * beside it as a second attribution line. The delimiters blank with the
+ * content: GitHub renders neither them nor an opener's info string, and a
+ * `<!--` lodged in the info string would blind the strip the same way.
+ *
+ * Scanned from the body's START, not from the tail the strip matches on: a
+ * fence's state is only knowable from where it opened, and a tail cut
+ * inside one reads its code as ordinary text. The scan is one linear pass,
+ * so the tail bound the regex needs is untouched.
+ */
+function blankQuotedCode(body: string): string {
+  const scanned = scanLines(body);
+  if (!scanned.some(({ kind }) => kind === 'fence' || kind === 'code')) {
+    return body;
+  }
+  const endings = body.match(LINE_ENDING_RE) ?? [];
+  return scanned
+    .map(
+      ({ line, kind }, i) =>
+        (kind === 'fence' || kind === 'code'
+          ? '\u0000'.repeat(line.length)
+          : line) + (endings[i] ?? ''),
+    )
+    .join('');
+}
+
+/**
+ * Every CommonMark line ending — `\n`, `\r\n`, and a bare `\r`. The one
+ * spelling for the scan and the blanking: both index lines the parser
+ * counted under the same definition (it normalizes all three to one line
+ * break), so a second spelling would misalign the two. Carries the `g`
+ * flag; `.split()` clones the regex and `.match()` resets `lastIndex`, so
+ * both are safe call sites.
+ */
+const LINE_ENDING_RE = /\r\n?|\n/g;
+
+/**
+ * The CommonMark classifier every line-aware strip reads. `html: true` is
+ * load-bearing: with raw-HTML blocks parsed as paragraphs instead, a fence
+ * delimiter inside `<div>…</div>` would open code state GitHub does not
+ * render. Same construction as `audit-layers.ts`. Only `token.type` and
+ * `token.map` are read, and the `block` core rule produces both — the
+ * inline pass is pure cost (and quadratic on some one-line bodies), so it
+ * is off.
+ */
+const BLOCK_PARSER = new MarkdownIt({ html: true });
+BLOCK_PARSER.core.ruler.disable(['inline']);
 
 /** The blockquote prefix a line can carry, at any nesting depth. */
 const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
 
-/** Fence delimiter runs (``` or ~~~), openers and closers alike. */
-const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
-
-/** A fence CLOSER: same shape, nothing but trailing whitespace after it. */
-const FENCE_CLOSE_RE = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/;
-
-// The CommonMark type-6 block-level tag names, opening or closing.
-const HTML_BLOCK_TAG_NAMES =
-  '(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)';
-
-/**
- * The simple HTML-block opener the line-map tracks (see `scanLines`): an
- * opening tag, or a CLOSING block-level tag — `</div>` alone on a line
- * starts a blank-line-terminated HTML block exactly as `<div>` does.
- */
-const HTML_BLOCK_OPEN_RE = new RegExp(
-  `^(?:<[A-Za-z][^>]*>?|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>)[ \\t]*\\r?$`,
-  'i',
-);
-
-/** The type-1 openers: their blocks end at the closing tag, not a blank line. */
-const HTML_TYPE1_OPEN_RE = /^<(pre|script|style|textarea)\b/i;
-
-/** Structural classes a line falls into, in scan order. */
+/** Structural classes a line falls into. */
 type LineKind =
   | 'text' // ordinary line — a strip's map applies
-  | 'htmlOpen' // opens a simple HTML block — kept verbatim
-  | 'html' // HTML-block content — mapped: renders VISIBLY on GitHub
-  | 'htmlEnd' // the blank line closing an HTML block — kept
-  | 'fenceEdge' // a fence opener or closer — kept
-  | 'fence' // fenced-code content — kept (a quotation)
+  | 'html' // tag-based HTML-block content — mapped: renders VISIBLY on GitHub
+  | 'fence' // fenced-code line, delimiters included — kept (a quotation)
   | 'code'; // indented-code content — kept (a quotation)
 
 interface ScannedLine {
@@ -490,114 +563,73 @@ interface ScannedLine {
 }
 
 /**
- * One structural pass over the body, shared by every line-aware strip:
- * markdown constructs under which a footer/marker-shaped line is a
- * QUOTATION, not attribution, classified identically everywhere.
+ * One structural pass over the body, shared by every line-aware strip and
+ * the blanking: which lines GitHub renders as code (the quotations the
+ * maps keep and the blanking hides), which as visible HTML-block content,
+ * and which as ordinary text the maps apply to — classified identically
+ * everywhere.
  *
- * Blockquote-wrapped lines classify on their CONTENT, after the `>` prefix
- * — `quoteBlock` in pr-context quotes every earlier comment containing code
- * as `> ``` …`, and a scanner that never sees past the `>` reaches inside
- * quoted code and corrupts it. Fences track their quote depth for the same
- * reason: a shallower depth ends the quoted block carrying the fence. A
- * DEEPER depth inside an open fence does not — a `>`-prefixed line inside a
- * fenced code block is literal code content on GitHub, and the fence stays
- * open past it; the closer must carry the opener's own depth for the same
- * reason.
+ * The classification is the CommonMark parser's token map, not a hand
+ * model of the block grammar. The scan this replaced tracked fences and
+ * HTML blocks itself and disagreed with the renderers on lazy continuation
+ * (an indented line right after a paragraph line is prose, not code), on
+ * list content indents and tab stops, and on fence delimiters inside a
+ * raw-HTML block — each disagreement kept a forged footer the render
+ * showed, or hid one it rendered as code. A fence token's map covers its
+ * delimiters too, so they classify with their content. Blockquotes and
+ * list items are the parser's containers: a `> ```` quotation of an earlier
+ * round's comment (`quoteBlock` in pr-context) is code at its depth.
  *
- * The fence state is the opener's delimiter character and run length:
- * CommonMark closes a fence only on the same character, at least the
- * opener's length, with no info string — a bare boolean inverts parity on
- * nested/mixed quotes, exactly the 'quoting an earlier round' shape these
- * strips exist for. It also never OPENS a backtick fence whose info string
- * carries a backtick — CommonMark forbids that spelling, so the line is
- * ordinary paragraph text (tilde fences may carry one). Lines inside a
- * simple HTML block (`<div>`, `</div>`, … until the next blank line;
- * `<pre>`/`<script>`/`<style>`/`<textarea>` until their closing tag) render
- * VISIBLY on GitHub, so the state only stops a fence-shaped line inside one
- * from toggling fence state — and a `>`-only line is not the blank line
- * that ends such a block.
+ * Tag-based HTML blocks (`<div>`, `<details>`, `<pre>` …) render their
+ * content visibly, so it maps like text — the one droppable quotation kind
+ * — and is what the marker-exposure gate counts. The raw kinds (a comment,
+ * PI, declaration or CDATA block) render nothing; they were never modeled
+ * and classify as text, where the projection's own comment handling
+ * applies.
+ *
+ * Blockquote-wrapped lines keep their prefix on `line`, their content on
+ * `content`, and their prefix depth on `depth`: the maps match quoted
+ * shapes at any depth, and a paragraph run ends where the depth changes.
  *
  * Splits on every CommonMark line ending — `\n`, `\r\n`, and a bare
- * `\r`: GitHub renders all three as a line break, and a `\n`-only scan
- * read the CR twins of these bodies as one line, leaving a forged footer
- * or a hollow fence the LF twin strips or refuses.
+ * `\r`: the parser normalizes all three to one line break, so its map and
+ * this split stay aligned, and the CR twins of these bodies classify like
+ * the LF ones.
  */
 function scanLines(body: string): ScannedLine[] {
-  let fence: { char: string; len: number; depth: number } | null = null;
-  let html: { endRe: RegExp | null } | null = null;
-  const out: ScannedLine[] = [];
-  for (const line of body.split(/\r\n?|\n/)) {
+  const lines = body.split(LINE_ENDING_RE);
+  const kinds: LineKind[] = new Array<LineKind>(lines.length).fill('text');
+  for (const token of BLOCK_PARSER.parse(body, {})) {
+    if (token.map === null) continue;
+    let kind: LineKind;
+    if (token.type === 'fence') kind = 'fence';
+    else if (token.type === 'code_block') kind = 'code';
+    else if (token.type === 'html_block') {
+      // A block opens at its first `<`, past any container prefix. Only a
+      // tag opens the visible kind; `<!--`, `<?`, `<!X` and `<![CDATA[`
+      // open the render-nothing kinds, which stay text.
+      const opener = lines[token.map[0]];
+      if (!/^<[A-Za-z/]/.test(opener.slice(Math.max(opener.indexOf('<'), 0)))) {
+        continue;
+      }
+      kind = 'html';
+    } else continue;
+    for (let l = token.map[0]; l < token.map[1]; l += 1) kinds[l] = kind;
+  }
+  return lines.map((line, i) => {
     const quote = QUOTE_PREFIX_RE.exec(line);
     const depth = quote === null ? 0 : quote[0].split('>').length - 1;
     const content = quote === null ? line : line.slice(quote[0].length);
-    const trimmed = content.trimStart();
-    if (html !== null) {
-      const closes =
-        html.endRe === null ? line.trim() === '' : html.endRe.test(line);
-      if (closes && html.endRe === null) {
-        html = null;
-        out.push({ line, kind: 'htmlEnd', depth, content });
-      } else {
-        out.push({ line, kind: 'html', depth, content });
-        if (closes) html = null;
-      }
-      continue;
-    }
-    if (fence !== null && depth < fence.depth) {
-      // The quoted block carrying the fence ended; reclassify outside it.
-      fence = null;
-    }
-    if (fence !== null) {
-      const close = FENCE_CLOSE_RE.exec(content);
-      if (
-        close !== null &&
-        depth === fence.depth &&
-        close[1]![0] === fence.char &&
-        close[1]!.length >= fence.len
-      ) {
-        fence = null;
-        out.push({ line, kind: 'fenceEdge', depth, content });
-      } else {
-        out.push({ line, kind: 'fence', depth, content });
-      }
-      continue;
-    }
-    if (HTML_BLOCK_OPEN_RE.test(trimmed)) {
-      const t1 = HTML_TYPE1_OPEN_RE.exec(trimmed);
-      html =
-        t1 === null
-          ? { endRe: null }
-          : { endRe: new RegExp(`</${t1[1]}\\s*>`, 'i') };
-      out.push({ line, kind: 'htmlOpen', depth, content });
-      continue;
-    }
-    const open = FENCE_RUN_RE.exec(content);
-    if (open !== null) {
-      // A backtick in a BACKTICK fence's info string is no fence at all —
-      // the line is ordinary text; tilde fences may carry one.
-      if (
-        !(open[1]![0] === '`' && content.slice(open[0].length).includes('`'))
-      ) {
-        fence = { char: open[1]![0]!, len: open[1]!.length, depth };
-        out.push({ line, kind: 'fenceEdge', depth, content });
-        continue;
-      }
-    }
-    if (/^[ \t]{4}/.test(content)) {
-      out.push({ line, kind: 'code', depth, content });
-      continue;
-    }
-    out.push({ line, kind: 'text', depth, content });
-  }
-  return out;
+    return { line, kind: kinds[i], depth, content };
+  });
 }
 
 /**
  * Line-map shared by the anywhere-strips: `map` returns the replacement
- * line, or null to drop it. Fenced code, indented code, fence edges, and
- * HTML-block openers/closers are quotations — kept verbatim; HTML-block
- * CONTENT renders visibly, so it maps like text. A body where nothing
- * changed is returned byte-identical.
+ * line, or null to drop it. Fenced code (delimiters included) and indented
+ * code are quotations — kept verbatim; HTML-block CONTENT renders visibly,
+ * so it maps like text. A body where nothing changed is returned
+ * byte-identical.
  */
 function mapLinesAware(
   body: string,
@@ -747,7 +779,7 @@ export function rendersAsNothing(text: string): boolean {
     stripped = next;
   }
   const kept: string[] = [];
-  const lines = stripped.split(/\r\n?|\n/);
+  const lines = stripped.split(LINE_ENDING_RE);
   for (let i = 0; i < lines.length; i += 1) {
     const l = lines[i]!;
     if (/^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.test(l)) continue;

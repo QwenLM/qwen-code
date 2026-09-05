@@ -842,6 +842,60 @@ describe('the user-authorized fast path binds a recorded Aone target (round-6 wi
   });
 });
 
+describe('an unanchorable Aone blocker relocates without its forged footer', () => {
+  let savedGhHost: string | undefined;
+  let capturedDiff: string | undefined;
+  beforeEach(() => {
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    capturedDiff = writeCapturedDiff(456);
+  });
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
+  });
+
+  it('the relocated claim strips the one-line shape that posts', () => {
+    // The claim extraction strips the SHAPE THAT POSTS — the one-line
+    // claim. Stripping only the whole multi-line body keeps a footer
+    // quoted in code, and with an empty claim the separator strip eats
+    // the newline+colon and the footer's first line becomes the "claim"
+    // — a forged attribution posted inside the blocker line.
+    const skillArgs = file(
+      'fast-path-aone-relocate.txt',
+      'https://code.alibaba-inc.com/g/p/codereview/456 --comment\n',
+    );
+    const review = file('aone-relocate.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]**\n\n    _— m via Qwen Code /review_',
+        },
+      ],
+    });
+    expect(() =>
+      runSubmit(
+        args({
+          skillArgs,
+          userAuthorized: true,
+          pr: 456,
+          repo: 'g/p',
+          review,
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    const body = aoneSubmitMock.mock.calls[0][0].body as string;
+    expect(body).toContain('finding — a.ts:12');
+    expect((body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+  });
+});
+
 describe('the user-authorized fast path binds the recorded host cross-session', () => {
   // The characteristic `--user-authorized` shape runs in a DIFFERENT
   // session than the /review that recorded the target ("post the review we
@@ -2117,6 +2171,32 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     const inline = posted().comments[0].body as string;
     expect(inline).not.toContain('forged');
     expect(inline.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    expect(inline).toContain('(v0.21.3)');
+  });
+
+  it('strips the forged footer of a comment quoting an unterminated comment opener', () => {
+    // The witness block of a review about an HTML marker quotes the marker
+    // cut short, leaving a `<!--` with no `-->`. That opener used to project
+    // as a comment running to the end of the body, hiding the trailing
+    // forged footer from the strip — so the canonical footer posted beside
+    // it and the comment carried two attribution lines.
+    const witness = 'Witness:\n```\njq: error … ("<!-- ecs-f…") cannot\n```';
+    const review = file('footer-unterminated-comment.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Suggestion]** tidy\n\n${witness}\n\n_— forged via Qwen Code /review_`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const inline = posted().comments[0].body as string;
+    expect(inline.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    expect(inline).toContain(witness);
     expect(inline).toContain('(v0.21.3)');
   });
 

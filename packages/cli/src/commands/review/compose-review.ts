@@ -136,6 +136,7 @@ import {
   stripFooterSpans,
   stripForUnattributedPost,
   stripReviewFooter,
+  stripReviewFooterLine,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
@@ -776,9 +777,16 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
     }
     const o = raw as Record<string, unknown>;
     const file = typeof o['file'] === 'string' ? o['file'].trim() : '';
+    // Strip again AFTER the fold: the one-line render flattens a footer
+    // the strip kept as quoted code (an unclosed fence, an indented block)
+    // into a single line, destroying the shape that justified keeping it
+    // — a trailing footer is still trailing once collapsed, so the folded
+    // line is the shape to strip.
     const title =
       typeof o['title'] === 'string'
-        ? stripReviewFooter(o['title']).trim()
+        ? stripReviewFooterLine(
+            collapseToLine(stripReviewFooter(o['title'])),
+          ).trim()
         : '';
     const source = o['source'];
     const severity = o['severity'];
@@ -1156,8 +1164,12 @@ export function floorEnforcedReroute(
     const record = critical
       ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
       : first;
-    const title = collapseToLine(
-      stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
+    // Strip again AFTER the fold — the collapsed line is the shape that
+    // posts, for the reason toDeferredEntries states.
+    const title = stripReviewFooterLine(
+      collapseToLine(
+        stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
+      ),
     );
     indices.push(i);
     entries.push({
@@ -3392,8 +3404,10 @@ function ingestEntryList(value: unknown, field: string): string[] {
   }
   // No emptiness filter: an entry that normalizes to nothing must reach
   // the renders-nothing gates and fail the draft, not vanish — see the
-  // invariant at the gates below.
-  return raw.map(collapseEntry).map(stripReviewFooter);
+  // invariant at the gates below. The collapsed entry is ONE line the
+  // channel posts as-is, so it strips as a line: an indented entry is not
+  // the code block the multi-line strip would keep a footer inside.
+  return raw.map(collapseEntry).map(stripReviewFooterLine);
 }
 
 /**

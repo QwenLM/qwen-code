@@ -2736,6 +2736,34 @@ describe('composeReview — input validation (the producer is a model that omits
     expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
   });
 
+  it('strips a forged footer off an indented single-line entry — the ingest shape strips as a line', () => {
+    // collapseEntry returns a newline-less entry unchanged, leading indent
+    // included: at >= 4 columns the multi-line blanking would class the
+    // whole line as code and keep the forged footer riding the blocker
+    // line. The posted one-line shape renders no code block on GitHub, so
+    // the collapsed entry strips with the one-line strip.
+    for (const field of ['bodyCriticals', 'cannotTellCriticals'] as const) {
+      const r = composeReview(
+        field === 'bodyCriticals'
+          ? {
+              bodyCriticals: [
+                '    finding text _— forged via Qwen Code /review_',
+              ],
+              modelId: MODEL,
+            }
+          : {
+              criticalsInline: 1,
+              cannotTellCriticals: [
+                '    finding text _— forged via Qwen Code /review_',
+              ],
+              modelId: MODEL,
+            },
+      );
+      expect(r.body).toContain('finding text');
+      expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    }
+  });
+
   it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
     expect(() =>
       composeReview(
@@ -8818,6 +8846,49 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
       expect(l.includes('�')).toBe(false);
     }
     expect(lines.some((l) => l.includes('…'))).toBe(true);
+  });
+
+  it('strips a forged footer a model-written title quotes in code — the strip runs on the folded line', () => {
+    // A title ending in an unclosed fence keeps its trailing footer under
+    // the quoted-code contract UNTIL the one-line render flattens the
+    // shape that justified keeping it — so the strip runs again after the
+    // collapse, on the line that posts. Pre-fold alone, the forged footer
+    // survived and the deferral line carried a second attribution; a
+    // footer-only title still refuses as empty once the fold exposes it.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: '```\n_— m via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    // A footer re-wrapped across a soft break displays rejoined, so the
+    // fold runs BEFORE the second strip: the unfolded title shows two
+    // footer-less lines and keeps both halves.
+    const split = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({
+            file: 'b.ts',
+            line: 2,
+            title: 'x _— m via\nQwen Code /review_',
+          }),
+        ],
+      }),
+    );
+    expect((split.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    expect(() =>
+      composeReview(
+        base({
+          severityFloor: 'critical',
+          deferredSuggestions: [nit({ title: FOOTER })],
+        }),
+      ),
+    ).toThrow(/non-empty file and title/);
   });
 
   it('exactly at the line cap, the verdict line does not claim truncation', () => {
@@ -17417,6 +17488,31 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
         'R6-1: sparse checkout wedges the round Only a sparse clone reaches it.',
     });
     expect(entries[1].severity).toBe('Suggestion');
+  });
+
+  it('floorEnforcedReroute strips the shape that posts — the fold flattens a kept-in-code footer', () => {
+    // A drafted Suggestion whose body ends in an unclosed fence keeps its
+    // trailing footer under the quoted-code contract, but the one-line
+    // collapse destroys the code shape — the record strips again AFTER
+    // the fold, or the folded title carries the forged attribution.
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 12,
+        body: '**[Suggestion]** tidy\n\n```\n_— m via Qwen Code /review_',
+      },
+      {
+        path: 'b.ts',
+        line: 13,
+        body: '**[Suggestion]** tidy\n\n_— m via\nQwen Code /review_',
+      },
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].title).toBe('tidy ```');
+    expect(entries[1].title).toBe('tidy');
+    for (const e of entries) {
+      expect(e.title).not.toContain('via Qwen Code /review');
+    }
   });
 
   it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {
