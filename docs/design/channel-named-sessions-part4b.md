@@ -245,10 +245,14 @@ because the create route deliberately does the opposite two blocks away:
 relocation failure removes the checkout "only when the session was
 definitively removed" (a bridge timeout is caller-facing; relocation may
 still land), and the post-relocation persistence failure preserves on an
-inconclusive delete and logs it. The outer catch is different in kind, not a
-relaxation of that rule: under `!spawnCompleted` no session exists, so
-nothing can own the checkout, whereas both inner handlers may still have a
-live session inside it.
+inconclusive delete and logs it. The block this PR changes is different in
+kind, not a relaxation of that rule: it is the post-spawn generation-guard
+catch, which runs before relocation is ever attempted — the session exists
+there (and orphan-confirmed removal is attempted on it), but no session has
+entered the worktree, so nothing can own the checkout regardless of how that
+cleanup turned out. The `!spawnCompleted` "no session exists" rationale
+belongs to the spawn-failed outer catch, a different block this PR does not
+change.
 
 Issue #11024 (the follow-up for the last two rows) also carries the
 reap-cleanup requirements gathered during this design's review, so they
