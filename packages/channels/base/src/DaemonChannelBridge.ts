@@ -38,6 +38,8 @@ export interface DaemonChannelEvent {
 export interface DaemonChannelSessionClient {
   readonly sessionId: string;
   readonly workspaceCwd: string;
+  readonly worktree?: { slug: string; path: string; branch: string };
+  readonly worktreeState?: 'persisted-v1';
   readonly lastEventId?: number;
   prompt(
     req: {
@@ -87,6 +89,7 @@ export interface DaemonChannelSessionFactoryRequest {
   approvalMode?: string;
   /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
+  worktree?: Record<string, never>;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -124,6 +127,8 @@ export interface DaemonChannelBridgeOptions {
    * `sessionAttachments`, and for hosts that construct this bridge themselves.
    */
   sessionPermissionVote?: boolean;
+  /** Daemon guarantees durable worktree create/restore attestation. */
+  sessionWorktreePersistence?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -386,6 +391,10 @@ export class DaemonChannelBridge
         sessionId: session.sessionId,
         workspaceCwd: session.workspaceCwd,
         hasActivePrompt: this.activePrompts.has(session.sessionId),
+        ...(session.worktree ? { worktree: { ...session.worktree } } : {}),
+        ...(session.worktreeState
+          ? { worktreeState: session.worktreeState }
+          : {}),
       });
     }
     return result;
@@ -400,6 +409,11 @@ export class DaemonChannelBridge
     options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
+    if (options?.worktree && !this.options.sessionWorktreePersistence) {
+      throw new Error(
+        'The daemon does not support durable Channel worktree sessions.',
+      );
+    }
     const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
@@ -407,6 +421,7 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
       ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      ...(options?.worktree ? { worktree: options.worktree } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -539,7 +554,7 @@ export class DaemonChannelBridge
         removeAttachment
       ) {
         try {
-          // Fan the uploads out like the webui's attachment path: names are
+          // Fan the uploads out like the browser attachment path: names are
           // index-disambiguated and prompt order comes from the array order,
           // so nothing serializes the uploads themselves.
           const uploads = await Promise.allSettled(

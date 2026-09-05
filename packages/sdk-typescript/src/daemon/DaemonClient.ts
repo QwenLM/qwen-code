@@ -34,6 +34,8 @@ import type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonEvent,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
@@ -53,6 +55,8 @@ import type {
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  DaemonSessionTurnIndexPage,
+  DaemonSessionTurnIndexPageOptions,
   SideTaskSessionRequest,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
@@ -431,9 +435,21 @@ function transcriptPageSuffix(
 ): string {
   const query = new URLSearchParams();
   if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
+  if (opts.direction !== undefined) query.set('direction', opts.direction);
+  if (opts.atRecordId !== undefined) query.set('atRecordId', opts.atRecordId);
+  if (opts.snapshot !== undefined) query.set('snapshot', opts.snapshot);
   if (opts.beforeRecordId !== undefined) {
     query.set('beforeRecordId', opts.beforeRecordId);
   }
+  if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+  const value = query.toString();
+  return value ? `?${value}` : '';
+}
+
+function turnIndexPageSuffix(opts: DaemonSessionTurnIndexPageOptions): string {
+  const query = new URLSearchParams();
+  if (opts.snapshot !== undefined) query.set('snapshot', opts.snapshot);
+  if (opts.start !== undefined) query.set('start', String(opts.start));
   if (opts.limit !== undefined) query.set('limit', String(opts.limit));
   const value = query.toString();
   return value ? `?${value}` : '';
@@ -481,7 +497,7 @@ function stripTrailingSlashes(url: string): string {
  *
  * Defensive on three axes:
  *   1. **Browser-safe**: `globalThis.process` indirection. The SDK is
- *      imported by `@qwen-code/webui`; a literal
+ *      imported by `@qwen-code/web-shell`; a literal
  *      `process.env[...]` would explode at module load on browser
  *      bundles. Browser globals don't expose `process` so this returns
  *      `undefined` cleanly there.
@@ -1499,6 +1515,18 @@ export class DaemonClient {
         return (await res.json()) as DaemonWorkspaceSkillsStatus;
       },
     );
+  }
+
+  workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.jsonRequest('/workspace/config/skills', 'Skills config', {
+      mode: 'rest',
+    });
+  }
+
+  workspaceRuntimeSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.jsonRequest('/workspace/runtime/skills', 'Skills runtime', {
+      mode: 'rest',
+    });
   }
 
   async workspaceAcpPreheat(
@@ -3237,6 +3265,17 @@ export class DaemonClient {
     );
   }
 
+  async getSessionTurnIndexPage(
+    sessionId: string,
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    return await this.jsonRequest<DaemonSessionTurnIndexPage>(
+      `/session/${urlEncode(sessionId)}/turn-index${turnIndexPageSuffix(opts)}`,
+      'GET /session/:id/turn-index',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
   async resolveSubagentSession(
     sessionId: string,
     subagentRef: string,
@@ -3441,6 +3480,48 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionAgents(
+    sessionId: string,
+    clientId?: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAgentsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/agents`,
+      { headers: this.headers({}, clientId), signal },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/agents');
+        }
+        return (await res.json()) as DaemonSessionAgentsStatus;
+      },
+    );
+  }
+
+  async sessionAgentTrace(
+    sessionId: string,
+    opts: {
+      rootAgentId?: string;
+      clientId?: string;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<DaemonAgentTrace> {
+    const query = new URLSearchParams();
+    if (opts.rootAgentId) {
+      query.set('rootAgentId', opts.rootAgentId);
+    }
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/agent-trace${suffix}`,
+      { headers: this.headers({}, opts.clientId), signal: opts.signal },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/agent-trace');
+        }
+        return (await res.json()) as DaemonAgentTrace;
       },
     );
   }
@@ -3928,6 +4009,29 @@ export class DaemonClient {
     );
   }
 
+  async listSessionAttachments(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionAttachmentReference[]> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/attachments');
+        }
+        const body = (await res.json()) as { attachments?: unknown };
+        return Array.isArray(body.attachments)
+          ? (body.attachments as DaemonSessionAttachmentReference[])
+          : [];
+      },
+    );
+  }
+
   async removeSessionAttachment(
     sessionId: string,
     attachmentId: string,
@@ -4266,6 +4370,27 @@ export class DaemonClient {
       `/workspace/skills/${urlEncode(skillName)}?scope=${scope}`,
       'Skill',
       { method: 'DELETE' },
+    );
+  }
+
+  installWorkspaceConfigSkill(
+    request: DaemonSkillInstallRequest & { scope: 'global' },
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest('/workspace/config/skills/install', 'Skill', {
+      method: 'POST',
+      body: request,
+      mode: 'rest',
+    });
+  }
+
+  deleteWorkspaceConfigSkill(
+    skillName: string,
+    scope: 'global',
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest(
+      `/workspace/config/skills/${urlEncode(skillName)}?scope=${scope}`,
+      'Skill',
+      { method: 'DELETE', mode: 'rest' },
     );
   }
 
@@ -6692,6 +6817,65 @@ export class WorkspaceDaemonClient {
     return this.get('/skills', 'GET /workspaces/:workspace/skills');
   }
 
+  workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/config/skills',
+      'GET /workspaces/:workspace/config/skills',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceRuntimeSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/skills',
+      'GET /workspaces/:workspace/runtime/skills',
+      { mode: 'rest' },
+    );
+  }
+
+  setWorkspaceConfigSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillToggleResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/skills/${urlEncode(skillName)}/enable`,
+      'POST /workspaces/:workspace/config/skills/:name/enable',
+      {
+        method: 'POST',
+        body: { enabled },
+        clientId: opts?.clientId,
+        mode: 'rest',
+      },
+    );
+  }
+
+  installWorkspaceConfigSkill(
+    request: DaemonSkillInstallRequest & { scope: 'workspace' },
+  ): Promise<DaemonSkillMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/config/skills/install',
+      'POST /workspaces/:workspace/config/skills/install',
+      { method: 'POST', body: request, mode: 'rest' },
+    );
+  }
+
+  deleteWorkspaceConfigSkill(
+    skillName: string,
+    scope: 'workspace',
+  ): Promise<DaemonSkillMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/skills/${urlEncode(skillName)}?scope=${scope}`,
+      'DELETE /workspaces/:workspace/config/skills/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
   workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
     return this.get('/providers', 'GET /workspaces/:workspace/providers');
   }
@@ -6898,6 +7082,19 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /workspaces/:workspace/session/:id/transcript',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
+  /** Read one sparse page of persisted navigation turns in this workspace. */
+  getSessionTurnIndexPage(
+    sessionId: string,
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    return this.client.workspaceJsonRequest<DaemonSessionTurnIndexPage>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/turn-index${turnIndexPageSuffix(opts)}`,
+      'GET /workspaces/:workspace/session/:id/turn-index',
       { clientId: opts.clientId, mode: 'rest' },
     );
   }

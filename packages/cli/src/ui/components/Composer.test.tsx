@@ -117,6 +117,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     messageQueue: [],
     constrainHeight: false,
     isInputActive: true,
+    isConfigInitialized: true,
     buffer: '',
     inputWidth: 80,
     suggestionsWidth: 40,
@@ -207,6 +208,34 @@ describe('Composer', () => {
 
       // Smoke check that the Footer renders
       expect(lastFrame()).toContain('Footer');
+    });
+
+    it('renders the startup footer while config initialization is pending', () => {
+      // Footer is the sole production consumer of useConfigInitMessage, which
+      // returns a message only while isConfigInitialized is false. Gating the
+      // footer on isInputActive alone makes the two windows disjoint, so
+      // startup would show no progress feedback at all.
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: false,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('Footer');
+      // The race this change closes must stay closed: no input before init.
+      expect(lastFrame()).not.toContain('InputPrompt');
+    });
+
+    it('keeps the footer hidden when input is inactive and initialization is done', () => {
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('Footer');
     });
   });
 

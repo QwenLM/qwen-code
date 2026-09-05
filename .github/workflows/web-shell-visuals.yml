@@ -25,11 +25,6 @@ on:
       - 'packages/web-shell/package.json'
       - 'packages/web-shell/vite.config.ts'
       - 'packages/web-shell/playwright.visuals.config.ts'
-      # The visuals dev server aliases the shared web UI library into the
-      # rendered bundle (see the `resolve.alias` block in
-      # packages/web-shell/vite.config.ts), so a change to its components/hooks
-      # must also refresh the preview.
-      - 'packages/webui/src/**'
       # NOTE: packages/sdk-typescript/src/** is deliberately NOT a trigger.
       # It is aliased in too, but the visuals render against a *mock* daemon, so
       # the SDK's transport/client layer is stubbed at the network boundary and
@@ -173,13 +168,21 @@ jobs:
       # node_modules and produce a HYBRID before. A skip here → absent baseline →
       # after-only. Screenshots only (base flow videos are discarded); `--`
       # passes the spec through to `playwright test`; browsers are shared.
+      #
+      # The positional filters are an explicit allowlist of every
+      # screenshot-producing spec: a view rendered only by a spec missing here
+      # never gets a merge-base baseline, so the composer keeps stamping it
+      # "new scenario" on every PR instead of diffing it. When adding a new
+      # screenshot spec, append it here too. The video-flow specs
+      # (flows.spec.ts) and the animation-harness test (harness.spec.ts) stay
+      # out — the base arm discards recordings, so rendering them is waste.
       - name: 'Capture before (base) screenshots'
         if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
         working-directory: 'base'
         continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts'
 
       - name: 'Compose before/after and keep only changed views'
         env:

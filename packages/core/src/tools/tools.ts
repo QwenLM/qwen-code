@@ -1023,7 +1023,13 @@ export interface ToolInfoConfirmationDetails {
 }
 
 export interface AutoModeFallbackConfirmation {
-  reason: 'classifier_unavailable';
+  reason:
+    | 'classifier_blocked_retry'
+    | 'classifier_unavailable'
+    | 'consecutive_block'
+    | 'consecutive_unavailable'
+    | 'total_denial'
+    | 'external_write';
   message: string;
 }
 

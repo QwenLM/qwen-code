@@ -203,6 +203,27 @@ describe('createSpawnChannelFactory env policy', () => {
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
   });
 
+  it('merges non-scrubbed overrides into the spawned child env', async () => {
+    // Pins the behavior the forwarding attestation claims: the factory's
+    // second argument actually reaches the child. Dropping the overrides
+    // argument from the `scrubChildEnv` call must turn this red. The key must
+    // sit outside SCRUBBED_CHILD_ENV_KEYS — a scrubbed key would assert
+    // absence rather than forwarding.
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+
+    const factory = createSpawnChannelFactory();
+    await factory('/tmp/project', {
+      QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+    });
+
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME']).toBe(
+      '1',
+    );
+  });
+
   it('marks the spawned ACP child as daemon-spawned for telemetry', async () => {
     mockSpawn.mockReturnValue(createFakeChildProcess());
 
