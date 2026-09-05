@@ -695,6 +695,7 @@ export default {
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',
   'Hide Tips': '隱藏提示',
+  'Show Tool Call Arguments': '顯示工具呼叫參數',
   'Show Line Numbers in Code': '在代碼中顯示行號',
   'Show Citations': '顯示引用',
   'Custom Witty Phrases': '自定義詼諧短語',
