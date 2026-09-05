@@ -98,7 +98,6 @@ describe('FocusModeProvider', () => {
     mkdirSync(settings.user.path);
     await act(async () => {
       await expect(getActions().toggleFocusMode()).rejects.toThrow();
-      getActions().syncFocusMode();
     });
     expect(lastFrame()).toContain('normal');
     expect(settings.merged.ui?.focusMode ?? false).toBe(false);

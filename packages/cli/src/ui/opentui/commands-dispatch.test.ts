@@ -23,6 +23,7 @@ import {
   type SlashCommandActionReturn,
 } from '../commands/types.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import { focusCommand } from '../commands/focus-command.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -705,6 +706,26 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
       type: 'info',
       text: 'Vim mode is not yet available in the OpenTUI renderer.',
     });
+  });
+
+  it('keeps focus unsupported through the real OpenTUI command context', async () => {
+    const toggleFocusMode = vi.fn(async () => true);
+    const hostOverride = { ...createFakeHost(), toggleFocusMode };
+    const { outcome, host } = await dispatch(
+      '/focus',
+      [focusCommand],
+      hostOverride,
+    );
+
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(host.items).toEqual([
+      expect.objectContaining({ type: 'user', text: '/focus' }),
+      expect.objectContaining({
+        type: 'error',
+        text: 'Focus mode is not supported by this renderer.',
+      }),
+    ]);
+    expect(toggleFocusMode).not.toHaveBeenCalled();
   });
 
   it('parent commands without an action list subcommands (info)', async () => {

@@ -636,8 +636,23 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
 
-      expect(lastFrame()).toContain('5 tool calls hidden (/focus to show)');
+      expect(lastFrame()).toContain('5 tool calls hidden (Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
+    });
+
+    it('collapses a single successful tool call to the singular summary line', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [successTool('c1')],
+      };
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+
+      expect(lastFrame()).toContain('1 tool call hidden (Ctrl+O for details)');
+      expect(ToolGroupMessage).not.toHaveBeenCalled();
     });
 
     it.each([false, true])(
@@ -683,7 +698,7 @@ describe('<HistoryItemDisplay />', () => {
       const { lastFrame } = renderInFocusMode(
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
-      expect(lastFrame()).not.toContain('hidden (/focus to show)');
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
       expect(ToolGroupMessage).toHaveBeenCalled();
     });
 
@@ -709,7 +724,7 @@ describe('<HistoryItemDisplay />', () => {
       const { lastFrame } = renderInFocusMode(
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
-      expect(lastFrame()).not.toContain('hidden (/focus to show)');
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
       expect(ToolGroupMessage).toHaveBeenCalled();
     });
 
@@ -725,7 +740,7 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={true} />,
       );
 
-      expect(lastFrame()).not.toContain('hidden (/focus to show)');
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
     });
 
@@ -742,7 +757,7 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
 
-      expect(lastFrame()).not.toContain('hidden (/focus to show)');
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
     });
 
@@ -765,8 +780,12 @@ describe('<HistoryItemDisplay />', () => {
           />,
         );
 
-        expect(lastFrame()).not.toContain('hidden (/focus to show)');
+        expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
         expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+        expect(vi.mocked(ToolGroupMessage).mock.calls[0][0]).toMatchObject({
+          fullDetail: true,
+          tools: item.tools,
+        });
       },
     );
 
@@ -791,22 +810,27 @@ describe('<HistoryItemDisplay />', () => {
       expect(output).not.toContain('Inspecting the repository');
     });
 
-    it('hides gemini_thought_content completely', () => {
+    it('hides an individually expanded thought continuation', () => {
       const item: HistoryItem = {
         id: 1,
         type: 'gemini_thought_content',
         text: 'Continuing the reasoning',
       };
 
-      const { lastFrame } = renderInFocusMode(
+      const element = (
         <HistoryItemDisplay
           item={item}
           terminalWidth={100}
           isPending={false}
-        />,
+          thoughtExpanded
+        />
       );
+      const normal = renderWithProviders(element);
+      expect(normal.lastFrame()).toContain('Continuing the reasoning');
+      normal.unmount();
 
-      expect(lastFrame() ?? '').not.toContain('Continuing the reasoning');
+      const focused = renderInFocusMode(element);
+      expect(focused.lastFrame()).not.toContain('Continuing the reasoning');
     });
 
     it('fullDetail (Ctrl+O transcript) shows thoughts despite focus mode', () => {
