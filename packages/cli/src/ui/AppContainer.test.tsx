@@ -103,7 +103,7 @@ import type {
   PeerReceipt,
 } from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
-import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
 import {
@@ -7845,6 +7845,9 @@ describe('AppContainer State Management', () => {
               crossSessionInbound,
             },
           },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: () => ({ settings: {} }),
         }) as unknown as LoadedSettings;
 
       const { rerender } = render(
@@ -7862,6 +7865,54 @@ describe('AppContainer State Management', () => {
         <AppContainer
           config={mockConfig}
           settings={settingsWith('refuse')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when policy ownership changes without changing its value', () => {
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (owner: 'user' | 'workspace') =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound: 'hold',
+            },
+          },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: (scope: SettingScope) => ({
+            settings:
+              (owner === 'user' && scope === SettingScope.User) ||
+              (owner === 'workspace' && scope === SettingScope.Workspace)
+                ? { agents: { crossSessionInbound: 'hold' } }
+                : {},
+          }),
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('user')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('workspace')}
           version="1.0.0"
           initializationResult={mockInitResult}
         />,
@@ -8214,6 +8265,27 @@ describe('AppContainer State Management', () => {
         peer.emitHeld([heldMessage('a'), heldMessage('c')]);
       });
       expect(noticeCount()).toBe(2);
+    });
+
+    it('passes the policy scope into a held-message announcement', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            cause: 'explicit-setting',
+            policyScope: 'workspace',
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain("this repository's settings hold");
     });
 
     it("identifies a held message from the session's own process", () => {
