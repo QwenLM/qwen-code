@@ -842,6 +842,24 @@ const INITIAL_TURN_INDEX: SessionTurnIndexState = createSessionTurnIndexState(
   'disabled',
 );
 
+/**
+ * Clamps a metadata page size to what the daemon accepts.
+ *
+ * Deliberately a function of the ref's current value rather than a render-time
+ * constant. `historyPageSize` is a public host prop, and a value derived from it
+ * during render would flow through these callbacks into the main session
+ * connection effect's dependency array — the effect whose cleanup detaches the
+ * session — so a host that varied it would drop and re-attach the SSE stream on
+ * every change. The rest of this file reads the ref at call time for the same
+ * reason.
+ */
+function clampTurnIndexPageSize(historyPageSize: number | undefined): number {
+  return Math.min(
+    historyPageSize ?? TURN_INDEX_PAGE_SIZE,
+    TURN_INDEX_MAX_PAGE_SIZE,
+  );
+}
+
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
   agentsVersion: 0,
@@ -1301,10 +1319,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   loadWarningsRef.current = loadWarnings;
   historyPageSizeRef.current = historyPageSize;
   subagentTranscriptModeRef.current = subagentTranscriptMode;
-  const turnIndexPageSize = Math.min(
-    historyPageSizeRef.current ?? TURN_INDEX_PAGE_SIZE,
-    TURN_INDEX_MAX_PAGE_SIZE,
-  );
   /**
    * Routes a failed index request.
    *
@@ -1366,7 +1380,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         // The seed omits `snapshot` — the client has none yet — so the response
         // mints it, and the daemon picks the newest window's `start` itself.
         const page = await session.getTurnIndexPage({
-          limit: turnIndexPageSize,
+          limit: clampTurnIndexPageSize(historyPageSizeRef.current),
           clientId: session.clientId,
         });
         if (sessionRef.current !== session) return;
@@ -1384,7 +1398,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         turnIndexInFlightRef.current = false;
       }
     },
-    [commitTurnIndex, failTurnIndex, turnIndexPageSize],
+    [commitTurnIndex, failTurnIndex],
   );
   const refreshTurnIndex = useCallback(
     async (session: DaemonSessionClient) => {
@@ -1397,14 +1411,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         return;
       }
       turnIndexInFlightRef.current = true;
+      // Read once per refresh so the validation window and the fill page size
+      // agree even if the host changes the prop mid-flight.
+      const pageSize = clampTurnIndexPageSize(historyPageSizeRef.current);
       try {
         const validation = await session.getTurnIndexPage({
-          limit: turnIndexPageSize,
+          limit: pageSize,
           clientId: session.clientId,
         });
         if (sessionRef.current !== session) return;
         const current = turnIndexRef.current;
-        const plan = planTailRefresh(current, validation, turnIndexPageSize);
+        const plan = planTailRefresh(current, validation, pageSize);
         if (plan.kind === 'divergent') {
           turnIndexAttemptRef.current = 0;
           commitTurnIndex(resetToTailPage(current, validation));
@@ -1430,7 +1447,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         turnIndexInFlightRef.current = false;
       }
     },
-    [commitTurnIndex, failTurnIndex, turnIndexPageSize],
+    [commitTurnIndex, failTurnIndex],
   );
   /**
    * Coalesces the tail refresh onto a trailing timer: a burst of terminal
@@ -1501,7 +1518,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       ) {
         return;
       }
-      const request = planEnsurePageRequest(state, ordinal, turnIndexPageSize);
+      const request = planEnsurePageRequest(
+        state,
+        ordinal,
+        clampTurnIndexPageSize(historyPageSizeRef.current),
+      );
       if (!request) return;
       await fetchTurnIndexPageInto(
         session,
@@ -1510,7 +1531,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         request.limit,
       );
     },
-    [fetchTurnIndexPageInto, turnIndexPageSize],
+    [fetchTurnIndexPageInto],
   );
   const loadOlderTurns = useCallback(async () => {
     const session = sessionRef.current;
@@ -1522,7 +1543,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return;
     }
-    const request = planOlderPageRequest(state, turnIndexPageSize);
+    const request = planOlderPageRequest(
+      state,
+      clampTurnIndexPageSize(historyPageSizeRef.current),
+    );
     if (!request) return;
     await fetchTurnIndexPageInto(
       session,
@@ -1530,7 +1554,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       request.start,
       request.limit,
     );
-  }, [fetchTurnIndexPageInto, turnIndexPageSize]);
+  }, [fetchTurnIndexPageInto]);
   // The single seeding path: initial load, a snapshot invalidation, a rewind,
   // and a bounded retry all express themselves as `idle` and are picked up here.
   useEffect(() => {
