@@ -44,15 +44,15 @@ Read against the three questions, not as taste:
 
 No new values; a rule for the existing tokens.
 
-| role  | token                   | used for                                   |
-| ----- | ----------------------- | ------------------------------------------ |
-| ink   | `--foreground`          | step content — the only full-contrast text |
-| quiet | `--muted-foreground`    | counts, elapsed, ids                       |
-| rule  | `--border`              | every node edge, every dependency line     |
-| live  | `--status-running-fg`   | running, and nothing else                  |
-| done  | `--status-done-fg`      | completed, and nothing else                |
-| wait  | `--status-attention-fg` | needs attention, and nothing else          |
-| pick  | `--agent-blue-500`      | selection and focus only, never decoration |
+| role  | token                   | used for                                                                                   |
+| ----- | ----------------------- | ------------------------------------------------------------------------------------------ |
+| ink   | `--foreground`          | step content — the only full-contrast text                                                 |
+| quiet | `--muted-foreground`    | counts, elapsed, ids                                                                       |
+| rule  | `--border`              | node borders; dependency lines are `--muted-foreground` with `--agent-blue-500` arrowheads |
+| live  | `--status-running-fg`   | running and in_progress                                                                    |
+| done  | `--status-done-fg`      | completed, and nothing else                                                                |
+| wait  | `--status-attention-fg` | needs attention, and paused (plus the step-details chips)                                  |
+| pick  | `--agent-blue-500`      | selection and focus only, never decoration                                                 |
 
 **The rule: a node carries at most one status colour, in exactly one place,
 and only when the status is worth saying.** Waiting/blocked is the resting
