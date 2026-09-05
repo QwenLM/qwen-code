@@ -8,156 +8,202 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 
+const CORE_SRC = path.resolve(__dirname, '../core/src');
+
+// Vite takes `alias` as an object or as an ordered array of {find,
+// replacement}; only the array form accepts a RegExp, and core needs one.
+// Order is precedence — the first entry whose `find` matches wins.
+const toAliases = (map: Record<string, string>) =>
+  Object.entries(map).map(([find, replacement]) => ({ find, replacement }));
+
 export default defineConfig({
   resolve: {
-    alias: {
-      '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
-        __dirname,
-        '../core/src/utils/no-follow-open.ts',
-      ),
-      '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
-        __dirname,
-        '../core/src/tools/sub-session-constants.ts',
-      ),
-      '@qwen-code/qwen-code-core/goalWire': path.resolve(
-        __dirname,
-        '../core/src/goals/goal-wire.ts',
-      ),
-      '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
-        __dirname,
-        '../core/src/utils/transcript-records.ts',
-      ),
-      '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
-        __dirname,
-        '../core/src/hooks/user-prompt-submit-context.ts',
-      ),
-      '@qwen-code/qwen-code-core/memoryScopes': path.resolve(
-        __dirname,
-        '../core/src/memory/scopes.ts',
-      ),
-      '@qwen-code/qwen-code-core/toolWriteOrigin': path.resolve(
-        __dirname,
-        '../core/src/services/tool-write-origin.ts',
-      ),
-      '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
-        __dirname,
-        '../core/src/utils/envVarResolver.ts',
-      ),
-      '@qwen-code/qwen-code-core/conversationsRuntimeMarker': path.resolve(
-        __dirname,
-        '../core/src/utils/conversations-runtime-marker.ts',
-      ),
-      '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
-      // cli's daemon-status-provider.test.ts imports `FakeAgent` /
-      // `makeChannel` from acp-bridge's package-private
-      // `internal/testUtils` module. This alias overrides the runtime
-      // resolution so vitest reads the .ts source directly instead of
-      // the build-then-stale `dist/` copy.
-      '@qwen-code/acp-bridge/internal/testUtils': path.resolve(
-        __dirname,
-        '../acp-bridge/src/internal/testUtils.ts',
-      ),
-      // Same rationale as above: bridgeErrors and status subpaths
-      // resolve to dist/ via package.json exports, but tests in the
-      // monorepo worktree need the live source (dist may be stale or
-      // absent during development).
-      '@qwen-code/acp-bridge/bridgeErrors': path.resolve(
-        __dirname,
-        '../acp-bridge/src/bridgeErrors.ts',
-      ),
-      '@qwen-code/acp-bridge/status': path.resolve(
-        __dirname,
-        '../acp-bridge/src/status.ts',
-      ),
-      '@qwen-code/acp-bridge/bridge': path.resolve(
-        __dirname,
-        '../acp-bridge/src/bridge.ts',
-      ),
-      '@qwen-code/acp-bridge/spawnChannel': path.resolve(
-        __dirname,
-        '../acp-bridge/src/spawnChannel.ts',
-      ),
-      '@qwen-code/acp-bridge/processRegistry': path.resolve(
-        __dirname,
-        '../acp-bridge/src/process-registry.ts',
-      ),
-      '@qwen-code/acp-bridge/daemonMemoryBudget': path.resolve(
-        __dirname,
-        '../acp-bridge/src/daemon-memory-budget.ts',
-      ),
-      '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
-        __dirname,
-        '../acp-bridge/src/ndJsonStream.ts',
-      ),
-      '@qwen-code/acp-bridge/logRedaction': path.resolve(
-        __dirname,
-        '../acp-bridge/src/logRedaction.ts',
-      ),
-      '@qwen-code/acp-bridge/bridgeClient': path.resolve(
-        __dirname,
-        '../acp-bridge/src/bridgeClient.ts',
-      ),
-      '@qwen-code/acp-bridge/bridgeOptions': path.resolve(
-        __dirname,
-        '../acp-bridge/src/bridgeOptions.ts',
-      ),
-      '@qwen-code/acp-bridge/promptLedger': path.resolve(
-        __dirname,
-        '../acp-bridge/src/prompt-ledger.ts',
-      ),
-      '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
-        __dirname,
-        '../acp-bridge/src/bridgeTypes.ts',
-      ),
-      '@qwen-code/acp-bridge/bridgeFileSystem': path.resolve(
-        __dirname,
-        '../acp-bridge/src/bridgeFileSystem.ts',
-      ),
-      '@qwen-code/acp-bridge/sessionArtifacts': path.resolve(
-        __dirname,
-        '../acp-bridge/src/sessionArtifacts.ts',
-      ),
-      '@qwen-code/acp-bridge/eventBus': path.resolve(
-        __dirname,
-        '../acp-bridge/src/eventBus.ts',
-      ),
-      '@qwen-code/acp-bridge/replayWindowLimits': path.resolve(
-        __dirname,
-        '../acp-bridge/src/replayWindowLimits.ts',
-      ),
-      '@qwen-code/acp-bridge/transcriptReplay': path.resolve(
-        __dirname,
-        '../acp-bridge/src/transcript-replay.ts',
-      ),
-      '@qwen-code/acp-bridge/workspacePaths': path.resolve(
-        __dirname,
-        '../acp-bridge/src/workspacePaths.ts',
-      ),
-      '@qwen-code/acp-bridge/externalToolGuard': path.resolve(
-        __dirname,
-        '../acp-bridge/src/externalToolGuard.ts',
-      ),
-      '@qwen-code/audio-capture': path.resolve(
-        __dirname,
-        '../audio-capture/src/index.ts',
-      ),
-      '@qwen-code/sdk/daemon/transcript': path.resolve(
-        __dirname,
-        '../sdk-typescript/src/daemon/transcript.ts',
-      ),
-      '@qwen-code/sdk/daemon/ui/transcript': path.resolve(
-        __dirname,
-        '../sdk-typescript/src/daemon/ui/transcript.ts',
-      ),
-      '@qwen-code/sdk/daemon/types': path.resolve(
-        __dirname,
-        '../sdk-typescript/src/daemon/types.ts',
-      ),
-      '@qwen-code/sdk/daemon': path.resolve(
-        __dirname,
-        '../sdk-typescript/src/daemon/index.ts',
-      ),
-    },
+    alias: [
+      // Named core subpaths. None of these targets can be derived from the
+      // specifier (noFollowOpen lives at utils/no-follow-open.ts), so they
+      // have to be matched ahead of the wildcard below. A new named subpath
+      // added to packages/cli/tsconfig.json must be added here too, above
+      // the wildcard, or the wildcard will claim it and point at a file
+      // that does not exist.
+      ...toAliases({
+        '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
+          __dirname,
+          '../core/src/utils/no-follow-open.ts',
+        ),
+        '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
+          __dirname,
+          '../core/src/tools/sub-session-constants.ts',
+        ),
+        '@qwen-code/qwen-code-core/goalWire': path.resolve(
+          __dirname,
+          '../core/src/goals/goal-wire.ts',
+        ),
+        '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
+          __dirname,
+          '../core/src/utils/transcript-records.ts',
+        ),
+        '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
+          __dirname,
+          '../core/src/hooks/user-prompt-submit-context.ts',
+        ),
+        '@qwen-code/qwen-code-core/memoryScopes': path.resolve(
+          __dirname,
+          '../core/src/memory/scopes.ts',
+        ),
+        '@qwen-code/qwen-code-core/toolWriteOrigin': path.resolve(
+          __dirname,
+          '../core/src/services/tool-write-origin.ts',
+        ),
+        '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
+          __dirname,
+          '../core/src/utils/envVarResolver.ts',
+        ),
+        '@qwen-code/qwen-code-core/storage': path.resolve(
+          __dirname,
+          '../core/src/config/storage.ts',
+        ),
+        '@qwen-code/qwen-code-core/atomicFileWrite': path.resolve(
+          __dirname,
+          '../core/src/utils/atomicFileWrite.ts',
+        ),
+        '@qwen-code/qwen-code-core/debugLogger': path.resolve(
+          __dirname,
+          '../core/src/utils/debugLogger.ts',
+        ),
+        '@qwen-code/qwen-code-core/conversationsRuntimeMarker': path.resolve(
+          __dirname,
+          '../core/src/utils/conversations-runtime-marker.ts',
+        ),
+      }),
+      // Mirrors `"@qwen-code/qwen-code-core/*": ["../core/src/*"]` from
+      // packages/cli/tsconfig.json. esbuild reads that paths block when it
+      // bundles; Vitest does not read tsconfig paths at all, so this file is
+      // the only place the mapping exists for a test run and the two have to
+      // be kept in sync by hand. Importing one core module rather than the
+      // package root depends on this entry.
+      {
+        find: /^@qwen-code\/qwen-code-core\/(.*)$/,
+        replacement: `${CORE_SRC}/$1`,
+      },
+      // The package root is matched exactly. Spelled as a string it would
+      // also match everything beneath it and rewrite each subpath into a
+      // path under index.ts.
+      {
+        find: /^@qwen-code\/qwen-code-core$/,
+        replacement: path.resolve(__dirname, '../core/index.ts'),
+      },
+      ...toAliases({
+        // cli's daemon-status-provider.test.ts imports `FakeAgent` /
+        // `makeChannel` from acp-bridge's package-private
+        // `internal/testUtils` module. This alias overrides the runtime
+        // resolution so vitest reads the .ts source directly instead of
+        // the build-then-stale `dist/` copy.
+        '@qwen-code/acp-bridge/internal/testUtils': path.resolve(
+          __dirname,
+          '../acp-bridge/src/internal/testUtils.ts',
+        ),
+        // Same rationale as above: bridgeErrors and status subpaths
+        // resolve to dist/ via package.json exports, but tests in the
+        // monorepo worktree need the live source (dist may be stale or
+        // absent during development).
+        '@qwen-code/acp-bridge/bridgeErrors': path.resolve(
+          __dirname,
+          '../acp-bridge/src/bridgeErrors.ts',
+        ),
+        '@qwen-code/acp-bridge/status': path.resolve(
+          __dirname,
+          '../acp-bridge/src/status.ts',
+        ),
+        '@qwen-code/acp-bridge/bridge': path.resolve(
+          __dirname,
+          '../acp-bridge/src/bridge.ts',
+        ),
+        '@qwen-code/acp-bridge/spawnChannel': path.resolve(
+          __dirname,
+          '../acp-bridge/src/spawnChannel.ts',
+        ),
+        '@qwen-code/acp-bridge/processRegistry': path.resolve(
+          __dirname,
+          '../acp-bridge/src/process-registry.ts',
+        ),
+        '@qwen-code/acp-bridge/daemonMemoryBudget': path.resolve(
+          __dirname,
+          '../acp-bridge/src/daemon-memory-budget.ts',
+        ),
+        '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
+          __dirname,
+          '../acp-bridge/src/ndJsonStream.ts',
+        ),
+        '@qwen-code/acp-bridge/logRedaction': path.resolve(
+          __dirname,
+          '../acp-bridge/src/logRedaction.ts',
+        ),
+        '@qwen-code/acp-bridge/bridgeClient': path.resolve(
+          __dirname,
+          '../acp-bridge/src/bridgeClient.ts',
+        ),
+        '@qwen-code/acp-bridge/bridgeOptions': path.resolve(
+          __dirname,
+          '../acp-bridge/src/bridgeOptions.ts',
+        ),
+        '@qwen-code/acp-bridge/promptLedger': path.resolve(
+          __dirname,
+          '../acp-bridge/src/prompt-ledger.ts',
+        ),
+        '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
+          __dirname,
+          '../acp-bridge/src/bridgeTypes.ts',
+        ),
+        '@qwen-code/acp-bridge/bridgeFileSystem': path.resolve(
+          __dirname,
+          '../acp-bridge/src/bridgeFileSystem.ts',
+        ),
+        '@qwen-code/acp-bridge/sessionArtifacts': path.resolve(
+          __dirname,
+          '../acp-bridge/src/sessionArtifacts.ts',
+        ),
+        '@qwen-code/acp-bridge/eventBus': path.resolve(
+          __dirname,
+          '../acp-bridge/src/eventBus.ts',
+        ),
+        '@qwen-code/acp-bridge/replayWindowLimits': path.resolve(
+          __dirname,
+          '../acp-bridge/src/replayWindowLimits.ts',
+        ),
+        '@qwen-code/acp-bridge/transcriptReplay': path.resolve(
+          __dirname,
+          '../acp-bridge/src/transcript-replay.ts',
+        ),
+        '@qwen-code/acp-bridge/workspacePaths': path.resolve(
+          __dirname,
+          '../acp-bridge/src/workspacePaths.ts',
+        ),
+        '@qwen-code/acp-bridge/externalToolGuard': path.resolve(
+          __dirname,
+          '../acp-bridge/src/externalToolGuard.ts',
+        ),
+        '@qwen-code/audio-capture': path.resolve(
+          __dirname,
+          '../audio-capture/src/index.ts',
+        ),
+        '@qwen-code/sdk/daemon/transcript': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/transcript.ts',
+        ),
+        '@qwen-code/sdk/daemon/ui/transcript': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/ui/transcript.ts',
+        ),
+        '@qwen-code/sdk/daemon/types': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/types.ts',
+        ),
+        '@qwen-code/sdk/daemon': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/index.ts',
+        ),
+      }),
+    ],
   },
   test: {
     // See packages/core/vitest.config.ts: raise the per-test ceiling above
