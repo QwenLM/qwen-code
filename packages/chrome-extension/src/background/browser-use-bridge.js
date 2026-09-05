@@ -39,17 +39,13 @@ const AGENT_OVERLAY_BOOTSTRAP = `(() => {
   let shell;
   let hideTimer;
   const mount = () => {
-    if (!document.documentElement) {
-      addEventListener("DOMContentLoaded", mount, { once: true });
-      return;
-    }
+    if (!document.documentElement) return;
     root = document.getElementById("__qwen-browser-overlay");
     if (!root) {
       root = document.createElement("div");
       root.id = "__qwen-browser-overlay";
       root.setAttribute("aria-hidden", "true");
       Object.assign(root.style, {
-        all: "initial",
         display: "none",
         position: "fixed",
         left: "0",
@@ -68,6 +64,11 @@ const AGENT_OVERLAY_BOOTSTRAP = `(() => {
     }
     shell = shadow.querySelector(".shell");
   };
+  const unmount = () => {
+    root?.remove();
+    root = undefined;
+    shell = undefined;
+  };
   const controller = {
     move(x, y, pressed) {
       mount();
@@ -77,20 +78,15 @@ const AGENT_OVERLAY_BOOTSTRAP = `(() => {
       root.dataset.visible = "true";
       shell?.classList.toggle("pressed", pressed === true);
       clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => {
-        if (!root) return;
-        root.style.display = "none";
-        root.dataset.visible = "false";
-      }, 2_500);
+      hideTimer = setTimeout(unmount, 2_500);
     },
     destroy() {
       clearTimeout(hideTimer);
-      root?.remove();
+      unmount();
       delete globalThis[globalName];
     },
   };
   Object.defineProperty(globalThis, globalName, { value: controller, configurable: true });
-  mount();
 })();`;
 
 /** @type {chrome.runtime.Port | undefined} */
@@ -438,7 +434,7 @@ async function dispatch(method, params, generation = connectionGeneration) {
     case 'tabs.create': {
       const tab = await chrome.tabs.create({
         url: 'about:blank',
-        active: true,
+        active: false,
       });
       if (tab.id == null)
         throw bridgeError('STALE_TAB', 'Chrome did not return a tab id');

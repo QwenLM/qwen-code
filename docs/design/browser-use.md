@@ -94,6 +94,13 @@ styles:
 `tab.cua` is used when the target is identified visually in a screenshot.
 The extension renders a transient pointer overlay for coordinate mouse input,
 but that decoration is best-effort and never delays the input command itself.
+Its DOM node is created on mouse input and removed when the pointer expires;
+read-only inspection does not create an overlay node.
+
+Browser operations run in the background. New tabs do not replace the user's
+active tab, and input actions do not bring Chrome to the foreground. Page focus
+emulation keeps background rendering and input active without changing desktop
+focus.
 
 Input actions and navigation waits have separate deadlines. Locator clicks,
 locator key presses, and DOM CUA clicks disable Playwright's implicit

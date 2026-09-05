@@ -188,7 +188,12 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
         async get(tabId: number) {
           return tabs.get(tabId);
         },
-        async create() {
+        async create(options: { active: boolean }) {
+          assert.equal(
+            options.active,
+            false,
+            'agent tabs must open in the background',
+          );
           if (releaseSlowCreate !== undefined) {
             await new Promise<void>((resolve) => {
               const release = releaseSlowCreate;
@@ -203,7 +208,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
             id,
             title: 'Agent tab',
             url: 'about:blank',
-            active: true,
+            active: options.active,
             windowId: 1,
             groupId: -1,
           };
@@ -500,6 +505,8 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     providerTabId: number;
   };
   assert.equal(created.providerTabId, 5);
+  assert.equal(tabs.get(5)?.active, false);
+  assert.equal(tabs.get(1)?.active, true);
   assert.ok(
     groupCalls.some((call) => call.tabIds.includes(3)),
     'causally derived popups must join the agent group',
@@ -523,13 +530,13 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     'Research run',
     'listings must expose the tab group name the user can see',
   );
-  assert.ok(
-    debuggerCommands.some(
-      (command) =>
-        command.method === 'Page.addScriptToEvaluateOnNewDocument' &&
-        String(command.params.source).includes('__qwen-browser-overlay'),
-    ),
+  const overlayBootstrap = debuggerCommands.find(
+    (command) =>
+      command.method === 'Page.addScriptToEvaluateOnNewDocument' &&
+      String(command.params.source).includes('__qwen-browser-overlay'),
   );
+  assert.ok(overlayBootstrap);
+  assertOverlayLifecycle(String(overlayBootstrap.params.source));
 
   assert.deepEqual(
     plain(
@@ -650,6 +657,90 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   assert.deepEqual(plain(sessionState.managedGroupIdsByWindow), []);
   assert.equal(api.inFlightDispatches.size, 0);
 });
+
+function assertOverlayLifecycle(source: string): void {
+  const overlayDocument = document.implementation.createHTMLDocument('Page');
+  const originalHtml = overlayDocument.documentElement.outerHTML;
+  const timers = new Map<number, () => void>();
+  let nextTimerId = 0;
+  const context = vm.createContext({
+    document: overlayDocument,
+    setTimeout(callback: () => void, delay: number) {
+      assert.equal(delay, 2_500);
+      timers.set(++nextTimerId, callback);
+      return nextTimerId;
+    },
+    clearTimeout(id: number) {
+      timers.delete(id);
+    },
+  });
+  vm.runInContext(source, context);
+  assert.equal(
+    overlayDocument.documentElement.outerHTML,
+    originalHtml,
+    'attaching a read-only page must not add overlay DOM',
+  );
+  assert.equal(timers.size, 0);
+  const controller = vm.runInContext(
+    'globalThis.__qwenBrowserOverlay',
+    context,
+  ) as {
+    move(x: number, y: number, pressed: boolean): void;
+    destroy(): void;
+  };
+  controller.move(12, 34, true);
+  const firstRoot = overlayDocument.getElementById('__qwen-browser-overlay');
+  assert.ok(firstRoot);
+  assert.equal(firstRoot.style.transform, 'translate3d(12px, 34px, 0)');
+  assert.equal(firstRoot.style.pointerEvents, 'none');
+  assert.equal(firstRoot.getAttribute('aria-hidden'), 'true');
+  assert.equal(
+    firstRoot.shadowRoot
+      ?.querySelector('.shell')
+      ?.classList.contains('pressed'),
+    true,
+  );
+  assert.equal(
+    firstRoot.style.all,
+    '',
+    'the inline reset expands into hundreds of serialized CSS declarations',
+  );
+  assert.ok((firstRoot.getAttribute('style')?.length ?? 0) < 500);
+  assert.ok(
+    firstRoot.shadowRoot
+      ?.querySelector('style')
+      ?.textContent?.includes(':host{all:initial}'),
+  );
+
+  controller.move(56, 78, false);
+  assert.equal(timers.size, 1, 'new input must reset the expiry timer');
+  const expire = timers.get(nextTimerId);
+  assert.ok(expire);
+  timers.delete(nextTimerId);
+  expire();
+  assert.equal(
+    overlayDocument.documentElement.outerHTML,
+    originalHtml,
+    'the overlay must leave no DOM behind after input stops',
+  );
+
+  controller.move(90, 12, false);
+  const secondRoot = overlayDocument.getElementById('__qwen-browser-overlay');
+  assert.ok(secondRoot);
+  assert.notEqual(
+    secondRoot,
+    firstRoot,
+    'later input must remount the overlay',
+  );
+  assert.equal(secondRoot.style.transform, 'translate3d(90px, 12px, 0)');
+  controller.destroy();
+  assert.equal(timers.size, 0);
+  assert.equal(overlayDocument.documentElement.outerHTML, originalHtml);
+  assert.equal(
+    vm.runInContext('globalThis.__qwenBrowserOverlay', context),
+    undefined,
+  );
+}
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
