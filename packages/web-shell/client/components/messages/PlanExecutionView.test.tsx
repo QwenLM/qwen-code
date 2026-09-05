@@ -594,6 +594,33 @@ describe('PlanExecutionView', () => {
     act(() => button?.click());
     expect(onOpen).toHaveBeenCalledWith(agentTool('build'));
 
+    // The downstream block wires its own onClick; witness it before the
+    // upstream click below moves the selection off `build`. Dropping that
+    // handler must turn this red.
+    act(() =>
+      details
+        ?.querySelector<HTMLButtonElement>('[data-plan-dependency="verify"]')
+        ?.click(),
+    );
+    expect(
+      container
+        .querySelector('[data-plan-node-id="verify"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    // That click selected `verify` and re-rendered the panel around it, so
+    // bring the selection back to `build` before exercising the upstream
+    // reference.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="build"]')
+        ?.click();
+    });
+    expect(
+      container
+        .querySelector('[data-plan-node-id="build"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
     // Last, because it moves the selection: following an upstream reference
     // selects the step it names, which is what makes the dependency list the
     // graph's navigation rather than a run of text.
@@ -658,6 +685,46 @@ describe('PlanExecutionView', () => {
           ?.querySelectorAll('span') ?? [],
       ).some((span) => span.classList.contains(styles.dependencyTitle)),
     ).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('announces attention beside the status word, not instead of it', () => {
+    // A failed descendant puts the node into attention while its own status
+    // stays running. The sr-only span must keep announcing the status word
+    // too — attention is additive for assistive tech, never a replacement.
+    const runningRoot = task('running');
+    const failedChild = task('failed', {
+      id: 'agent-child',
+      toolUseId: 'call-child',
+      parentAgentId: runningRoot.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[agentTool('build')]}
+            tasks={[runningRoot, failedChild]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('Running');
+    expect(buildNode?.textContent).toContain('Needs attention');
+    expect(
+      buildNode
+        ?.querySelector(`.${styles.nodeStatusText}`)
+        ?.textContent?.trim(),
+    ).toBe('Running, Needs attention');
 
     act(() => root.unmount());
     container.remove();

@@ -82,16 +82,27 @@ describe('PlanExecutionView stylesheet', () => {
     expect(title).toMatch(/color:\s*var\(--foreground\)/);
   });
 
-  it('declares the attention tone after the blocked/ready tone', () => {
-    // Both selectors carry the same specificity, so the cascade lets the
-    // later rule win: attention must stay declared after the status tones,
-    // or a blocked node that also needs attention would wear the muted
-    // ring instead of the attention tone its comment promises.
+  it('declares the attention tone after every status tone', () => {
+    // All these selectors carry the same specificity, so the cascade lets
+    // the later rule win. Attention co-occurs with every status (a linked
+    // agent task can fail under any of them), so the attention rule must
+    // stay declared after every status tone, or a node that needs attention
+    // would wear its status ring instead of the attention tone its comment
+    // promises — whichever status block a later edit regroups.
     const attentionAt = planCss.indexOf(".node[data-attention='true']");
-    const neutralAt = planCss.indexOf(".node[data-status='blocked']");
     expect(attentionAt).toBeGreaterThan(-1);
-    expect(neutralAt).toBeGreaterThan(-1);
-    expect(attentionAt).toBeGreaterThan(neutralAt);
+    for (const status of [
+      'completed',
+      'running',
+      'in_progress',
+      'paused',
+      'blocked',
+      'ready',
+    ]) {
+      const statusAt = planCss.indexOf(`.node[data-status='${status}']`);
+      expect(statusAt).toBeGreaterThan(-1);
+      expect(attentionAt).toBeGreaterThan(statusAt);
+    }
   });
 
   it('narrows the DAG lane at two viewport steps', () => {

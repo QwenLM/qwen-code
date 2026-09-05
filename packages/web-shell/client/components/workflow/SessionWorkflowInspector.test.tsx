@@ -266,6 +266,53 @@ describe('SessionWorkflowInspector', () => {
     container.remove();
   });
 
+  it('drops a self-reference from the upstream list', () => {
+    // The projection's dependentsByTodo builder skips self-blocks
+    // (session-workflow-model.ts), and the DAG draws no edge for them; the
+    // inspector's upstream filter must apply the same rule, or a todo
+    // naming itself in blockedBy renders a chip that only re-selects the
+    // already-selected step.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['ship', 'prepare'],
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="ship"
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="workflow-dependency-ship"]'),
+    ).toBeNull();
+    expect(
+      container.querySelectorAll('[data-testid="workflow-dependency-prepare"]'),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('keeps every activity row reachable past the preview cap', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
