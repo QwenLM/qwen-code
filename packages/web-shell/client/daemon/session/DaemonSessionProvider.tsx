@@ -1505,7 +1505,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           commitTurnIndex(resetToTailPage(current, validation));
           return;
         }
-        let next = adoptRefreshedTail(current, plan.snapshot, plan.totalTurns);
+        // Commit the adopted tail before filling rather than accumulating into a
+        // state captured here. A hole-fill from the public `ensurePage` /
+        // `loadOlderTurns` path takes no in-flight guard, so it can admit a page
+        // while one of the awaits below is open, and a late commit of the
+        // pre-await state would silently discard it — a lost update on the index.
+        commitTurnIndex(
+          adoptRefreshedTail(current, plan.snapshot, plan.totalTurns),
+        );
         for (const fill of plan.fills) {
           const page = await session.getTurnIndexPage({
             snapshot: plan.snapshot,
@@ -1514,10 +1521,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clientId: session.clientId,
           });
           if (!turnIndexRequestIsCurrent(session, epoch)) return;
-          next = admitTurnIndexPage(next, page, plan.snapshot) ?? next;
+          const base = turnIndexRef.current;
+          // A 409 from an anchored read can drop the snapshot mid-fill. Admitting
+          // this snapshot's ordinals into a store that no longer holds it would
+          // mix two orderings, so leave the hole for the next refresh.
+          if (base.snapshot !== plan.snapshot) return;
+          const admitted = admitTurnIndexPage(base, page, plan.snapshot);
+          if (admitted) commitTurnIndex(admitted);
         }
         turnIndexAttemptRef.current = 0;
-        commitTurnIndex(next);
       } catch (error) {
         if (!turnIndexRequestIsCurrent(session, epoch)) return;
         failTurnIndex(error);
