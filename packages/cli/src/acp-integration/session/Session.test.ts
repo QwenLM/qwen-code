@@ -25916,7 +25916,7 @@ describe('Session', () => {
         );
         expect(sentText).toContain('Browser automation');
         expect(sentText).toContain(
-          '- Skills: browser-skill (invoke via /<skill-name>)',
+          '- Skills: browser:browser-skill (invoke via /<skill-name>)',
         );
         expect(sentText).toContain('- MCP Servers: browser-mcp');
         expect(sentText).toContain('extension context file');
