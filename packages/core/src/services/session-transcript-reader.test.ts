@@ -77,6 +77,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 
 describe('SessionTranscriptReader', () => {
   let runtimeDir: string;
@@ -1645,6 +1646,94 @@ describe('SessionTranscriptReader', () => {
     expect(projection?.runtime.recording.lastAssistantModel).toBe(
       'other-turn-model',
     );
+  });
+
+  it('restores the last session approval mode with its plan exit target', async () => {
+    await writeRecords([
+      {
+        ...record('mode-1', null, ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: { mode: ApprovalMode.YOLO },
+      },
+      {
+        ...record('mode-2', 'mode-1', ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.AUTO_EDIT,
+        },
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      kind: 'valid',
+      payload: {
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.AUTO_EDIT,
+      },
+    });
+  });
+
+  it('does not fall back to an older privileged mode after an invalid record', async () => {
+    await writeRecords([
+      {
+        ...record('mode-1', null, ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: { mode: ApprovalMode.YOLO },
+      },
+      {
+        ...record('mode-2', 'mode-1', ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: { mode: 'future-mode' },
+      } as unknown as ChatRecord,
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      kind: 'invalid',
+    });
+  });
+
+  it('keeps plan mode but downgrades an invalid plan exit target', async () => {
+    await writeRecords([
+      {
+        ...record('mode-1', null, ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.PLAN,
+        },
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      kind: 'valid',
+      payload: {
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.DEFAULT,
+      },
+    });
   });
 
   it('captures lastAssistantModel when no session_model record exists', async () => {

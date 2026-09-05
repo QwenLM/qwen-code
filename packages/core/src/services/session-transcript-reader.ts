@@ -21,9 +21,11 @@ import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
+  normalizeSessionApprovalModePayload,
   type AttributionSnapshotPayload,
   type ChatRecord,
   type ParentSessionRecordPayload,
+  type SessionApprovalModeRestoreState,
   type SessionModelRecordPayload,
   type SessionSourceRecordPayload,
   type TitleSource,
@@ -273,6 +275,7 @@ export interface SessionRuntimeResumeState {
     sourceType?: string;
     sourceId?: string;
     sessionModel?: SessionModelRecordPayload;
+    sessionApprovalMode?: SessionApprovalModeRestoreState;
     lastAssistantModel?: string;
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
@@ -2749,6 +2752,11 @@ export class SessionTranscriptReader {
       return entry?.type === 'system' && entry.subtype === 'session_model';
     });
     const sessionModelSet = new Set(sessionModelUuids);
+    const sessionApprovalModeUuid = lastUuidMatching(
+      index,
+      (entry) =>
+        entry.type === 'system' && entry.subtype === 'session_approval_mode',
+    );
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -2791,6 +2799,7 @@ export class SessionTranscriptReader {
         parentSessionUuid,
         sessionSourceUuid,
         ...sessionModelUuids,
+        sessionApprovalModeUuid,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -2815,6 +2824,7 @@ export class SessionTranscriptReader {
     let sourceType: string | undefined;
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
+    let sessionApprovalMode: SessionApprovalModeRestoreState | undefined;
     let lastAssistantModel: string | undefined;
     let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
@@ -2854,6 +2864,13 @@ export class SessionTranscriptReader {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
         }
+      } else if (record.uuid === sessionApprovalModeUuid) {
+        const payload = normalizeSessionApprovalModePayload(
+          record.systemPayload,
+        );
+        sessionApprovalMode = payload
+          ? { kind: 'valid', payload }
+          : { kind: 'invalid' };
       }
       if (
         record.type === 'assistant' &&
@@ -3110,6 +3127,7 @@ export class SessionTranscriptReader {
         ...(sourceType !== undefined ? { sourceType } : {}),
         ...(sourceId !== undefined ? { sourceId } : {}),
         ...(sessionModel !== undefined ? { sessionModel } : {}),
+        ...(sessionApprovalMode !== undefined ? { sessionApprovalMode } : {}),
         ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
       },
       ...(restoredFileHistory

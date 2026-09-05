@@ -177,6 +177,7 @@ import {
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_APPROVAL_MODE_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -1883,6 +1884,11 @@ function extractJsonRpcErrorField(
   if (typeof data !== 'object' || data === null) return undefined;
   const value = (data as Record<string, unknown>)[field];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function reconstructTrustGateError(err: unknown): unknown {
+  if (extractJsonRpcErrorField(err, 'errorKind') !== 'trust_gate') return err;
+  return new TrustGateError(extractErrorMessage(err));
 }
 
 export function extractErrorCode(err: unknown): string | undefined {
@@ -5303,6 +5309,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
                     }
                   : {}),
+                ...(approvalMode
+                  ? { [SESSION_APPROVAL_MODE_META_KEY]: approvalMode }
+                  : {}),
                 [SESSION_INITIALIZATION_DEADLINE_META_KEY]:
                   Date.now() + initTimeoutMs,
               },
@@ -5424,7 +5433,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         } else {
           ci.emptyReapPending = true;
         }
-        throw err;
+        throw reconstructTrustGateError(err);
       }
 
       // Let an already-settled transport failure publish its synchronous
@@ -5876,21 +5885,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     try {
       return await approvalWork;
     } catch (err) {
-      const data = (err as { data?: unknown })?.data;
-      if (
-        data &&
-        typeof data === 'object' &&
-        'errorKind' in data &&
-        (data as { errorKind?: unknown }).errorKind === 'trust_gate'
-      ) {
-        const rawMessage = (err as { message?: unknown })?.message;
-        const message =
-          typeof rawMessage === 'string'
-            ? rawMessage
-            : 'Trust-gate rejection from ACP child';
-        throw new TrustGateError(message);
-      }
-      throw err;
+      throw reconstructTrustGateError(err);
     }
   }
 
@@ -8283,6 +8278,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                       }
                     : {}),
+                  ...(req.approvalMode
+                    ? {
+                        [SESSION_APPROVAL_MODE_META_KEY]: req.approvalMode,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -8308,6 +8308,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ? {
                       [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                     }
+                  : {}),
+                ...(req.approvalMode
+                  ? { [SESSION_APPROVAL_MODE_META_KEY]: req.approvalMode }
                   : {}),
               },
             });
@@ -8398,7 +8401,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } catch (err) {
         if (err instanceof SessionRestoreTimeoutError) throw err;
         restoreEvents.close();
-        if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+        const normalizedError = reconstructTrustGateError(err);
+        if (normalizedError instanceof TrustGateError) {
+          if (
+            !ci.isDying &&
+            hasNoChannelWork(ci, { ignoreRestoreId: req.sessionId })
+          ) {
+            await startIdleTimer(ci, `session ${action} rejected`);
+          }
+          throw normalizedError;
+        }
+        if (isAcpSessionResourceNotFound(normalizedError, req.sessionId)) {
           if (
             !ci.isDying &&
             hasNoChannelWork(ci, { ignoreRestoreId: req.sessionId })
@@ -8407,7 +8420,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
           throw new SessionNotFoundError(req.sessionId);
         }
-        await retireChannelOnTimeout(ci, err, `session ${action} timeout`);
+        await retireChannelOnTimeout(
+          ci,
+          normalizedError,
+          `session ${action} timeout`,
+        );
         if (!ci.isDying) {
           ci.emptyReapPending = hasNoChannelWork(ci, {
             ignoreRestoreId: req.sessionId,
@@ -8416,7 +8433,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ci.isDying = true;
           }
         }
-        throw err;
+        throw normalizedError;
       }
 
       if (shuttingDown) {

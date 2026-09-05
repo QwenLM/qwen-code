@@ -11057,6 +11057,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
     avoidPermissionPrompts?: boolean;
     targetDir?: () => string;
     toolInvocationGuard?: ToolInvocationGuard;
+    waitForApprovalModePersistence?: () => Promise<void>;
   }) {
     const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
     const registry = {
@@ -11113,6 +11114,8 @@ describe('CoreToolScheduler Plan shell routing', () => {
         options.avoidPermissionPrompts ?? false,
       getOnPersistPermissionRule: () => undefined,
       getToolInvocationGuard: () => options.toolInvocationGuard,
+      waitForSessionApprovalModePersistence:
+        options.waitForApprovalModePersistence,
     } as unknown as Config;
 
     return {
@@ -11271,6 +11274,62 @@ describe('CoreToolScheduler Plan shell routing', () => {
       throw new Error('Expected the guarded tool call to succeed');
     }
     expect(allowedCall.response.executionStatus).toBe('success');
+  });
+
+  it('waits for the latest approval mode write at the execution boundary', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    let release!: () => void;
+    const waitForApprovalModePersistence = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      waitForApprovalModePersistence,
+    });
+
+    const pending = scheduler.schedule(
+      [request('approval-mode-write', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(waitForApprovalModePersistence).toHaveBeenCalledOnce(),
+    );
+    expect(execute).not.toHaveBeenCalled();
+
+    release();
+    await pending;
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('terminalizes a tool when approval-mode persistence fails', async () => {
+    const execute = vi.fn();
+    const persistenceError = new Error('approval persistence failed');
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      waitForApprovalModePersistence: vi
+        .fn()
+        .mockRejectedValue(persistenceError),
+    });
+
+    await scheduler.schedule(
+      [request('approval-mode-failed', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0]).toMatchObject({
+      status: 'error',
+      response: { executionStatus: 'not_started' },
+    });
   });
 
   it('cancels without execution when aborted while awaiting the host guard', async () => {

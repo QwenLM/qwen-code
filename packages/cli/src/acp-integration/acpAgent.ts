@@ -268,6 +268,7 @@ import {
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
+import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -430,6 +431,7 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_APPROVAL_MODE_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -1885,6 +1887,54 @@ function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
  */
 function isRestrictedApprovalModeConfig(config: Config): boolean {
   return config.isSafeMode?.() === true || config.getBareMode?.() === true;
+}
+
+function requestedSessionApprovalMode(request: {
+  _meta?: Record<string, unknown> | null;
+}): ApprovalMode | undefined {
+  const raw = request._meta?.[SESSION_APPROVAL_MODE_META_KEY];
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string' && APPROVAL_MODES.includes(raw as ApprovalMode)) {
+    return raw as ApprovalMode;
+  }
+  throw RequestError.invalidParams(
+    undefined,
+    `Invalid session approval mode; allowed: ${APPROVAL_MODES.join(', ')}`,
+  );
+}
+
+function rethrowApprovalModeRequestError(error: unknown): never {
+  if (error instanceof Error && error.name === 'TrustGateError') {
+    throw new RequestError(-32003, error.message, {
+      errorKind: 'trust_gate',
+    });
+  }
+  throw error;
+}
+
+function setRequestedSessionApprovalMode(
+  config: Config,
+  mode: ApprovalMode,
+  projection?: SessionRestoreProjection,
+): void {
+  try {
+    const restored = projection?.runtime.recording.sessionApprovalMode;
+    config.restoreApprovalModeState({
+      mode,
+      ...(mode === ApprovalMode.PLAN
+        ? {
+            prePlanMode:
+              restored?.kind === 'valid'
+                ? restored.payload.mode === ApprovalMode.PLAN
+                  ? restored.payload.prePlanMode
+                  : restored.payload.mode
+                : config.getApprovalMode(),
+          }
+        : {}),
+    });
+  } catch (error) {
+    rethrowApprovalModeRequestError(error);
+  }
 }
 
 export function normalizeCoreSettingValue(
@@ -3514,11 +3564,11 @@ class QwenAgent implements Agent {
    * The last file-derived approval mode each live session actually
    * converged on, seeded with the session's boot-derived mode at
    * publication. `workspaceReload` compares the reloaded disk value against
-   * this — not against each session's live mode — because approval mode has
-   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
-   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
-   * so a live session legitimately diverges from the file mid-workflow and
-   * an unchanged file must not clobber those transitions. The record lives
+   * this — not against each session's live mode — because session-level
+   * writers (`ExitPlanModeTool` approved plan exits, ACP `session/set_mode`,
+   * the `sessionApprovalMode` ext) do not rewrite workspace settings, so a
+   * live session legitimately diverges from the file mid-workflow and an
+   * unchanged file must not clobber those transitions. The record lives
    * on the daemon so it survives a `this.settings` cache swap, and per
    * session because one daemon-wide baseline cannot represent a partially
    * applied convergence: while a session skipped mid-flip still waits for
@@ -4963,6 +5013,7 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const requestedApprovalMode = requestedSessionApprovalMode(params);
     const parsedSessionId = parseCallerSuppliedSessionId(
       params._meta?.[REQUESTED_SESSION_ID_META_KEY],
     );
@@ -5037,8 +5088,12 @@ class QwenAgent implements Agent {
                 : undefined,
             ),
           );
+          const approvalModeConvergenceBaseline = config.getApprovalMode();
           let session: Session;
           try {
+            if (requestedApprovalMode !== undefined) {
+              setRequestedSessionApprovalMode(config, requestedApprovalMode);
+            }
             initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
@@ -5056,6 +5111,8 @@ class QwenAgent implements Agent {
                   ? { signal: initializationDeadline.signal }
                   : {}),
                 configProviderRevision,
+                approvalModeConvergenceBaseline,
+                persistInitialApprovalMode: requestedApprovalMode !== undefined,
               }),
             );
           } catch (error) {
@@ -5111,6 +5168,7 @@ class QwenAgent implements Agent {
     profiler: AcpSessionRestoreProfiler,
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
+    const requestedApprovalMode = requestedSessionApprovalMode(params);
     const sessionSource = getSessionSource(params);
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -5305,6 +5363,7 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const approvalModeConvergenceBaseline = config.getApprovalMode();
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
         projection.runtime.goalRecoverySourceUuid !==
@@ -5333,6 +5392,15 @@ class QwenAgent implements Agent {
             : {}),
         })) as LoadSessionResponse;
       try {
+        if (requestedApprovalMode !== undefined) {
+          setRequestedSessionApprovalMode(
+            config,
+            requestedApprovalMode,
+            projection,
+          );
+        } else {
+          applyRestoredSessionApprovalMode(config, projection);
+        }
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
             restoreSessionModelThenAuthenticate(config, projection, () =>
@@ -5349,6 +5417,8 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            approvalModeConvergenceBaseline,
+            persistInitialApprovalMode: requestedApprovalMode !== undefined,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5590,6 +5660,7 @@ class QwenAgent implements Agent {
     profiler: AcpSessionRestoreProfiler,
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
+    const requestedApprovalMode = requestedSessionApprovalMode(params);
     const sessionSource = getSessionSource(params);
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -5692,8 +5763,18 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const approvalModeConvergenceBaseline = config.getApprovalMode();
       let response: ResumeSessionResponse | undefined;
       try {
+        if (requestedApprovalMode !== undefined) {
+          setRequestedSessionApprovalMode(
+            config,
+            requestedApprovalMode,
+            projection,
+          );
+        } else {
+          applyRestoredSessionApprovalMode(config, projection);
+        }
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
             restoreSessionModelThenAuthenticate(config, projection, () =>
@@ -5710,6 +5791,8 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            approvalModeConvergenceBaseline,
+            persistInitialApprovalMode: requestedApprovalMode !== undefined,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -11122,7 +11205,9 @@ class QwenAgent implements Agent {
         const previous = config.getApprovalMode();
         try {
           config.setApprovalMode(mode as ApprovalMode);
+          await config.waitForSessionApprovalModePersistence?.();
         } catch (err) {
+          config.setApprovalMode(previous);
           // `TrustGateError` is the core's structured rejection for
           // untrusted-folder + privileged-mode. We re-raise it as a
           // JSON-RPC error whose `data.errorKind` is the literal the
@@ -13387,6 +13472,7 @@ class QwenAgent implements Agent {
               if (reloadedSessionMode !== previousMode) {
                 try {
                   config.setApprovalMode(reloadedSessionMode);
+                  await config.waitForSessionApprovalModePersistence?.();
                   if (reloadedSessionMode === 'plan') {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
@@ -14218,6 +14304,8 @@ class QwenAgent implements Agent {
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
       configProviderRevision?: number;
+      approvalModeConvergenceBaseline?: ApprovalMode;
+      persistInitialApprovalMode?: boolean;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
       beforeSessionPublish?: () => void;
@@ -14391,6 +14479,9 @@ class QwenAgent implements Agent {
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
         forceAuthenticationRefresh = true;
       }
+      await config.enableSessionApprovalModePersistence?.(
+        options.persistInitialApprovalMode,
+      );
       options.beforeSessionPublish?.();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {
@@ -14410,12 +14501,13 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
-      // The session boots converged on the mode its settings derived; later
-      // reloads track convergence from here. Restricted sessions derive
-      // DEFAULT, mirroring the fold the reload loop applies to them.
+      // Reload convergence starts from the settings-derived boot mode, even
+      // when transcript restoration or request metadata changed the live
+      // session mode before publication. Restricted sessions derive DEFAULT,
+      // mirroring the fold the reload loop applies to them.
       this.sessionApprovalModeConverged.set(
         sessionId,
-        config.getApprovalMode(),
+        options.approvalModeConvergenceBaseline ?? config.getApprovalMode(),
       );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon

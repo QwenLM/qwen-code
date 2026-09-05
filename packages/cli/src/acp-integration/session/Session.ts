@@ -10330,6 +10330,12 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
+    try {
+      await this.config.waitForSessionApprovalModePersistence?.();
+    } catch (error) {
+      this.config.setApprovalMode(previousApprovalMode);
+      throw error;
+    }
     // Only plan-involving transitions touch the revision: entering PLAN starts
     // a fresh approval cycle and leaving PLAN abandons the draft, but an
     // approved workflow plan keeps executing in a non-plan mode — switching
@@ -10683,6 +10689,11 @@ export class Session implements SessionContext {
    * Called after the agent switches modes (e.g., from exit_plan_mode tool).
    */
   private async sendCurrentModeUpdateNotification(): Promise<void> {
+    try {
+      await this.config.waitForSessionApprovalModePersistence?.();
+    } catch (error) {
+      debugLogger.debug('approval-mode persistence failed', error);
+    }
     const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
@@ -12958,6 +12969,13 @@ export class Session implements SessionContext {
           }
           const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
           if (staleTodoPlanApproval) return staleTodoPlanApproval;
+
+          await this.config.waitForSessionApprovalModePersistence?.();
+          const persistenceBoundaryCancellation =
+            cancelBeforeExecutionIfAborted(toolName);
+          if (persistenceBoundaryCancellation) {
+            return persistenceBoundaryCancellation;
+          }
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&

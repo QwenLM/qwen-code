@@ -41,6 +41,7 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 
 function branchTestRecord(
   uuid: string,
@@ -2869,6 +2870,137 @@ describe('ChatRecordingService', () => {
         modelId: 'qwen3-coder-flash',
         authType: 'openai',
       });
+    });
+  });
+
+  describe('recordSessionApprovalMode', () => {
+    it('persists every supported approval mode', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      for (const mode of Object.values(ApprovalMode)) {
+        await expect(
+          chatRecordingService.recordSessionApprovalMode(
+            mode === ApprovalMode.PLAN
+              ? { mode, prePlanMode: ApprovalMode.DEFAULT }
+              : { mode },
+          ),
+        ).resolves.toBe(true);
+      }
+
+      const modes = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map(
+          (call) =>
+            (call[1] as ChatRecord).systemPayload as { mode?: ApprovalMode },
+        )
+        .map((payload) => payload.mode);
+      expect(modes).toEqual(Object.values(ApprovalMode));
+    });
+
+    it('appends normalized approval state and skips identical payloads', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.AUTO_EDIT,
+        }),
+      ).resolves.toBe(true);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'session_approval_mode',
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.AUTO_EDIT,
+        },
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.AUTO_EDIT,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('re-anchors the live approval state onto the rewind branch', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_approval_mode',
+      ]);
+      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
+      expect(written[1]?.systemPayload).toEqual({ mode: ApprovalMode.YOLO });
+    });
+
+    it('re-anchors a pending approval change when rewind lands mid-write', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      let releaseWrite: (() => void) | undefined;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          }),
+      );
+      const pendingSwitch = chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.DEFAULT,
+      });
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      releaseWrite?.();
+      await pendingSwitch;
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewindIndex = written.findIndex(
+        (record) => record.subtype === 'rewind',
+      );
+      expect(rewindIndex).toBeGreaterThanOrEqual(0);
+      expect(written[rewindIndex + 1]).toMatchObject({
+        subtype: 'session_approval_mode',
+        parentUuid: written[rewindIndex]?.uuid,
+        systemPayload: { mode: ApprovalMode.DEFAULT },
+      });
+    });
+
+    it('retries the same approval mode after synchronous setup failure', async () => {
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      const payload = { mode: ApprovalMode.DEFAULT };
+
+      await expect(service.recordSessionApprovalMode(payload)).resolves.toBe(
+        false,
+      );
+      await expect(service.recordSessionApprovalMode(payload)).resolves.toBe(
+        true,
+      );
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
     });
   });
 

@@ -55,6 +55,7 @@ import type {
   GoalTurnPermit,
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
+import { APPROVAL_MODES, ApprovalMode } from '../config/approval-mode.js';
 import {
   collectPendingBranchToolCalls,
   resolveCompletedTurnBranchCandidateFromRecords,
@@ -303,6 +304,7 @@ export interface ChatRecord {
     | 'parent_session'
     | 'session_source'
     | 'session_model'
+    | 'session_approval_mode'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -366,6 +368,7 @@ export interface ChatRecord {
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
     | SessionModelRecordPayload
+    | SessionApprovalModeRecordPayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
@@ -578,6 +581,53 @@ export interface SessionModelRecordPayload {
   authType: string;
   baseUrl?: string;
   isRuntime?: boolean;
+}
+
+/** Last-wins approval state for a persistent daemon session. */
+export interface SessionApprovalModeRecordPayload {
+  mode: ApprovalMode;
+  prePlanMode?: ApprovalMode;
+}
+
+export type SessionApprovalModeRestoreState =
+  | {
+      kind: 'valid';
+      payload: SessionApprovalModeRecordPayload;
+    }
+  | { kind: 'invalid' };
+
+const APPROVAL_MODE_VALUES = new Set<string>(APPROVAL_MODES);
+
+export function normalizeSessionApprovalModePayload(
+  payload: unknown,
+): SessionApprovalModeRecordPayload | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const candidate = payload as {
+    mode?: unknown;
+    prePlanMode?: unknown;
+  };
+  if (
+    typeof candidate.mode !== 'string' ||
+    !APPROVAL_MODE_VALUES.has(candidate.mode)
+  ) {
+    return undefined;
+  }
+  const mode = candidate.mode as ApprovalMode;
+  if (mode !== ApprovalMode.PLAN) return { mode };
+  const prePlanMode =
+    typeof candidate.prePlanMode === 'string' &&
+    APPROVAL_MODE_VALUES.has(candidate.prePlanMode) &&
+    candidate.prePlanMode !== ApprovalMode.PLAN
+      ? (candidate.prePlanMode as ApprovalMode)
+      : ApprovalMode.DEFAULT;
+  return { mode, prePlanMode };
+}
+
+function sessionApprovalModePayloadsEqual(
+  a: SessionApprovalModeRecordPayload,
+  b: SessionApprovalModeRecordPayload,
+): boolean {
+  return a.mode === b.mode && a.prePlanMode === b.prePlanMode;
 }
 
 export function isValidSessionModelPayload(
@@ -869,6 +919,7 @@ export interface ChatRecordingRestoreState {
   sourceType?: string;
   sourceId?: string;
   sessionModel?: SessionModelRecordPayload;
+  sessionApprovalMode?: SessionApprovalModeRestoreState;
 }
 
 /**
@@ -963,6 +1014,9 @@ export class ChatRecordingService {
   private currentSourceId: string | undefined;
   /** Last-wins daemon session model binding, used to skip duplicate writes. */
   private currentSessionModel: SessionModelRecordPayload | undefined;
+  private currentSessionApprovalMode:
+    | SessionApprovalModeRecordPayload
+    | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
    * How many auto-title attempts have been made this process.
@@ -1144,6 +1198,7 @@ export class ChatRecordingService {
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
     this.currentSessionModel = undefined;
+    this.currentSessionApprovalMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
@@ -1180,6 +1235,10 @@ export class ChatRecordingService {
             record.systemPayload,
           );
         }
+      } else if (record.subtype === 'session_approval_mode') {
+        this.currentSessionApprovalMode = normalizeSessionApprovalModePayload(
+          record.systemPayload,
+        );
       }
     }
     if (persistedTitleInfo !== undefined) {
@@ -1214,6 +1273,10 @@ export class ChatRecordingService {
     this.currentSessionModel = state.sessionModel
       ? normalizeSessionModelPayload(state.sessionModel)
       : undefined;
+    this.currentSessionApprovalMode =
+      state.sessionApprovalMode?.kind === 'valid'
+        ? state.sessionApprovalMode.payload
+        : undefined;
     if (this.currentCustomTitle) {
       this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
     }
@@ -2476,6 +2539,15 @@ export class ChatRecordingService {
         });
       }
 
+      if (this.currentSessionApprovalMode) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_approval_mode',
+          systemPayload: this.currentSessionApprovalMode,
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -2749,6 +2821,45 @@ export class ChatRecordingService {
     } catch (error) {
       if (error !== this.writeFailure) {
         debugLogger.error('Error saving session model record:', error);
+      }
+      return false;
+    }
+  }
+
+  /** Persist the daemon session's current approval state for cold restore. */
+  async recordSessionApprovalMode(
+    payload: SessionApprovalModeRecordPayload,
+  ): Promise<boolean> {
+    const normalized = normalizeSessionApprovalModePayload(payload);
+    if (!normalized) return false;
+    if (
+      this.currentSessionApprovalMode &&
+      sessionApprovalModePayloadsEqual(
+        this.currentSessionApprovalMode,
+        normalized,
+      )
+    ) {
+      return true;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        systemPayload: normalized,
+      };
+      const previous = this.currentSessionApprovalMode;
+      this.currentSessionApprovalMode = normalized;
+      try {
+        await this.appendRecordStrict(record);
+      } catch (error) {
+        this.currentSessionApprovalMode = previous;
+        throw error;
+      }
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session approval mode record:', error);
       }
       return false;
     }

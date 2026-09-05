@@ -226,6 +226,7 @@ import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
+  type SessionApprovalModeRecordPayload,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -2267,6 +2268,8 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
+  private sessionApprovalModePersistenceEnabled = false;
+  private sessionApprovalModePersistenceTail: Promise<void> = Promise.resolve();
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
     kind: 'clear',
@@ -4514,6 +4517,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.queueSessionApprovalModePersistence();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -7078,6 +7082,21 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  restoreApprovalModeState(payload: SessionApprovalModeRecordPayload): void {
+    this.setApprovalMode(payload.mode);
+    // Restoring or initializing a session establishes its current state; it
+    // is not a user-driven PLAN exit that the next model turn must explain.
+    Config.prototype.getManualPlanExitNoticeEventState.call(this).kind =
+      'clear';
+    if (payload.mode !== ApprovalMode.PLAN) return;
+    const prePlanMode = payload.prePlanMode ?? ApprovalMode.DEFAULT;
+    this.prePlanMode =
+      prePlanMode === ApprovalMode.PLAN ||
+      (!this.isTrustedFolder() && prePlanMode !== ApprovalMode.DEFAULT)
+        ? ApprovalMode.DEFAULT
+        : prePlanMode;
+  }
+
   getApprovalModeRevision(): number {
     return this.approvalModeRevision;
   }
@@ -7190,6 +7209,7 @@ export class Config {
     this.approvalMode = mode;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      this.queueSessionApprovalModePersistence();
     }
   }
 
@@ -8666,6 +8686,61 @@ export class Config {
     return this.chatRecordingService;
   }
 
+  private sessionApprovalModeSnapshot(): SessionApprovalModeRecordPayload {
+    return this.approvalMode === ApprovalMode.PLAN
+      ? {
+          mode: this.approvalMode,
+          prePlanMode: this.getPrePlanMode(),
+        }
+      : { mode: this.approvalMode };
+  }
+
+  private queueSessionApprovalModePersistence(): void {
+    const recorder = this.chatRecordingService;
+    if (
+      isDerivedConfig(this) ||
+      !this.sessionApprovalModePersistenceEnabled ||
+      !recorder
+    ) {
+      return;
+    }
+    const payload = this.sessionApprovalModeSnapshot();
+    const persist = async () => {
+      const persisted = await recorder.recordSessionApprovalMode(payload);
+      if (!persisted) throw new SessionWriterUnavailableError();
+    };
+    this.sessionApprovalModePersistenceTail =
+      this.sessionApprovalModePersistenceTail.then(persist, persist);
+    void this.sessionApprovalModePersistenceTail.catch(() => undefined);
+  }
+
+  async enableSessionApprovalModePersistence(
+    persistCurrentMode = true,
+  ): Promise<void> {
+    if (isDerivedConfig(this)) return;
+    const recorder = this.getChatRecordingService();
+    if (!recorder) return;
+    if (this.sessionWriterLeaseEnabled && !recorder.hasWriteOwnership()) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionApprovalModePersistenceEnabled = true;
+    if (persistCurrentMode) {
+      this.queueSessionApprovalModePersistence();
+    }
+    await this.waitForSessionApprovalModePersistence();
+  }
+
+  async waitForSessionApprovalModePersistence(): Promise<void> {
+    if (isDerivedConfig(this) || !this.sessionApprovalModePersistenceEnabled) {
+      return;
+    }
+    while (true) {
+      const pending = this.sessionApprovalModePersistenceTail;
+      await pending;
+      if (pending === this.sessionApprovalModePersistenceTail) return;
+    }
+  }
+
   getGoalRuntime(): GoalRuntime {
     if (
       !Object.hasOwn(this, 'goalRuntime') ||
@@ -8927,6 +9002,9 @@ export class Config {
 
   async assertCanStartTurn(): Promise<void> {
     if (isDerivedConfig(this)) return;
+    if (this.sessionApprovalModePersistenceEnabled) {
+      await this.waitForSessionApprovalModePersistence();
+    }
     if (this.chatRecordingService?.hasWriteOwnership()) {
       await this.chatRecordingService.assertCanStartTurn();
     }
@@ -8969,10 +9047,6 @@ export class Config {
       this.sessionWriterHandoffRequested = true;
     }
     this.sessionWriterShutdownRequested = true;
-    this.chatRecordingService?.beginClose({
-      handoff: this.sessionWriterHandoffRequested,
-    });
-    this.startPendingSessionWriterRelease();
     if (this.sessionWriterClosePromise) return this.sessionWriterClosePromise;
     const pending = this.closeSessionWriterOnce();
     this.sessionWriterClosePromise = pending;
@@ -8987,6 +9061,15 @@ export class Config {
   private async closeSessionWriterOnce(): Promise<void> {
     const failures: unknown[] = [];
     const activation = this.sessionWriterActivationPromise;
+    try {
+      await this.waitForSessionApprovalModePersistence();
+    } catch (error) {
+      failures.push(error);
+    }
+    this.chatRecordingService?.beginClose({
+      handoff: this.sessionWriterHandoffRequested,
+    });
+    this.startPendingSessionWriterRelease();
     try {
       await activation;
     } catch (error) {

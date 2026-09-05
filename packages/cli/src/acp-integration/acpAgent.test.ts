@@ -1149,6 +1149,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
+  SESSION_APPROVAL_MODE_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -4237,6 +4238,57 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         agent.newSession({ cwd: '/tmp', mcpServers: [] }),
       ).resolves.toMatchObject({ sessionId: 'test-session-id' });
       expect(mockSessionStartSpan.setAttribute).not.toHaveBeenCalled();
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(false);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('persists an approval mode explicitly requested for a new session', async () => {
+    const innerConfig = makeInnerConfig();
+    Object.assign(innerConfig, {
+      restoreApprovalModeState: vi.fn(),
+    });
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'yolo' },
+      });
+
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(true);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -4450,6 +4502,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      enableSessionApprovalModePersistence: vi
+        .fn()
+        .mockResolvedValue(undefined),
       setSessionWorkflowEnabledProvider: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
@@ -5761,6 +5816,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rolls back a live approval-mode change when persistence fails', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let approvalMode = 'default';
+    const persistenceError = new Error('approval persistence failed');
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    Object.assign(innerConfig, {
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      waitForSessionApprovalModePersistence: vi
+        .fn()
+        .mockRejectedValue(persistenceError),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+        sessionId,
+        mode: 'plan',
+      }),
+    ).rejects.toBe(persistenceError);
+    expect(setApprovalMode).toHaveBeenNthCalledWith(1, 'plan');
+    expect(setApprovalMode).toHaveBeenNthCalledWith(2, 'default');
+    expect(approvalMode).toBe('default');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -22648,6 +22735,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
+        setMode: ReturnType<typeof vi.fn>;
         assertCanStartTurn: ReturnType<typeof vi.fn>;
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
@@ -22739,6 +22827,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       resumedConversation?: { messages: unknown[] };
     } = {},
   ) {
+    let approvalMode = 'default';
     const recording = {
       rebuildTurnBoundaries: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
@@ -22771,7 +22860,21 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
-      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode: vi.fn((mode: string) => {
+        approvalMode = mode;
+      }),
+      restoreApprovalModeState: vi.fn((payload: { mode: string }) => {
+        approvalMode = payload.mode;
+      }),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      enableSessionApprovalModePersistence: vi
+        .fn()
+        .mockResolvedValue(undefined),
+      waitForSessionApprovalModePersistence: vi
+        .fn()
+        .mockResolvedValue(undefined),
       getSessionId: vi.fn().mockReturnValue('persisted-1'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
@@ -22928,6 +23031,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         const lastSessionModel = [...messages]
           .reverse()
           .find((message) => message['subtype'] === 'session_model');
+        const lastSessionApprovalMode = [...messages]
+          .reverse()
+          .find((message) => message['subtype'] === 'session_approval_mode');
         return {
           sessionId,
           filePath: '/tmp/session.jsonl',
@@ -22942,6 +23048,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
               turnParentUuids: [],
               ...(lastSessionModel?.['systemPayload']
                 ? { sessionModel: lastSessionModel['systemPayload'] }
+                : {}),
+              ...(lastSessionApprovalMode?.['systemPayload']
+                ? {
+                    sessionApprovalMode: {
+                      kind: 'valid',
+                      payload: lastSessionApprovalMode['systemPayload'],
+                    },
+                  }
                 : {}),
             },
             artifactSnapshot: data.artifactSnapshot,
@@ -23043,6 +23157,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ),
         startCronScheduler: vi.fn(),
         enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
+        setMode: vi.fn().mockResolvedValue(undefined),
         beginClose: vi.fn().mockReturnValue(releaseCloseGate),
         beginCloseIfAvailable: vi.fn().mockReturnValue(releaseCloseGate),
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
@@ -23606,6 +23721,218 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       await agentPromise;
     },
   );
+
+  it.each(['load', 'resume'] as const)(
+    'cold %s restores and republishes the recorded session approval mode',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'mode-1',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: {
+                mode: 'plan',
+                prePlanMode: 'auto-edit',
+              },
+            },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      };
+
+      const response =
+        action === 'load'
+          ? await agent.loadSession(request)
+          : await agent.unstable_resumeSession(request);
+
+      expect(innerConfig.restoreApprovalModeState).toHaveBeenCalledWith({
+        mode: 'plan',
+        prePlanMode: 'auto-edit',
+      });
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(false);
+      expect(
+        innerConfig.restoreApprovalModeState.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        innerConfig.enableSessionApprovalModePersistence.mock
+          .invocationCallOrder[0],
+      );
+      expect(
+        (
+          agent as unknown as {
+            sessionApprovalModeConverged: Map<string, string>;
+          }
+        ).sessionApprovalModeConverged.get('persisted-1'),
+      ).toBe('default');
+      expect(response).toEqual(
+        expect.objectContaining({
+          modes: expect.objectContaining({ currentModeId: 'plan' }),
+        }),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'cold %s applies an explicit approval mode before session publication',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'mode-1',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: { mode: 'default' },
+            },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: {
+          [SESSION_APPROVAL_MODE_META_KEY]: 'yolo',
+        },
+      };
+
+      const response =
+        action === 'load'
+          ? await agent.loadSession(request)
+          : await agent.unstable_resumeSession(request);
+
+      expect(innerConfig.restoreApprovalModeState).toHaveBeenCalledWith({
+        mode: 'yolo',
+      });
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(true);
+      expect(
+        innerConfig.restoreApprovalModeState.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        innerConfig.enableSessionApprovalModePersistence.mock
+          .invocationCallOrder[0],
+      );
+      expect(response).toEqual(
+        expect.objectContaining({
+          modes: expect.objectContaining({ currentModeId: 'yolo' }),
+        }),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'cold %s preserves the recorded plan exit target for an explicit plan mode',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'mode-1',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: {
+                mode: 'auto-edit',
+              },
+            },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'plan' },
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(request);
+      } else {
+        await agent.unstable_resumeSession(request);
+      }
+
+      expect(innerConfig.restoreApprovalModeState).toHaveBeenCalledWith({
+        mode: 'plan',
+        prePlanMode: 'auto-edit',
+      });
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('rejects invalid explicit approval modes for new, load, and resume', async () => {
+    bindRestoreMocks({ sessionExists: true });
+    const { agent, agentPromise } = await spawnAgent();
+    const request = {
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'invalid-mode' },
+    };
+
+    await expect(
+      (
+        agent as unknown as {
+          newSession: (params: typeof request) => Promise<unknown>;
+        }
+      ).newSession(request),
+    ).rejects.toThrow('Invalid session approval mode');
+    await expect(agent.loadSession(request)).rejects.toThrow(
+      'Invalid session approval mode',
+    );
+    await expect(agent.unstable_resumeSession(request)).rejects.toThrow(
+      'Invalid session approval mode',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps an explicit approval-mode trust rejection and cleans the cold config', async () => {
+    const innerConfig = bindRestoreMocks({ sessionExists: true });
+    const trustError = new Error('privileged mode rejected');
+    trustError.name = 'TrustGateError';
+    innerConfig.restoreApprovalModeState.mockImplementation(() => {
+      throw trustError;
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'yolo' },
+      }),
+    ).rejects.toMatchObject({
+      code: -32003,
+      data: { errorKind: 'trust_gate' },
+    });
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('cold resume still succeeds when restoring the session model fails', async () => {
     const innerConfig = bindRestoreMocks({
@@ -25606,6 +25933,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           cwd: '/tmp',
           sessionId: 'persisted-1',
           mcpServers: [],
+          _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'yolo' },
         })
         .catch((error: unknown) => error);
       await vi.advanceTimersByTimeAsync(30_000);
@@ -25614,6 +25942,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         message: 'Session restore timed out after 30000ms',
       });
       expect(releaseCloseGate).toHaveBeenCalledOnce();
+      expect(firstSession.setMode).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
       mockConnectionState.resolve();
@@ -28197,12 +28526,11 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('keeps runtime-only approval-mode transitions across unchanged-file reloads', async () => {
-    // The file pins plan; the session legitimately exits plan through an
-    // approved exit_plan_mode, which switches the live mode at runtime
-    // without ever persisting (core Config.setApprovalMode is runtime-only,
-    // as are ACP session/set_mode and the sessionApprovalMode ext). A reload
-    // whose file value is unchanged must not re-apply the disk value: that
+  it('keeps session approval-mode transitions across unchanged-file reloads', async () => {
+    // The file pins plan; the initial request legitimately selects a
+    // session-scoped default without rewriting the workspace setting. A
+    // reload whose file value is unchanged must not re-apply the disk value:
+    // that
     // would flip the executing session back into PLAN between turns and
     // destroy its approved revision + stop-guard trust.
     let mergedSettings: Record<string, unknown> = {
@@ -28225,6 +28553,9 @@ describe('sessionLanguage multi-session propagation', () => {
       getSessionId: vi.fn().mockReturnValue('s-runtime-mode'),
       getApprovalMode: vi.fn(() => approvalMode),
       setApprovalMode,
+      restoreApprovalModeState: vi.fn(({ mode }: { mode: string }) => {
+        setApprovalMode(mode);
+      }),
       setDisabledTools: vi.fn(),
       isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
     });
@@ -28265,15 +28596,20 @@ describe('sessionLanguage multi-session propagation', () => {
       },
     });
 
-    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    await agent.newSession({
+      cwd: '/reload',
+      mcpServers: [],
+      _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'default' },
+    });
+    expect(approvalMode).toBe('default');
+    setApprovalMode.mockClear();
     const approvalModes = APPROVAL_MODES as unknown as string[];
     const originalApprovalModes = [...approvalModes];
     approvalModes.splice(0, approvalModes.length, 'default', 'plan', 'auto');
     try {
-      // Runtime-only transition (approved plan exit): the live session drops
-      // to default between turns while the file still says plan. An
-      // unrelated-settings reload must leave it alone.
-      approvalMode = 'default';
+      // The initial request applies a session mode before publication while
+      // the file still says plan. An unrelated-settings reload must leave it
+      // alone.
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
       expect(setApprovalMode).not.toHaveBeenCalled();
       expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
@@ -28287,8 +28623,8 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(setApprovalMode).not.toHaveBeenCalled();
 
       // ...which keeps the mirror direction safe too: the file is default
-      // while the user drafts in PLAN at runtime (session/set_mode never
-      // persists), and a no-edit reload must not discard the draft.
+      // while the user drafts in PLAN at session scope (session/set_mode does
+      // not rewrite settings), and a no-edit reload must not discard the draft.
       approvalMode = 'plan';
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
       expect(setApprovalMode).not.toHaveBeenCalled();

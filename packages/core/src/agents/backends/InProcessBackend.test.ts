@@ -60,6 +60,7 @@ function createMockConfig() {
     getApprovalMode: vi.fn().mockReturnValue(DEFAULT_MODE),
     getPrePlanMode: vi.fn().mockReturnValue(DEFAULT_MODE),
     setApprovalMode: vi.fn(),
+    queueSessionApprovalModePersistence: vi.fn(),
     isTrustedFolder: vi.fn().mockReturnValue(true),
     getPermissionManager: vi.fn().mockReturnValue(null),
     getWorkingDir: vi.fn().mockReturnValue('/tmp'),

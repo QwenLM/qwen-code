@@ -5767,6 +5767,59 @@ describe('Session', () => {
       );
     });
 
+    it('waits for approval-mode persistence before reporting success', async () => {
+      let release!: () => void;
+      mockConfig.waitForSessionApprovalModePersistence = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const pending = session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+      await Promise.resolve();
+
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.anything(),
+      );
+
+      release();
+      await pending;
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({ currentModeId: 'auto-edit' }),
+      );
+    });
+
+    it('rolls back and does not report a mode switch when persistence fails', async () => {
+      mockConfig.waitForSessionApprovalModePersistence = vi
+        .fn()
+        .mockRejectedValue(new Error('approval persistence failed'));
+
+      await expect(
+        session.setMode({
+          sessionId: 'test-session-id',
+          modeId: 'auto-edit',
+        }),
+      ).rejects.toThrow('approval persistence failed');
+      expect(mockConfig.setApprovalMode).toHaveBeenNthCalledWith(
+        1,
+        ApprovalMode.AUTO_EDIT,
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.DEFAULT,
+      );
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.anything(),
+      );
+    });
+
     it('rejects an unknown modeId and does NOT touch approval mode (A2)', async () => {
       await expect(
         session.setMode({
@@ -6061,6 +6114,26 @@ describe('Session', () => {
         expect.objectContaining({
           currentModeId: ApprovalMode.DEFAULT,
           legacyFrameSent: false,
+        }),
+      );
+    });
+
+    it('still reports the mode when approval persistence fails', async () => {
+      mockConfig.waitForSessionApprovalModePersistence = vi
+        .fn()
+        .mockRejectedValue(new Error('approval persistence failed'));
+
+      await (
+        session as unknown as {
+          sendCurrentModeUpdateNotification: () => Promise<void>;
+        }
+      ).sendCurrentModeUpdateNotification();
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          currentModeId: ApprovalMode.DEFAULT,
+          legacyFrameSent: true,
         }),
       );
     });
@@ -31117,6 +31190,61 @@ describe('Session', () => {
           errorType: undefined,
         }),
       );
+    });
+
+    it('preserves cancellation while approval persistence settles', async () => {
+      const abortController = new AbortController();
+      let releasePersistence!: () => void;
+      mockConfig.waitForSessionApprovalModePersistence = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releasePersistence = resolve;
+          }),
+      );
+      const execute = vi.fn();
+      const build = vi.fn().mockReturnValue({
+        params: {},
+        execute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue('persistence_tool'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'persistence_tool',
+        kind: core.Kind.Read,
+        displayName: 'persistence_tool',
+        description: 'persistence_tool',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-persistence-cancel',
+        [
+          {
+            id: 'persistence_cancel_call',
+            name: 'persistence_tool',
+            args: {},
+          },
+        ],
+      );
+      await vi.waitFor(() =>
+        expect(
+          mockConfig.waitForSessionApprovalModePersistence,
+        ).toHaveBeenCalledOnce(),
+      );
+
+      abortController.abort();
+      releasePersistence();
+      const result = await runPromise;
+
+      expect(build).toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Tool call was cancelled before execution.',
+      });
     });
 
     it('preserves cancellation when permission flow resolves deny after abort', async () => {
