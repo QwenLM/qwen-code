@@ -78,7 +78,7 @@ import type {
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { LlmChat } from '../../core/llm-chat.js';
+import { LlmChat, type StreamEvent } from '../../core/llm-chat.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
@@ -968,6 +968,7 @@ export class AgentCore {
       // parent propagation; the try/finally below guarantees reverse-cleanup
       // fires for every exit (success, break, return, throw).
       const roundAbortController = createChildAbortController(abortController);
+      let responseStream: AsyncGenerator<StreamEvent> | undefined;
 
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
@@ -985,12 +986,16 @@ export class AgentCore {
         };
 
         const roundStreamStart = Date.now();
-        const responseStream = await chat.sendMessageStream(
+        responseStream = await chat.sendMessageStream(
           this.modelConfig.model ||
             this.runtimeContext.getModel() ||
             DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
+          undefined,
+          stickyMaxOutputTokens !== undefined
+            ? { maxOutputTokensFromRecovery: true }
+            : undefined,
         );
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
@@ -1042,6 +1047,32 @@ export class AgentCore {
             }
             if (streamEvent.maxOutputTokensEscalated !== undefined) {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
+            functionCalls.length = 0;
+            loopGuardStreamedCallIds.clear();
+            if (!streamEvent.isContinuation) {
+              roundText = '';
+              roundThoughtText = '';
+              lastUsage = undefined;
+            }
+            currentResponseId = undefined;
+            wasOutputTruncated = false;
+            continue;
+          }
+
+          if (streamEvent.type === 'model_fallback') {
+            if (
+              checkSubagentLoop({
+                type: LlmEventType.ModelFallback,
+                fromModel: streamEvent.info.fromModel,
+                toModel: streamEvent.info.toModel,
+                statusCode: streamEvent.info.statusCode,
+                fallbackIndex: streamEvent.info.fallbackIndex,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
             }
             functionCalls.length = 0;
             loopGuardStreamedCallIds.clear();
@@ -1354,6 +1385,13 @@ export class AgentCore {
         // long-running parents like the per-message roundAbortController in
         // AgentInteractive or the session-lived externalSignal in headless.
         roundAbortController.abort();
+        try {
+          await responseStream?.return(undefined);
+        } catch (error) {
+          this.runtimeContext
+            .getDebugLogger()
+            .warn(`Failed to close response stream: ${String(error)}`);
+        }
       }
     }
 

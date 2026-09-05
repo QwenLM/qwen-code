@@ -279,6 +279,20 @@ async function runSpeculativeLoop(
       const modelParts: Part[] = [];
       for await (const event of stream) {
         if (state.abortController?.signal.aborted) break;
+        if (event.type === StreamEventType.RETRY) {
+          if (event.isContinuation) {
+            for (let i = modelParts.length - 1; i >= 0; i -= 1) {
+              if (modelParts[i]?.functionCall) modelParts.splice(i, 1);
+            }
+          } else {
+            modelParts.length = 0;
+          }
+          continue;
+        }
+        if (event.type === StreamEventType.MODEL_FALLBACK) {
+          modelParts.length = 0;
+          continue;
+        }
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
         const parts = response.candidates?.[0]?.content?.parts ?? [];

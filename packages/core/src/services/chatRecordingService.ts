@@ -341,6 +341,8 @@ export interface ChatRecord {
 
   /** Token usage statistics */
   usageMetadata?: GenerateContentResponseUsageMetadata;
+  /** Whether usage is a conservative substitute rather than a fresh provider boundary. */
+  usageMetadataIsEstimated?: boolean;
   /** Model used for this response */
   model?: string;
   /** Context window size of the model used for this response */
@@ -2073,6 +2075,13 @@ export class ChatRecordingService {
     this.goalTurnSpend.tokens += total;
   }
 
+  recordGoalTurnUsage(
+    goalContext: GoalTurnPermit,
+    usage: GenerateContentResponseUsageMetadata,
+  ): void {
+    this.accumulateGoalTurnTokens(goalContext.turnId, usage);
+  }
+
   /**
    * The tokens billed to `turnId`, consuming them so a turn is counted once.
    *
@@ -2095,14 +2104,17 @@ export class ChatRecordingService {
    * @param data.model The model name
    * @param data.tokens Token usage statistics
    * @param data.contextWindowSize Context window size of the model
-   * @param data.toolCallsMetadata Enriched tool call info for UI recovery
+   * @param data.goalContext Goal turn attributed to this model call
+   * @param data.goalTokensAlreadyAccumulated Whether Goal billing was recorded per attempt
    */
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
+    usageMetadataIsEstimated?: boolean;
     contextWindowSize?: number;
     goalContext?: GoalTurnPermit;
+    goalTokensAlreadyAccumulated?: boolean;
   }): void {
     try {
       const record: ChatRecord = {
@@ -2119,7 +2131,10 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
-        if (data.goalContext) {
+        if (data.usageMetadataIsEstimated) {
+          record.usageMetadataIsEstimated = true;
+        }
+        if (data.goalContext && !data.goalTokensAlreadyAccumulated) {
           this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
         }
       }
