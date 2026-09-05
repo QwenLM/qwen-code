@@ -5387,7 +5387,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
-            { userCancelled: turnCancelledRef.current },
+            { userCancelled: true },
           );
         }
         endToolInteraction('cancelled');
@@ -5864,7 +5864,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
-            { userCancelled: turnCancelledRef.current },
+            { userCancelled: true },
           );
         }
         endToolInteraction('cancelled');

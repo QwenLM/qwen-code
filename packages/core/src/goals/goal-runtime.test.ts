@@ -3122,6 +3122,37 @@ describe('goal runtime', () => {
     });
   });
 
+  it('releases a turn without restarting after a requested pause cannot persist', async () => {
+    const writerLost = new Error('writer lost');
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, writerLost],
+    });
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const permit = host.started[0];
+
+    await expect(
+      runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toMatchObject({ cause: writerLost });
+    await expect(
+      runtime.releaseTurn(`goal-runtime:${permit.turnId}`, {
+        requeue: false,
+      }),
+    ).resolves.toBe(true);
+
+    expect(host.started).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: { status: 'active' },
+    });
+  });
+
   it('serializes reservation release behind an in-flight turn commit', async () => {
     const appendReached = deferred<void>();
     const appendGate = deferred<void>();

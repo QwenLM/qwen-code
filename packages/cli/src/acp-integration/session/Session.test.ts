@@ -24432,7 +24432,9 @@ describe('Session', () => {
         });
 
         await vi.waitFor(() => {
-          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+            requeue: false,
+          });
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
@@ -24536,7 +24538,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       });
 
-      it('records session closure instead of user cancellation for an ACP Goal turn', async () => {
+      it('does not restart a model-started Goal when recording session closure fails', async () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',
           revision: 1,
@@ -24582,6 +24584,9 @@ describe('Session', () => {
                 yield* [];
               })(),
           );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
 
         await boundGoalHost!.startGoalTurn({
           permit,
@@ -24606,6 +24611,9 @@ describe('Session', () => {
             reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
           }),
         );
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+          requeue: false,
+        });
         cancelClose();
       });
 

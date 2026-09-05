@@ -2626,7 +2626,7 @@ export class Session implements SessionContext {
                 error instanceof Error ? error.message : String(error)
               }`,
             );
-            await runtime.releaseTurn(turn.turnKey);
+            await runtime.releaseTurn(turn.turnKey, { requeue: false });
           }
         } else {
           await runtime.releaseTurn(turn.turnKey);
@@ -2706,7 +2706,14 @@ export class Session implements SessionContext {
             error instanceof Error ? error.message : String(error)
           }`,
         );
-        await runtime.releaseTurn(turn.turnKey);
+        if (
+          cancelledByUser ||
+          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+        ) {
+          await runtime.releaseTurn(turn.turnKey, { requeue: false });
+        } else {
+          await runtime.releaseTurn(turn.turnKey);
+        }
       }
     } catch (error) {
       debugLogger.warn(

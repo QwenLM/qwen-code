@@ -5005,13 +5005,28 @@ describe('useLlmStream', () => {
     act(() => {
       result.current.cancelOngoingRequest();
     });
+    let releaseRefresh: (() => void) | undefined;
+    mockRefreshMemoryAfterManagedWrite.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          releaseRefresh = () => resolve(false);
+        }),
+    );
     mockAddItem.mockClear();
-    await act(async () => {
+    const batch = act(async () => {
       await capturedOnComplete?.([
         completedTool('done-tool'),
         cancelledTool('cont-tool'),
       ]);
     });
+    await waitFor(() => {
+      expect(releaseRefresh).toBeDefined();
+    });
+    await act(async () => {
+      await result.current.submitQuery('keep going', SendMessageType.Steer);
+    });
+    releaseRefresh?.();
+    await batch;
 
     await waitFor(() => {
       expect(dispatch).toHaveBeenCalledWith({
@@ -5035,8 +5050,9 @@ describe('useLlmStream', () => {
       'done-tool',
       'cont-tool',
     ]);
-    // No second model call: the interrupted batch never reached the model.
-    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    // The only second model call is the explicit Steer; the interrupted batch
+    // itself never reached the model.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
   });
 
   it('pauses a declined Goal tool batch as a user action, not a failure', async () => {
@@ -5744,10 +5760,10 @@ describe('useLlmStream', () => {
     );
   });
 
-  it('pairs a cancelled Goal batch without persisting a restored steer', async () => {
+  it('keeps a user cancellation latched across the boundary drain', async () => {
     // A batch that passes the first cancellation check is already marked
-    // submitted by the time the boundary drain resolves an in-band pause. The
-    // later exit owes the same pairing, but must not persist a steer it restores.
+    // submitted when the boundary drain begins. If Esc lands during that await,
+    // a later Steer resets the transient flag but not the cancelled signal.
     const permit: GoalTurnPermit = {
       goalId: 'goal-drain-cancel',
       revision: 4,
@@ -5808,9 +5824,8 @@ describe('useLlmStream', () => {
         } as unknown as AnyToolInvocation,
       }) as unknown as TrackedCompletedToolCall;
 
-    // A plain steer resolved before an in-band `/goal pause` is both appended
-    // to the pending submission and eligible for restoration when that command
-    // preempts the Goal binding.
+    // A plain steer resolved before the delayed command is both appended to the
+    // pending submission and eligible for restoration when Esc aborts the drain.
     let queuedSteerMessages: string[] = [];
     const midTurnDrainRef = {
       current: vi.fn<() => string[]>(() => {
@@ -5822,11 +5837,13 @@ describe('useLlmStream', () => {
     const midTurnRestoreRef = {
       current: vi.fn<(messages: string[]) => void>(),
     };
-    const preemptDuringSlashCommand = vi.fn();
-    mockHandleSlashCommand.mockImplementation(async () => {
-      preemptDuringSlashCommand();
-      return false;
-    });
+    let releaseSlashCommand: (() => void) | undefined;
+    mockHandleSlashCommand.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          releaseSlashCommand = () => resolve(false);
+        }),
+    );
 
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -5869,10 +5886,6 @@ describe('useLlmStream', () => {
         midTurnRestoreRef,
       ),
     );
-    preemptDuringSlashCommand.mockImplementation(() =>
-      result.current.preemptGoalTurn('paused by in-band command'),
-    );
-
     mockSendMessageStream.mockImplementationOnce(() =>
       (async function* () {
         yield {
@@ -5915,11 +5928,31 @@ describe('useLlmStream', () => {
     rerender();
     client.addHistory.mockClear();
     queuedSteerMessages = ['steer it this way', '/goal pause'];
-    await act(async () => {
+    const batch = act(async () => {
       await capturedOnComplete?.([
         completedTool('done-tool'),
         completedTool('cont-tool'),
       ]);
+    });
+    await waitFor(() => {
+      expect(releaseSlashCommand).toBeDefined();
+    });
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+    await act(async () => {
+      await result.current.submitQuery('keep going', SendMessageType.Steer);
+    });
+    releaseSlashCommand?.();
+    await batch;
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+        reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      });
     });
 
     expect(client.addHistory).toHaveBeenCalledWith({
@@ -5934,8 +5967,9 @@ describe('useLlmStream', () => {
     expect(midTurnRestoreRef.current).toHaveBeenCalledWith([
       'steer it this way',
     ]);
-    // The cancelled batch never reached the model.
-    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    // The only second model call is the explicit Steer; the cancelled batch
+    // itself never reached the model.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
   });
 
   it('finishes a Goal turn without another model call after update_goal', async () => {
