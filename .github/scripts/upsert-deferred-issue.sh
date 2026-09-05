@@ -203,11 +203,15 @@ while (( lookup_page <= LOOKUP_MAX_PAGES )); do
   # fallback. The marker lives on the one surface maintainers are invited to
   # edit, so an edit that drops it would orphan the issue and the next round
   # would open a duplicate; the title is derived, never authored.
+  # The title fallback accepts both the bare form and the creation-time
+  # enriched form "base: <PR title>", guarded by the colon so PR #5's base
+  # never prefix-matches PR #50's issue.
   HIT="$(jq -r --arg m "${MARKER}" --arg t "${TITLE}" '
     (map(select((.pull_request | not)
       and ((.body // "") | contains($m)))) | .[0].number)
     // (map(select((.pull_request | not)
-      and ((.title // "") == $t))) | .[0].number)
+      and (((.title // "") == $t)
+        or ((.title // "") | startswith($t + ":"))))) | .[0].number)
     // "" | tostring' \
     <<< "${PAGE_JSON}" 2> /dev/null)" || HIT=''
   if [[ -n "${HIT}" && "${HIT}" != 'null' ]]; then
@@ -287,7 +291,8 @@ fi
 # &#0064; &commat;) get their `&` escaped — both measured inert against the
 # real renderer; `\@` and bare entity-escaping are NOT. Paths are already
 # reduced to a safe charset (no `@` survives).
-if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RESOLVED_FILE}" '
+if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RESOLVED_FILE}" \
+  --arg repo "${REPO}" --arg pr "${PR}" '
   # Identity for the multi-finding sources. LOSSLESS on content: only case
   # and PUNCTUATION are normalized, so the tolerance for rewording survives
   # while every letter of every script does too. The earlier form stripped
@@ -312,7 +317,7 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RE
        raw: ((.path // "?") + " " + .reason),
        # The path charset filter already excludes `<`, so the comment opener
        # cannot survive there; the reason is escaped explicitly below.
-       line: "- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
+       line: ("- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
         | gsub("[\r\n]+"; " ")
         | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
         | gsub("@"; "@\u200b")
@@ -321,7 +326,17 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RE
         # raw rendering against the escaped stored form never matches and
         # re-publishes the finding every round.
         | gsub("<!--"; "<!\\-\\-")
-        | .[0:500])",
+        | .[0:500])"
+        # rc gets a deep link back to the original review comment — safe on
+        # identity because rc dedup is anchored to the id (the line-start
+        # `anchor` prefix and unique_by [src,id]), so trailing text can
+        # neither duplicate nor suppress. rv/ic deliberately DO NOT get one:
+        # their cross-round identity IS the rendered line, and a suffix here
+        # would render every already-persisted rv/ic item as new — a
+        # one-time duplicate wave over the existing tracking issues.
+        + (if $src == "review_comment"
+           then " — [comment](https://github.com/\($repo)/pull/\($pr)#discussion_r\($id))"
+           else "" end)),
        anchor: ("^- " + $pfx + ":" + ($id | tostring) + " ")}
     # Identity key for the multi-finding sources. NOT the exact line: a
     # reworded re-emission (the repair flow re-runs the agent, so this is
@@ -376,11 +391,87 @@ else
 fi
 
 if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
-  BODY="${MARKER}"$'\n\n'"Verified review findings from PR #${PR} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up. A maintainer can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
+  # Creation-only context, best-effort: the PR title and author make the
+  # tracking issue self-describing at a glance (which PR it came from, what
+  # that PR was about) and assign the follow-up back to that author. Any
+  # failure here degrades to the bare title / no assignee — metadata must
+  # never lose findings.
   gh_err_reset
-  if NUM="$(gh api "repos/${REPO}/issues" \
-    -f title="${TITLE}" \
-    -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")"; then
+  PR_FETCH_OK=1
+  PR_JSON="$(gh api "repos/${REPO}/pulls/${PR}" 2> "${GH_ERR:-/dev/null}")" ||
+    PR_FETCH_OK=0
+  # Both fields are API-derived content published under the bot identity, so
+  # they get the same mention/comment-opener neutralization as the reason
+  # rendering. The title slice happens in jq (codepoint-safe): a bash byte
+  # slice could cut a UTF-8 sequence on CJK titles under a C locale and
+  # fail the whole create call.
+  PR_TITLE="$(jq -r '(.title // "")
+    | gsub("[\r\n\t]+"; " ")
+    | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
+    | gsub("@"; "@\u200b")
+    | gsub("<!--"; "<!\\-\\-")
+    | .[0:80]' <<< "${PR_JSON}" 2> /dev/null || true)"
+  PR_AUTHOR="$(jq -r '.user.login // ""' <<< "${PR_JSON}" 2> /dev/null || true)"
+  # GitHub login charset; anything else (or a failed fetch) reads as absent.
+  [[ "${PR_AUTHOR}" =~ ^[A-Za-z0-9-]{1,39}$ ]] || PR_AUTHOR=''
+  # The degradation must be SAID, like every other gh failure path here: the
+  # reset before the create call below wipes this call's captured reason, so
+  # without this warning a systematic pulls-endpoint failure — a fine-grained
+  # PAT rotated without pull-requests:read, a rate limit, a persistent 404 —
+  # reverts every new tracking issue to the bare title / no assignee / no cc
+  # while the success line still prints, and a fully degraded round is
+  # indistinguishable from a healthy one in the log. Gated on the CALL status,
+  # not on a body field: a successful fetch of a PR object is not a failure
+  # whatever fields it carries. Non-blocking (persistence must never fail a
+  # round) and read BEFORE that reset, so the create-failure warning below
+  # still reports its own reason.
+  if [[ "${PR_FETCH_OK}" != 1 ]]; then
+    echo "::warning::could not fetch PR #${PR} context ($(gh_reason)); creating the deferred-findings issue with the bare title, no assignee and no cc — the findings themselves are still persisted"
+  fi
+  CREATE_TITLE="${TITLE}"
+  [[ -n "${PR_TITLE}" ]] && CREATE_TITLE="${TITLE}: ${PR_TITLE}"
+  CONTEXT="PR #${PR}"
+  [[ -n "${PR_TITLE}" ]] && CONTEXT="${CONTEXT} (\"${PR_TITLE}\")"
+  [[ -n "${PR_AUTHOR}" ]] && CONTEXT="${CONTEXT} by ${PR_AUTHOR}"
+  # The assignment below notifies the author only when GitHub accepts it;
+  # external contributors are NOT assignable, so also cc them in the body —
+  # the mention is what actually reaches them. The login is charset-validated
+  # above, so this deliberate mention cannot inject anything else. Evaluated
+  # ONCE and reused below: a second copy of the condition could drift, cc'ing
+  # an author in the body that the assignment then declines.
+  CC=''
+  ASSIGNABLE=0
+  if [[ -n "${PR_AUTHOR}" && "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
+    CC=" cc @${PR_AUTHOR}."
+    ASSIGNABLE=1
+  fi
+  BODY="${MARKER}"$'\n\n'"Verified review findings from ${CONTEXT} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up.${CC} Each rc: item links back to its original review comment. A maintainer or the PR author can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
+  gh_err_reset
+  # ONE create call, never retried. POST /repos/{owner}/{repo}/issues is not
+  # idempotent, and the failures that reach a retry are the ambiguous ones —
+  # a connection reset, a gateway 502, a read timeout after the server already
+  # committed — so re-POSTing can mint a second tracking issue carrying the
+  # same marker and title. The next round's newest-first lookup adopts the
+  # newer one and the first is orphaned forever, publicly duplicating every
+  # finding while this round logs clean success. Same rule as the lookup cap
+  # above: creating a duplicate is worse than deferring persistence one round,
+  # so the failure path here is the loud LOST warning below, not another POST.
+  NUM="$(gh api "repos/${REPO}/issues" \
+    -f title="${CREATE_TITLE}" \
+    -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")" || NUM=''
+  if [[ -n "${NUM}" && "${ASSIGNABLE}" == 1 ]]; then
+    # Assignment is a separate metadata call: it can never mint a second
+    # issue, and it is where GitHub puts it anyway — assignees on the create
+    # call are silently dropped for users without push access, so for the
+    # external contributors this branch exists for the create always returned
+    # 201 unassigned. Failure only warns (persistence already succeeded) and
+    # the body's cc mention is what actually reaches them.
+    gh_err_reset
+    gh api "repos/${REPO}/issues/${NUM}/assignees" -f "assignees[]=${PR_AUTHOR}" \
+      > /dev/null 2> "${GH_ERR:-/dev/null}" \
+      || echo "::warning::could not assign deferred-findings issue #${NUM} to ${PR_AUTHOR} ($(gh_reason)); the body's cc mention still notifies them"
+  fi
+  if [[ -n "${NUM}" ]]; then
     echo "🗂 deferred findings tracked in new issue #${NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
     # Not "this round": the eval watermark filters this round's feedback out
