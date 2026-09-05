@@ -199,6 +199,18 @@ function liveWorkerPid(
   worker: AgentViewWorkerFile | undefined,
 ): number | undefined {
   if (!worker) return undefined;
+  // A worker file from another OS first: on darwin and win32 both
+  // `readProcStartToken` and `readPidNamespaceId` return null permanently,
+  // so such a file carries no token and no namespace and would sail
+  // through every guard below into a bare liveness probe — against a pid
+  // that lives in another OS's pid space, where the verdict means
+  // nothing. The token-less fall-through further down is for files
+  // written before those fields existed, which are same-machine and were
+  // getting a liveness check in their own pid space already; it does not
+  // transfer to this case. Pre-platform files are safe here because
+  // `platformValue` defaults an absent `platform` to `process.platform`,
+  // so they read as same-platform and keep that documented behaviour.
+  if (worker.platform !== process.platform) return undefined;
   const ownNamespace = readPidNamespaceId();
   if (
     worker.pidNs != null &&

@@ -92,7 +92,10 @@ function workerFile(
   return {
     schemaVersion: 1,
     protocolVersion: 1,
-    platform: 'linux',
+    // The reader's own platform, not a literal: `liveWorkerPid` compares
+    // this against `process.platform`, so pinning 'linux' here would fail
+    // every pid case on the macOS runner rather than testing anything.
+    platform: process.platform,
     recentOutputBytes: 0,
     ...over,
   };
@@ -356,6 +359,31 @@ describe('managedSessionRows', () => {
       NOW,
     );
     expect(row.pid).toBe(100);
+  });
+
+  it('refuses pids from a worker file written on another OS', () => {
+    // darwin and win32 have neither a start token nor a PID namespace, so
+    // a file written there carries null for both and clears every other
+    // guard — while its pids belong to another OS's pid space, where a
+    // local liveness probe answers about an unrelated process. The
+    // shared-home topology this module defends against reaches exactly
+    // here: a macOS supervisor's ~/.qwen mounted into a Linux container.
+    const foreign = process.platform === 'darwin' ? 'linux' : 'darwin';
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({
+            platform: foreign,
+            workerPid: 200,
+            workerProcStart: null,
+            pidNs: null,
+          }),
+        }),
+      ],
+      NOW,
+    );
+    expect(isPidAlive(200)).toBe(true);
+    expect(row.pid).toBeUndefined();
   });
 
   it('leaves the pid unset when no process is recorded, rather than reporting 0', () => {

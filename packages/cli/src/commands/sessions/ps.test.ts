@@ -106,7 +106,10 @@ function managedSnapshot(
       schemaVersion: 1,
       workerPid: 777,
       protocolVersion: 1,
-      platform: 'linux',
+      // The reader's own platform: `liveWorkerPid` refuses pids from a
+      // worker file written on another OS, so a literal here would blank
+      // this fixture's pid on the macOS runner.
+      platform: process.platform,
       recentOutputBytes: 0,
     },
     ...rest,
