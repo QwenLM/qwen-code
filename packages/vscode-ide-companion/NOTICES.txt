@@ -14057,8 +14057,8 @@ SOFTWARE.
 
 
 ============================================================
-diff@7.0.0
-(git://github.com/kpdecker/jsdiff.git)
+diff@8.0.4
+(https://github.com/kpdecker/jsdiff.git)
 
 BSD 3-Clause License
 
@@ -16411,7 +16411,7 @@ SOFTWARE.
 
 
 ============================================================
-uuid@9.0.1
+uuid@11.1.1
 (https://github.com/uuidjs/uuid.git)
 
 The MIT License (MIT)
