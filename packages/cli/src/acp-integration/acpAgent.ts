@@ -4580,9 +4580,10 @@ class QwenAgent implements Agent {
    * caller's decision at this level: callers that already hold deliberately
    * scoped settings (workspace MCP discovery, live-session scope checks,
    * session creation) pass them in. Per-request session-management handlers
-   * (list, delete, rename, transcript page, settled turn status, and the
-   * non-live branch of loadUpdates) must not make that decision themselves —
-   * they use `runWithPinnedRuntimeBaseDirForRequest` below. Session load and
+   * (list, delete, rename, transcript page, transcript turn index, settled
+   * turn status, and the non-live branch of loadUpdates) must not make that
+   * decision themselves — they use `runWithPinnedRuntimeBaseDirForRequest`
+   * below. Session load and
    * resume resolve the request's settings at the call site deliberately,
    * under profiler instrumentation, because they adopt those settings for
    * the session afterwards.
@@ -13983,7 +13984,7 @@ class QwenAgent implements Agent {
     if (!provisionalWorkspace) {
       startNonInteractiveOpenAILogHousekeeping(config, settings);
     }
-    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    // ACP sessions served to browser clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
     if (!provisionalWorkspace) {

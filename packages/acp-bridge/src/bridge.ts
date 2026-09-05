@@ -6181,6 +6181,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return idle();
     }
+    const requestRuntimeEpoch = runtimeEpoch;
     return await withWorkspaceStatusRead(info, async () => {
       let response = await withTimeout(
         Promise.race([
@@ -6195,13 +6196,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       if (
         isRecord(response) &&
-        (method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
+        (method === SERVE_STATUS_EXT_METHODS.workspaceSkills ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources)
       ) {
         response = {
           ...response,
-          runtimeEpoch,
+          runtimeEpoch: requestRuntimeEpoch,
           ...(method === SERVE_STATUS_EXT_METHODS.workspaceMcp
             ? { source: 'live' }
             : {}),
