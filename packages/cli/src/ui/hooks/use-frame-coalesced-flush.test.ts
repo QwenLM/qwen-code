@@ -65,6 +65,39 @@ describe('useFrameCoalescedFlush', () => {
     expect(result.current.isWindowActive()).toBe(false);
   });
 
+  it('reports an overdue pending timer as an active window', () => {
+    const flush = vi.fn();
+    const { result } = renderHook(() => useFrameCoalescedFlush(flush, 16));
+
+    act(() => result.current.schedule());
+    act(() => vi.advanceTimersByTime(5));
+    act(() => result.current.schedule());
+
+    const now = vi.spyOn(performance, 'now').mockReturnValue(32);
+    expect(result.current.isWindowActive()).toBe(true);
+    now.mockRestore();
+  });
+
+  it('measures the next window from a trailing flush', () => {
+    const flush = vi.fn();
+    const { result } = renderHook(() => useFrameCoalescedFlush(flush, 16));
+
+    act(() => result.current.schedule());
+    act(() => vi.advanceTimersByTime(5));
+    act(() => result.current.schedule());
+    act(() => vi.advanceTimersByTime(11));
+    expect(flush).toHaveBeenCalledTimes(2);
+
+    act(() => vi.advanceTimersByTime(4));
+    act(() => result.current.schedule());
+    expect(flush).toHaveBeenCalledTimes(2);
+
+    act(() => vi.advanceTimersByTime(11));
+    expect(flush).toHaveBeenCalledTimes(2);
+    act(() => vi.advanceTimersByTime(1));
+    expect(flush).toHaveBeenCalledTimes(3);
+  });
+
   it('coalesces repeated schedules inside one frame', () => {
     const flush = vi.fn();
     const { result } = renderHook(() => useFrameCoalescedFlush(flush, 16));

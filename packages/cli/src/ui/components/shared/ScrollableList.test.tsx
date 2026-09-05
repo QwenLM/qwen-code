@@ -511,6 +511,41 @@ const CTRL_END = `${ESC}[1;5F`;
 describe('<ScrollableList /> keyboard scroll', () => {
   const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
 
+  it('drops stale clipped wheel-up intent before a later burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+
+    await act(async () => stdin.write(wheelUp(5, 5)));
+    await flushScrollFrame();
+
+    await act(async () => {
+      stdin.write(wheelUp(5, 5));
+      stdin.write(PAGE_DOWN);
+      stdin.write(PAGE_DOWN);
+      stdin.write(wheelDown(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(10);
+  });
+
   it('Shift+Up scrolls up by 1 line', async () => {
     const Wrapper = () => (
       <ScrollableList<Item>
