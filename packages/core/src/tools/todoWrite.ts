@@ -307,14 +307,11 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
       const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
-      // Deliberately NOT gated on `isSessionWorkflowEnabled()`, and the
-      // `blockedBy` schema description is not gated either. Both are plan
-      // data-model semantics, not presentation: gating them on what is a
-      // visualization switch would give `todo_write` two dialects, so the
-      // same call would produce different stored plans depending on whether
-      // anyone happens to be looking at the graph. The behaviour therefore
-      // reaches sessions with Session Workflow off, which is intended — see
-      // the preservation merge below for the exact blast radius.
+      // Not gated on `isSessionWorkflowEnabled()` on purpose, and neither is
+      // the `blockedBy` schema description: dependencies are plan data-model
+      // semantics, not presentation. Gating them on a visualization switch
+      // would make the same `todo_write` call store a different plan
+      // depending on whether anyone is looking at the graph.
       const hasActivePlan = oldTodos.some(
         (todo) => todo.status !== 'completed',
       );
@@ -325,23 +322,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
-        // Blast radius of the omitted-`blockedBy` preservation, stated once
-        // because it is ungated (see `hasActivePlan` above): it changes an
-        // update only when all three hold — the previous plan still has an
-        // unfinished item, the same id carried a non-empty `blockedBy`, and
-        // this call omits `blockedBy` for it. A plan that never used
-        // dependencies is untouched, because `undefined?.filter()` is
-        // `undefined` and the entry is returned as sent. Callers that always
-        // send the full dependency list are likewise unaffected, and `[]`
-        // remains the explicit clear (an empty array is not nullish, so it
-        // wins over the preserved value).
-        //
-        // Note the `blockedBy` schema description above ("Active-plan updates
-        // preserve omitted dependencies for existing IDs; use [] to remove
-        // them") actively invites that omission, and a tool schema is part of
-        // the prompt, so it reaches every session including ones with Session
-        // Workflow off. That text is therefore what widens the exposure of
-        // this branch rather than being independent of it.
+        // Preservation only fires when the previous plan still has an
+        // unfinished item and the same id carried a non-empty `blockedBy`
+        // that this call omits; `[]` is not nullish, so it still clears.
         let preservedAnyBlockedBy = false;
         candidateTodos = todos.map((todo) => {
           // Preserved edges may only reference ids that survive this update:
