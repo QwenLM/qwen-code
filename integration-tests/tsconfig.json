@@ -127,7 +127,7 @@
       "@qwen-code/acp-bridge/workspacePaths": [
         "../packages/acp-bridge/src/workspacePaths.ts"
       ],
-      // qwen-serve-webui-live-journal-recovery.test.ts imports Web Shell's
+      // qwen-serve-web-shell-live-journal-recovery.test.ts imports Web Shell's
       // daemon bindings; map to source so typecheck does not depend on dist.
       "@qwen-code/web-shell/daemon-react-sdk": [
         "../packages/web-shell/client/daemon-react-sdk.ts"
