@@ -5148,6 +5148,21 @@ describe('Server Config (config.ts)', () => {
       // Second call lands mid-flight → joins the first flight instead of
       // bouncing off the already-set flag.
       const second = config.initialize();
+
+      // Pin the ordering property this test is named for: while the first
+      // flight is still gated, the joining caller must remain unsettled — it
+      // awaits the in-flight promise instead of returning early. A join branch
+      // that drops the `await` resolves `second` immediately and still passes
+      // every other assertion here, yet it reproduces #11002 (the joiner
+      // proceeds before initialization completes and dies on "Chat not
+      // initialized"). Assert nothing has settled before the gate is released
+      // so that mutant goes red.
+      const settled: string[] = [];
+      first.then(() => settled.push('first'));
+      second.then(() => settled.push('second'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toEqual([]);
+
       release();
       await Promise.all([first, second]);
       expect(initializeInternal).toHaveBeenCalledOnce();
