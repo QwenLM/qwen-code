@@ -422,7 +422,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
       'Slash command names to hide/disable (comma-separated or ' +
       'repeated). Merged with the `slashCommands.disabled` setting ' +
       'and QWEN_DISABLED_SLASH_COMMANDS. Matched case-insensitively ' +
-      'against the final command name.',
+      'against the final command name; a skill command matches under ' +
+      'its registered name (rust:pdf) or its authored name (pdf).',
   },
   'auth-type': {
     type: 'string' as const,

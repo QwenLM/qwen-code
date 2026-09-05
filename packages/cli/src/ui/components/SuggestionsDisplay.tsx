@@ -256,16 +256,25 @@ export function SuggestionsDisplay({
                 ? { width: labelColumnWidth, flexShrink: 0 as const }
                 : { flexShrink: 1 as const })}
             >
+              {/* The label keeps PrepareLabel's own wrapping: the Ctrl+R
+                  expand/collapse snapshots render the long label across
+                  lines, so the container must not truncate. Only hint and
+                  badge truncate; left wrappable, an owner badge longer than
+                  the half-width column's leftover wrapped one character per
+                  line. */}
               <Box>
                 <Box flexShrink={0}>{labelElement}</Box>
                 {suggestion.argumentHint && (
-                  <Text color={theme.text.secondary}>
+                  <Text color={theme.text.secondary} wrap="truncate-end">
                     {' '}
                     {suggestion.argumentHint}
                   </Text>
                 )}
                 {suggestion.sourceBadge && (
-                  <Text color={textColor}> {suggestion.sourceBadge}</Text>
+                  <Text color={textColor} wrap="truncate-end">
+                    {' '}
+                    {suggestion.sourceBadge}
+                  </Text>
                 )}
               </Box>
             </Box>

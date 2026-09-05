@@ -32,12 +32,16 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
+import { skillRestrictionNames } from '@qwen-code/qwen-code-core';
 import {
   computeWorkspaceSkillListUpdates,
+  lookupSkillSetting,
   skillSettingStrings,
 } from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
-import { levelLabel } from '../../utils/skill-level-label.js';
+import { MAX_EXTENSION_OWNER_LABEL_WIDTH } from '../../../services/commandMetadata.js';
+import { skillOriginLabel } from '../../utils/skill-level-label.js';
+import { truncateToWidth } from '../../utils/textUtils.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
@@ -64,6 +68,27 @@ interface SkillItemValue {
   name: string;
   description: string;
   level: SkillLevel;
+  /**
+   * Carried so `handlePick`'s lock guard can match a restriction against the
+   * authored spelling too. A value without it is tested against the registry
+   * identity only, so a row blocked solely by a legacy bare entry reads as
+   * pickable.
+   */
+  authoredName?: string;
+}
+
+/**
+ * The row value for a skill. Both producers (the MultiSelect items and the
+ * initial `activeValue`) build it here so the shape the pick guard reads
+ * cannot drift from the shape the lock lookups match against.
+ */
+export function skillItemValue(skill: SkillConfig): SkillItemValue {
+  return {
+    name: skill.name,
+    description: skill.description,
+    level: skill.level,
+    authoredName: skill.authoredName,
+  };
 }
 
 const LEVEL_ORDER: Record<SkillLevel, number> = {
@@ -74,6 +99,30 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 };
 
 const NAME_COLUMN = 24;
+
+/**
+ * The locked row is clipped rather than wrapped (`wrap="truncate"`), so naming
+ * the owner takes room out of the description: the owner's budget plus the
+ * description's still fill the 60 columns the description used to occupy on
+ * its own, which keeps the composed row no wider than the row already was.
+ */
+const LOCKED_ORIGIN_COLUMN = MAX_EXTENSION_OWNER_LABEL_WIDTH + 2; // `skillOriginLabel`'s parens
+const LOCKED_DESCRIPTION_COLUMN = 60 - LOCKED_ORIGIN_COLUMN;
+
+/**
+ * The row text a skill is listed under. Split out from the `items` memo (like
+ * `skillItemValue`) so the label a user reads is testable without rendering.
+ *
+ * Reads the extension fields off the full `SkillConfig`, not off the row
+ * value: `skillItemValue` carries only what the pick guard matches, and the
+ * owner is display-only.
+ */
+export function skillRowLabel(skill: SkillConfig): string {
+  return `${truncateToWidth(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncateToWidth(
+    skill.description,
+    80,
+  )}  ${truncateToWidth(skillOriginLabel(skill), LOCKED_ORIGIN_COLUMN)}`;
+}
 
 function lower(name: string): string {
   return name.trim().toLowerCase();
@@ -100,26 +149,106 @@ function namesFromScope(
   return Array.isArray(raw) ? raw : [];
 }
 
-function buildHigherDisabled(settings: LoadedSettings): {
-  set: ReadonlySet<string>;
-  scopeOf: (name: string) => string | null;
+export function buildHigherDisabled(settings: LoadedSettings): {
+  /**
+   * The scope or settings entry that blocks this skill, or null when the
+   * dialog's toggle can change its state. A skill's registry identity carries
+   * its extension prefix while an entry written before that prefix existed
+   * holds the authored spelling, so both are checked — a miss here renders a
+   * locked skill as a toggleable row and the label loses the scope the user
+   * has to edit. Entries the toggle cannot cancel lock the row the same way
+   * a higher scope does: a bare disablement keeps gating under either
+   * spelling, and any `enabled` entry identical to a `defaultDisabled` one
+   * cancels it at resolve time. Naming the entry and its scope tells the
+   * user which list in which file to edit. Workspace entries join the lock
+   * inputs only while the workspace is trusted — the merge drops it
+   * otherwise, so an untrusted repo's stale entries disable nothing.
+   */
+  lockedIn: (skill: { name: string; authoredName?: string }) => string | null;
 } {
-  const sysDefaults = normalizeNames(
-    namesFromScope(settings, SettingScope.SystemDefaults),
+  const scopeOfEntry = new Map<string, string>();
+  // Inserted lowest-precedence first so the highest scope that names an entry
+  // wins the label. System > User > SystemDefaults matches the merge order in
+  // `settings.ts`.
+  const scopes = [
+    [SettingScope.SystemDefaults, 'SystemDefaults'],
+    [SettingScope.User, 'User'],
+    [SettingScope.System, 'System'],
+  ] as const;
+  for (const [scope, label] of scopes) {
+    for (const name of normalizeNames(namesFromScope(settings, scope))) {
+      scopeOfEntry.set(name, label);
+    }
+  }
+  // Workspace settings join the lock inputs only when the merge honors them:
+  // an untrusted workspace is dropped from `settings.merged` wholesale, so
+  // locking on its entries would dim rows for skills that are live.
+  const allScopes = [
+    ...scopes.map(([scope]) => scope),
+    ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+  ];
+  // name -> highest scope holding the entry, inserted in true merge
+  // precedence order (SystemDefaults < User < Workspace < System) so the
+  // highest scope that names an entry wins the label and the user is
+  // pointed at the one file whose edit can unlock.
+  const hardEntries = new Map<string, string>();
+  const defaultEntries = new Map<string, string>();
+  for (const [scope, label] of [
+    [SettingScope.SystemDefaults, 'SystemDefaults'],
+    [SettingScope.User, 'User'],
+    [SettingScope.Workspace, 'Workspace'],
+    [SettingScope.System, 'System'],
+  ] as const) {
+    if (scope === SettingScope.Workspace && !settings.isTrusted) continue;
+    for (const name of normalizeNames(
+      skillSettingStrings(settings, scope, 'disabled'),
+    )) {
+      hardEntries.set(name, label);
+    }
+    for (const name of normalizeNames(
+      skillSettingStrings(settings, scope, 'defaultDisabled'),
+    )) {
+      defaultEntries.set(name, label);
+    }
+  }
+  // Identical-spelling cancellation mirrors resolveSkillSettings: a grant
+  // equal to a defaultDisabled entry keeps the skill live, so the row is
+  // not locked.
+  const enabledEntries = new Set(
+    allScopes.flatMap((scope) =>
+      normalizeNames(skillSettingStrings(settings, scope, 'enabled')),
+    ),
   );
-  const user = normalizeNames(namesFromScope(settings, SettingScope.User));
-  const system = normalizeNames(namesFromScope(settings, SettingScope.System));
-  const set = new Set([...sysDefaults, ...user, ...system]);
-  // Highest-precedence scope wins for the locked-row label. System >
-  // User > SystemDefaults matches the merge order in `settings.ts`.
-  const scopeOf = (name: string): string | null => {
-    const l = lower(name);
-    if (system.includes(l)) return 'System';
-    if (user.includes(l)) return 'User';
-    if (sysDefaults.includes(l)) return 'SystemDefaults';
-    return null;
+  const workspaceDisabled = new Set(
+    settings.isTrusted
+      ? normalizeNames(
+          skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
+        )
+      : [],
+  );
+  return {
+    lockedIn: (skill) => {
+      const higherScope = lookupSkillSetting(scopeOfEntry, skill);
+      if (higherScope) return higherScope;
+      const registry = skill.name.trim().toLowerCase();
+      for (const spelling of skillRestrictionNames(skill)) {
+        if (hardEntries.has(spelling)) {
+          // The toggle removes an exact-spelling workspace entry itself.
+          if (spelling === registry && workspaceDisabled.has(spelling)) {
+            continue;
+          }
+          return `skills.disabled '${spelling}' (${hardEntries.get(spelling)})`;
+        }
+        if (defaultEntries.has(spelling)) {
+          // A grant identical to the entry cancels it at resolve time — the
+          // persisted qualified one, or any identical-spelling bare one.
+          if (spelling === registry || enabledEntries.has(spelling)) continue;
+          return `skills.defaultDisabled '${spelling}' (${defaultEntries.get(spelling)})`;
+        }
+      }
+      return null;
+    },
   };
-  return { set, scopeOf };
 }
 
 function sortSkills(skills: SkillConfig[]): SkillConfig[] {
@@ -128,11 +257,6 @@ function sortSkills(skills: SkillConfig[]): SkillConfig[] {
       LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] ||
       a.name.localeCompare(b.name),
   );
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
 export function SkillsManagerDialog({
@@ -189,12 +313,12 @@ export function SkillsManagerDialog({
   // render — that would invalidate every downstream useMemo dependency.
   const allSkills = useMemo(() => skills ?? [], [skills]);
   const lockedSkills = useMemo(
-    () => allSkills.filter((s) => higher.set.has(lower(s.name))),
-    [allSkills, higher.set],
+    () => allSkills.filter((s) => higher.lockedIn(s) !== null),
+    [allSkills, higher],
   );
   const unlockedSkills = useMemo(
-    () => allSkills.filter((s) => !higher.set.has(lower(s.name))),
-    [allSkills, higher.set],
+    () => allSkills.filter((s) => higher.lockedIn(s) === null),
+    [allSkills, higher],
   );
 
   const initialSelectedKeys = useMemo(
@@ -241,11 +365,7 @@ export function SkillsManagerDialog({
       filteredUnlocked.some((s) => s.name === activeValue.name);
     if (!stillVisible) {
       const top = filteredUnlocked[0];
-      setActiveValue({
-        name: top.name,
-        description: top.description,
-        level: top.level,
-      });
+      setActiveValue(skillItemValue(top));
     }
   }, [filteredUnlocked, activeValue]);
 
@@ -263,11 +383,8 @@ export function SkillsManagerDialog({
     () =>
       filteredUnlocked.map((s) => ({
         key: s.name,
-        value: { name: s.name, description: s.description, level: s.level },
-        label: `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
-          s.description,
-          80,
-        )}  (${levelLabel(s.level)})`,
+        value: skillItemValue(s),
+        label: skillRowLabel(s),
       })),
     [filteredUnlocked],
   );
@@ -432,7 +549,7 @@ export function SkillsManagerDialog({
       const isEnabled =
         selectedKeys !== null &&
         selectedKeys.includes(skill.name) &&
-        !higher.set.has(lower(skill.name));
+        higher.lockedIn(skill) === null;
       if (!isEnabled) {
         // Persist any OTHER pending toggles before bailing — otherwise
         // the user's session-long edits get silently discarded just
@@ -451,7 +568,7 @@ export function SkillsManagerDialog({
         setInputBuffer(`/${skill.name}`);
       }
     },
-    [higher.set, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
+    [higher, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
   );
 
   useKeypress(
@@ -636,21 +753,31 @@ export function SkillsManagerDialog({
       {filteredLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.text.secondary}>
-            {t('Locked by higher-scope settings (cannot toggle here):')}
+            {t('Locked by settings entries you cannot toggle here:')}
           </Text>
           {filteredLocked.map((s) => {
             // Scope identifiers (System / User / SystemDefaults) stay as
             // untranslated technical labels — they refer to settings file
             // scopes by name and matching them exactly helps users locate
             // the offending entry.
-            const scopeName = higher.scopeOf(s.name) ?? t('higher scope');
+            const scopeName = higher.lockedIn(s) ?? t('higher scope');
             return (
               <Text key={s.name} dimColor wrap="truncate">
                 {t('  {{name}} {{description}}  [locked: {{scope}}]', {
-                  name: truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN),
-                  description: truncate(s.description, 60),
+                  name: truncateToWidth(s.name, NAME_COLUMN).padEnd(
+                    NAME_COLUMN,
+                  ),
+                  description: truncateToWidth(
+                    s.description,
+                    LOCKED_DESCRIPTION_COLUMN,
+                  ),
                   scope: scopeName,
                 })}
+                {/* Appended outside the template rather than interpolated: the
+                    origin is already translated inside `skillOriginLabel`, so
+                    this costs no new string and the locked reason keeps its
+                    place. Bounded like every other column on the row. */}
+                {`  ${truncateToWidth(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
               </Text>
             );
           })}

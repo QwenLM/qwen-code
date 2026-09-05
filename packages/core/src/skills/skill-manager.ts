@@ -25,6 +25,7 @@ import {
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
+  qualifySkillName,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -1027,6 +1028,13 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
+            // The registry identity carries the owner, so two extensions
+            // shipping `pdf` contribute two names and a reader can tell where
+            // a skill came from. The manifest and the workspace
+            // extension-skill store keep using the authored spelling;
+            // `Config.isSkillEnabled` bridges the two.
+            name: qualifySkillName(extension.name, skill.name),
+            authoredName: skill.name,
             extensionName: extension.name,
             extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`

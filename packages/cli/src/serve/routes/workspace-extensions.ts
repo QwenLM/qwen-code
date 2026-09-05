@@ -23,6 +23,7 @@ import {
   type ExtensionGitCredential,
   ExtensionNotUpdatableError,
   isSupportedArchiveUrl,
+  qualifySkillName,
   validateSkillName,
 } from '@qwen-code/qwen-code-core';
 import express, {
@@ -33,7 +34,10 @@ import express, {
 } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { loadSettings } from '../../config/settings.js';
-import { resolveSkillSettings } from '../../config/skill-settings.js';
+import {
+  lookupSkillDisablement,
+  resolveSkillSettings,
+} from '../../config/skill-settings.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
@@ -460,18 +464,25 @@ const buildExtensionSkillStates = (
       runtime.workspaceCwd,
     ).effective === 'enabled';
   return (extension.skills ?? []).map((skill) => {
-    const name = skill.name.trim().toLowerCase();
+    // The registry identity this skill will have once registered. The store
+    // and the manifest defaults below keep using the authored name.
+    const registryName = qualifySkillName(extension.name, skill.name);
     const internal = manager.getExtensionSkillState(
       extension.id,
       skill.name,
       runtime.workspaceCwd,
       snapshot,
     );
-    const disablement = settings.disablements.get(name);
+    const disablement = lookupSkillDisablement(settings.disablements, {
+      name: registryName,
+      authoredName: skill.name,
+    });
     const disabledReason = !parentEnabled
       ? 'inactive_extension'
       : (disablement?.reason ??
-        (!settings.enabledNames.has(name) &&
+        // A grant matches the registry identity only, so a legacy bare
+        // `skills.enabled` entry no longer opts an extension skill in.
+        (!settings.enabledNames.has(registryName.trim().toLowerCase()) &&
         !(internal.workspaceEnabled ?? internal.defaultEnabled)
           ? 'default'
           : undefined));

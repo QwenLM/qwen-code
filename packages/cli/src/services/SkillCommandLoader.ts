@@ -29,6 +29,7 @@ import type {
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
+import { extensionOwnerLabel } from './commandMetadata.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
 
@@ -113,7 +114,10 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `${t('Extension:')} ${skill.extensionDisplayName ?? skill.extensionName ?? 'unknown'}`
+          ? extensionOwnerLabel({
+              name: skill.extensionName,
+              displayName: skill.extensionDisplayName,
+            })
           : skill.level === 'project'
             ? t('Project')
             : t('User');
@@ -143,7 +147,10 @@ export class SkillCommandLoader implements ICommandLoader {
             filePath: skill.filePath,
             level: skill.level,
             ...(isExtension && skill.extensionName
-              ? { extensionName: skill.extensionName }
+              ? {
+                  extensionName: skill.extensionName,
+                  authoredName: skill.authoredName,
+                }
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
