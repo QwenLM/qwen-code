@@ -424,9 +424,7 @@ describe('useSlashCommandProcessor', () => {
     );
 
     it('should respect disabled commands while slash commands are loading', async () => {
-      mockConfig.getDisabledSlashCommands = vi
-        .fn()
-        .mockReturnValue(['exit']);
+      mockConfig.getDisabledSlashCommands = vi.fn().mockReturnValue(['exit']);
       const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
         () => undefined,
       );

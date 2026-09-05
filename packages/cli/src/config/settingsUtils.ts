@@ -268,12 +268,59 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
-  { section: 'agents', key: 'crossSessionMessaging' },
-  { section: 'agents', key: 'crossSessionInbound' },
   { section: 'goals', key: 'modelProposed' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
+}>;
+
+/**
+ * Settings a Workspace may only make stricter.
+ *
+ * A cloned repository must not open the user's session to peers or force
+ * incoming messages through, so the loosening direction is dropped like a
+ * restricted setting. The tightening direction is the one a repository has
+ * a legitimate reason to set — automation agents in a monorepo that must
+ * not be able to reach a person's session, say — so a workspace value
+ * that is stricter than what the operator scopes set is honored. System
+ * scope stays the admin override: when it sets the key the workspace
+ * value is dropped regardless.
+ *
+ * `strictness` ranks the behavior a value produces; higher is stricter.
+ * An unrecognized value gets the rank of the fail-closed behavior its
+ * reader applies: messaging is off, and inbound messages are held.
+ * `undefined` is ranked too, so a workspace value is compared against the
+ * feature's own default when no operator scope sets the key.
+ *
+ * Like the list above, this is the one place that drives the merge-time
+ * strip and the warning that reports it.
+ */
+export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
+  {
+    section: 'agents',
+    key: 'crossSessionMessaging',
+    strictness: (value: unknown): number => (value === true ? 0 : 1),
+  },
+  {
+    section: 'agents',
+    key: 'crossSessionInbound',
+    // Unset means approval-mode parity, which delivers some messages and
+    // holds others: looser than `hold`, stricter than `accept`.
+    strictness: (value: unknown): number =>
+      value === 'accept'
+        ? 0
+        : value === undefined
+          ? 1
+          : value === 'hold'
+            ? 2
+            : value === 'refuse'
+              ? 3
+              : 2,
+  },
+] as const satisfies ReadonlyArray<{
+  readonly section: keyof Settings;
+  readonly key: string;
+  readonly strictness: (value: unknown) => number;
 }>;
 
 /** The restricted settings as flattened dotted keys, e.g. `tools.workflowsEnabled`. */
