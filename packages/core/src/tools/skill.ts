@@ -356,13 +356,24 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   restoreLoadedSkillsFromHistory(history: Content[]): void {
     this.clearLoadedSkills();
 
+    const cachedSkills = this.skillManager.getCachedSkills() ?? [];
     const skillByName = new Map<string, { name: string; output: string }>();
-    for (const skill of this.skillManager.getCachedSkills() ?? []) {
+    for (const skill of cachedSkills) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
       skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+    }
+    // Pre-rename transcripts request the authored spelling; fall back to it
+    // only where no skill owns that name outright, or a resumed session
+    // misses the restore and re-injects a body on the next invocation.
+    for (const skill of cachedSkills) {
+      const authored = (skill.authoredName ?? '').trim().toLowerCase();
+      const registryName = skill.name.toLowerCase();
+      if (authored && authored !== registryName && !skillByName.has(authored)) {
+        skillByName.set(authored, skillByName.get(registryName)!);
+      }
     }
 
     const pendingSkillCalls = new Map<string, string>();

@@ -481,6 +481,46 @@ describe('bareEnabledGrantWarnings', () => {
       bareEnabledGrantWarnings(lists(['pdf'], ['pdf']), [rustPdf]),
     ).toEqual([]);
   });
+
+  it('names every same-authored skill for one shared bare entry', () => {
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf']), [
+        rustPdf,
+        { name: 'other:pdf', authoredName: 'pdf' },
+      ]),
+    ).toEqual([
+      "Warning: skills.enabled lists 'pdf' by bare name, which no longer " +
+        "enables the extension skills 'rust:pdf', 'other:pdf'. Replace it " +
+        "with 'rust:pdf', 'other:pdf'.",
+    ]);
+  });
+
+  it('names the hard block that defeats the replacement', () => {
+    const withHard: SkillSettingsLists = {
+      enabled: new Set(['pdf']),
+      defaultDisabled: new Set(),
+      hardDisabled: new Set(['pdf']),
+    };
+
+    expect(bareEnabledGrantWarnings(withHard, [rustPdf]).join('\n')).toContain(
+      'remove that entry too',
+    );
+  });
+
+  it('warns when a load-bearing pair targets a default-off extension skill', () => {
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf'], ['pdf']),
+        [rustPdf],
+        new Set(['pdf']),
+      ),
+    ).toEqual([
+      "Warning: skills.enabled and skills.defaultDisabled both list 'pdf' " +
+        'by bare name. The pair cancels the disablement but no longer ' +
+        "enables the extension skill 'rust:pdf', which defaults off. " +
+        'Write the registered name in skills.enabled to enable it.',
+    ]);
+  });
 });
 
 describe('bareDisablementBlocksQualifiedGrantWarnings', () => {
@@ -517,6 +557,17 @@ describe('bareDisablementBlocksQualifiedGrantWarnings', () => {
 
   it('advises both lists for a bare defaultDisabled block', () => {
     expect(warn(['rust:pdf'], ['pdf'])).toEqual([defaultAdvice]);
+  });
+
+  it('names the siblings a hard-entry removal re-enables', () => {
+    expect(
+      warn(
+        ['rust:pdf'],
+        ['pdf'],
+        ['pdf'],
+        [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      ).join('\n'),
+    ).toContain("The removal also re-enables 'other:pdf'");
   });
 
   it('advises removal for a hard block, since rewriting it would silence the warning without unblocking', () => {

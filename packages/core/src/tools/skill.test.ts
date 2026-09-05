@@ -1227,6 +1227,51 @@ describe('SkillTool', () => {
       expect(skillTool.getLoadedSkillContents()).toEqual(new Set([output]));
     });
 
+    it('restores loaded Skill state requested under a pre-rename authored name', () => {
+      const qualified = {
+        ...mockSkills[0],
+        name: 'rust:code-review',
+        authoredName: 'code-review',
+      };
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([qualified]);
+      const output = buildSkillLlmContent(
+        '/project/.qwen/skills/code-review',
+        qualified.body,
+      );
+
+      skillTool.restoreLoadedSkillsFromHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                args: { skill: 'code-review' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(skillTool.getLoadedSkillNames()).toEqual(
+        new Set(['rust:code-review']),
+      );
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue(mockSkills);
+    });
+
     it('does not restore command output that matches an unrelated cached Skill', () => {
       const output = buildSkillLlmContent(
         '/project/.qwen/skills/code-review',

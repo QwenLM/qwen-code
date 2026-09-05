@@ -1570,27 +1570,63 @@ export interface SkillSettingsLists {
 export function bareEnabledGrantWarnings(
   lists: SkillSettingsLists,
   skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+  defaultOffAuthored: ReadonlySet<string> = new Set(),
 ): string[] {
   if (lists.enabled.size === 0) return [];
   const registry = new Set(
     skills.map((skill) => skill.name.trim().toLowerCase()),
   );
-  const warnings: string[] = [];
+  // One bare entry names every same-authored extension skill, and editing
+  // it acts on all of them at once, so advise per entry: a per-skill warning
+  // for a shared entry goes silent for the siblings the moment one piece of
+  // advice is applied.
+  const registryNamesByAuthored = new Map<string, string[]>();
   for (const skill of skills) {
     const authored = authoredSkillName(skill).trim().toLowerCase();
     const registryName = skill.name.trim().toLowerCase();
     if (authored === registryName) continue;
+    const group = registryNamesByAuthored.get(authored) ?? [];
+    group.push(registryName);
+    registryNamesByAuthored.set(authored, group);
+  }
+  const warnings: string[] = [];
+  for (const [authored, registryNames] of registryNamesByAuthored) {
     // A bare entry that IS some registry identity enables that skill; the
     // shadowing is a separate, pre-existing concern, not a stale grant.
     if (registry.has(authored)) continue;
     if (!lists.enabled.has(authored)) continue;
+    const plural = registryNames.length > 1;
+    const names = registryNames.map((name) => `'${name}'`).join(', ');
+    const skillWord = plural ? 'skills' : 'skill';
     // A bare entry identical to a defaultDisabled entry is load-bearing: it
     // cancels that entry, so the pair is a working opt-in, not a stale grant.
-    if (lists.defaultDisabled.has(authored)) continue;
+    if (lists.defaultDisabled.has(authored)) {
+      // For a default-off extension skill the pair no longer enables
+      // anything: pre-rename the enable beat the defaultDisabled entry, now
+      // the bare grant is void and the declared default decides. Name the
+      // flip or it stays silent.
+      if (defaultOffAuthored.has(authored)) {
+        warnings.push(
+          `Warning: skills.enabled and skills.defaultDisabled both list ` +
+            `'${authored}' by bare name. The pair cancels the disablement ` +
+            `but no longer enables the extension ${skillWord} ${names}, ` +
+            `which ${plural ? 'default' : 'defaults'} off. Write the ` +
+            `registered name in skills.enabled to enable ` +
+            `${plural ? 'them' : 'it'}.`,
+        );
+      }
+      continue;
+    }
+    const hardNote = lists.hardDisabled.has(authored)
+      ? ` A bare '${authored}' in skills.disabled also blocks ` +
+        `${plural ? 'them' : 'it'} under either spelling, so replacing the ` +
+        `grant alone will not enable anything: remove that entry too.`
+      : '';
     warnings.push(
       `Warning: skills.enabled lists '${authored}' by bare name, which no ` +
-        `longer enables the extension skill '${skill.name}'. Replace it ` +
-        `with '${skill.name}'.`,
+        `longer enables the extension ${skillWord} ${names}. Replace it ` +
+        `with ${names}.` +
+        hardNote,
     );
   }
   return warnings;
@@ -1621,17 +1657,47 @@ export function bareDisablementBlocksQualifiedGrantWarnings(
     // removed (rewriting it to the qualified spelling would keep blocking
     // and silence this warning), a defaultDisabled entry is cancelled by
     // the identical spelling.
+    if (lists.hardDisabled.has(authored)) {
+      // Removing the bare entry re-enables every skill it blocks, so name
+      // the siblings the removal unlocks and the qualified entries that
+      // keep blocking them.
+      const siblings = [
+        ...new Set(
+          skills
+            .filter((other) => {
+              const name = other.name.trim().toLowerCase();
+              return (
+                name !== registryName &&
+                (name === authored ||
+                  authoredSkillName(other).trim().toLowerCase() === authored)
+              );
+            })
+            .map((other) => other.name.trim().toLowerCase()),
+        ),
+      ];
+      const sideEffect = siblings.length
+        ? ` The removal also re-enables ${siblings
+            .map((name) => `'${name}'`)
+            .join(', ')}; add ${siblings
+            .map((name) => `'${name}'`)
+            .join(', ')} to skills.disabled to keep ` +
+          `${siblings.length > 1 ? 'them' : 'it'} blocked.`
+        : '';
+      warnings.push(
+        `Warning: skills.enabled opts in '${registryName}' but ` +
+          `'${authored}' in skills.disabled still blocks it — hard entries ` +
+          `are never cancelled by skills.enabled. Remove '${authored}' ` +
+          `from skills.disabled to enable the skill.` +
+          sideEffect,
+      );
+      continue;
+    }
     warnings.push(
-      lists.hardDisabled.has(authored)
-        ? `Warning: skills.enabled opts in '${registryName}' but ` +
-            `'${authored}' in skills.disabled still blocks it — hard entries ` +
-            `are never cancelled by skills.enabled. Remove '${authored}' ` +
-            `from skills.disabled to enable the skill.`
-        : `Warning: skills.enabled opts in '${registryName}' but a bare ` +
-            `'${authored}' entry still blocks it — disable entries match ` +
-            `under either spelling; a skills.defaultDisabled entry is ` +
-            `cancelled only by the identical spelling. Write ` +
-            `'${registryName}' in both lists, or remove '${authored}'.`,
+      `Warning: skills.enabled opts in '${registryName}' but a bare ` +
+        `'${authored}' entry still blocks it — disable entries match ` +
+        `under either spelling; a skills.defaultDisabled entry is ` +
+        `cancelled only by the identical spelling. Write ` +
+        `'${registryName}' in both lists, or remove '${authored}'.`,
     );
   }
   return warnings;
@@ -3539,8 +3605,30 @@ export class Config {
         try {
           const lists = this.skillSettingsListsProvider();
           const skills = await this.skillManager.listSkills();
+          const extensionIdByName = new Map(
+            this.getExtensions().map((extension) => [
+              extension.name,
+              extension.id,
+            ]),
+          );
+          const defaultOffAuthored = new Set<string>();
+          for (const skill of skills) {
+            const extensionId = skill.extensionName
+              ? extensionIdByName.get(skill.extensionName)
+              : undefined;
+            if (skill.level !== 'extension' || !extensionId) continue;
+            const state = this.extensionManager.getExtensionSkillState(
+              extensionId,
+              authoredSkillName(skill),
+            );
+            if (state.defaultEnabled === false && !state.workspaceEnabled) {
+              defaultOffAuthored.add(
+                authoredSkillName(skill).trim().toLowerCase(),
+              );
+            }
+          }
           this.warnings.push(
-            ...bareEnabledGrantWarnings(lists, skills),
+            ...bareEnabledGrantWarnings(lists, skills, defaultOffAuthored),
             ...bareDisablementBlocksQualifiedGrantWarnings(
               lists,
               this.getDisabledSkillNames(),
