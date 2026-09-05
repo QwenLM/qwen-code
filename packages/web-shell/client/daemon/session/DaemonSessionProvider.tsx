@@ -4952,6 +4952,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             insertOffset,
           ),
         );
+        const repair = liveJournalRepairRef.current;
+        if (repair?.sessionId === session.sessionId) {
+          // A pending live-journal repair rebuilds the window from its
+          // checkpoint alone, so a page not folded in here is discarded when the
+          // repair reload lands: the turn the user just navigated to disappears
+          // and the focus target names a block that no longer exists. Sequential
+          // prepends already mirror themselves for the same reason. The offset is
+          // recomputed against the checkpoint's own blocks — it covers the
+          // pre-marker prefix, not the live tail — and the splice must be
+          // position-aware, because this page can land mid-window.
+          repair.checkpoint = applyTranscriptHistoryAt(
+            repair.checkpoint,
+            admission.materialization,
+            Math.min(insertOffset, repair.checkpoint.blocks.length),
+          );
+        }
         const entry = createLedgerPageEntry(
           {
             id: `page-${(ledgerEntrySeqRef.current += 1)}`,
