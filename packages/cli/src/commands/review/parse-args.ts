@@ -184,8 +184,9 @@ export const EFFORT_OPTION = {
   choices: [...EFFORT_LEVELS],
   describe:
     'The review effort. `medium` (balanced) drops the adversarial ' +
-    'personas (6a/6b/6c) and the language-pitfall and wrapper/proxy ' +
-    'specialists (1d/1e) from the required roster; recorded in the plan ' +
+    'personas (6a/6b/6c), the counter-frame audit (6d) and the ' +
+    'language-pitfall and wrapper/proxy specialists (1d/1e) from the ' +
+    'required roster; recorded in the plan ' +
     'so check-coverage, agent-prompt --roster and compose-review all ' +
     'read one value. Omit for the full (high) roster.',
 } as const;
