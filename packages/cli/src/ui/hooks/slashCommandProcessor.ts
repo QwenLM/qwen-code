@@ -129,10 +129,7 @@ const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
-const QUIT_COMMAND_NAMES = [
-  quitCommand.name,
-  ...(quitCommand.altNames ?? []),
-];
+const QUIT_COMMAND_NAMES = [quitCommand.name, ...(quitCommand.altNames ?? [])];
 
 function shouldHideSlashCommandInvocation(
   command: SlashCommand | undefined,
