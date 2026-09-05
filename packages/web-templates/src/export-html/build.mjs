@@ -39,8 +39,13 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // entry's dependencies:
 //   cd packages/web-templates && node src/export-html/build.mjs
 // (the build prints `Document export runtime is N bytes`.)
-const DOCUMENT_RUNTIME_WARNING_BYTES = 18_500_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 19_000_000;
+//
+// Last measured at 8,456,076 bytes, by CI on this branch's merge with main
+// (run 33959200199, "Lint & Static"), before the echarts stub below landed —
+// so the real number is now lower and these two are still loose. Tighten them
+// from the next green CI run rather than from a local guess.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 8_500_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 8_700_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -60,6 +65,15 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'Import @qwen-code/web-shell/transcript instead (#11031).',
   },
   {
+    pattern: /(^|\/)node_modules\/(echarts|zrender)\//,
+    why:
+      'The chart runtime is only reachable through the `?? () => import("echarts")` ' +
+      'default inside @datafe-open/markdown-chart-echarts, which Web Shell never ' +
+      'takes (MarkdownChartRenderer always passes a loadECharts). IIFE output ' +
+      'cannot code-split, so that dead dynamic import was flattened in; it is ' +
+      'resolved to src/document-echarts-stub.ts by the strip plugin below.',
+  },
+  {
     pattern: /(^|\/)node_modules\/(codemirror|@codemirror)\//,
     why:
       'A read-only export has no composer. CodeMirror last reached it through ' +
@@ -74,11 +88,15 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
 // simply fail to resolve in the browser. See src/document-shiki-stub.ts for why
 // this is dead code in an export.
 const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
+const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
 const stripDocumentDeadModules = {
   name: 'strip-document-dead-modules',
   setup(build) {
     build.onResolve({ filter: /^(shiki|@shikijs)(\/|$)/ }, () => ({
       path: documentShikiStub,
+    }));
+    build.onResolve({ filter: /^echarts(\/|$)/ }, () => ({
+      path: documentEchartsStub,
     }));
   },
 };
