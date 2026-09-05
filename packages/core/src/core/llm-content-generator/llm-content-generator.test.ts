@@ -211,6 +211,85 @@ describe('LlmContentGenerator', () => {
     ).toBeUndefined();
   });
 
+  it('uses a non-Routify request destination over a Routify constructor destination', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: {
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+        },
+      },
+      undefined,
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      {
+        model: 'gemini-1.5-flash',
+        contents: [],
+        config: {
+          httpOptions: {
+            baseUrl: 'https://generativelanguage.googleapis.com',
+            headers: { 'X-Request': 'request-value' },
+          },
+        },
+      },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions,
+    ).toEqual({
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      headers: { 'X-Request': 'request-value' },
+    });
+  });
+
+  it('injects alongside request headers for a request-level Routify destination', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: { baseUrl: 'https://generativelanguage.googleapis.com' },
+      },
+      undefined,
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      {
+        model: 'gemini-1.5-flash',
+        contents: [],
+        config: {
+          httpOptions: {
+            baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+            headers: { 'X-Request': 'request-value' },
+          },
+        },
+      },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions,
+    ).toEqual({
+      baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+      headers: {
+        'X-Request': 'request-value',
+        session_id: 'session-1',
+      },
+    });
+  });
+
   it('does not infer the SDK destination from content generator config', async () => {
     const cliConfig = {
       getSessionId: vi.fn().mockReturnValue('session-1'),
