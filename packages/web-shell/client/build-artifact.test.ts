@@ -316,12 +316,22 @@ describe('build artifact — transcript entry (#11031)', () => {
   // the package root injects its stylesheet as a top-level side effect, which
   // no bundler can drop, so the boundary has to be a real entry point.
   it('does not pull the editor stack into the transcript entry', () => {
-    const bundle = readTranscriptBundle();
     // Import specifiers of externals survive minification verbatim, so their
     // absence is a reliable signal that the module never entered the graph.
-    expect(bundle).not.toContain('@codemirror/');
-    expect(bundle).not.toContain('"codemirror"');
-    expect(bundle).not.toContain('vaul');
+    // The signal lives in the JS only: injectCssModules (vite.lib.config.ts)
+    // prepends the stylesheet as a single-line `__qwenWebShellCss` constant,
+    // and Tailwind v4 compiles classes from every scanned source file rather
+    // than this entry's graph, so the CSS carries e.g. drawer.tsx's
+    // `data-[vaul-drawer-direction=…]` selectors even though no transcript JS
+    // imports vaul. Guard the JS remainder; if the injection shape changes
+    // the replace() is a no-op and these checks fail loudly, not falsely.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('@codemirror/');
+    expect(js).not.toContain('"codemirror"');
+    expect(js).not.toContain('vaul');
   });
 
   it('still carries what a transcript actually renders', () => {
