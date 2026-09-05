@@ -456,6 +456,7 @@ export function ExtensionsManagerPage({
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
   const [messageOwner, setMessageOwner] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -480,9 +481,6 @@ export function ExtensionsManagerPage({
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const archiveInputRef = useRef<HTMLInputElement>(null);
   const returnFocusNameRef = useRef<string | null>(null);
-  // Increments whenever a mutation claims the shared message slot, so a late
-  // background refresh cannot overwrite a newer mutation's message.
-  const messageClaimRef = useRef(0);
   const [pendingMutation, setPendingMutation] = useState<{
     operationId: string;
     name: string;
@@ -609,8 +607,12 @@ export function ExtensionsManagerPage({
               },
           );
         }
+        // `refresh` reconciles the runtime; adopting it would lock the page
+        // behind an action the user never started.
         const activeMutation = operations.find(
-          (operation) => operation.operation !== 'install',
+          (operation) =>
+            operation.operation !== 'install' &&
+            operation.operation !== 'refresh',
         );
         if (activeMutation) {
           mutationInFlightRef.current = true;
@@ -915,7 +917,6 @@ export function ExtensionsManagerPage({
   const checkUpdates = useCallback(
     (name: string) => {
       setCheckingName(name);
-      messageClaimRef.current += 1;
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('info');
       setMessage(null);
@@ -961,7 +962,6 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
-    messageClaimRef.current += 1;
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);
@@ -1022,7 +1022,6 @@ export function ExtensionsManagerPage({
         uninstallInFlightNameRef.current = name;
       }
       setBusyName(name);
-      messageClaimRef.current += 1;
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1096,8 +1095,7 @@ export function ExtensionsManagerPage({
           : activation === 'disabled'
             ? 'disable'
             : 'inherit';
-      messageClaimRef.current += 1;
-      const messageClaim = messageClaimRef.current;
+      setRefreshError(null);
       setBusyName(extension.name);
       setMessageOwner(extension.name);
       setMessageTone('progress');
@@ -1137,11 +1135,9 @@ export function ExtensionsManagerPage({
         if (activationRequiresExplicitRefresh) {
           void workspace.client
             .workspaceByCwd(workspace.workspaceCwd)
-            .refreshExtensionRuntime(connection.clientId)
+            .refreshExtensionRuntime()
             .catch((error: unknown) => {
-              if (messageClaim !== messageClaimRef.current) return;
-              setMessageTone('error');
-              setMessage(
+              setRefreshError(
                 t('extensions.manage.refreshFailed', {
                   error: error instanceof Error ? error.message : String(error),
                 }),
@@ -1159,7 +1155,6 @@ export function ExtensionsManagerPage({
       activationRequiresExplicitRefresh,
       busyName,
       checkingName,
-      connection.clientId,
       load,
       pendingInstall,
       pendingMutation,
@@ -1263,6 +1258,19 @@ export function ExtensionsManagerPage({
   ) : (
     standaloneNavigation
   );
+
+  // Hoisted so both views show it beside the activation success it qualifies.
+  const refreshNotice = refreshError ? (
+    <ManagementNotice
+      tone="error"
+      noticeKey={refreshError}
+      closeLabel={t('common.close')}
+      onDismiss={() => setRefreshError(null)}
+      className="break-words"
+    >
+      {refreshError}
+    </ManagementNotice>
+  ) : null;
 
   if (selectedExtension) {
     const details = selectedExtension.details;
@@ -1384,6 +1392,8 @@ export function ExtensionsManagerPage({
               {message}
             </ManagementNotice>
           ) : null}
+
+          {refreshNotice}
 
           {activationUnavailable ? (
             <Alert variant="destructive">
@@ -1701,6 +1711,8 @@ export function ExtensionsManagerPage({
             {(messageOwner === null ? message : null) ?? recoveryError}
           </ManagementNotice>
         ) : null}
+
+        {refreshNotice}
 
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />

@@ -34,6 +34,7 @@ const state = vi.hoisted(() => {
     actions: {
       loadExtensionsStatus: vi.fn(),
       activeExtensionOperations: vi.fn(),
+      extensionOperationStatus: vi.fn(),
     },
     workspace: {
       workspaceCwd: '/work/primary',
@@ -69,6 +70,14 @@ async function renderPage(): Promise<void> {
   await vi.waitFor(() => {
     expect(container.querySelector('[aria-label="Demo"]')).not.toBeNull();
   });
+}
+
+function findButton(label: string): HTMLButtonElement {
+  const matches = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('button'),
+  ).filter((button) => button.textContent?.trim() === label);
+  expect(matches).toHaveLength(1);
+  return matches[0]!;
 }
 
 async function chooseActivation(
@@ -172,6 +181,7 @@ beforeEach(() => {
     v: 1,
     operations: [],
   });
+  state.actions.extensionOperationStatus.mockReset();
 });
 
 afterEach(async () => {
@@ -188,10 +198,12 @@ describe('ExtensionsManagerPage activation refresh', () => {
     await renderPage();
     await chooseActivation('workspace', 'Disabled');
 
+    // No client id: the workspace-qualified route validates a supplied id
+    // against only the targeted runtime, then discards it.
     await vi.waitFor(() => {
       expect(
         state.workspaceHandle.refreshExtensionRuntime,
-      ).toHaveBeenCalledWith('client-1');
+      ).toHaveBeenCalledWith();
     });
     expect(state.client.waitForExtensionOperation).toHaveBeenCalledOnce();
     expect(state.client.waitForExtensionOperation).toHaveBeenCalledWith(
@@ -214,9 +226,9 @@ describe('ExtensionsManagerPage activation refresh', () => {
     expect(state.client.workspaceByCwd).toHaveBeenLastCalledWith(
       '/work/primary',
     );
-    expect(state.workspaceHandle.refreshExtensionRuntime).toHaveBeenCalledWith(
-      'client-1',
-    );
+    expect(
+      state.workspaceHandle.refreshExtensionRuntime,
+    ).toHaveBeenCalledWith();
   });
 
   it('does not submit an extra refresh to an older daemon', async () => {
@@ -239,9 +251,7 @@ describe('ExtensionsManagerPage activation refresh', () => {
     await renderPage();
     await chooseActivation('workspace', 'Disabled');
     await vi.waitFor(() => {
-      expect(
-        state.workspaceHandle.refreshExtensionRuntime,
-      ).toHaveBeenCalledWith('client-1');
+      expect(state.workspaceHandle.refreshExtensionRuntime).toHaveBeenCalled();
     });
 
     state.client.waitForExtensionOperation.mockResolvedValue({
@@ -265,6 +275,86 @@ describe('ExtensionsManagerPage activation refresh', () => {
     });
 
     expect(container.textContent).toContain('boom-later-mutation');
+    expect(container.textContent).toContain('session refresh failed');
+  });
+
+  it('does not adopt an in-flight refresh as a pending mutation', async () => {
+    const running = {
+      v: 1 as const,
+      operationId: 'refresh-1',
+      operation: 'refresh',
+      status: 'running' as const,
+      phase: 'reconciling' as const,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    state.actions.activeExtensionOperations.mockResolvedValue({
+      v: 1,
+      operations: [running],
+    });
+    state.actions.extensionOperationStatus.mockResolvedValue(running);
+    await renderPage();
+
+    expect(container.textContent).not.toContain('Extension action queued');
+    expect(findButton('Add').disabled).toBe(false);
+
+    await chooseActivation('workspace', 'Disabled');
+    expect(state.workspaceHandle.setExtensionActivation).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the catalog load error when a stale refresh rejects', async () => {
+    let rejectRefresh: ((error: Error) => void) | undefined;
+    state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectRefresh = reject;
+      }),
+    );
+    await renderPage();
+    await chooseActivation('workspace', 'Disabled');
+    await vi.waitFor(() => {
+      expect(state.workspaceHandle.refreshExtensionRuntime).toHaveBeenCalled();
+    });
+
+    // The catalog error banner only renders in the list view.
+    await act(async () => {
+      findButton('Manage Extensions').click();
+    });
+    state.actions.loadExtensionsStatus.mockRejectedValue(
+      new Error('catalog-reload-failed'),
+    );
+    await act(async () => {
+      findButton('Refresh').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('catalog-reload-failed');
+    });
+
+    await act(async () => {
+      rejectRefresh!(new Error('boom-stale-refresh'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('catalog-reload-failed');
+    expect(container.textContent).toContain('session refresh failed');
+  });
+
+  it('clears a stale refresh failure when a new activation starts', async () => {
+    state.workspaceHandle.refreshExtensionRuntime.mockRejectedValueOnce(
+      new Error('refresh unavailable'),
+    );
+    await renderPage();
+    await chooseActivation('workspace', 'Disabled');
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('session refresh failed');
+    });
+
+    state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
+      new Promise(() => {}),
+    );
+    await chooseActivation('workspace', 'Enabled');
     expect(container.textContent).not.toContain('session refresh failed');
   });
 
