@@ -3780,6 +3780,363 @@ describe('DwsChannel', () => {
     expect(vi.mocked(bridge.prompt).mock.calls[1]?.[1]).toContain('second');
   });
 
+  it('routes a slash command after the leading bot mention to /btw', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    const btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'Today is September 3, 2026.',
+    });
+    bridge.btw = btw;
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'btw-after-mention',
+        '@QwenBot(QwenBot)  /btw what day is it?',
+      ),
+    );
+
+    expect(btw).toHaveBeenCalledWith(
+      'session-1',
+      'what day is it?',
+      expect.any(AbortSignal),
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(client.sendImMessage).toHaveBeenCalledTimes(2),
+    );
+    expect(client.sendImMessage.mock.calls[0]?.[1]).toMatch(
+      /^BTW #[a-f0-9]{8} received\./u,
+    );
+    expect(client.sendImMessage.mock.calls[1]?.[1]).toMatch(
+      /^BTW #[a-f0-9]{8}\n\nToday is September 3, 2026\.$/u,
+    );
+  });
+
+  it('routes a bare slash command after the leading bot mention', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'bare-btw-after-mention',
+        '@QwenBot(QwenBot) /btw',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'group', conversationId: 'cid-1' },
+      'Usage: /btw <question>',
+      expect.any(String),
+    );
+  });
+
+  it('strips the leading bot mention from a namespaced slash command', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'namespaced-command-after-mention',
+        '@QwenBot(QwenBot) /git:commit',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: '/git:commit' }),
+    ]);
+  });
+
+  it('keeps an ambient group mention before a slash command', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'ambient-mention-before-command',
+        '@Alice /btw is this right?',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: '@Alice /btw is this right?' }),
+    ]);
+  });
+
+  it('keeps a slash command addressed to another mentioned member as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'not expected',
+    });
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-after-other-mention',
+        '@Colleague /btw is this right? @QwenBot(QwenBot)',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining(
+        '@Colleague /btw is this right? @QwenBot(QwenBot)',
+      ),
+      expect.any(Object),
+    );
+  });
+
+  it('keeps a slash command carrying a glued mention suffix as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-with-glued-mention',
+        '@Colleague /approve@QwenBot(QwenBot)',
+      ),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('@Colleague /approve@QwenBot(QwenBot)'),
+      expect.any(Object),
+    );
+  });
+
+  it.each([
+    ['zero-width space', '\u200b'],
+    ['byte-order mark', '\ufeff'],
+  ])(
+    'keeps a slash command before a %s mention as prose',
+    async (_label, separator) => {
+      const client = new FakeDwsClient();
+      const { bridge } = await readyPolicyChannel(client);
+
+      await client.emit(
+        0,
+        message(
+          'user_im_message_receive_at',
+          'command-before-hidden-mention',
+          `@QwenBot(QwenBot) /approve @${separator}Alice`,
+        ),
+      );
+
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining('@QwenBot(QwenBot) /approve'),
+        expect.any(Object),
+      );
+    },
+  );
+
+  it('keeps a slash command with a later mention on another line as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-with-mention-on-later-line',
+        '@QwenBot(QwenBot) /btw what day is it?\nsee the deploy log\n@Alice',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('@QwenBot(QwenBot) /btw what day is it?'),
+      expect.any(Object),
+    );
+  });
+
+  it('normalizes a padded mention in linear time', async () => {
+    // Group message content is attacker-controlled and reaches the mention
+    // strip uncapped. A whitespace run that backtracks into the whole-remainder
+    // mention scan pays that scan once per space, which blocks the event loop
+    // for seconds. The bound is generous to slow runners; one linear scan of
+    // this payload costs microseconds.
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const content = `@QwenBot(QwenBot) ${' '.repeat(100_000)}not a command`;
+    const started = performance.now();
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'padded-mention', content),
+    );
+
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: content }),
+    ]);
+  }, 60_000);
+
+  it('keeps a slash command after a mention holding a zero-width space as prose', async () => {
+    // Asserted on the envelope rather than the prompt: prompt sanitization
+    // rewrites the invisible separator to a space before the agent sees it.
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const content = '@QwenBot(QwenBot)\u200b /btw what day is it?';
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'hidden-separator-mention',
+        content,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: content }),
+    ]);
+  });
+
+  it('keeps a slash command glued to the leading mention as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'glued-command-mention',
+        '@QwenBot(QwenBot)/btw hi',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('@QwenBot(QwenBot)/btw hi'),
+      expect.any(Object),
+    );
+  });
+
+  it('strips the leading bot mention from a hyphenated slash command', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'hyphenated-command-after-mention',
+        '@QwenBot(QwenBot) /run-tests now',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: '/run-tests now' }),
+    ]);
+  });
+
+  it('routes a slash command whose argument holds an email address', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    const btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'queued',
+    });
+    bridge.btw = btw;
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-with-email-argument',
+        '@QwenBot(QwenBot) /btw mail bob@example.com',
+      ),
+    );
+
+    expect(btw).toHaveBeenCalledWith(
+      'session-1',
+      'mail bob@example.com',
+      expect.any(AbortSignal),
+    );
+  });
+
+  it.each([
+    ['at stream first', 0, 1],
+    ['group-all stream first', 1, 0],
+  ])(
+    'keeps an ambient group slash command prose when the %s wins dedup',
+    async (_label, winner, loser) => {
+      const client = new FakeDwsClient();
+      const { bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ groups: { '*': { requireMention: false } } }),
+      );
+      bridge.btw = vi.fn();
+      const content = '@QwenBot(QwenBot) /btw what day is it?';
+
+      await client.emit(
+        winner,
+        message('user_im_message_receive_at', 'ambient-race', content),
+      );
+      await client.emit(
+        loser,
+        message('user_im_message_receive_group_all', 'ambient-race', content),
+      );
+
+      expect(bridge.btw).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining(content),
+        expect.any(Object),
+      );
+    },
+  );
+
+  it('keeps a slash command before a punctuation-glued mention as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-before-glued-mention',
+        '@Colleague /btw is this right?@QwenBot(QwenBot)',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining(
+        '@Colleague /btw is this right?@QwenBot(QwenBot)',
+      ),
+      expect.any(Object),
+    );
+  });
+
   it('deduplicates a mention delivered by history and the live stream', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

@@ -1590,6 +1590,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
+  private requiresMention(conversationId: string): boolean {
+    return (
+      this.config.groups[conversationId]?.requireMention ??
+      this.config.groups['*']?.requireMention ??
+      true
+    );
+  }
+
   private receiveImMessage(
     source: DwsImSource,
     message: DwsImMessage,
@@ -1927,7 +1935,28 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         : { kind: 'group', conversationId: message.conversationId };
     this.rememberImTarget(message.conversationId, target);
 
-    const text = message.content.trim();
+    // DWS reports only that the bot was mentioned somewhere, not which token is
+    // the bot, so a leading mention goes only when what follows is unambiguously
+    // a slash command and no later mention could be the one that caused the
+    // at-event. That scan shares the document-mention parser's boundary
+    // heuristic: an `@` glued to a word is an address like `bob@example.com`,
+    // one behind punctuation is a rival mention. The command lookahead must stay
+    // ahead of the whole-remainder scan; swapping them re-runs it at every
+    // backtracked space, quadratic on attacker-controlled content.
+    //
+    // Mention-required conversations only: an ambient group delivers one message
+    // on both the at stream and its group stream under a single dedup key, and
+    // only when a mention is required is the at stream the sole deliverer, so
+    // the normalized text cannot depend on which copy won the race.
+    const text =
+      source.kind === 'at' && this.requiresMention(message.conversationId)
+        ? message.content
+            .replace(
+              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:\s|$))(?![\s\S]*(?<![A-Za-z0-9_])@)/u,
+              '',
+            )
+            .trim()
+        : message.content.trim();
     if (!text) {
       this.markProcessedMessage(key);
       this.saveCursor();
@@ -1947,7 +1976,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
 
-    const envelope = this.createImEnvelope(source, message);
+    const envelope = this.createImEnvelope(source, message, text);
     this.rememberInboundReactionTarget(
       message.conversationId,
       message.messageId,
@@ -1979,8 +2008,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private createImEnvelope(
     source: DwsImSource,
     message: DwsImMessage,
+    text = message.content.trim(),
   ): Envelope {
-    const text = message.content.trim();
     return {
       channelName: this.name,
       senderId: message.senderId,
