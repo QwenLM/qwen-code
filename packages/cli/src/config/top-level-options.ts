@@ -200,6 +200,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     type: 'string' as const,
     description: 'Execute the provided prompt and continue in interactive mode',
   },
+  bg: {
+    type: 'boolean' as const,
+    description:
+      'Experimental. Run the prompt as a background session owned by a supervisor, and return immediately. List them with `qwen sessions ps`.',
+  },
   'system-prompt': {
     type: 'string' as const,
     description:

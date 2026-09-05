@@ -81,6 +81,25 @@ describe('dispatchAgentViewSession', () => {
     });
   });
 
+  it('launches the worker under the id the roster recorded', async () => {
+    // The worker is an ordinary interactive session, so it registers
+    // itself in the live-process registry under whatever `--session-id`
+    // it was given. `qwen sessions ps` merges that registry with this
+    // roster and deduplicates by session id, so if the two ever stopped
+    // agreeing, every background session would be listed twice — once as
+    // `interactive` and once with its real state.
+    const result = await dispatchAgentViewSession('write tests', '/repo/pkg', {
+      globalDir: tempDir,
+      token: 'token',
+    });
+
+    const launch = await readAgentViewLaunch(result.sessionId, {
+      globalDir: tempDir,
+    });
+    const argv = launch?.argv ?? [];
+    expect(argv[argv.indexOf('--session-id') + 1]).toBe(result.sessionId);
+  });
+
   it('rolls back session files and roster when a mid-dispatch write fails', async () => {
     // Fail the activity write: the session-state and launch writes have
     // already succeeded at that point, so rollback must actually remove the
