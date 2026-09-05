@@ -231,6 +231,32 @@ describe('HookRunner', () => {
       }
     });
 
+    it('passes verbatim arguments to cmd.exe on Windows for quoted hooks (#8649)', async () => {
+      // cmd.exe needs windowsVerbatimArguments: Node's MSVC CRT escaping
+      // mangles quotes/backslashes in `bash "C:\path with space\script.sh"`,
+      // breaking the hook. This mirrors shellExecutionService. #8649.
+      const { getShellConfiguration } = await import('../utils/shell-utils.js');
+      const shell = getShellConfiguration();
+      const mockProcess = createMockProcess(0, '');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo hello',
+        source: HooksConfigSource.Project,
+      };
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.windowsVerbatimArguments).toBe(
+        process.platform === 'win32' && shell.shell === 'cmd',
+      );
+    });
+
     it('should return failure for non-zero exit code', async () => {
       const mockProcess = createMockProcess(1, '', 'error');
       mockSpawn.mockImplementation(() => mockProcess);
