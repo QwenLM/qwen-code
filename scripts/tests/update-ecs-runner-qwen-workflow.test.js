@@ -112,10 +112,52 @@ const DEFAULT_JOBS = jobsFixture({
 describe('ECS runner qwen update workflow', () => {
   it('installs without the selected runner npm prefix', () => {
     expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
-    expect(workflow).toContain('INSTALL=(sudo env -u NPM_CONFIG_PREFIX)');
-    expect(workflow).toContain(
-      '"${INSTALL[@]}" npm install -g --prefix /usr/local',
+    // The sudo mode drops the runner user's custom npm prefix, and
+    // `--prefix` pins the install to /usr/local: on hk-4/hk-5 root's global
+    // prefix is a custom Node directory, so without the pin the update lands
+    // somewhere the pool never resolves.
+    expect(workflow).toContain('sudo -n env -u NPM_CONFIG_PREFIX');
+    expect(workflow).toContain('npm install -g --prefix /usr/local');
+  });
+
+  it('picks the install mode by running it, not by proxy-probing sudo', () => {
+    // hk-1/hk-2 carry command-specific sudoers: they reject a generic
+    // `sudo -n true` probe and allow the real npm install. A probe-selected
+    // mode therefore lands on the runner user on exactly the pools that
+    // could have installed as root, and that mode EACCESes against the
+    // root-owned package dir on all three attempts — those two pools can
+    // never update. Only the real command can answer for itself.
+    const update = stepBody('Update qwen');
+    // Comments narrate the old probe, so every assertion here reads the
+    // comment-stripped code.
+    const updateCode = update
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(updateCode).not.toContain('sudo -n true');
+    expect(updateCode).toContain(
+      'install_qwen sudo -n env -u NPM_CONFIG_PREFIX',
     );
+    // The runner-user fallback has to survive: deleting it strands any pool
+    // with no passwordless sudo at all, and making both modes sudo strands
+    // it the same way.
+    expect(updateCode).toContain('|| install_qwen env;');
+    // And it has to stay second. Reversing the order sends a runner-user
+    // EACCES attempt at the root-owned prefix on every pool that could have
+    // installed as root, which is the regression this step just came back
+    // from.
+    expect(updateCode.indexOf('install_qwen sudo -n')).toBeLessThan(
+      updateCode.indexOf('install_qwen env'),
+    );
+    // One command line shared by both modes, so the `--prefix` pin cannot
+    // drift between them and one mode cannot lose the registry pin.
+    expect(
+      updateCode.match(/npm install -g --prefix \/usr\/local/g),
+    ).toHaveLength(1);
+    // Same class the Verify step is held to: a bare `sudo` blocks on a
+    // password prompt until `timeout-minutes: 10` kills the step, on the
+    // pools the fallback exists for.
+    expect(updateCode).not.toMatch(/sudo\s+(?!-n\b)/);
   });
 
   it('keeps the verify diagnostics usable without passwordless sudo', () => {
@@ -192,7 +234,10 @@ describe('ECS runner qwen update workflow', () => {
     );
     expect(workflow).toContain('for attempt in 1 2 3; do');
     expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
-    expect(workflow).toContain('sudo rm -rf "${PKG_DIR}"/.qwen-code-*');
+    // `-n` like every other sudo in this step: the trash cleanup runs on the
+    // pools with no passwordless sudo too, where a bare `sudo` would block on
+    // a password prompt instead of falling through to the `|| true`.
+    expect(workflow).toContain('sudo -n rm -rf "${PKG_DIR}"/.qwen-code-*');
   });
 
   it('resolves once on a hosted runner and feeds every pool', () => {
@@ -394,6 +439,132 @@ function runVerify({
   }
 }
 
+// Runs the 'Update qwen' step body against stubbed `sudo`, `npm` and `sleep`
+// modelling one pool's sudoers policy and prefix ownership:
+//   sudoers: 'generic'          — passwordless sudo for anything (hk-3/4/5)
+//            'command-specific' — sudo only for the npm install itself, while
+//                                 a generic `sudo -n true` probe is rejected
+//                                 (hk-1/hk-2, the shape that regressed)
+//            'none'             — no passwordless sudo at all
+//   prefixOwner: who can write /usr/local/lib/node_modules
+// The npm stub records every install it is asked to run tagged with the
+// effective user, so a test can assert *which mode* installed rather than
+// only that the step exited 0 — a fallback that succeeds after a wasted
+// runner-user EACCES attempt against a root-owned prefix is the regression.
+function runUpdate({
+  sudoers = 'generic',
+  prefixOwner = 'root',
+  version = '0.22.3',
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'ecs-install-'));
+  try {
+    const calls = join(dir, 'npm-calls');
+    writeFileSync(calls, '');
+
+    const sudoStub = join(dir, 'sudo');
+    writeFileSync(
+      sudoStub,
+      [
+        '#!/usr/bin/env bash',
+        '# A `sudo` without `-n` blocks on a password prompt until the job',
+        '# timeout kills the step; fail it distinctly so a dropped `-n` reds.',
+        'if [[ "${1:-}" != "-n" ]]; then',
+        '  echo "sudo: a terminal is required to read the password" >&2',
+        '  exit 1',
+        'fi',
+        'shift',
+        'case ' + `"${sudoers}"` + ' in',
+        '  generic) ;;',
+        '  command-specific)',
+        '    if [[ " $* " != *" npm install -g "* ]]; then',
+        '      echo "sudo: a password is required" >&2',
+        '      exit 1',
+        '    fi',
+        '    ;;',
+        '  *)',
+        '    echo "sudo: a password is required" >&2',
+        '    exit 1',
+        '    ;;',
+        'esac',
+        '# Only the `env ... npm install` form is actually run, as root. The',
+        '# trash-cleanup `rm -rf` is authorized but not executed: a replay',
+        "# must never touch the host's real /usr/local.",
+        'if [[ "${1:-}" == "env" ]]; then',
+        '  STUB_EFFECTIVE_USER=root exec "$@"',
+        'fi',
+        'exit 0',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    chmodSync(sudoStub, 0o755);
+
+    const npmStub = join(dir, 'npm');
+    writeFileSync(
+      npmStub,
+      [
+        '#!/usr/bin/env bash',
+        '# The prefix the runner user exports is recorded too: the sudo mode',
+        '# must not carry it into the install.',
+        'echo "${STUB_EFFECTIVE_USER:-runner}|NPM_CONFIG_PREFIX=${NPM_CONFIG_PREFIX:-UNSET}|$*" >> ' +
+          calls,
+        'if [[ " $* " == *" install -g "* ]]; then',
+        '  if [[ "${STUB_EFFECTIVE_USER:-runner}" == "root" ]]; then',
+        "    echo 'changed 16 packages in 5s'",
+        '    exit 0',
+        '  fi',
+        `  if [[ "${prefixOwner}" == "runner" ]]; then`,
+        "    echo 'changed 16 packages in 5s'",
+        '    exit 0',
+        '  fi',
+        '  echo "npm error code EACCES" >&2',
+        '  echo "npm error path /usr/local/lib/node_modules/@qwen-code" >&2',
+        '  exit 1',
+        'fi',
+        'exit 0',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    chmodSync(npmStub, 0o755);
+
+    // The retry backoff is 10s + 20s; a replay must not sit through it.
+    const sleepStub = join(dir, 'sleep');
+    writeFileSync(sleepStub, '#!/usr/bin/env bash\nexit 0\n', {
+      mode: 0o755,
+    });
+    chmodSync(sleepStub, 0o755);
+
+    const script = join(dir, 'update.sh');
+    writeFileSync(script, stepBody('Update qwen'));
+
+    const result = spawnSync('bash', [script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        RUNNER_TEMP: dir,
+        VERSION: version,
+        // What a runner user's shell profile exports on the pools the
+        // `-u NPM_CONFIG_PREFIX` drop exists for.
+        NPM_CONFIG_PREFIX: '/home/runner/.npm-global',
+      },
+    });
+    const recorded = readFileSync(calls, 'utf8');
+    return {
+      status: result.status,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+      // Effective user of each npm install invocation, in order.
+      modes: recorded
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => line.split('|')[0]),
+      calls: recorded,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // Runs .github/scripts/ecs-fleet-update-failure-issue.sh against a stubbed
 // `gh`. The stub applies the script's real `--jq` filter with real jq, so the
 // pool-naming expression is exercised rather than mocked away, and it honours
@@ -520,6 +691,66 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     const resolved = runResolve({ env: { INPUT_VERSION: '' } });
     expect(resolved.status).toBe(0);
     expect(resolved.output.trim()).toBe('version=0.22.3');
+  });
+
+  // The fleet splits into three sudoers classes and the install step has to
+  // serve all three. The mode assertions read the effective user npm actually
+  // ran as, not just the exit code: a fallback that eventually succeeds after
+  // a wasted runner-user EACCES attempt against a root-owned prefix is the
+  // shape that lost hk-1/hk-2.
+
+  it('installs as root on a pool whose sudoers allows only the npm install', () => {
+    // hk-1/hk-2. A generic `sudo -n true` probe is rejected here while the
+    // real install is allowed, so a probe-selected mode picks the runner user
+    // and every attempt EACCESes against the root-owned package dir — the
+    // pool can never update. Trying the real command is what saves it.
+    const updated = runUpdate({ sudoers: 'command-specific' });
+    expect(updated.status).toBe(0);
+    expect(updated.modes).toEqual(['root']);
+    expect(updated.stderr).not.toContain('EACCES');
+  });
+
+  it('installs as root on a pool with passwordless sudo for anything', () => {
+    // hk-3/4/5 today: the sudo mode must stay the one that runs, pinned to
+    // /usr/local and without the runner user's custom npm prefix.
+    const updated = runUpdate({ sudoers: 'generic' });
+    expect(updated.status).toBe(0);
+    expect(updated.modes).toEqual(['root']);
+    expect(updated.calls).toContain('install -g --prefix /usr/local');
+    expect(updated.calls).toContain('--registry=https://registry.npmjs.org');
+    expect(updated.calls).toContain('NPM_CONFIG_PREFIX=UNSET');
+  });
+
+  it('falls back to the runner user on a pool with no sudo at all', () => {
+    // The mode the fallback exists for. Deleting it — or making both modes
+    // sudo — leaves these pools with no way to install at all.
+    const updated = runUpdate({ sudoers: 'none', prefixOwner: 'runner' });
+    expect(updated.status).toBe(0);
+    expect(updated.modes).toEqual(['runner']);
+  });
+
+  it('never runs an interactive sudo in the install step', () => {
+    // On a pool where the runner user owns the prefix the install succeeds
+    // either way, so the exit code cannot see a dropped `-n`; the marker and
+    // the mode can. Without `-n` sudo blocks on a password prompt until
+    // `timeout-minutes: 10` kills the step instead of failing fast into the
+    // next mode, which silently loses the sudo mode on every class.
+    const updated = runUpdate({ sudoers: 'generic', prefixOwner: 'runner' });
+    expect(updated.status).toBe(0);
+    expect(updated.stderr).not.toContain('a terminal is required');
+    expect(updated.modes).toEqual(['root']);
+  });
+
+  it('fails the leg when no mode can write the prefix', () => {
+    // No sudo and a root-owned prefix has no working mode: the step must
+    // exhaust its retries and fail loudly rather than report success.
+    const updated = runUpdate({ sudoers: 'none', prefixOwner: 'root' });
+    expect(updated.status).toBe(1);
+    expect(updated.modes).toEqual(['runner', 'runner', 'runner']);
+    expect(updated.stderr).toContain('EACCES');
+    expect(updated.stdout).toContain(
+      '::error::npm install of @qwen-code/qwen-code@0.22.3 failed after 3 attempts',
+    );
   });
 
   it('verifies a healthy install without diagnostics', () => {
