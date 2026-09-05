@@ -3281,49 +3281,15 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toContain('tool_search');
   });
 
-  it('should auto-disable tool_search for deepseek-v4 models', async () => {
-    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+  it.each([
+    'deepseek-v4-flash',
+    'deepseek-v3',
+    'openrouter/deepseek/deepseek-chat',
+    'qwen-max',
+  ])('should enable tool_search by default for %s', async (model) => {
+    process.argv = ['node', 'script.js', '--model', model];
     const argv = await parseArguments();
     const settings: Settings = {};
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
-  });
-
-  it('should auto-disable tool_search for deepseek-v3 models', async () => {
-    process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
-    const argv = await parseArguments();
-    const settings: Settings = {};
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
-  });
-
-  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--model',
-      'openrouter/deepseek/deepseek-chat',
-    ];
-    const argv = await parseArguments();
-    const settings: Settings = {};
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
-  });
-
-  it('should not auto-disable tool_search for non-deepseek models', async () => {
-    process.argv = ['node', 'script.js', '--model', 'qwen-max'];
-    const argv = await parseArguments();
-    const settings: Settings = {};
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).not.toContain('tool_search');
-  });
-
-  it('should respect explicit enabled:true override for deepseek models', async () => {
-    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
-    const argv = await parseArguments();
-    const settings: Settings = {
-      tools: { toolSearch: { enabled: true } },
-    };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
   });

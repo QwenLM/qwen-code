@@ -2683,7 +2683,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
+              'When enabled, deferred bundled and MCP tools can be loaded on demand via ToolSearch to reduce prompt size. Disable this only when every deferred tool should be declared up front.',
             showInDialog: true,
           },
           threshold: {
