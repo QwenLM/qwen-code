@@ -3327,8 +3327,10 @@ export class DaemonClient {
    * session (`POST /session/:id/worktree-reset`, capability
    * `session_worktree_reset_v1`). Resolves 200 with the replacement
    * session's create-shape response. Typed 409 bodies carry the reset
-   * taxonomy: `worktree_reset_not_worktree_session`, `worktree_reset_active`
-   * (a session involved is busy), `worktree_reset_interrupted` (a previous
+   * taxonomy: `worktree_reset_unsupported` (not a worktree session),
+   * `worktree_reset_active` (a session involved is busy),
+   * `worktree_reset_invalid_state` (corrupt or ambiguous ownership state;
+   * always non-destructive), `worktree_reset_interrupted` (a previous
    * transfer crashed; retry), and `worktree_session_superseded` /
    * `worktree_marker_missing` on the restore surface.
    */
