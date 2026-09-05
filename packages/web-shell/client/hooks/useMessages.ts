@@ -69,8 +69,11 @@ interface ReconciliationRound {
 export function transcriptBlocksToLocalizedMessages(
   blocks: readonly DaemonTranscriptBlock[],
   t: Translator,
+  safeToolProjection = false,
 ): Message[] {
   return transcriptBlocksToDaemonMessages(blocks, {
+    safeToolProjection,
+    includeSourceIdentity: true,
     labels: {
       promptCancelled: t('request.cancelled'),
       branchSuccess: (name) => t('branch.success', { name }),
