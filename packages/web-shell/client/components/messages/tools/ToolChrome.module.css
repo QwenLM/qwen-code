@@ -232,6 +232,17 @@
   min-width: 0;
 }
 
+.workflowLineDetail {
+  padding: 8px 0 2px;
+}
+
+.workflowFallback {
+  padding: 10px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .chatSummary {
   width: 100%;
   margin: 0;
@@ -275,6 +286,29 @@
 
 .chatSummaryIcon svg {
   display: block;
+}
+
+/* Marks the row's only active work as a detached agent. The tint is not
+   motion, so it stays on under reduced motion — otherwise such a card would
+   remain indistinguishable from a finished one. */
+.chatSummaryIconDetached {
+  color: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chatSummaryIconDetached {
+    animation: chat-summary-agent-pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes chat-summary-agent-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
 }
 
 .chatSummaryToolIcon {
@@ -398,6 +432,12 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Collapsed groups that stay mounted (workflow details keep their live state)
+   collapse the grid row instead of unmounting via `display: none`. */
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
 }
 
 .chatSummaryContentInner {
@@ -616,6 +656,11 @@
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
+}
+
+:global([data-transcript-render-mode='document']) .expandedOutput {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .expandedEdit {
