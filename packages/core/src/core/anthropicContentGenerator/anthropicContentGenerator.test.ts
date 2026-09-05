@@ -151,6 +151,54 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+    expect(anthropicState.constructorOptions?.['fetch']).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('installs session ID injection on the runtime fetch', async () => {
+    const runtimeFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    vi.doMock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
+      const actual =
+        await importOriginal<
+          typeof import('../../utils/runtimeFetchOptions.js')
+        >();
+      return {
+        ...actual,
+        buildRuntimeFetchOptions: vi.fn(() => ({ fetch: runtimeFetch })),
+      };
+    });
+
+    try {
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const sessionAwareFetch = anthropicState.constructorOptions?.[
+        'fetch'
+      ] as typeof fetch;
+      await sessionAwareFetch(
+        'https://routify-pub.alibaba-inc.com/protocol/anthropic/v1',
+      );
+
+      const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+      expect(headers.get('session_id')).toBe('test-session');
+    } finally {
+      vi.doUnmock('../../utils/runtimeFetchOptions.js');
+    }
   });
 
   it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {

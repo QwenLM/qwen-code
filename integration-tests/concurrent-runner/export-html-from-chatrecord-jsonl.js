@@ -34,8 +34,6 @@ Usage:
 
 Notes:
   - Input JSONL is expected to contain one ChatRecord per line.
-  - The legacy exported JSONL shape is also accepted when source ChatRecords
-    are unavailable.
 `;
   console.error(message.trimEnd());
   process.exit(exitCode);
@@ -127,15 +125,6 @@ async function buildProductSessionData(records, collectSessionMetadata) {
   };
 }
 
-function buildLegacySessionData(objects) {
-  const [metadata, ...messages] = objects;
-  return {
-    sessionId: metadata.sessionId,
-    startTime: metadata.startTime,
-    messages,
-  };
-}
-
 function defaultOutPath(inputPath) {
   if (inputPath === '-') return path.resolve(process.cwd(), 'export.html');
   const directory = path.dirname(inputPath);
@@ -151,22 +140,21 @@ async function main() {
   const objects = await readJsonlObjects(input);
   if (objects.length === 0) throw new Error('Input JSONL is empty.');
 
-  let sessionData;
-  let records;
   if (looksLikeExportJsonl(objects)) {
-    sessionData = buildLegacySessionData(objects);
-  } else {
-    records = objects.filter(looksLikeChatRecord);
-    if (records.length === 0) {
-      throw new Error(
-        'Unrecognized JSONL format (expected ChatRecord-per-line).',
-      );
-    }
-    sessionData = await buildProductSessionData(
-      records,
-      collectSessionMetadata,
+    throw new Error(
+      'Legacy exported JSONL cannot be rendered safely; provide source ChatRecord JSONL.',
     );
   }
+  const records = objects.filter(looksLikeChatRecord);
+  if (records.length === 0) {
+    throw new Error(
+      'Unrecognized JSONL format (expected ChatRecord-per-line).',
+    );
+  }
+  const sessionData = await buildProductSessionData(
+    records,
+    collectSessionMetadata,
+  );
 
   const html = toHtml(sessionData, records);
   const outputPath = output ? path.resolve(output) : defaultOutPath(input);
