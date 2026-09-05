@@ -334,6 +334,22 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('vaul');
   });
 
+  it('does not pull the daemon provider stack into the transcript entry', () => {
+    // The entry advertises "no daemon providers". It did not hold: the
+    // transcript imported transcriptBlocksToLocalizedMessages from
+    // hooks/useMessages, which value-imports useConnection /
+    // useTranscriptBlocks / useWorkspace from the daemon-react-sdk barrel, so
+    // dist/transcript.js still carried the provider guards. The projection now
+    // lives in adapters/localizedMessages.ts. These strings are provider
+    // invariant messages, which survive minification verbatim.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('DaemonSessionProvider');
+    expect(js).not.toContain('DaemonWorkspaceProvider');
+  });
+
   it('still carries what a transcript actually renders', () => {
     const bundle = readTranscriptBundle();
     expect(bundle).toContain('react-markdown');
