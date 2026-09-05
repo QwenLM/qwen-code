@@ -388,9 +388,27 @@ function pageOrdinalBounds(
 }
 
 /**
- * The span index a page landing at `targetOrdinal` belongs in: the first span
- * covering that ordinal or a newer one, or `spans.length` when the target is
- * newer than everything retained, so the page lands just before the live tail.
+ * Turns a page index into the gap the target actually falls inside, when there
+ * is one.
+ *
+ * The ordinal lookup skips gaps because a gap has no ordinal to compare against,
+ * so on its own it always lands on a page index or the end of the span list. But
+ * the unloaded range the target belongs to is the gap immediately before that
+ * position, and landing the page there is what lets the recorder consume it —
+ * leaving the gap in place keeps claiming an unloaded range the page just filled.
+ * Block offsets are identical either way, since a gap contributes no blocks.
+ */
+function gapBefore(ledger: TranscriptPageLedger, index: number): number {
+  return index > 0 && ledger.spans[index - 1]?.kind === 'gap'
+    ? index - 1
+    : index;
+}
+
+/**
+ * The span index a page landing at `targetOrdinal` belongs in: the gap it falls
+ * inside when there is one, otherwise the first span covering that ordinal or a
+ * newer one, or `spans.length` when the target is newer than everything retained
+ * and no trailing gap follows it — so the page lands just before the live tail.
  *
  * Order comes from the caller-supplied ordinal lookup because record ids are not
  * themselves ordered. Two cases report undefined instead of guessing a position,
@@ -417,10 +435,10 @@ export function ledgerInsertIndexForOrdinal(
     if (span.kind === 'gap') continue;
     const bounds = pageOrdinalBounds(span.entry, ordinalByRecordId);
     if (bounds === undefined) return undefined;
-    if (targetOrdinal <= bounds.lowest) return index;
+    if (targetOrdinal <= bounds.lowest) return gapBefore(ledger, index);
     if (targetOrdinal <= bounds.highest) return undefined;
   }
-  return ledger.spans.length;
+  return gapBefore(ledger, ledger.spans.length);
 }
 
 /** How to fetch the range a gap describes. */

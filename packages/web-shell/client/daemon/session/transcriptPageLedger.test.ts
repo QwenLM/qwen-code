@@ -642,15 +642,45 @@ describe('anchored page placement', () => {
     ]);
   });
 
-  it('places a page by ordinal, skipping gaps', () => {
+  it('places a page in the gap it falls inside, not on the page after it', () => {
     const ordinals = new Map([
       ['ro1', 10],
       ['rn1', 40],
     ]);
     const ledger = anchoredWindow();
-    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 5)).toBe(1);
-    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 25)).toBe(3);
+    // Spans are [gap, page:old@10, gap, page:new@40]. Each target falls inside
+    // the gap before the page the lookup lands on, and that gap is the range the
+    // page fills — returning the page index instead would leave the gap claiming
+    // an unloaded range that is now loaded.
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 5)).toBe(0);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 25)).toBe(2);
+    // Newer than every page and no trailing gap: land before the live tail.
     expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 90)).toBe(4);
+  });
+
+  it('lets the recorder consume the gap the lookup placed the page in', () => {
+    const ordinals = new Map([
+      ['ro1', 10],
+      ['rn1', 40],
+    ]);
+    const ledger = anchoredWindow();
+    const insertAt = ledgerInsertIndexForOrdinal(ledger, ordinals, 25);
+    expect(insertAt).toBeDefined();
+    const placed = recordLedgerAnchoredPage(
+      ledger,
+      entry('mid', anchored, 'anchored'),
+      insertAt!,
+      { older: olderGapAt('ra1', 'snap-2') },
+    );
+    // The interior gap is gone, replaced by what the read itself still reports as
+    // missing; the head gap and both pages are untouched.
+    expect(spanSummary(placed)).toEqual([
+      'gap:ro1',
+      'page:old',
+      'gap:ra1',
+      'page:mid',
+      'page:new',
+    ]);
   });
 
   it('places a page in front of the one whose lowest ordinal it matches', () => {
@@ -662,8 +692,8 @@ describe('anchored page placement', () => {
     // expands backward off its target, so the newcomer can only carry records
     // older than that one, and those belong in front.
     const ledger = anchoredWindow();
-    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 10)).toBe(1);
-    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 40)).toBe(3);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 10)).toBe(0);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 40)).toBe(2);
   });
 
   it('refuses to place a page whose target falls inside a retained page', () => {
