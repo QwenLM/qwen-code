@@ -701,6 +701,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
     getGlobalTempDir: vi.fn(() => '/tmp/qwen-global-temp'),
     getUserExtensionsDir: vi.fn(() => '/tmp/qwen-extensions'),
+    getUserWorkflowsDir: vi.fn(() => '/home/test/.qwen/workflows'),
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
     runWithRuntimeBaseDir: vi.fn(
       (
@@ -4503,6 +4504,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       '/home/test/.qwen/skills',
       '/tmp/qwen-extensions',
       '/home/test/.qwen/plans',
+      Storage.getUserWorkflowsDir(),
+      path.join('/project', 'workflows'),
       ...(process.platform === 'win32' ? [] : ['/tmp']),
     ];
   }
@@ -13764,6 +13767,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'failed' as 'failed' | 'running',
       workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
+      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       args: { prompt: 'retry this path' },
     };
     const registry = {
@@ -13807,7 +13811,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).resolves.toEqual({ changed: true, status: 'running' });
     expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
       {
-        script: task.script,
+        scriptPath: task.scriptPath,
         args: task.args,
         resumeFromRunId: task.runId,
       },
@@ -14058,6 +14062,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'failed' as 'failed' | 'running',
       workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
+      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       args: { prompt: 'rerun everything' },
     };
     const rerun = {
@@ -14129,7 +14134,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
       {
-        script: task.script,
+        scriptPath: task.scriptPath,
         args: task.args,
       },
       task.workflowName,

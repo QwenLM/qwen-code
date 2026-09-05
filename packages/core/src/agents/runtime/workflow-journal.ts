@@ -32,6 +32,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
@@ -182,6 +184,32 @@ export class WorkflowJournal {
   private pending = Promise.resolve();
 
   constructor(readonly path: string) {}
+
+  /** Ensure the advertised journal path exists without affecting the run. */
+  async ensureExists(): Promise<boolean> {
+    try {
+      await fs.mkdir(path.dirname(this.path), { recursive: true });
+      const file = await fs.open(this.path, 'a', 0o600);
+      await file.close();
+      return true;
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.ensureExists failed for ${this.path}: ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /** Remove a never-registered run's journal file, best-effort. */
+  async remove(): Promise<void> {
+    try {
+      await fs.rm(this.path, { force: true });
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.remove failed for ${this.path}: ${error}`,
+      );
+    }
+  }
 
   /** Load + parse all entries into replay maps. Empty maps if no file. */
   async load(): Promise<JournalReplay> {

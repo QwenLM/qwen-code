@@ -32,7 +32,11 @@ import {
 import { WorkflowBudgetImpl } from './workflow-budget.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
-import { resolveSavedWorkflowScript } from './workflow-saved.js';
+import {
+  deleteInlineWorkflowScript,
+  persistInlineWorkflowScript,
+  resolveSavedWorkflowScript,
+} from './workflow-saved.js';
 import {
   compileWorkflowScript,
   describeWorkflowCompileError,
@@ -58,6 +62,16 @@ export type WorkflowRunSettlement =
 
 export class WorkflowRunHandle {
   readonly completion: Promise<WorkflowRunSettlement>;
+  /**
+   * Where this run's script lives on disk: the file a `{scriptPath}` launch
+   * loaded, or the persisted copy of an inline `{script}`. `undefined` when
+   * an inline script could not be persisted (no `storage`, symlinked root,
+   * write failure) — callers report the run without it rather than naming a
+   * path that does not exist.
+   */
+  readonly scriptPath: string | undefined;
+  /** This run's resume journal, when the config has a `storage` to hold one. */
+  readonly journalPath: string | undefined;
 
   constructor(
     readonly runId: string,
@@ -66,7 +80,10 @@ export class WorkflowRunHandle {
     private readonly controller: AbortController,
     private readonly scheduler: WorkflowDispatchScheduler,
     start: () => Promise<WorkflowRunSettlement>,
+    locations: { scriptPath?: string; journalPath?: string } = {},
   ) {
+    this.scriptPath = locations.scriptPath;
+    this.journalPath = locations.journalPath;
     this.completion = Promise.resolve().then(start);
   }
 
@@ -159,13 +176,23 @@ export class WorkflowRunner {
     const controller = registry
       ? registry.reserveStart(runId, createController)
       : createController();
+    const assertStartNotCancelled = (): void => {
+      if (controller.signal.aborted && !options.signal.aborted) {
+        throw new WorkflowStartCancelledError();
+      }
+      if (runInBackground && options.signal.aborted) {
+        throw new WorkflowStartCancelledError();
+      }
+    };
     const storage = config.storage;
-    const journal = storage
-      ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
+    let journalPath = storage
+      ? storage.getWorkflowRunJournalPath(runId)
       : undefined;
+    let journal = journalPath ? new WorkflowJournal(journalPath) : undefined;
     let script: string;
     let scriptPath: string | undefined;
     let resumeReplay: JournalReplay | undefined;
+    let persistedInlineScript = false;
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
     try {
@@ -203,16 +230,29 @@ export class WorkflowRunner {
       // classifier — which only knows the caller's signal and the entry's
       // status — record the run as failed, or completed for a dispatch-free
       // script, under a client that was just told `{cancelled: true}`.
-      if (controller.signal.aborted && !options.signal.aborted) {
-        throw new WorkflowStartCancelledError();
-      }
+      assertStartNotCancelled();
       // The caller's own abort is reported the same way for a background
       // start; a foreground start registers and settles `cancelled` so the
       // caller's tool result carries the run it asked for.
-      if (runInBackground && options.signal.aborted) {
-        throw new WorkflowStartCancelledError();
-      }
       callerWasAbortedBeforeStart = options.signal.aborted;
+      // Persisted only once the run is certain to start: a script that never
+      // compiled, and a start the registry cancelled out from under us, leave
+      // no file behind. A resume of an inline script overwrites the copy from
+      // the original run, which is the file the model was told to edit.
+      if (options.script !== undefined && scriptPath === undefined) {
+        const persisted = await persistInlineWorkflowScript(
+          config,
+          runId,
+          script,
+        );
+        scriptPath = persisted ?? undefined;
+        persistedInlineScript = persisted !== null;
+      }
+      if (journal && !(await journal.ensureExists())) {
+        journal = undefined;
+        journalPath = undefined;
+      }
+      assertStartNotCancelled();
       const dispatch =
         options.dispatch ??
         createProductionDispatch(
@@ -245,6 +285,7 @@ export class WorkflowRunner {
           tokenBudgetTotal: budget.total,
           script,
           scriptPath,
+          ...(journalPath ? { journalPath } : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
@@ -253,12 +294,22 @@ export class WorkflowRunner {
               }
             : {}),
           isBackgrounded: runInBackground,
+          resumeInBackground:
+            runInBackground &&
+            config.isInteractive?.() === true &&
+            config.getExperimentalZedIntegration?.() !== true,
         },
         controller,
       );
     } catch (error) {
       registry?.releaseStart(runId, controller);
       controller.abort();
+      if (persistedInlineScript && options.resumeFromRunId === undefined) {
+        await deleteInlineWorkflowScript(config, runId);
+      }
+      if (options.resumeFromRunId === undefined) {
+        await journal?.remove();
+      }
       throw error;
     }
     const emitUpdate = (): void => {
@@ -442,6 +493,10 @@ export class WorkflowRunner {
           }
           registry?.releaseHandle(runId, handle);
         }
+      },
+      {
+        ...(scriptPath ? { scriptPath } : {}),
+        ...(journalPath ? { journalPath } : {}),
       },
     );
     registry?.attachHandle(handle);

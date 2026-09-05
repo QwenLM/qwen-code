@@ -842,6 +842,10 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),
+    Storage.getUserWorkflowsDir(),
+    // Workflow run artifacts: resume journals, run snapshots, and persisted
+    // inline scripts named by workflow results and notifications.
+    path.join(config.storage.getProjectDir(), 'workflows'),
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
@@ -11893,7 +11897,10 @@ class QwenAgent implements Agent {
               : task.status === 'completed' ||
                 task.status === 'failed' ||
                 task.status === 'cancelled';
-          if (!canStart || !task.script) {
+          const savedScriptPath = task.workflowName
+            ? task.scriptPath
+            : undefined;
+          if (!canStart || (!task.script && !savedScriptPath)) {
             return { changed: false, status: task.status };
           }
           const attempt = await tryWithWorkflowTaskMutation(
@@ -11909,7 +11916,9 @@ class QwenAgent implements Agent {
                 );
               }
               const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-                script: task.script,
+                ...(savedScriptPath
+                  ? { scriptPath: savedScriptPath }
+                  : { script: task.script }),
                 args: task.args,
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };

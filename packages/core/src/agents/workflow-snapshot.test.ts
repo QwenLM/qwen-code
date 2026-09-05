@@ -291,6 +291,9 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     const journalPath = config.storage.getWorkflowRunJournalPath(runId);
     await fs.mkdir(path.dirname(journalPath), { recursive: true });
     await fs.writeFile(journalPath, '{}\n', 'utf8');
+    const inlinePath = config.storage.getInlineWorkflowScriptPath(runId);
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
 
     await expect(deleteWorkflowSnapshot(config, runId)).resolves.toBe(true);
 
@@ -298,6 +301,7 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       fs.access(config.storage.getWorkflowRunSnapshotPath(runId)),
     ).rejects.toThrow();
     await expect(fs.access(path.dirname(journalPath))).rejects.toThrow();
+    await expect(fs.access(inlinePath)).rejects.toThrow();
     await expect(listWorkflowSnapshots(config)).resolves.toEqual([]);
   });
 
@@ -376,6 +380,75 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(files.length).toBe(MAX_RETAINED_SNAPSHOTS);
     // The pruned runs' journal directories are gone too (no orphan leak).
     expect(journalDirs.length).toBe(MAX_RETAINED_SNAPSHOTS);
+  });
+
+  // An inline run leaves a third artifact — its persisted source. Retiring
+  // the snapshot and the journal while the script stays would let those
+  // accumulate for runs nothing can name any more.
+  it('prunes the persisted inline script alongside the snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const inlineDir = path.dirname(
+      config.storage.getInlineWorkflowScriptPath('wf_0'),
+    );
+    await fs.mkdir(inlineDir, { recursive: true });
+    // A file whose stem is not a well-formed run id must survive: prune only
+    // removes what the `wf_<hex>` gate admits.
+    const stranger = path.join(inlineDir, 'notarun.js');
+    await fs.writeFile(stranger, 'keep', 'utf8');
+
+    const total = MAX_RETAINED_SNAPSHOTS + 2;
+    for (let i = 0; i < total; i++) {
+      const runId = `wf_${i.toString(16)}`;
+      await fs.writeFile(
+        path.join(inlineDir, `${runId}.js`),
+        'return 1',
+        'utf8',
+      );
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId, startTime: 1_000 + i }),
+      );
+    }
+
+    const scripts = (await fs.readdir(inlineDir)).filter((f) =>
+      f.startsWith('wf_'),
+    );
+    expect(scripts.length).toBe(MAX_RETAINED_SNAPSHOTS);
+    // The oldest two runs lost their scripts with their snapshots.
+    expect(scripts).not.toContain('wf_0.js');
+    expect(scripts).not.toContain('wf_1.js');
+    await expect(fs.readFile(stranger, 'utf8')).resolves.toBe('keep');
+  });
+
+  it('keeps live run artifacts while pruning its stale snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const liveRunId = 'wf_a0';
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(liveRunId);
+    const journalPath = config.storage.getWorkflowRunJournalPath(liveRunId);
+    const inlinePath = config.storage.getInlineWorkflowScriptPath(liveRunId);
+    await writeWorkflowSnapshot(config, task({ runId: liveRunId }));
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    await fs.writeFile(journalPath, '{}\n', 'utf8');
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
+    await fs.utimes(snapshotPath, new Date(0), new Date(0));
+    Object.assign(config, {
+      getWorkflowRunRegistry: () => ({
+        list: () => [task({ runId: liveRunId, status: 'running' })],
+        listStartingRunIds: () => [],
+      }),
+    });
+
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId: `wf_b${i.toString(16)}`, startTime: 2_000 + i }),
+      );
+    }
+
+    await expect(fs.access(snapshotPath)).rejects.toThrow();
+    await expect(fs.access(journalPath)).resolves.toBeUndefined();
+    await expect(fs.access(inlinePath)).resolves.toBeUndefined();
   });
 
   // Security: prune derives `runId` from the snapshot filename and feeds it to
