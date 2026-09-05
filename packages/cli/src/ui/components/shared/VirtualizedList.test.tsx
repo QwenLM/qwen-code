@@ -145,7 +145,7 @@ describe('<VirtualizedList />', () => {
     expect(frame.endsWith('item-19')).toBe(true);
   });
 
-  it('collapses a short bottom-stuck list below the container height', async () => {
+  it('bottom-aligns a short bottom-stuck list within the container height', async () => {
     const { lastFrame, rerender } = render(
       <VirtualizedList<Item>
         data={makeItems(5)}
@@ -174,13 +174,1312 @@ describe('<VirtualizedList />', () => {
     await act(async () => {});
 
     const frame = lastFrame() ?? '';
-    expect(frame.split('\n')).toEqual([
+    // Short bottom-stuck content is bottom-aligned (#9300): blank rows at the
+    // top, the five items pinned to the bottom of the 20-row container.
+    const lines = frame.split('\n');
+    expect(lines.length).toBe(20);
+    expect(lines.slice(0, 15).every((l) => l.trim() === '')).toBe(true);
+    expect(lines.slice(15)).toEqual([
       'item-0',
       'item-1',
       'item-2',
       'item-3',
       'item-4',
     ]);
+  });
+
+  it('keeps a fitting top-anchored mount (initialScrollIndex 0) top-aligned', async () => {
+    // MainContent mounts the banner-only VP session with
+    // `initialScrollIndex={0}` (top-anchored). The mount-time re-stick must
+    // not override that explicit anchor and bottom-align the content:
+    // bottom-alignment is reserved for bottom-stuck conversations (#9300).
+    const { lastFrame, rerender } = render(
+      <VirtualizedList<Item>
+        data={makeItems(3)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+
+    rerender(
+      <VirtualizedList<Item>
+        data={makeItems(3)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+    ]);
+  });
+
+  it('does not bottom-align a scrolled-away list when content shrinks to fit', async () => {
+    // Discriminates the `isStickingToBottom` gate of `bottomAlignGap`: the
+    // user scrolled away from the bottom, then content shrinks in place
+    // below the viewport. The frame must collapse top-aligned around the
+    // content the user is reading, not grow to the full container height
+    // with blank rows above it (#9305 review R4-2).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollTo(0);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(3);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+    ]);
+
+    // A scroll attempt while everything fits is positionally a no-op and
+    // must not flip sticking either way: engaging it would bottom-align
+    // the fitting content (destroying the top-aligned state pinned above),
+    // releasing it would drop auto-follow (#9305 review R5-2).
+    for (const scroll of [
+      () => listRef!.scrollBy(1),
+      () => listRef!.scrollBy(-1),
+      () => listRef!.scrollTo(0),
+      () => listRef!.scrollToEnd(),
+    ]) {
+      act(scroll);
+      rerender(<Wrapper />);
+      await act(async () => {});
+      expect((lastFrame() ?? '').split('\n')).toEqual([
+        'item-0',
+        'item-1',
+        'item-2',
+      ]);
+    }
+  });
+
+  it('top-aligns the banner-only state when a stuck list collapses without remount', async () => {
+    // /clear does not remount the list (no key on ScrollableList in
+    // MainContent), so sticking from the bottom-stuck rest state is still
+    // set when the data collapses to the banner alone. The host mounts that
+    // state top-anchored (initialScrollIndex 0), so the in-place collapse
+    // must render the same top-aligned frame instead of bottom-aligning the
+    // banner under a blank viewport (#9305 review R5-1).
+    let items = makeItems(20);
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={10}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: 'banner' }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+  });
+
+  it('keeps sticking released when an overflowing banner-only list is resized', async () => {
+    // The collapse drop queues setIsStickingToBottom(false), but the
+    // mark-install still reads the stale render-time flag on that render.
+    // When the single remaining item overflows the container (a tall
+    // banner in a small terminal), the missing clamp mark lets the next
+    // effect trigger — here a terminal resize — read the parked position
+    // as the user being at the bottom and re-engage sticking,
+    // bottom-pinning the top-anchored banner (#9305 review R6-1). The
+    // banner sits at index 0 like AppHeader so its height is cached
+    // before the collapse, as in the real /clear lifecycle.
+    const banner = Array.from({ length: 15 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(5)];
+    let height = 10;
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={height}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: banner }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // Collapse parks the viewport at the banner's bottom (top clipped).
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+      'b12',
+      'b13',
+      'b14',
+    ]);
+
+    height = 8;
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // The resize must not re-engage sticking from the parked position:
+    // the anchor holds and the frame is not bottom-pinned to b7..b14.
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+      'b12',
+    ]);
+  });
+
+  it('does not yank the viewport to the first post-clear message', async () => {
+    // Combined R6-1 + R6-2: after the /clear-style collapse drops
+    // sticking and parks the viewport inside an overflowing banner, the
+    // first new message must not read that parked position as the user
+    // being at the bottom: the growth branch would snap the anchor to
+    // the end and latch auto-follow back on (#9305 reviews R6-1, R6-2).
+    // The banner sits at index 0 like AppHeader so its height is cached
+    // before the collapse, as in the real /clear lifecycle.
+    const banner = Array.from({ length: 12 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(5)];
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={10}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: banner }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+    ]);
+
+    items = [
+      { id: 999, label: banner },
+      { id: 0, label: 'message' },
+    ];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+    ]);
+  });
+
+  it('re-engages auto-follow when a fitting top-anchored mount grows to overflow', async () => {
+    // MainContent mounts the banner-only session top-anchored
+    // (`length <= 1 ? 0 : SCROLL_TO_ITEM_END`). While the banner fits,
+    // the re-anchor clamp moves nothing, so no clamp mark may be
+    // installed: while content fits, nothing can move the anchor off a
+    // mark, and `clampParked` would suppress the growth auto-follow
+    // branch forever — the first streamed reply would then render below
+    // the fold (#9305 review R8-1). Growth must re-engage sticking once
+    // the conversation overflows the viewport.
+    let items: Item[] = [{ id: 999, label: 'banner' }];
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+
+    items = [{ id: 999, label: 'banner' }, ...makeItems(8)];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+    ]);
+
+    // Sticking stays engaged: further growth keeps following.
+    items = [{ id: 999, label: 'banner' }, ...makeItems(14)];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-9',
+      'item-10',
+      'item-11',
+      'item-12',
+      'item-13',
+    ]);
+  });
+
+  it('re-engages auto-follow when the first post-clear message overflows a fitting banner', async () => {
+    // Fitting-remnant counterpart of the R6 combined test above: the
+    // /clear collapse drops sticking and re-anchors to {0,0}, but the
+    // remnant FITS — the re-stick gate is already blocked by
+    // `!contentPreviouslyFit`, so no clamp mark may be installed. A
+    // mark here reads as `clampParked` on every later growth and
+    // suppresses the auto-follow branch, killing follow for the first
+    // conversation after /clear (#9305 review R8-1). The overflowing
+    // remnant keeps its park (pinned by the R6 tests).
+    let items = makeItems(20);
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={10}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    items = [{ id: 999, label: 'banner' }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+
+    items = [{ id: 999, label: 'banner' }, ...makeItems(12)];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+      'item-9',
+      'item-10',
+      'item-11',
+    ]);
+  });
+
+  it('re-engages auto-follow when a scrolled-away collapse to a fitting banner grows', async () => {
+    // Scrolled-away counterpart of the post-clear re-follow test above:
+    // sticking was already released before the collapse re-anchors, but the
+    // fitting banner must not get a clamp mark through the released arm
+    // either — while content fits, nothing can move the anchor off a mark,
+    // so one installed here reads as `clampParked` on every later growth
+    // and suppresses the auto-follow branch, leaving the first post-clear
+    // reply below the fold (#9305 review R10-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items: Item[] = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Scrolled-away rest state: sticking released, viewport five rows up.
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+      'item-9',
+      'item-10',
+      'item-11',
+      'item-12',
+      'item-13',
+      'item-14',
+    ]);
+
+    items = [{ id: 999, label: 'banner' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['banner']);
+
+    items = [{ id: 999, label: 'banner' }, ...makeItems(12)];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+      'item-9',
+      'item-10',
+      'item-11',
+    ]);
+  });
+
+  it('does not re-stick a scrolled-away list that shrinks to fit in two steps', async () => {
+    // The first shrink re-anchors a scrolled-away viewport, parking it
+    // exactly at the new bottom; the re-stick gate must not read that
+    // content-driven clamp as the user being at the bottom and flip
+    // sticking back on when the next shrink fits (#9305 review R5-3).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(12);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+    ]);
+
+    // The parked position must not read as the user being at the bottom
+    // when the list grows either: the next message arriving must not yank
+    // the anchor to the end and re-engage sticking (#9305 review R6-2).
+    items = makeItems(9);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+      'item-3',
+      'item-4',
+      'item-5',
+      'item-6',
+      'item-7',
+      'item-8',
+    ]);
+  });
+
+  it('does not preempt the sticking drop when a shrink and resize land in one render', async () => {
+    // Ink coalesces rapid state updates, so a terminal resize can land in
+    // the same render as the /clear-style shrink to the banner. The
+    // container-change arm must not evaluate on the stale render-time
+    // sticking flag and preempt the drop branch there: the END anchor it
+    // would install makes the drop unreachable again, so the first
+    // post-clear message yanks the viewport and re-latches follow — the
+    // R6-2 regression this PR removes (#9305 review R11-1).
+    const banner = Array.from({ length: 15 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(5)];
+    let height = 10;
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={height}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // Shrink to the banner and resize the container in one batched render.
+    items = [{ id: 999, label: banner }];
+    height = 8;
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // The collapse parks the viewport at the banner's bottom, sticking
+    // released.
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+      'b12',
+      'b13',
+      'b14',
+    ]);
+
+    // The first post-clear message must not yank the viewport to the end
+    // nor re-latch auto-follow.
+    items = [
+      { id: 999, label: banner },
+      { id: 0, label: 'message' },
+    ];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b7',
+      'b8',
+      'b9',
+      'b10',
+      'b11',
+      'b12',
+      'b13',
+      'b14',
+    ]);
+
+    // Follow must stay off: once the content fits again the frame renders
+    // top-aligned, not bottom-aligned under a stuck viewport.
+    height = 20;
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      ...Array.from({ length: 15 }, (_, i) => `b${i}`),
+      'message',
+    ]);
+  });
+
+  it('does not yank the first message after a resize overflows a fitting banner by one row', async () => {
+    // After the /clear collapse a fitting banner installs no mark (R8-1 /
+    // R10-1). Shrinking the terminal so the banner overflows by exactly
+    // one row must not let the -1 bottom tolerance read the parked TOP of
+    // that one-row scroll range as the bottom pixels: the first new
+    // message would then snap the anchor to END and latch follow from a
+    // position the user never scrolled to (#9305 review R11-4).
+    const banner = Array.from({ length: 10 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(5)];
+    let height = 12;
+
+    const renderList = () => (
+      <VirtualizedList<Item>
+        data={items}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={height}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    // Collapse to the fitting banner: top-anchored, no mark.
+    items = [{ id: 999, label: banner }];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b0',
+      'b1',
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+      'b9',
+    ]);
+
+    // Resize so the banner overflows by exactly one row: the park stays
+    // at the top with sticking off.
+    height = 9;
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b0',
+      'b1',
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+    ]);
+
+    // The first new message must not yank the viewport nor latch follow.
+    items = [
+      { id: 999, label: banner },
+      { id: 0, label: 'message' },
+    ];
+    rerender(renderList());
+    rerender(renderList());
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b0',
+      'b1',
+      'b2',
+      'b3',
+      'b4',
+      'b5',
+      'b6',
+      'b7',
+      'b8',
+    ]);
+  });
+
+  it('re-engages auto-follow when a scrolled-away resize-to-fit grows past the viewport', async () => {
+    // Scrolled away in an overflowing conversation, then the terminal
+    // grows until the content fits: the clamp parks at {0,0} and the
+    // released arm installs the mark. While the content fits that park is
+    // correct, but once growth crosses the fit boundary the user — who
+    // could see everything while it fit — must get auto-follow back
+    // instead of every new message rendering below the fold (#9305
+    // review R11-6).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+    let height = 10;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={height}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Enlarge the terminal until the content fits: top-parked at {0,0}.
+    height = 25;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 20 }, (_, i) => `item-${i}`),
+    );
+
+    // Growth past the viewport re-engages follow.
+    items = makeItems(28);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 25 }, (_, i) => `item-${i + 3}`),
+    );
+  });
+
+  it('re-engages auto-follow when a scrolled-away shrink-to-fit grows past the viewport', async () => {
+    // Second entrance of the released-arm mark: the user scrolls away, the
+    // list shrinks in place until it fits, and the park at {0,0} installs
+    // the mark. Growth crossing the fit boundary must re-engage follow
+    // (#9305 review R11-6). The still-fitting growth right after the park
+    // stays suppressed (pinned by the R6-2 test above).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    items = makeItems(14);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `item-${i + 4}`),
+    );
+  });
+
+  it('re-engages auto-follow across a wholesale dataset replacement', async () => {
+    // /resume swaps the history in one batched commit and ScrollableList
+    // carries no key, so the list state — including the clamp mark —
+    // survives the swap. Switching into a short fitting session re-anchors
+    // to {0,0} and the released arm installs the mark on the NEW dataset;
+    // the mark must not kill growth follow there: the session's first
+    // streaming reply past the viewport must follow, not render below the
+    // fold (#9305 review R11-6).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(30);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // In-place session switch to a short fitting session (2+ items).
+    items = Array.from({ length: 6 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 6 }, (_, i) => `it-${100 + i}`),
+    );
+
+    // The new session streams past the viewport: follow must re-engage.
+    items = Array.from({ length: 15 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `it-${105 + i}`),
+    );
+  });
+
+  it('does not re-latch sticking when a banner-only remnant overflows after a fitting park', async () => {
+    // The released shrink-to-fit park installs the mark keyed to the first
+    // remnant item — the banner, which survives the /clear collapse at the
+    // same {0,0} anchor, so the mark still validates and survives too. A
+    // terminal shrink that then overflows the banner must not let the
+    // fit→overflow crossing re-latch sticking on the banner-only remnant:
+    // there is no conversation to follow, and the engaged flag would
+    // bottom-align the banner under a blank viewport and yank the first
+    // post-clear message (#9305 review R17-1).
+    const banner = Array.from({ length: 3 }, (_, i) => `b${i}`).join('\n');
+    let items: Item[] = [{ id: 999, label: banner }, ...makeItems(20)];
+    let height = 12;
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={height}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Shrink in place until the remnant fits: the released park at {0,0}
+    // installs the mark keyed to the banner.
+    items = [{ id: 999, label: banner }, ...makeItems(8)];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'b0',
+      'b1',
+      'b2',
+      ...Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    ]);
+
+    // /clear collapses to the banner alone; it still fits.
+    items = [{ id: 999, label: banner }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['b0', 'b1', 'b2']);
+
+    // Shrink the terminal past the banner height: sticking must stay
+    // released and the frame stays top-aligned, not bottom-pinned b1..b2.
+    height = 2;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['b0', 'b1']);
+
+    // The first post-clear message must not yank the viewport nor latch
+    // follow.
+    items = [
+      { id: 999, label: banner },
+      { id: 0, label: 'message' },
+    ];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(['b0', 'b1']);
+  });
+
+  it('re-engages auto-follow when a released swap lands in an overflowing session', async () => {
+    // /resume swaps the whole dataset in one commit and ScrollableList
+    // carries no key, so the carried anchor lands out of range and the drop
+    // branch parks the viewport at the new session's live bottom. That park
+    // must not install the clamp mark: the user never scrolled there, and
+    // the mark would suppress every re-follow path, leaving the new
+    // session's first streamed messages below the fold until a manual
+    // scroll (#9305 review R17-2).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(30);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // In-place session switch to an overflowing session: the carried
+    // anchor is out of range, the drop branch parks at the new bottom.
+    items = Array.from({ length: 12 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `it-${102 + i}`),
+    );
+
+    // The new session streams: follow must re-engage.
+    items = Array.from({ length: 13 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `it-${103 + i}`),
+    );
+
+    items = Array.from({ length: 14 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `it-${104 + i}`),
+    );
+  });
+
+  it('keeps follow alive when a replacement lands under the carried anchor', async () => {
+    // A wholesale replacement whose items sit under the carried anchor
+    // bypasses the drop branch entirely. In production this shape remounts
+    // by session key (MainContent), but the component must still hold: the
+    // park mark — now positional, no item key — must not suppress follow
+    // in the replaced dataset; growth from a live-bottom park re-engages
+    // (#9305 reviews R17-3, R18-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Shrink in place: the drop branch parks at the new bottom and
+    // installs the mark keyed to the parked item.
+    items = makeItems(12);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `item-${i + 2}`),
+    );
+
+    // Replacement whose items sit under the carried anchor: the anchor
+    // stays in range, so no drop render fires. The park sat at the live
+    // bottom of a multi-item remnant, so the arrival of the taller dataset
+    // re-engages follow (not the old gate latch from a key-cleared mark).
+    items = Array.from({ length: 20 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `it-${110 + i}`),
+    );
+
+    // The new session streams: follow must work.
+    items = Array.from({ length: 21 }, (_, i) => ({
+      id: 100 + i,
+      label: `it-${100 + i}`,
+    }));
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `it-${111 + i}`),
+    );
+  });
+
+  it('re-engages auto-follow when parked fitting content grows taller in place', async () => {
+    // Streaming reply shape: useGeminiStream updates one pending item per
+    // chunk and MainContent maps it at a constant array position, so the
+    // reply crosses the container height at constant data.length. The
+    // fit-boundary crossing must re-engage follow from the clamp-parked,
+    // previously-fitting state for any growth shape, not only data.length
+    // increases (#9305 review R14-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Shrink in place until the content fits: clamp-parked at {0,0}.
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    // In-place height growth that still fits must not yank the park.
+    items = [...makeItems(7), { id: 7, label: 'tok-0\ntok-1' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      ...Array.from({ length: 7 }, (_, i) => `item-${i}`),
+      'tok-0',
+      'tok-1',
+    ]);
+
+    // The streamed reply crosses the container height at constant
+    // data.length: follow must re-engage.
+    items = [...makeItems(7), { id: 7, label: 'tok-0\ntok-1\ntok-2\ntok-3' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      ...Array.from({ length: 6 }, (_, i) => `item-${i + 1}`),
+      'tok-0',
+      'tok-1',
+      'tok-2',
+      'tok-3',
+    ]);
+  });
+
+  it('re-engages auto-follow when a container shrink overflows parked fitting content', async () => {
+    // Second crossing shape: the resize-to-fit park at {0,0} carries the
+    // mark, then the terminal shrinks back below the content height. The
+    // previously-fitting state overflows without any data.length change;
+    // afterwards contentPreviouslyFit is false and the parked scrollTop is
+    // not near the grown max scroll, so no other gate can bring follow
+    // back — the crossing must re-engage it (#9305 review R14-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    const items = makeItems(20);
+    let height = 10;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={height}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Enlarge the terminal until the content fits: top-parked at {0,0}.
+    height = 25;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 20 }, (_, i) => `item-${i}`),
+    );
+
+    // Shrink the terminal back below the content height: follow must
+    // re-engage.
+    height = 10;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 10 }, (_, i) => `item-${i + 10}`),
+    );
   });
 
   it('reports zero-height shrink so collapsed items leave no blank gap', async () => {
@@ -268,7 +1567,7 @@ describe('<VirtualizedList />', () => {
     expect(lastFrame() ?? '').toContain('thinking line 29');
   });
 
-  it('collapses after measuring changed content at full viewport height', async () => {
+  it('bottom-aligns changed content after measuring it at full viewport height', async () => {
     const liveItems = [{ id: -1, label: 'live' }];
 
     const { frames, lastFrame, rerender } = render(
@@ -301,7 +1600,9 @@ describe('<VirtualizedList />', () => {
       />,
     );
     await act(async () => {});
-    expect(lastFrame()?.split('\n')).toEqual(['confirm']);
+    // Bottom-aligned (#9300): the single confirmation sits at the container
+    // bottom with blank rows above.
+    expect(lastFrame()?.split('\n')).toEqual(['', '', '', '', 'confirm']);
 
     const longConfirmationItems = [
       { id: -1, label: ['confirm', 'line 2', 'line 3'].join('\n') },
@@ -326,7 +1627,14 @@ describe('<VirtualizedList />', () => {
     expect(
       frames.slice(frameCountBeforeLongContent).map((frame) => frame.trimEnd()),
     ).not.toContain('confirm');
-    expect(lastFrame()?.split('\n')).toEqual(['confirm', 'line 2', 'line 3']);
+    // Bottom-aligned (#9300): 3-line content pinned to the 5-row bottom.
+    expect(lastFrame()?.split('\n')).toEqual([
+      '',
+      '',
+      'confirm',
+      'line 2',
+      'line 3',
+    ]);
   });
 
   it('targetScrollIndex anchors to that index on first usable render', () => {
@@ -982,6 +2290,175 @@ describe('<VirtualizedList />', () => {
       expect(listRef!.getScrollIndex()).toBe(24);
     });
   });
+
+  it('keeps the park mark across a re-key of the parked item (R18-1 F2)', async () => {
+    // The park mark must survive a key transition of the item it sits on:
+    // pending items re-key on commit (p-N → h-N), and the old key-based
+    // validation cleared the mark while the user still sat at the parked
+    // position. With the mark gone, the fit→overflow crossing arm (which
+    // requires the parked signal) dies and the shrunken content clips
+    // instead of re-engaging follow (#9305 review R18-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+    let height = 10;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={height}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Shrink in place until the remnant fits: the released park at {0,0}
+    // installs the positional mark.
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    // Re-key the parked item (pending → commit re-key keeps the position).
+    items = [{ id: 900, label: 'item-0' }, ...makeItems(8).slice(1)];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    // The container shrink crosses the fitting remnant into overflow: the
+    // parked signal must survive the re-key so follow re-engages.
+    height = 6;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 6 }, (_, i) => `item-${i + 2}`),
+    );
+  });
+
+  it('re-engages follow when growth lands on a live-bottom park (R18-1 F7)', async () => {
+    // An in-place shrink of a scrolled-away (bottom-pixels) viewport parks
+    // it at the live bottom and installs the park mark. The park is not a
+    // user scroll, so the very next render must not latch sticking — but
+    // once new content arrives the park is the bottom of a live multi-item
+    // conversation, and follow must come back. The old mark suppressed
+    // every re-follow path forever: the whole next reply streamed below the
+    // fold until a manual scroll (#9305 review R18-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    const tall = (n: number, from = 0): Item[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: from + i,
+        label: `X${from + i}-0\nX${from + i}-1\nX${from + i}-2`,
+      }));
+    let items = tall(12);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-1);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // In-place shrink below the viewport (new keys: cached heights do not
+    // shrink under a stable key): the re-anchor clamp parks the viewport
+    // at the live bottom of the remnant.
+    items = [
+      ...Array.from({ length: 8 }, (_, i) => ({
+        id: 100 + i,
+        label: `x${i}`,
+      })),
+      ...tall(1, 8),
+      ...Array.from({ length: 3 }, (_, i) => ({
+        id: 109 + i,
+        label: `x${9 + i}`,
+      })),
+    ];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'x4',
+      'x5',
+      'x6',
+      'x7',
+      'X8-0',
+      'X8-1',
+      'X8-2',
+      'x9',
+      'x10',
+      'x11',
+    ]);
+
+    // Growth must re-engage follow from the live-bottom park.
+    items = [...items, { id: 120, label: 'g0' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'x5',
+      'x6',
+      'x7',
+      'X8-0',
+      'X8-1',
+      'X8-2',
+      'x9',
+      'x10',
+      'x11',
+      'g0',
+    ]);
+  });
 });
 
 // Hoisted to module scope so every harness rerender hands VirtualizedList
@@ -1132,10 +2609,15 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     const lines = (harness.lastFrame() ?? '').split('\n');
     expect(lines.some((l) => l.includes('c1 thought line 0'))).toBe(false);
     expect(lines.filter((l) => l.trim() !== '').length).toBeLessThanOrEqual(6);
-    expect(lines.length).toBeLessThanOrEqual(8);
     // Collapsed state must still render the head summary, not an empty
     // window (the assertions above also hold for a blank frame).
     expect(lines.some((l) => l.includes('Thought for 1m 41s'))).toBe(true);
+    // Bottom-aligned (#9300): the released height becomes blank space at the
+    // TOP, and the collapsed summary sits at the bottom of the full 40-row
+    // container (last row is content, not a gap between content and the
+    // composer).
+    expect(lines.length).toBe(40);
+    expect(lines[lines.length - 1]!.trim()).not.toBe('');
   });
 
   it('does not lock the render window when a tall thought collapses off-screen', async () => {
