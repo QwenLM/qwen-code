@@ -428,9 +428,11 @@ describe('owned Conversations runtime quarantine', () => {
     });
     const registry = createMockRegistry([runtime]);
     const runtimeRemoval = createRemovalController();
+    const onWorkspaceRemoved = vi.fn();
     const { handle } = createApp({
       workspaceRegistry: registry,
       runtimeRemoval,
+      onWorkspaceRemoved,
     });
 
     await expect(
@@ -446,6 +448,7 @@ describe('owned Conversations runtime quarantine', () => {
     );
     expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
     expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(onWorkspaceRemoved).toHaveBeenCalledWith(runtime.workspaceCwd);
     expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
     expect(registry.cancelDrain).not.toHaveBeenCalled();
     expect(
@@ -2365,6 +2368,7 @@ describe('DELETE /workspaces/:workspace', () => {
     Object.assign(runtime.bridge, { sessionCount: 2, activePromptCount: 1 });
     const runtimeRemoval = createRemovalController(1);
     const removeByIds = vi.fn().mockResolvedValue(2);
+    const onWorkspaceRemoved = vi.fn();
     const acpHandle = {
       beginWorkspaceDrain: vi.fn(),
       cancelWorkspaceDrain: vi.fn(),
@@ -2379,6 +2383,7 @@ describe('DELETE /workspaces/:workspace', () => {
       workspaceRegistry: createMockRegistry([runtime]),
       runtimeRemoval,
       getAcpHandle: () => acpHandle as never,
+      onWorkspaceRemoved,
       workspaceRegistrationStore: {
         removeByIds,
       } as unknown as WorkspaceRegistrationStore,
@@ -2426,6 +2431,7 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(acpHandle.disposeWorkspace).toHaveBeenCalledWith(
       runtime.workspaceId,
     );
+    expect(onWorkspaceRemoved).toHaveBeenCalledWith(runtime.workspaceCwd);
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
     ).toBeUndefined();
