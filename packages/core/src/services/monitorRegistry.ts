@@ -168,6 +168,14 @@ export class MonitorRegistry {
     MonitorOwnerLifecycleCallback
   >();
   private notificationCallback?: MonitorNotificationCallback;
+  /**
+   * Tracks whether a notification callback was ever installed on this
+   * registry instance. When true and the callback is later cleared
+   * (session runtime recycle), terminal notifications are deferred
+   * rather than discarded so reconciliation can deliver them when the
+   * next subscriber arrives (#11119).
+   */
+  private hadNotificationSubscriber = false;
   private registerCallback?: MonitorRegisterCallback;
   private statusChangeCallback?: MonitorStatusChangeCallback;
 
@@ -343,6 +351,18 @@ export class MonitorRegistry {
 
   setNotificationCallback(cb: MonitorNotificationCallback | undefined): void {
     this.notificationCallback = cb;
+    if (cb) this.hadNotificationSubscriber = true;
+    // Reconciliation: when a new callback is installed (e.g. after a
+    // session runtime generation swap), re-emit terminal notifications
+    // for any entries whose delivery was missed while no callback was
+    // registered (#11119).
+    if (cb) {
+      for (const entry of this.monitors.values()) {
+        if (entry.status !== 'running' && !entry.notified) {
+          this.emitTerminalNotification(entry);
+        }
+      }
+    }
   }
 
   setAgentNotificationCallback(
@@ -536,6 +556,27 @@ export class MonitorRegistry {
   /** Emit a terminal notification (completed/failed/cancelled). */
   private emitTerminalNotification(entry: MonitorTask, detail?: string): void {
     if (entry.notified) return;
+
+    // Check whether a callback is available before marking notified.
+    // If none exists (session runtime recycled), leave the entry
+    // eligible for reconciliation when the next subscriber arrives
+    // (#11119).
+    const callback = entry.ownerAgentId
+      ? this.agentNotificationCallbacks.get(entry.ownerAgentId)
+      : this.notificationCallback;
+    if (!callback) {
+      if (this.hadNotificationSubscriber) {
+        debugLogger.warn(
+          `Notification deferred for monitor ${entry.monitorId}: no callback registered (will reconcile on next subscriber)`,
+        );
+        return;
+      }
+      // No callback was ever installed (isolated/test usage). Mark
+      // notified so pruning and finalization gates behave normally.
+      entry.notified = true;
+      return;
+    }
+
     entry.notified = true;
 
     const statusText =

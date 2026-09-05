@@ -243,6 +243,16 @@ export class BackgroundShellRegistry {
 
   private registerCallback: BackgroundShellRegisterCallback | undefined;
   private notificationCallback: BackgroundShellNotificationCallback | undefined;
+  /**
+   * Tracks whether a notification callback was ever installed on this
+   * registry instance. When true and the callback is later cleared
+   * (session runtime recycle), terminal notifications are deferred
+   * rather than discarded so reconciliation can deliver them when the
+   * next subscriber arrives. When false (isolated/test usage with no
+   * session wiring), entries are marked notified immediately because
+   * there is no subscriber to reconcile to (#11119).
+   */
+  private hadNotificationSubscriber = false;
   private statusChangeCallback: BackgroundShellStatusChangeCallback | undefined;
 
   /**
@@ -259,6 +269,20 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
+    if (cb) this.hadNotificationSubscriber = true;
+    // Reconciliation: when a new callback is installed (e.g. after a
+    // session runtime generation swap), re-emit notifications for any
+    // terminal entries whose delivery was missed while no callback was
+    // registered. This makes the silent-drop state structurally
+    // impossible — a notification is either delivered immediately or
+    // deferred until the next subscriber arrives (#11119).
+    if (cb) {
+      for (const entry of this.entries.values()) {
+        if (entry.status !== 'running' && !entry.notified) {
+          this.emitNotification(entry);
+        }
+      }
+    }
   }
 
   /**
@@ -476,14 +500,28 @@ export class BackgroundShellRegistry {
 
   private emitNotification(entry: ShellTask): void {
     if (entry.notified) return;
-    entry.notified = true;
 
     if (!this.notificationCallback) {
-      debugLogger.debug(
-        `Notification dropped for shell ${entry.shellId}: no callback registered`,
-      );
+      if (this.hadNotificationSubscriber) {
+        // A callback was previously installed and then cleared (session
+        // runtime recycle). Do NOT mark notified — leave the entry
+        // eligible for reconciliation when the next subscriber registers
+        // its callback (#11119).
+        debugLogger.warn(
+          `Notification deferred for shell ${entry.shellId}: no callback registered (will reconcile on next subscriber)`,
+        );
+        return;
+      }
+      // No callback was ever installed (isolated/test usage). Mark
+      // notified so pruning and finalization gates behave normally.
+      entry.notified = true;
       return;
     }
+
+    // Mark notified *after* confirming a callback exists so a re-entrant
+    // terminal call inside the callback chain (cancel → complete race)
+    // sees the flag and short-circuits, rather than firing twice.
+    entry.notified = true;
 
     const statusText =
       entry.status === 'completed'
