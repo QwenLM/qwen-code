@@ -317,7 +317,17 @@ export class PlaywrightRuntime {
         () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
       );
     } catch (error) {
-      if (tab.dialog === undefined && !tab.page.isClosed()) throw error;
+      // Navigation can invalidate this drain after the input already succeeded.
+      const contextDestroyed =
+        typeof error === 'object' &&
+        error !== null &&
+        'message' in error &&
+        typeof error.message === 'string' &&
+        error.message.includes(
+          'Execution context was destroyed, most likely because of a navigation',
+        );
+      if (!contextDestroyed && tab.dialog === undefined && !tab.page.isClosed())
+        throw error;
     }
     return result;
   }

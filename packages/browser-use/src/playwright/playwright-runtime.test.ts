@@ -242,6 +242,84 @@ describe('PlaywrightRuntime command contracts', () => {
     );
   });
 
+  it.each([
+    new Error(
+      'page.evaluate: Execution context was destroyed, most likely because of a navigation',
+    ),
+    {
+      message:
+        'page.evaluate: Execution context was destroyed, most likely because of a navigation.',
+    },
+  ])(
+    'preserves successful input when the drain loses its context (%j)',
+    async (error) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      fixture.page.evaluate.mockRejectedValueOnce(error);
+
+      await expect(
+        fixture.runtime.dispatch('locator.selectOption', {
+          tabId: tab.id,
+          steps: [{ kind: 'locator', selector: '#sort' }],
+          value: 'price',
+        }),
+      ).resolves.toBeNull();
+
+      expect(fixture.locator.selectOption).toHaveBeenCalledExactlyOnceWith(
+        'price',
+        { timeout: 5_000 },
+      );
+      expect(fixture.page.evaluate).toHaveBeenCalledOnce();
+      expect(
+        fixture.locator.selectOption.mock.invocationCallOrder[0],
+      ).toBeLessThan(fixture.page.evaluate.mock.invocationCallOrder[0] ?? 0);
+    },
+  );
+
+  it.each([
+    'selection failed',
+    'Execution context was destroyed, most likely because of a navigation',
+  ])(
+    'preserves input errors without running the drain (%s)',
+    async (message) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      fixture.locator.selectOption.mockRejectedValueOnce(new Error(message));
+
+      await expect(
+        fixture.runtime.dispatch('locator.selectOption', {
+          tabId: tab.id,
+          steps: [{ kind: 'locator', selector: '#sort' }],
+          value: 'price',
+        }),
+      ).rejects.toMatchObject({
+        message: `locator.selectOption failed: ${message}`,
+      });
+
+      expect(fixture.locator.selectOption).toHaveBeenCalledOnce();
+      expect(fixture.page.evaluate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves unrelated errors from the input drain', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.page.evaluate.mockRejectedValueOnce(new Error('renderer failed'));
+
+    await expect(
+      fixture.runtime.dispatch('locator.selectOption', {
+        tabId: tab.id,
+        steps: [{ kind: 'locator', selector: '#sort' }],
+        value: 'price',
+      }),
+    ).rejects.toMatchObject({
+      message: 'locator.selectOption failed: renderer failed',
+    });
+
+    expect(fixture.locator.selectOption).toHaveBeenCalledOnce();
+    expect(fixture.page.evaluate).toHaveBeenCalledOnce();
+  });
+
   it('delegates coordinate input and snapshot capture', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
