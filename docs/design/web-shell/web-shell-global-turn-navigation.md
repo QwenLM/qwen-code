@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted; Phase 1 implemented, Phases 2–3 proposed, 2026-09-02.
+Accepted; Phases 1 and 2A implemented, Phases 2B–3 proposed; delivery boundary
+clarified 2026-09-04.
 
 This design complements
 `web-shell-bounded-transcript-and-subagent-details.md`. That document defines
@@ -577,21 +578,22 @@ the live-owner and workspace-qualified paths.
 
 ### Phase 2: bounded client window
 
-1. Land the immutable historical page table and separate live tail described
-   by the bounded-transcript design.
-2. Add bidirectional boundaries, deduplication by record ID, page admission,
-   eviction, and detached-live behavior.
-3. Migrate existing sequential prepend pagination to that window before adding
-   random jump.
+1. Add the bounded turn-index store, tail refresh, provisional reconciliation,
+   and canonical locator map without coupling metadata residency to transcript
+   residency.
+2. Land the immutable historical page table beside the existing connected live
+   window, with bidirectional boundaries, deduplication by record ID, page
+   admission, eviction, detached-live behavior, and random anchored reads.
+3. Migrate existing sequential prepend pagination behind the page-table
+   boundary while preserving its current public behavior.
+4. Expose the complete headless state and locator contract needed by the rail.
 
 ### Phase 3: global rail
 
-1. Add the turn-index store, tail refresh, provisional reconciliation, and
-   canonical locator map.
-2. Virtualize `SessionTimeline` by total ordinal count.
-3. Add loaded and unloaded selection paths, retry, placeholders, keyboard
+1. Virtualize `SessionTimeline` by total ordinal count.
+2. Add loaded and unloaded selection paths, retry, placeholders, keyboard
    navigation, and jump-to-latest integration.
-4. Keep the old `getSessionTimelineEntries(messages)` path as the capability
+3. Keep the old `getSessionTimelineEntries(messages)` path as the capability
    fallback.
 
 ## Implementation map
