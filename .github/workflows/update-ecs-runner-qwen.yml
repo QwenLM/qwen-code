@@ -25,7 +25,7 @@ jobs:
     name: 'Resolve version'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    timeout-minutes: 100
     outputs:
       version: '${{ steps.version.outputs.version }}'
     steps:
@@ -36,12 +36,16 @@ jobs:
           # npm publishes asynchronously: `npm publish --provenance` returns
           # "Your package is being processed and may take a few minutes to
           # become available", and release.yml dispatches this workflow as soon
-          # as it returns. For v0.22.3 the gap was ~16 minutes (published
-          # 17:14Z, resolvable 17:30Z), so the single un-retried `npm view` this
-          # step used to run 404'd on 3 of the 4 pools and left the fleet split
-          # across two CLI versions until a maintainer noticed. Wait the
-          # registry out rather than losing the race.
-          RESOLVE_TIMEOUT_SECONDS: '1500'
+          # as it returns. The gap grows with the package size and varies
+          # widely: v0.22.3 took ~16 minutes, and v0.23.0 (a ~100 MB main
+          # package) took 55m22s measured end to end (npm accepted the upload
+          # 10:58:30Z, the registry served it 11:53:52Z). The previous 1500s
+          # budget gave up long before that and the run failed with the
+          # package still in flight, leaving the fleet on the old version.
+          # Budget ~1 hour for a main-package release and treat anything past
+          # 90 minutes as anomalous. The wait polls every 30s, so fast
+          # publishes still resolve immediately.
+          RESOLVE_TIMEOUT_SECONDS: '5400'
           RESOLVE_INTERVAL_SECONDS: '30'
         run: |-
           set -euo pipefail
@@ -97,9 +101,54 @@ jobs:
             # package dir (ENOTEMPTY). Clear trash left by crashed installs
             # and retry through the seconds-long race window.
             PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            # --prefix pins the install to /usr/local: on the hk-4/hk-5
+            # machines root's npm global prefix is a custom Node directory
+            # (/usr/local/lib/nodejs/node-v22.23.2-linux-x64), so without
+            # it the update landed there while the pool kept resolving the
+            # stale /usr/local/bin/qwen -> /usr/local/lib/node_modules copy.
+            #
+            # hk-1/hk-2 grant sudo only for named command lines, and the
+            # spec they name carries no --prefix:
+            #   /usr/bin/env -u NPM_CONFIG_PREFIX npm install -g
+            #     --registry=https://registry.npmjs.org @qwen-code/qwen-code@*
+            # sudoers matches argv literally, so wedging the pin between -g
+            # and --registry= costs the authorization. The two runs four
+            # minutes apart on the same fleet are the mirror image of each
+            # other: 33754421601 (pinned) failed hk-1 and hk-2 with `sudo: a
+            # password is required` on all three attempts while hk-3/4/5
+            # went green, and 33754034666 (unpinned) was green on hk-1/hk-2
+            # and installed hk-4/hk-5 into that custom Node directory. No
+            # single argv serves both, so the step tries three modes in
+            # order and never selects one by probe:
+            #   1. pinned sudo — hk-3/4/5, whose root prefix needs the pin
+            #   2. spec sudo   — hk-1/hk-2, exactly the authorized argv
+            #   3. runner user — pools with no passwordless sudo at all,
+            #                    where that user owns the prefix
+            # Mode 2 has to stay after mode 1: reversing them sends hk-4/hk-5
+            # the unpinned argv, which sudo allows there and which installs
+            # somewhere the pool never resolves. A probe cannot be more
+            # representative than the command it stands in for either — the
+            # `sudo -n true` gate this step used to carry is rejected on
+            # hk-1/hk-2 while the real install is allowed, so it picked mode
+            # 3 on exactly the machines that could have installed as root,
+            # and that mode then hit EACCES on the root-owned package dir on
+            # all three attempts.
+            # Every sudo here is `-n`: a pool without sudo must fail fast
+            # into the next mode instead of blocking on a password prompt
+            # until `timeout-minutes: 10` kills the step.
+            install_qwen() {
+              "$@" npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
+            }
+            # The argv hk-1/hk-2's sudoers names, unpinned. Any flag added
+            # here costs the authorization and drops those pools to mode 3.
+            install_qwen_named_spec() {
+              "$@" npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
+            }
             for attempt in 1 2 3; do
-              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              sudo -n rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
+              if install_qwen sudo -n env -u NPM_CONFIG_PREFIX ||
+                install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX ||
+                install_qwen env; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then
@@ -118,9 +167,38 @@ jobs:
         run: |-
           set -euo pipefail
           qwen_path="$(command -v qwen)"
-          actual="$("${qwen_path}" --version)"
+          # Tolerate a broken entrypoint: a crashed install can leave
+          # `command -v qwen` resolving to a binary whose `--version` exits
+          # non-zero, and under `set -e` a failing command substitution
+          # feeding a bare assignment aborts the step right here — before
+          # the mismatch diagnostics below can print, for exactly the
+          # failure class they exist for. The version test at the end
+          # still fails the step either way. The capture stays stdout-only:
+          # a stderr byte would fold into the strict-matched version and
+          # fail a healthy install on one runtime warning.
+          actual="$("${qwen_path}" --version)" || actual="(qwen --version failed, exit $?)"
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
+          if [[ "${actual}" != "${VERSION}" ]]; then
+            # Diagnose where the stale binary comes from before failing:
+            # the install step's npm may write to a different prefix than
+            # the one `command -v` resolves on this pool. The probes must
+            # work on the pools without passwordless sudo — the same pools
+            # the install fallback serves — where an interactive `sudo`
+            # blocks on a password prompt until the job timeout kills the
+            # step, so they run as the runner user or with `sudo -n`, and
+            # the runner-user variants see what the fallback installed.
+            echo "--- diagnostics ---"
+            echo "readlink: $(readlink -f "${qwen_path}" 2>/dev/null || echo '(not a link)')"
+            ls -la /usr/local/bin/qwen /usr/bin/qwen 2>/dev/null || true
+            echo "npm prefix (user): $(npm prefix -g 2>/dev/null || true)"
+            echo "npm prefix (sudo): $(sudo -n env -u NPM_CONFIG_PREFIX npm prefix -g 2>/dev/null || true)"
+            cat /usr/local/lib/node_modules/@qwen-code/qwen-code/package.json 2>/dev/null | grep '"version"' || true
+            sudo -n cat /usr/local/lib/node_modules/@qwen-code/qwen-code/package.json 2>/dev/null | grep '"version"' || true
+            ls -la /usr/local/lib/node_modules/@qwen-code/ 2>/dev/null || true
+            sudo -n ls /usr/local/lib/node_modules/@qwen-code/ 2>/dev/null || true
+            echo "--- end diagnostics ---"
+          fi
           test "${actual}" = "${VERSION}"
 
   # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
