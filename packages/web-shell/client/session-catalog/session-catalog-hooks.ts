@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import {
+  useActions,
   useSessions,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -170,11 +171,23 @@ export function useSessionCatalogQueries(
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SNAPSHOTS);
 }
 
-export function useSessionHasActivePrompt(
+/**
+ * Whether the daemon reports a prompt in flight for `sessionId`, together with
+ * whether that answer is allowed to *settle* a running turn.
+ *
+ * Only a live-state response is `authoritative`. It lists every live session
+ * regardless of paging, so its silence about a session genuinely means "not
+ * running". The catalog-page fallback cannot say that: the page is bounded, so
+ * a running session may simply have fallen off a fresher first page, and any
+ * invalidation refetches it. Lighting an indicator from the page is fine;
+ * settling a turn from it would end a turn that is still going — the failure
+ * this whole signal exists to prevent (#9487).
+ */
+export function useSessionActivePromptState(
   client: DaemonClient,
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
-): boolean {
+): { hasActivePrompt: boolean; authoritative: boolean } {
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const subscribeLiveSessions = useCallback(
     (listener: () => void) =>
@@ -183,11 +196,26 @@ export function useSessionHasActivePrompt(
         : () => undefined,
     [store, workspaceCwd],
   );
-  const hasLiveSessions = useSyncExternalStore(
+  // Track the session's own live flag, not just whether the workspace has any
+  // live-state coverage: a coverage boolean stays `true` across polls, so
+  // `useSyncExternalStore` would bail out of re-rendering on the one change
+  // that matters — this session's prompt starting or finishing — and the
+  // reader would keep serving whatever it last happened to render (#9487).
+  // `undefined` distinguishes "no live-state response covers this workspace"
+  // from "covered, and this session has no prompt in flight".
+  const getLiveActivePrompt = useCallback((): boolean | undefined => {
+    if (!workspaceCwd || !store.hasLiveSessions(workspaceCwd)) return undefined;
+    if (!sessionId) return false;
+    return (
+      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
+    );
+  }, [sessionId, store, workspaceCwd]);
+  const liveActivePrompt = useSyncExternalStore(
     subscribeLiveSessions,
-    () => (workspaceCwd ? store.hasLiveSessions(workspaceCwd) : false),
-    () => false,
+    getLiveActivePrompt,
+    () => undefined,
   );
+  const hasLiveSessions = liveActivePrompt !== undefined;
   // The live-state response is authoritative and independent of catalog
   // paging. Arm the full-catalog fallback only when nothing tracks live-state
   // for this workspace — i.e. the daemon lacks workspace_session_live_state.
@@ -213,18 +241,63 @@ export function useSessionHasActivePrompt(
   }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd]);
   // autoLoad keeps the fallback page loading (and the store's error-retry
   // timer armed) for observer panes that never trigger an invalidation.
-  const { sessions } = useSessionCatalogQuery(client, catalogQuery, {
+  const { sessions, page } = useSessionCatalogQuery(client, catalogQuery, {
     autoLoad: true,
   });
-  if (!workspaceCwd || !sessionId) return false;
-  if (hasLiveSessions) {
-    return (
-      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
-    );
+  if (!workspaceCwd || !sessionId) {
+    return { hasActivePrompt: false, authoritative: false };
   }
-  return sessions.some(
-    (session) => session.sessionId === sessionId && session.hasActivePrompt,
+  if (liveActivePrompt !== undefined) {
+    return { hasActivePrompt: liveActivePrompt, authoritative: true };
+  }
+  const row = page
+    ? sessions.find((session) => session.sessionId === sessionId)
+    : undefined;
+  return {
+    hasActivePrompt: row?.hasActivePrompt === true,
+    // Never settle-grade, whether or not the row is on the page. A row that
+    // drops off a bounded page between refetches is indistinguishable from one
+    // whose turn ended, and treating that as "the turn ended" is exactly the
+    // bug this signal exists to prevent.
+    authoritative: false,
+  };
+}
+
+/**
+ * Read the daemon's live prompt state for the surrounding
+ * `DaemonSessionProvider`'s session, and publish it back into that provider.
+ *
+ * Every view that owns a provider needs its own bridge: a split pane, a side
+ * task and a subagent detail each mount one, and each is an observer of a turn
+ * it did not submit — the case where the event stream alone cannot tell a long
+ * silent tool call from a finished turn (#9487). Publishing `undefined` while
+ * the answer is unknown leaves that provider's pre-existing heuristics alone.
+ *
+ * Returns the plain boolean for rendering, so a caller needs only this hook.
+ */
+export function useDaemonActivePromptBridge(
+  client: DaemonClient,
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): boolean {
+  const { hasActivePrompt, authoritative } = useSessionActivePromptState(
+    client,
+    workspaceCwd,
+    sessionId,
   );
+  // Idempotent, so the main view and its ChatPane sharing one provider both
+  // publishing the same value is harmless; a split pane, which renders a
+  // ChatPane without an App around it, needs its own.
+  const { setDaemonActivePrompt } = useActions();
+  // Publish only what may settle a turn. On the catalog-fallback path this is
+  // always `undefined`, so the provider never sees a `true` there and no
+  // fallback refetch can produce the `true -> undefined` transition that
+  // settles. A genuine loss of live-state coverage still does.
+  const daemonActivePrompt = authoritative ? hasActivePrompt : undefined;
+  useEffect(() => {
+    setDaemonActivePrompt(daemonActivePrompt);
+  }, [daemonActivePrompt, setDaemonActivePrompt]);
+  return hasActivePrompt;
 }
 
 export function useSessionCatalogPolling(

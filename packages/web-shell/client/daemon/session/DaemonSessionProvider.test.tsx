@@ -10203,6 +10203,875 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
+  describe('observed turn loading across silent tool gaps (#9487)', () => {
+    // An observer pane is one that did not submit the running prompt — a
+    // refreshed page, a second tab, a split pane, or a turn driven by a
+    // scheduler. It only has the event stream to go on, and a single tool call
+    // routinely runs far longer than the passive settle window without
+    // emitting anything.
+    function createObservedSparseTurnSession(
+      silentToolGap: { promise: Promise<void> },
+      sessionId?: string,
+    ) {
+      return createMockSession({
+        sessionId,
+        events: async function* observedSparseTurn(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'run long task' },
+              },
+            },
+          };
+          yield {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+            void silentToolGap.promise.then(() => resolve());
+          });
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 11,
+            v: 1,
+            type: 'turn_complete',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: { stopReason: 'end_turn' },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      });
+    }
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      streamingState = useDaemonStreamingState();
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    const streamingAssistantBlocks = () =>
+      blocks.filter(
+        (block) => block.kind === 'assistant' && block.streaming === true,
+      );
+
+    beforeEach(() => {
+      promptStatus = 'idle';
+      streamingState = 'idle';
+      actions = undefined;
+      blocks = [];
+    });
+
+    it('closes a chunk still buffered when the daemon settles the turn', async () => {
+      vi.useFakeTimers();
+      try {
+        // The backstop reads the store to decide what to close, but transcript
+        // events are batched for TRANSCRIPT_DISPATCH_BATCH_MS. A chunk burst
+        // still inside that window when live state flips must be folded into
+        // the block this settle closes — otherwise it lands after the
+        // `assistant.done`, the reducer mints a fresh streaming block, and
+        // nothing is left to close it: the message keeps a streaming cursor
+        // for the life of the pane.
+        const tailGate = createDeferred<void>();
+        const chunk = (id: number, text: string) => ({
+          id,
+          v: 1,
+          type: 'session_update',
+          originatorClientId: 'client-other',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+            },
+          },
+        });
+        sdkMocks.sessions.push(
+          createMockSession({
+            events: async function* bufferedTail(
+              opts: { signal?: AbortSignal } = {},
+            ) {
+              yield chunk(9, 'starting');
+              await tailGate.promise;
+              yield chunk(10, ' tail');
+              await new Promise<void>((resolve) => {
+                if (opts.signal?.aborted) {
+                  resolve();
+                  return;
+                }
+                opts.signal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              });
+            },
+          }),
+        );
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(streamingAssistantBlocks()).toHaveLength(1);
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // Release the tail chunk but do not advance the batch window, so it is
+        // still buffered when the daemon reports the turn finished.
+        await act(async () => {
+          tailGate.resolve();
+          await flushPromises();
+          actions?.setDaemonActivePrompt(false);
+          await flushPromises();
+        });
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000);
+          await flushPromises();
+        });
+
+        expect(promptStatus).toBe('idle');
+        expect(streamingAssistantBlocks()).toEqual([]);
+        // Folded, not discarded: a settle that dropped the pending batch
+        // instead of flushing it would also leave no streaming block, while
+        // silently losing the tail of the final assistant message.
+        expect(
+          blocks.some(
+            (block) =>
+              block.kind === 'assistant' && block.text.includes(' tail'),
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps the pane loading while the daemon reports the prompt in flight', async () => {
+      vi.useFakeTimers();
+      try {
+        const silentToolGap = createDeferred<void>();
+        sdkMocks.sessions.push(createObservedSparseTurnSession(silentToolGap));
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The workspace live-state poll says the turn is still running.
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // A long tool call goes quiet well past the passive settle window.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingState).not.toBe('idle');
+
+        await act(async () => {
+          silentToolGap.resolve();
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('settles on the daemon reporting the prompt finished without a terminal event', async () => {
+      vi.useFakeTimers();
+      try {
+        // Backstop for terminal events that never arrive (dropped stream,
+        // daemon restart mid-turn): the turn never emits turn_complete here.
+        const silentToolGap = createDeferred<void>();
+        sdkMocks.sessions.push(createObservedSparseTurnSession(silentToolGap));
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(false);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('survives a replay_complete that lands mid-turn', async () => {
+      vi.useFakeTimers();
+      try {
+        // Reconnecting mid-turn replays history and ends with
+        // replay_complete. That means "history caught up", not "turn
+        // finished" — and inside a long silent tool call there is no next
+        // event to revive the indicator, so settling here would drop it for
+        // the rest of the turn.
+        const silentToolGap = createDeferred<void>();
+        const replayGate = createDeferred<void>();
+        const session = createMockSession({
+          events: async function* replayThenSilence(
+            opts: { signal?: AbortSignal } = {},
+          ) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            // Hold the sentinel until the test has published the daemon's
+            // live prompt state, so replay_complete lands with the turn
+            // already known to be in flight.
+            await replayGate.promise;
+            yield {
+              v: 1,
+              type: 'replay_complete',
+              data: { lastEventId: 9, replayedCount: 1 },
+            };
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              void silentToolGap.promise.then(() => resolve());
+            });
+          },
+        });
+        sdkMocks.sessions.push(session);
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          replayGate.resolve();
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingState).not.toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('survives a non-epoch resync that lands mid-turn', async () => {
+      // A ring eviction asks the client to rebuild transcript state. It is a
+      // recovery signal, not a prompt terminal signal — settling here drops an
+      // observer pane's indicator for the rest of a silent tool call, with no
+      // event left to revive it.
+      const resyncGate = createDeferred<void>();
+      const reloaded = createDeferred<void>();
+      const firstSession = createMockSession({
+        sessionId: 'session-resync-active',
+        events: async function* observedThenResync() {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await resyncGate.promise;
+          yield {
+            id: 10,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          } satisfies DaemonEvent;
+        },
+      });
+      const reloadedSession = createMockSession({
+        sessionId: 'session-resync-active',
+        events: createPendingEvents(reloaded),
+      });
+      sdkMocks.sessions.push(firstSession, reloadedSession);
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(promptStatus).not.toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true);
+        await flushPromises();
+      });
+
+      await act(async () => {
+        resyncGate.resolve();
+        await reloaded.promise;
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+    });
+
+    it('does not revive a backstop-settled restored prompt on reconnect', async () => {
+      // The /load snapshot's `hasActivePrompt` is one-shot: once something
+      // consumes it, a reconnect on the same session client must not recompute
+      // it as still running. The backstop is one of those consumers — without
+      // it marking the snapshot settled, an ordinary Last-Event-ID resume
+      // flips the pane back to streaming for a turn the daemon already
+      // finished.
+      const streamEnd = createDeferred<void>();
+      const reattached = createDeferred<void>();
+      let attach = 0;
+      const session = createMockSession({
+        sessionId: 'session-restored-backstop',
+        hasActivePrompt: true,
+        events: async function* restoredThenReconnect(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          attach += 1;
+          if (attach === 1) {
+            await streamEnd.promise;
+            return;
+          }
+          reattached.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+          yield* [];
+        },
+      });
+      // The same client instance on both attaches: a PATH-A resume, which is
+      // what makes the one-shot snapshot recomputable.
+      sdkMocks.sessions.push(session, session);
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('streaming');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true);
+        actions?.setDaemonActivePrompt(false);
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('idle');
+
+      await act(async () => {
+        streamEnd.resolve();
+        await reattached.promise;
+        await flushPromises();
+      });
+
+      expect(attach).toBe(2);
+      expect(promptStatus).toBe('idle');
+    });
+
+    it('survives a same-session reload that carries a replay snapshot', async () => {
+      // A ring-evicted reload rebuilds the store from a fresh replay snapshot.
+      // That reset is not a turn boundary, and it runs before the episode-start
+      // updater — so if it flattens the state unconditionally there is nothing
+      // left for the updater to preserve, and an observer pane mid-turn loses
+      // the indicator with no event left to revive it.
+      const resyncGate = createDeferred<void>();
+      const reloaded = createDeferred<void>();
+      const firstSession = createMockSession({
+        sessionId: 'session-replay-reload',
+        events: async function* observedThenResync() {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await resyncGate.promise;
+          yield {
+            id: 10,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          } satisfies DaemonEvent;
+        },
+      });
+      const reloadedSession = createMockSession({
+        sessionId: 'session-replay-reload',
+        // Non-empty, and with no terminal in it: the turn is still running.
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+        events: createPendingEvents(reloaded),
+      });
+      sdkMocks.sessions.push(firstSession, reloadedSession);
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(promptStatus).not.toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true);
+        await flushPromises();
+      });
+
+      await act(async () => {
+        resyncGate.resolve();
+        await reloaded.promise;
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+    });
+
+    it('still settles on silence when no daemon prompt state is available', async () => {
+      vi.useFakeTimers();
+      try {
+        // Hosts that never publish live state (or daemons without
+        // workspace_session_live_state) keep the pre-existing silence
+        // heuristic, so an observer pane cannot be left spinning forever.
+        const silentToolGap = createDeferred<void>();
+        sdkMocks.sessions.push(createObservedSparseTurnSession(silentToolGap));
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('settles a restored prompt when the daemon reports the turn finished', async () => {
+      vi.useFakeTimers();
+      try {
+        // Refreshing mid-turn re-attaches to the running prompt via /load. If
+        // the terminal event then never arrives (dropped stream, daemon
+        // restart mid-turn), the daemon's live-state flip is the only settle
+        // signal left — it must settle the restored prompt too, not just the
+        // pure-observer case (#9487).
+        const session = createMockSession({
+          hasActivePrompt: true,
+          events: async function* restoredTurnNeverCompletes(
+            opts: { signal?: AbortSignal } = {},
+          ) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+          },
+        });
+        sdkMocks.sessions.push(session);
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(false);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps daemon authority across a switch to another running turn', async () => {
+      vi.useFakeTimers();
+      try {
+        // The host bridge publishes per-session live values and only
+        // re-publishes on change. Switching between two sessions that are
+        // both running keeps the published value `true`, so the provider must
+        // carry its authority across the switch instead of resetting it
+        // (#9487).
+        const gapA = createDeferred<void>();
+        const gapB = createDeferred<void>();
+        sdkMocks.sessions.push(
+          createObservedSparseTurnSession(gapA, 'session-a'),
+        );
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // Session B is running too, so the bridge's published value does not
+        // change across the switch and nothing re-publishes.
+        sdkMocks.sessions.push(
+          createObservedSparseTurnSession(gapB, 'session-b'),
+        );
+        let switched: Promise<void> | undefined;
+        act(() => {
+          switched = requireActions(actions).loadSession('session-b');
+        });
+        if (!switched) throw new Error('Session switch was not started');
+        await act(async () => {
+          await switched;
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // A silent tool gap long past the passive settle window on B.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingState).not.toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps an observed turn loading across a transport close', async () => {
+      vi.useFakeTimers();
+      try {
+        // A proxy idle timeout can drop the SSE stream inside a long silent
+        // tool gap. While the daemon reports the turn in flight, the close
+        // must not settle the pane — the resume finds no events inside the
+        // gap to revive a settled indicator (#9487).
+        const streamEnded = createDeferred<void>();
+        const releaseStreamEnd = createDeferred<void>();
+        const events = vi.fn(async function* observedTurnThenStreamEnd(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          if (events.mock.calls.length === 1) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            // Hold the close until the test has published the daemon's live
+            // prompt state, so the settle check runs with authority known.
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              void releaseStreamEnd.promise.then(() => resolve());
+            });
+            if (opts.signal?.aborted) return;
+            streamEnded.resolve();
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        });
+        sdkMocks.sessions.push(createMockSession({ events }));
+
+        await renderWithProvider(<Harness />, {
+          autoConnect: true,
+          reconnectDelayMs: 1000,
+          maxReconnectDelayMs: 1000,
+        });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        await act(async () => {
+          releaseStreamEnd.resolve();
+          await streamEnded.promise;
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The passive settle window passes while the stream is down.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The authority's own channel then stops answering too — a dead daemon,
+        // not a long tool call. Once the live-state poll gives up on its
+        // snapshot the bridge publishes `undefined`, and the pane must be
+        // released rather than showing a running turn for the tab's lifetime.
+        await act(async () => {
+          actions?.setDaemonActivePrompt(undefined);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps an observed turn loading across a retriable connect error', async () => {
+      vi.useFakeTimers();
+      try {
+        // A retriable transport failure inside a silent gap is not a prompt
+        // terminal either: while the daemon reports the turn in flight, the
+        // pane must stay loading until the reconnect catches up (#9487).
+        const releaseTransportError = createDeferred<void>();
+        const events = vi.fn(async function* observedTurnThenTransportError(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          if (events.mock.calls.length === 1) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            // Hold the failure until the test has published the daemon's live
+            // prompt state, so the settle check runs with authority known.
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              void releaseTransportError.promise.then(() => resolve());
+            });
+            if (opts.signal?.aborted) return;
+            throw new Error('network blip');
+          }
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        });
+        sdkMocks.sessions.push(createMockSession({ events }));
+
+        await renderWithProvider(<Harness />, {
+          autoConnect: true,
+          reconnectDelayMs: 1000,
+          maxReconnectDelayMs: 1000,
+        });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // Let the thrown transport error propagate through the settle check.
+        await act(async () => {
+          releaseTransportError.resolve();
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The passive settle window passes while reconnecting.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('finishes replayed assistant streaming when replay completes', async () => {
     vi.useFakeTimers();
     try {

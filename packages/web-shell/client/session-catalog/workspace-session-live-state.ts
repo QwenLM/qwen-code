@@ -12,6 +12,15 @@ import {
 
 export const SESSION_LIVE_STATE_POLL_MS = 2_000;
 export const SESSION_LIVE_STATE_ERROR_RETRY_MS = 30_000;
+/**
+ * Consecutive live-state request failures before the retained snapshot is
+ * dropped as no longer current. Failures are spaced by
+ * `SESSION_LIVE_STATE_ERROR_RETRY_MS`, so this is a ~minute of a channel that
+ * cannot answer — long enough to ride out a daemon restart, short enough that
+ * a pane held loading by this authority is released while the turn is still
+ * interesting (#9487).
+ */
+export const SESSION_LIVE_STATE_STALE_AFTER_FAILURES = 3;
 export const SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS = 10_000;
 
 interface WorkspacePollState {
@@ -19,6 +28,7 @@ interface WorkspacePollState {
   acceptedVersion?: DaemonSessionCatalogVersion;
   inFlight: boolean;
   liveRetryAt: number;
+  liveFailureStreak: number;
   reconcileRetryAt: number;
   lastReconcileAt: number;
   fallbackAttempted: boolean;
@@ -135,6 +145,7 @@ export function useWorkspaceSessionLiveState(
       workspaceCwd,
       inFlight: false,
       liveRetryAt: 0,
+      liveFailureStreak: 0,
       reconcileRetryAt: 0,
       lastReconcileAt: Number.NEGATIVE_INFINITY,
       fallbackAttempted: false,
@@ -275,6 +286,19 @@ export function useWorkspaceSessionLiveState(
       } catch (error) {
         if (disposed) return;
         state.liveRetryAt = Date.now() + SESSION_LIVE_STATE_ERROR_RETRY_MS;
+        // Only backoff-paced failures count. Interactive refreshes bypass
+        // `liveRetryAt`, so a user deleting or archiving a few sessions during
+        // a 10s daemon restart could otherwise push the streak to the
+        // threshold seconds apart — dropping the snapshot inside the very blip
+        // the threshold exists to ride out.
+        if (!bypassRetry) state.liveFailureStreak += 1;
+        if (
+          state.liveFailureStreak >= SESSION_LIVE_STATE_STALE_AFTER_FAILURES
+        ) {
+          // The channel has stopped answering. Retaining the last snapshot
+          // would let a reader keep vouching for a turn nobody can confirm.
+          catalogStore.markWorkspaceLiveStateUnavailable(state.workspaceCwd);
+        }
         console.warn('[session-live-state] request failed:', error);
         if (!state.acceptedVersion && !state.fallbackAttempted) {
           try {
@@ -302,6 +326,7 @@ export function useWorkspaceSessionLiveState(
         live.sessions,
       );
       state.liveRetryAt = 0;
+      state.liveFailureStreak = 0;
       if (pendingActivity) {
         for (const [sessionId, sequence] of pendingActivity) {
           // applyLiveState reports which sessions absorbed a usable watermark

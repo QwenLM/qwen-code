@@ -109,7 +109,7 @@ import {
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   useSessionCatalogController,
-  useSessionHasActivePrompt,
+  useDaemonActivePromptBridge,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
@@ -3217,7 +3217,7 @@ export function App({
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
   // through >3s silent tool gaps where streamingState drops to idle (#9487).
-  const sessionHasActivePrompt = useSessionHasActivePrompt(
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     connection.workspaceCwd,
     connection.sessionId,
