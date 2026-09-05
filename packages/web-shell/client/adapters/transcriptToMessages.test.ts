@@ -4925,6 +4925,72 @@ describe('Persisted identity on rendered messages', () => {
     });
   });
 
+  it('stamps a tool group from every sibling tool folded into it', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          ...toolBlock('t1', 'call-1', 'completed', 1),
+          sourceRecordIds: ['r-tool-1'],
+          promptId: 'prompt-2',
+        },
+        {
+          ...toolBlock('t2', 'call-2', 'completed', 2),
+          sourceRecordIds: ['r-tool-2'],
+        },
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      sourceRecordIds: ['r-tool-1', 'r-tool-2'],
+      promptId: 'prompt-2',
+    });
+  });
+
+  it('stamps a tool group from a subtool block the message does not list', () => {
+    // This is the case that pins the order of the sync and the stamp. A subtool's
+    // block id is unioned into its PARENT TOOL, not into the group message, so the
+    // message's own block list is missing it until the sync walks the tools and
+    // lifts it. The stamp reads the message's list, so stamping first would drop
+    // the subtool's record id — a sibling-tool group cannot show this, because
+    // there the message already lists every block.
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          ...toolBlock('t1', 'agent-1', 'in_progress', 1, {
+            toolName: 'Agent',
+            title: 'Agent A running',
+            rawInput: { subagent_type: 'Explore', prompt: 'a' },
+          }),
+          sourceRecordIds: ['r-agent'],
+          promptId: 'prompt-3',
+        },
+        {
+          ...toolBlock('t2', 'sub-a1', 'completed', 2, {
+            toolName: 'web_fetch',
+            parentToolCallId: 'agent-1',
+            rawOutput: 'data-a',
+          }),
+          sourceRecordIds: ['r-sub'],
+        },
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toHaveLength(1);
+    const group = messages[0];
+    expect(group?.role).toBe('tool_group');
+    expect(
+      group?.role === 'tool_group' ? group.tools[0]?.subTools : undefined,
+    ).toHaveLength(1);
+    expect(group).toMatchObject({
+      sourceRecordIds: ['r-agent', 'r-sub'],
+      promptId: 'prompt-3',
+    });
+  });
+
   it('leaves both fields off a message whose blocks carry no identity', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [textBlock('user-1', 'user', 'hello', 1)],
