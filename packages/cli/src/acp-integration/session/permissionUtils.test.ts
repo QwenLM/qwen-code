@@ -6,9 +6,12 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  permissionCancelMessageFromResponse,
+  permissionCancelReasonFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -357,6 +360,52 @@ describe('permissionUtils', () => {
       ),
     ).toThrow('unoffered option');
   });
+
+  it.each([
+    ['timeout', 'Permission request timed out before the user answered.'],
+    [
+      'session_closed',
+      'Permission request was cancelled because the session closed before the user answered.',
+    ],
+    [
+      'agent_cancelled',
+      'Permission request was cancelled before the user answered.',
+    ],
+  ] as const)(
+    'maps daemon cancel reason %s to model-facing prose',
+    (reason, expectedMessage) => {
+      const response = {
+        outcome: { outcome: 'cancelled' },
+        _meta: {
+          'qwen.daemon.permissionCancelReason': reason,
+        },
+      } as RequestPermissionResponse;
+
+      expect(permissionCancelReasonFromResponse(response)).toBe(reason);
+      expect(permissionCancelMessageFromResponse(response)).toBe(
+        expectedMessage,
+      );
+    },
+  );
+
+  it.each([undefined, '', 42, 'approval_ui_unavailable'])(
+    'ignores invalid daemon cancel reason metadata: %s',
+    (reason) => {
+      const response = {
+        outcome: { outcome: 'cancelled' },
+        ...(reason === undefined
+          ? {}
+          : {
+              _meta: {
+                'qwen.daemon.permissionCancelReason': reason,
+              },
+            }),
+      } as RequestPermissionResponse;
+
+      expect(permissionCancelReasonFromResponse(response)).toBeUndefined();
+      expect(permissionCancelMessageFromResponse(response)).toBeUndefined();
+    },
+  );
 
   it('aborts permission requests and ignores late settlement', async () => {
     let resolveRequest: ((value: never) => void) | undefined;

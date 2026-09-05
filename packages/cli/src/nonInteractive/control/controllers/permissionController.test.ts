@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ApprovalMode,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   InputFormat,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -185,6 +186,46 @@ describe('PermissionController', () => {
       'wf_2',
       'wfap_2',
       ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
+    );
+  });
+
+  it('cancels workflow approval with an explanation when approval is already aborted', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const approvalAbort = new AbortController();
+    approvalAbort.abort();
+
+    await controller.handleWorkflowApproval(
+      'wf_aborted',
+      {
+        approvalId: 'wfap_aborted',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      approvalAbort.signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_aborted',
+      'wfap_aborted',
+      ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
     );
   });
 
@@ -318,6 +359,45 @@ describe('PermissionController', () => {
       'wf_cleared',
       'wfap_cleared',
       ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
+    );
+  });
+
+  it('cancels workflow approval with an explanation when stream-json is unavailable', async () => {
+    const context = createContext();
+    vi.mocked(context.config.getInputFormat).mockReturnValue(InputFormat.TEXT);
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+
+    await controller.handleWorkflowApproval(
+      'wf_text',
+      {
+        approvalId: 'wfap_text',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_text',
+      'wfap_text',
+      ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
     );
   });
 

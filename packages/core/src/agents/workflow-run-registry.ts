@@ -148,6 +148,10 @@ export function isTerminalWorkflowStatus(
 export const MAX_PENDING_WORKFLOW_APPROVALS = 32;
 export const MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS = 64 * 1024;
 
+export const AUTO_REJECT_APPROVAL_PAYLOAD: ToolConfirmationPayload = {
+  cancelMessage: 'Workflow approval was cancelled before it could be answered.',
+};
+
 export interface WorkflowApproval {
   approvalId: string;
   subagentId: string;
@@ -988,6 +992,7 @@ export class WorkflowRunRegistry {
             runId,
             approvalId,
             ToolConfirmationOutcome.Cancel,
+            AUTO_REJECT_APPROVAL_PAYLOAD,
           );
         });
       } catch (error) {
@@ -1607,7 +1612,10 @@ export class WorkflowRunRegistry {
   }
 
   private rejectResponder(respond: AgentApprovalRequestEvent['respond']): void {
-    void respond(ToolConfirmationOutcome.Cancel).catch((error) => {
+    void respond(
+      ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
+    ).catch((error) => {
       debugLogger.error('Failed to reject workflow approval:', error);
     });
   }

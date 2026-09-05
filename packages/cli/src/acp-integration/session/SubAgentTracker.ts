@@ -12,11 +12,13 @@ import type {
   AgentUsageEvent,
   AgentStreamTextEvent,
   ToolCallConfirmationDetails,
+  ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -32,6 +34,7 @@ import {
   buildPermissionRequestContent,
   interactionMetaFields,
   type PermissionPersistencePolicy,
+  permissionCancelMessageFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -265,13 +268,19 @@ export class SubAgentTracker {
           output,
           offeredPermissionOptions,
         );
-        // Respond to subagent with the outcome
-        await event.respond(outcome, {
+        const cancelMessage =
+          outcome === ToolConfirmationOutcome.Cancel
+            ? permissionCancelMessageFromResponse(output)
+            : undefined;
+        const confirmationPayload: ToolConfirmationPayload = {
           answers:
             'answers' in output
               ? (output.answers as Record<string, string> | undefined)
               : undefined,
-        });
+          ...(cancelMessage !== undefined ? { cancelMessage } : {}),
+        };
+        // Respond to subagent with the outcome
+        await event.respond(outcome, confirmationPayload);
         if (
           outcome === ToolConfirmationOutcome.Cancel &&
           !abortSignal.aborted
@@ -291,7 +300,10 @@ export class SubAgentTracker {
           this.onPermissionCancel?.();
         }
         try {
-          await event.respond(ToolConfirmationOutcome.Cancel);
+          await event.respond(
+            ToolConfirmationOutcome.Cancel,
+            AUTO_REJECT_APPROVAL_PAYLOAD,
+          );
         } catch (respondError) {
           debugLogger.error(
             `Failed to cancel subagent tool ${event.name} after permission request failure:`,

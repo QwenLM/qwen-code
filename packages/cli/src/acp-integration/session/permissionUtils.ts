@@ -13,6 +13,20 @@ import type {
   RequestPermissionResponse,
   ToolCallContent,
 } from '@agentclientprotocol/sdk';
+import { DAEMON_PERMISSION_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { PermissionResolution } from '@qwen-code/acp-bridge';
+
+type DaemonPermissionCancelReason = Extract<
+  PermissionResolution,
+  { kind: 'cancelled' }
+>['reason'];
+
+const daemonPermissionCancelMessages = {
+  timeout: 'Permission request timed out before the user answered.',
+  session_closed:
+    'Permission request was cancelled because the session closed before the user answered.',
+  agent_cancelled: 'Permission request was cancelled before the user answered.',
+} satisfies Record<DaemonPermissionCancelReason, string>;
 
 const basicPermissionOptions = [
   {
@@ -130,6 +144,25 @@ export function interactionMetaFields(
         qwenQuestions: confirmation.questions,
       }
     : {};
+}
+
+export function permissionCancelReasonFromResponse(
+  response: RequestPermissionResponse,
+): DaemonPermissionCancelReason | undefined {
+  const reason = response._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+  return typeof reason === 'string' &&
+    Object.hasOwn(daemonPermissionCancelMessages, reason)
+    ? (reason as DaemonPermissionCancelReason)
+    : undefined;
+}
+
+export function permissionCancelMessageFromResponse(
+  response: RequestPermissionResponse,
+): string | undefined {
+  const reason = permissionCancelReasonFromResponse(response);
+  return reason === undefined
+    ? undefined
+    : daemonPermissionCancelMessages[reason];
 }
 
 export function buildPermissionRequestContent(

@@ -25,6 +25,7 @@ import type {
 import {
   ApprovalMode,
   APPROVAL_MODES,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   InputFormat,
   ToolConfirmationOutcome,
   ToolNames,
@@ -40,6 +41,9 @@ import { BaseController } from './baseController.js';
 import { buildPermissionSuggestions } from '../../permission-suggestions.js';
 
 const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
+const TEAMMATE_APPROVAL_UNAVAILABLE_PAYLOAD: ToolConfirmationPayload = {
+  cancelMessage: 'Teammate approval was cancelled before it could be answered.',
+};
 
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
@@ -328,7 +332,10 @@ export class PermissionController extends BaseController {
   ): Promise<void> {
     try {
       if (this.context.abortSignal.aborted) {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          TEAMMATE_APPROVAL_UNAVAILABLE_PAYLOAD,
+        );
         return;
       }
 
@@ -336,7 +343,10 @@ export class PermissionController extends BaseController {
       if (inputFormat !== InputFormat.STREAM_JSON) {
         // Should not happen under the current wiring; cancel
         // safely rather than silently auto-proceeding.
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          TEAMMATE_APPROVAL_UNAVAILABLE_PAYLOAD,
+        );
         return;
       }
 
@@ -358,7 +368,10 @@ export class PermissionController extends BaseController {
       );
 
       if (response.subtype !== 'success') {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          TEAMMATE_APPROVAL_UNAVAILABLE_PAYLOAD,
+        );
         return;
       }
 
@@ -409,7 +422,10 @@ export class PermissionController extends BaseController {
       // an escaped rejection here is an unhandledRejection that can
       // take down an SDK session.
       try {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          TEAMMATE_APPROVAL_UNAVAILABLE_PAYLOAD,
+        );
       } catch (cancelError) {
         this.debugLogger.error(
           '[PermissionController] Teammate approval cancel failed:',
@@ -431,6 +447,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       return;
     }
@@ -440,6 +457,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       return;
     }
@@ -488,6 +506,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     }
   }
@@ -514,6 +533,11 @@ export class PermissionController extends BaseController {
       if (signal.aborted) {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          requiresUserInteraction
+            ? {
+                cancelMessage: interactionUnavailableMessage,
+              }
+            : undefined,
         );
         return;
       }

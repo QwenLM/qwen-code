@@ -1774,6 +1774,56 @@ describe('Session', () => {
     });
   });
 
+  it('forwards workflow approval cancel reasons to the registry', async () => {
+    mockToolRegistry.getTool.mockReturnValue({
+      displayName: 'Shell',
+      kind: core.Kind.Execute,
+      build: vi.fn().mockReturnValue({
+        getDescription: vi.fn().mockReturnValue('echo safe'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }),
+    });
+    vi.mocked(mockClient.requestPermission).mockResolvedValue({
+      outcome: { outcome: 'cancelled' },
+      _meta: {
+        'qwen.daemon.permissionCancelReason': 'timeout',
+      },
+    } as RequestPermissionResponse);
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback | undefined;
+    expect(callback).toBeTypeOf('function');
+
+    await callback?.(
+      { runId: 'wf_cancel' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_cancel',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'run_shell_command',
+        description: 'Run a safe command',
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          command: 'echo safe',
+          rootCommand: 'echo',
+          hideAlwaysAllow: true,
+        },
+        at: 1,
+      },
+      { command: 'echo safe' },
+      new AbortController().signal,
+    );
+
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_cancel',
+      'wfap_cancel',
+      core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage: 'Permission request timed out before the user answered.',
+      },
+    );
+  });
+
   it('serializes concurrent workflow approvals for single-flight ACP clients', async () => {
     let resolveFirst:
       | ((response: RequestPermissionResponse) => void)
@@ -2046,6 +2096,10 @@ describe('Session', () => {
       'wf_timeout',
       'wfap_timeout',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
     expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
       sessionId: 'test-session-id',
@@ -2132,6 +2186,10 @@ describe('Session', () => {
       'wf_persistent',
       'wfap_persistent',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
   });
 
@@ -2171,6 +2229,10 @@ describe('Session', () => {
       'wf_dispose',
       'wfap_dispose',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
     expect(
       mockWorkflowRunRegistry.setApprovalRequestCallback,
@@ -2214,6 +2276,10 @@ describe('Session', () => {
       'wf_cleared',
       'wfap_cleared',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
   });
 
@@ -4779,6 +4845,9 @@ describe('Session', () => {
       );
       vi.mocked(mockClient.requestPermission).mockResolvedValue({
         outcome: { outcome: 'cancelled' },
+        _meta: {
+          'qwen.daemon.permissionCancelReason': 'timeout',
+        },
       });
 
       const result = await session.prompt({
@@ -4791,7 +4860,10 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
       expect(onConfirm).toHaveBeenCalledWith(
         core.ToolConfirmationOutcome.Cancel,
-        expect.anything(),
+        expect.objectContaining({
+          cancelMessage:
+            'Permission request timed out before the user answered.',
+        }),
       );
       expect(mockChat.addHistory).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -4801,6 +4873,11 @@ describe('Session', () => {
               functionResponse: expect.objectContaining({
                 id: 'call-auq',
                 name: 'ask_user_question',
+                response: expect.objectContaining({
+                  error: expect.stringContaining(
+                    'Permission request timed out before the user answered.',
+                  ),
+                }),
               }),
             }),
           ]),
@@ -32498,6 +32575,42 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
     });
 
+    it('uses daemon cancel metadata in ask_user_question tool responses', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+        _meta: { 'qwen.daemon.permissionCancelReason': 'agent_cancelled' },
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-question-cancel-reason',
+        [
+          {
+            id: 'question_call',
+            name: core.ToolNames.ASK_USER_QUESTION,
+            args: {
+              questions: [{ header: 'Continue?', question: 'Continue?' }],
+            },
+          },
+        ],
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        error: 'Permission request was cancelled before the user answered.',
+      });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
     it('skips later sequential tools after cancelled ask_user_question', async () => {
       const questionExecute = vi.fn();
       const shellExecute = vi.fn().mockResolvedValue({
@@ -33746,6 +33859,7 @@ describe('Session', () => {
         await vi.waitFor(() => {
           expect(respond).toHaveBeenCalledWith(
             core.ToolConfirmationOutcome.Cancel,
+            core.AUTO_REJECT_APPROVAL_PAYLOAD,
           );
         });
         expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
