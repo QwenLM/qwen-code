@@ -24,7 +24,43 @@ import { execSync } from 'node:child_process';
 const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+checkout\s+--\s+\./,
-  /\bgit\s+clean\s+-[a-zA-Z]*f/,
+  // `git checkout .` discards the same tracked changes as the `-- .` form
+  // above. What is matched is a pathspec built only from `.` and `..`
+  // segments, in any spelling — `.`, `./`, `..`, `../`, but equally `./.`,
+  // `././`, `../..` and `.///`. Enumerating a few spellings would be blocking
+  // by spelling again: real git reverts exactly what `.` reverts for every one
+  // of them, and `../..` reverts strictly more than the `..` that is already
+  // blocked. `git checkout ...` stays out of the pattern because it is not a
+  // pathspec at all — git resolves it as a revision and reverts nothing.
+  //
+  // The lookahead rejects what could continue a path rather than enumerating
+  // shell metacharacters, so it cannot be outrun by an operator nobody listed:
+  // `.>/dev/null`, `.<in`, `$(git checkout .)` and `.;rm -rf /` are all
+  // caught.
+  //
+  // A pathspec with a named segment is left to the rule that already allows
+  // `src` and `packages/core`: blocking by spelling rather than by blast
+  // radius would stop `git checkout ./package.json`, which reverts exactly one
+  // file, while still allowing `git checkout src`, which reverts a whole
+  // directory. That asymmetry is worse than the gap it closes, so `./src` and
+  // `../src` are allowed for the same reason their undotted spellings are.
+  // The cost of that line is `git checkout src/..`, which does revert the
+  // whole tree; deciding that needs the path resolved against the repository
+  // root, which is more than a pre-filter regex can do.
+  /\bgit\s+checkout\s+\.{1,2}(?:\/+\.{1,2})*\/*(?![\w.\-/])/,
+  // The force flag must be matched wherever it appears in the argument list,
+  // not only as the first token: `git clean -d -f` and `git clean -d --force`
+  // delete exactly what `git clean -fd` does. `--force` is the long spelling
+  // of `-f`, so it blocks identically. The scan stops at a command separator
+  // so a later segment cannot pull an unrelated `-f` into this match.
+  //
+  // A bare newline is one of those separators — bash ends the command there,
+  // so in `git clean\n -fd` the `-fd` is a second command and the clean that
+  // runs is the harmless one. A newline escaped by a backslash is the
+  // opposite: it is a line continuation, the two lines are one command, and
+  // `git clean \<newline> -fd` really does delete. So the scan crosses `\\\n`
+  // and stops at every other newline.
+  /\bgit\s+clean\b(?:[^;&|\n]|\\\n)*?(?:\s-[a-zA-Z]*f|\s--force\b)/,
   /\bgit\s+stash\s+drop\b/,
 ]);
 
@@ -165,11 +201,28 @@ export function isDestructiveCommand(
   userPrompt: string,
   cwd: string = process.cwd(),
 ): DestructiveCommandResult | null {
-  const expanded = command + ' ' + stripShellQuotes(command);
+  const stripped = stripShellQuotes(command);
+  // Test the two spellings separately rather than scanning their concatenation.
+  // For an unquoted command `stripShellQuotes` is the identity, so concatenating
+  // gives `cmd + ' ' + cmd`, and a pattern can match across the seam where the
+  // two copies join — an adjacency that exists nowhere in what the user typed.
+  // Two ways that bites: a match spanning more than two tokens runs off the end
+  // of the first copy into the second (the `-f` in `rm -f stale.log && git
+  // clean` is separator-bounded within one copy but not across the seam), and a
+  // two-token pattern matches the tail of one copy against the head of the
+  // next, so `destroy.sh --cdk` reads as `cdk destroy` and is blocked outright.
+  //
+  // One traversal answers both questions: whether to block, and which text to
+  // quote back. Deciding with `.test()` and then re-deriving the quoted string
+  // with a separate `.match()` runs the pattern twice on every blocked command
+  // and lets the two drift — a later edit that taught one spelling to the test
+  // but not to the match would quote a string the block decision never saw.
+  const matchEither = (pattern: RegExp): string | undefined =>
+    command.match(pattern)?.[0] ?? stripped.match(pattern)?.[0];
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {
-    if (pattern.test(expanded) && !userMentionsDiscard(userPrompt)) {
-      const matched = command.match(pattern)?.[0] ?? command;
+    const matched = matchEither(pattern);
+    if (matched !== undefined && !userMentionsDiscard(userPrompt)) {
       return {
         blocked: true,
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,
@@ -177,7 +230,10 @@ export function isDestructiveCommand(
     }
   }
 
-  if (GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd)) {
+  if (
+    matchEither(GIT_AMEND_PATTERN) !== undefined &&
+    !isAmendOfSessionCommit(cwd)
+  ) {
     return {
       blocked: true,
       reason:
@@ -186,9 +242,9 @@ export function isDestructiveCommand(
   }
 
   for (const pattern of IAC_DESTROY_PATTERNS) {
-    if (pattern.test(expanded)) {
-      const toolName =
-        command.match(pattern)?.[0]?.split(/\s+/)[0] ?? 'unknown';
+    const matched = matchEither(pattern);
+    if (matched !== undefined) {
+      const toolName = matched.split(/\s+/)[0] ?? 'unknown';
       if (!userMentionsStack(userPrompt, toolName)) {
         return {
           blocked: true,
