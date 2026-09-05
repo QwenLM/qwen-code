@@ -132,18 +132,51 @@ export function validateModelOutput(
 // naming the child that never exited.
 export const INTERACTIVE_EXIT_GRACE_MS = 8_000;
 
-// Resolves true when `promise` settles, false when `ms` elapses first. The
-// timer is cleared and unrefed so a won race leaves no handle holding the
-// worker's event loop open.
-function settleWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+// `process.kill(-pid, 0)` reports whether anything is left in the process
+// group `pid` leads; it throws once the group is empty. Windows has no
+// negative-pid process groups and always throws, so there the child's own exit
+// stays the whole bound.
+function sessionAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Resolves true once the whole PTY session is gone, false when `ms` elapses
+// first. `exited` covers only the process node-pty spawned, and node-pty
+// signals only that pid — on the installed-release lane it is the bin wrapper,
+// which relaunches the real CLI with spawnSync and dies on SIGHUP's default
+// action at once, so `exited` settles while that CLI is still draining into
+// the PTY (#10990). The spawned process leads its own process group and the
+// relaunched CLI stays in it, and a group reads empty only once every member
+// has exited and been reaped, so wait for both inside the same grace. Timers
+// are unrefed so a lost race leaves no handle holding the worker's event loop
+// open.
+function sessionEndsWithin(
+  pid: number,
+  exited: Promise<unknown>,
+  ms: number,
+): Promise<boolean> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), ms);
-    timer.unref();
-    const settle = () => {
-      clearTimeout(timer);
-      resolve(true);
+    const deadline = Date.now() + ms;
+    let childExited = false;
+    const check = () => {
+      const gone = childExited && !sessionAlive(pid);
+      if (gone || Date.now() >= deadline) {
+        clearInterval(timer);
+        resolve(gone);
+      }
     };
-    void promise.then(settle, settle);
+    const onChildExit = () => {
+      childExited = true;
+      check();
+    };
+    const timer = setInterval(check, 50);
+    timer.unref();
+    void exited.then(onChildExit, onChildExit);
   });
 }
 
@@ -531,10 +564,15 @@ export class TestRig {
       } catch {
         // Process may have already exited
       }
-      if (!(await settleWithin(exited, INTERACTIVE_EXIT_GRACE_MS))) {
+      const ended = await sessionEndsWithin(
+        ptyProcess.pid,
+        exited,
+        INTERACTIVE_EXIT_GRACE_MS,
+      );
+      if (!ended) {
         console.warn(
-          `interactive CLI child (pid ${ptyProcess.pid}) did not exit within ` +
-            `${INTERACTIVE_EXIT_GRACE_MS}ms; continuing cleanup`,
+          `interactive CLI process group ${ptyProcess.pid} did not end ` +
+            `within ${INTERACTIVE_EXIT_GRACE_MS}ms; continuing cleanup`,
         );
       }
     }

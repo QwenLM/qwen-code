@@ -23,9 +23,10 @@ function isProcessAlive(pid: number): boolean {
 // and still look correct.
 const STAND_IN_EXIT_DELAY_MS = 750;
 
-// Both interactive cases below stand in for the CLI through rig.bundlePath.
-// The installed-release lane spawns the installed CLI instead and never runs
-// the stand-in, so there is nothing for them to measure there.
+// Every interactive case below stands in for the CLI through rig.bundlePath.
+// The installed-release lane spawns the installed CLI instead and never runs a
+// stand-in, so these cases cannot measure that lane directly — the wrapper
+// stand-in below reproduces its process topology on the bundle lane instead.
 const usesInstalledCli =
   process.env['INTEGRATION_TEST_USE_INSTALLED_GEMINI'] === 'true';
 
@@ -120,6 +121,63 @@ describe('TestRig', () => {
           timeout: 10_000,
         })
         .toBe(false);
+    },
+  );
+
+  it.skipIf(usesInstalledCli)(
+    'waits for the CLI the installed bin wrapper relaunched to end',
+    async () => {
+      process.env['KEEP_OUTPUT'] = 'true';
+      const rig = new TestRig();
+      await rig.setup('cleanup waits past the bin wrapper');
+      // Mimics the installed-release lane, where the bin wrapper node-pty
+      // spawns relaunches the real CLI with spawnSync and installs no signal
+      // handler: SIGHUP ends the wrapper at once, while the relaunched CLI
+      // traps it and keeps draining. That CLI, not the wrapper, is what
+      // cleanup() must not return early on.
+      const relaunched = rig.createFile(
+        'relaunched-cli.cjs',
+        'process.on("SIGHUP", () => setTimeout(() => process.exit(129), ' +
+          `${STAND_IN_EXIT_DELAY_MS}));\n` +
+          'setInterval(() => {}, 1000);\n' +
+          'process.stdout.write("RELAUNCHED_PID=" + process.pid + ' +
+          '"\\nRELAUNCHED_READY\\n");\n',
+      );
+      rig.bundlePath = rig.createFile(
+        'bin-wrapper.cjs',
+        "const { spawnSync } = require('node:child_process');\n" +
+          `const result = spawnSync(process.execPath, [${JSON.stringify(
+            relaunched,
+          )}], {\n` +
+          "  stdio: 'inherit',\n" +
+          '});\n' +
+          'if (result.signal) process.kill(process.pid, result.signal);\n' +
+          'else process.exit(result.status ?? 1);\n',
+      );
+
+      const { ptyProcess } = rig.runInteractive();
+      expect(await rig.waitForText('RELAUNCHED_READY', 30_000)).toBe(true);
+      const reported = /RELAUNCHED_PID=(\d+)/.exec(rig._interactiveOutput);
+      expect(
+        reported,
+        'the relaunched CLI never reported its pid',
+      ).not.toBeNull();
+      const relaunchedPid = Number(reported![1]);
+      expect(isProcessAlive(relaunchedPid)).toBe(true);
+
+      const cleanupStartedAt = Date.now();
+      await rig.cleanup();
+
+      // The wrapper dies on SIGHUP's default action within milliseconds, so
+      // only a wait that sees past it can still be running here.
+      expect(Date.now() - cleanupStartedAt).toBeGreaterThanOrEqual(
+        STAND_IN_EXIT_DELAY_MS,
+      );
+      expect(
+        isProcessAlive(relaunchedPid),
+        'cleanup() returned while the relaunched CLI was still draining',
+      ).toBe(false);
+      expect(isProcessAlive(ptyProcess.pid)).toBe(false);
     },
   );
 
