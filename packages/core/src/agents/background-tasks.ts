@@ -532,6 +532,16 @@ export class BackgroundTaskRegistry {
   // global cap is enforced.
   private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
+  /**
+   * Tracks whether a notification callback was ever installed on this
+   * registry instance. When true and the callback is later cleared
+   * (session runtime recycle), terminal notifications are deferred
+   * rather than discarded so reconciliation can deliver them when the
+   * next subscriber arrives. When false (isolated/test usage with no
+   * session wiring), entries are marked notified immediately because
+   * there is no subscriber to reconcile to (#11119).
+   */
+  private hadNotificationSubscriber = false;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
   private activityChangeCallback?: BackgroundActivityChangeCallback;
@@ -1627,6 +1637,23 @@ export class BackgroundTaskRegistry {
     cb: BackgroundNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
+    if (cb) this.hadNotificationSubscriber = true;
+    // Reconciliation: when a new callback is installed (e.g. after a
+    // session runtime generation swap), re-emit notifications for any
+    // terminal background entries whose delivery was missed while no
+    // callback was registered (#11119).
+    if (cb) {
+      for (const entry of this.agents.values()) {
+        if (
+          entry.status !== 'running' &&
+          entry.status !== 'paused' &&
+          !entry.notified &&
+          entry.isBackgrounded
+        ) {
+          this.emitNotification(entry);
+        }
+      }
+    }
   }
 
   setRegisterCallback(cb: BackgroundRegisterCallback | undefined): void {
@@ -1693,19 +1720,41 @@ export class BackgroundTaskRegistry {
   }
 
   private emitNotification(entry: AgentTask): void {
-    // Mark notified *before* invoking the callback so that a re-entrant
-    // terminal call inside the callback chain (cancel → complete race)
-    // sees the flag and short-circuits, rather than firing twice.
     if (entry.notified) return;
-    entry.notified = true;
 
     // Foreground entries return their result through the parent's normal
     // tool-result channel (the `returnDisplay` field on the synchronous
     // tool-call). Emitting the XML envelope on top would feed the parent
     // model the same payload twice.
-    if (!entry.isBackgrounded) return;
+    if (!entry.isBackgrounded) {
+      entry.notified = true;
+      return;
+    }
 
-    if (!this.notificationCallback) return;
+    if (!this.notificationCallback) {
+      if (this.hadNotificationSubscriber) {
+        // A callback was previously installed and then cleared (session
+        // runtime recycle). Do NOT mark notified — leave the entry
+        // eligible for reconciliation when the next subscriber registers
+        // its callback. Before this fix the flag was set unconditionally,
+        // permanently losing the notification if the runtime recycled
+        // between the task settling and the new generation wiring up
+        // (#11119).
+        debugLogger.warn(
+          `Notification deferred for agent ${entry.agentId}: no callback registered (will reconcile on next subscriber)`,
+        );
+        return;
+      }
+      // No callback was ever installed (isolated/test usage). Mark
+      // notified so pruning and finalization gates behave normally.
+      entry.notified = true;
+      return;
+    }
+
+    // Mark notified *after* confirming a callback exists so a re-entrant
+    // terminal call inside the callback chain (cancel → complete race)
+    // sees the flag and short-circuits, rather than firing twice.
+    entry.notified = true;
 
     const statusText =
       entry.status === 'completed'
