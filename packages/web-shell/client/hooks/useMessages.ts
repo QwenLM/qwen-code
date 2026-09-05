@@ -11,7 +11,6 @@ import {
   useTranscriptBlocks,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import {
   transcriptBlocksToLocalizedMessages,
   type Translator,
