@@ -1448,11 +1448,15 @@ describe('fetch-pr report assembly', () => {
   };
 
   /** Serve the delta for `ANCHOR..head` and the full range for `BASE..head`. */
-  function servesBothRanges(full = FULL_DIFF, delta = DELTA_DIFF) {
+  function servesBothRanges(
+    full = FULL_DIFF,
+    delta = DELTA_DIFF,
+    head = 'f00df00df00d',
+  ) {
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
-      args.includes(`${ANCHOR}..f00df00df00d`)
+      args.includes(`${ANCHOR}..${head}`)
         ? Buffer.from(delta)
-        : args.includes(`${BASE}..f00df00df00d`)
+        : args.includes(`${BASE}..${head}`)
           ? Buffer.from(full)
           : Buffer.from(''),
     );
@@ -1476,7 +1480,7 @@ describe('fetch-pr report assembly', () => {
    * orphaned by the AGit-Flow amend. One shape, so the tests that refuse
    * it on GitHub and the tests that scope it on Aone cannot drift apart.
    */
-  function serveOrphanShape(): void {
+  function serveOrphanShape(head = 'f00df00df00d'): void {
     producerMocks.gitOpt.mockImplementation((...args: string[]) =>
       args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null,
     );
@@ -1484,7 +1488,7 @@ describe('fetch-pr report assembly', () => {
       sha: BASE,
       baseFetchFailed: false,
     });
-    servesBothRanges();
+    servesBothRanges(FULL_DIFF, DELTA_DIFF, head);
   }
 
   it('pulls a still-clean importer of a changed file back into the scope', async () => {
@@ -2918,6 +2922,8 @@ describe('fetch-pr report assembly', () => {
     // it, a mocked `a1` serves auth + MR view, and the git probes answer
     // the orphan shape (existence yes, ancestry exit 1).
 
+    const AGIT_HEAD = 'f00d'.repeat(10);
+
     function serveAone(): void {
       producerMocks.execFileSync.mockImplementation(
         (cmd: string, args: string[]) => {
@@ -2925,7 +2931,7 @@ describe('fetch-pr report assembly', () => {
           if (args[0] === 'repo' && args[1] === 'mr' && args[2] === 'view') {
             return JSON.stringify({
               mergeRequest: {
-                sourceBranch: 'f00df00df00d',
+                sourceBranch: AGIT_HEAD,
                 targetBranch: 'main',
                 detailUrl:
                   'https://code.alibaba-inc.com/acme/widgets/codereview/42',
@@ -2936,7 +2942,13 @@ describe('fetch-pr report assembly', () => {
           return ''; // `auth whoami`
         },
       );
-      serveOrphanShape();
+      producerMocks.git.mockImplementation((...args: string[]) => {
+        if (args[0] === 'remote' && args[1] === 'get-url') {
+          return 'git@gitlab.alibaba-inc.com:acme/widgets.git';
+        }
+        return args[0] === 'rev-parse' ? AGIT_HEAD : '';
+      });
+      serveOrphanShape(AGIT_HEAD);
     }
 
     it('scopes an amend-orphaned anchor instead of refusing it', async () => {
@@ -2952,6 +2964,7 @@ describe('fetch-pr report assembly', () => {
         diffBase: BASE,
       });
       expect(report.diffPath).not.toBeNull();
+      expect(report.fetchedSha).toBe(AGIT_HEAD);
       // The published scope is the PR's own diff narrowed to the amend's
       // delta — the untouched file is dropped, exactly as the GitHub
       // incremental path narrows.
@@ -2962,6 +2975,11 @@ describe('fetch-pr report assembly', () => {
         'origin',
         'refs/merge-requests/42/head:qwen-review/pr-42',
       ]);
+      expect(
+        producerMocks.git.mock.calls.some(([command]) =>
+          String(command).startsWith('ls-remote'),
+        ),
+      ).toBe(false);
     });
 
     it('never asks an ancestry question on the Aone platform', async () => {

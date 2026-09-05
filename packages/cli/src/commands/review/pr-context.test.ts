@@ -4046,6 +4046,23 @@ describe('prContextCommand handler — Aone routing', () => {
     expect(written).toContain('general chatter');
   });
 
+  it('renders an unresolved branch head as unavailable, never as a SHA', async () => {
+    (aoneStub.getReviewContext as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      {
+        ...structuredClone(aoneContext),
+        headRefName: 'feature/fix-loop',
+        headRefOid: '',
+      },
+    );
+
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(written).toContain('`master` ← `feature/fix-loop`');
+    expect(written).toContain('- **HEAD SHA:** unavailable');
+    expect(written).not.toContain('- **HEAD SHA:** `feature/fix-loop`');
+  });
+
   it('recovers the machine ledger from a posted summary comment', async () => {
     const written = await runHandler({
       host: 'gitlab.alibaba-inc.com',

@@ -2241,7 +2241,11 @@ export function buildMarkdown(
   parts.push(
     `- **Base → Head:** \`${meta.baseRefName}\` ← \`${meta.headRefName}\``,
   );
-  parts.push(`- **HEAD SHA:** \`${meta.headRefOid}\``);
+  parts.push(
+    meta.headRefOid === ''
+      ? '- **HEAD SHA:** unavailable'
+      : `- **HEAD SHA:** \`${meta.headRefOid}\``,
+  );
   parts.push(
     meta.changedFiles !== undefined
       ? `- **Diff:** ${meta.changedFiles} files, +${meta.additions}/-${meta.deletions}`
