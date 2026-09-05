@@ -22,6 +22,12 @@ import {
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
+import {
+  backgroundFlagPromptWord,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+  INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+  isBackgroundFlagToken,
+} from './agent-view/entry-flags.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
@@ -55,6 +61,25 @@ export const TOP_LEVEL_COMMANDS = [
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
+
+// yargs' builtin help command: the parser registers it itself, and it
+// matches `help` on the LAST positional (yargs pops argv._'s tail when it
+// ends in the help word), so the `--bg` gate must not read it only in the
+// first slot.
+const HELP_COMMAND = 'help';
+
+// The entrances the parser honors for a positional-led launch: the command
+// names of TOP_LEVEL_COMMANDS without their yargs argument suffixes, the
+// aliases their command modules register with them in config.ts (hooks.tsx
+// registers `aliases: ['hook']`), and yargs' `help` builtin. A positional
+// the parser reads as one of these is a subcommand launch the `--bg`
+// intercept must not shadow. cli.test.ts pins this mirror to the command
+// modules so a new alias cannot slip past the gate.
+export const TOP_LEVEL_COMMAND_NAMES = new Set([
+  ...TOP_LEVEL_COMMANDS.map(([command]) => command.split(' ')[0]),
+  'hook',
+  HELP_COMMAND,
+]);
 
 export const MCP_COMMANDS = [
   ['add <name> <commandOrUrl> [args...]', 'Add a server'],
@@ -198,15 +223,18 @@ function writeStdoutLine(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
-function hasFlag(
+// The index of a flag in argv, or -1. The scan is value-slot-aware: a
+// flag-shaped token sitting in a preceding value-taking flag's value slot
+// is that flag's data and never matches.
+function flagIndex(
   argv: readonly string[],
   long: string,
   short: string,
-): boolean {
+): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
-      return false;
+      return -1;
     }
     // Base parity (mirrors hasVersionToken): the pre-PR scan skipped the
     // token after the base's hardcoded value flags unconditionally, even
@@ -217,13 +245,21 @@ function hasFlag(
     }
     i = skipOptionValues(argv, i);
     if (arg === long || arg === short) {
-      return true;
+      return i;
     }
   }
-  return false;
+  return -1;
 }
 
-// True when argv carries a `-v`/`--version` token before any `--`.
+function hasFlag(
+  argv: readonly string[],
+  long: string,
+  short: string,
+): boolean {
+  return flagIndex(argv, long, short) !== -1;
+}
+
+// The index of a `-v`/`--version` token before any `--`, or -1.
 // Mirrors the pre-PR hasFlag scan exactly: the token
 // following one of the base's hardcoded value-taking flags
 // (BASE_VALUE_FLAGS) is skipped unconditionally (even when it starts with
@@ -233,22 +269,23 @@ function hasFlag(
 // deliberately NOT used here: flags it adds were absent from the base
 // scan, which counted a version token in their value slot (`qwen --proxy
 // -v ...` printed the version), so this scan must count it too. Tokens
-// after `--` are positional data and never count.
-function hasVersionToken(argv: readonly string[]): boolean {
+// after `--` are positional data and never count. The index rather than a
+// boolean because the `--bg` gate below has to compare positions.
+function versionTokenIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
-      return false;
+      return -1;
     }
     if (BASE_VALUE_FLAGS.has(arg)) {
       i++; // skip the value slot; the loop increment consumes the token
       continue;
     }
     if (arg === '--version' || arg === '-v') {
-      return true;
+      return i;
     }
   }
-  return false;
+  return -1;
 }
 
 async function buildTopLevelHelpParser() {
@@ -292,11 +329,11 @@ async function buildTopLevelHelpParser() {
   return parser;
 }
 
-function firstPositionalArg(argv: readonly string[]): string | undefined {
+function firstPositionalArgIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
-      return undefined;
+      return -1;
     }
     // Base parity: same unconditional BASE value-slot skip as hasFlag, so
     // a sentinel sitting in one of those slots never ends the scan early.
@@ -306,10 +343,71 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
     }
     i = skipOptionValues(argv, i);
     if (!arg.startsWith('-')) {
-      return arg;
+      return i;
     }
   }
-  return undefined;
+  return -1;
+}
+
+function firstPositionalArg(argv: readonly string[]): string | undefined {
+  const index = firstPositionalArgIndex(argv);
+  return index === -1 ? undefined : argv[index];
+}
+
+function lastPositionalArg(argv: readonly string[]): string | undefined {
+  let lastPositional: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === '--') {
+      return lastPositional;
+    }
+    // Same value-slot skip as firstPositionalArgIndex, so a flag's value
+    // is never read as positional data.
+    if (BASE_VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
+    }
+    i = skipOptionValues(argv, i);
+    if (!arg.startsWith('-')) {
+      lastPositional = arg;
+    }
+  }
+  return lastPositional;
+}
+
+// The index of the background flag before any `--`, in its bare
+// (`--bg`) or attached (`--bg=<prompt>`) spelling, or -1. Tokens after
+// `--` are the user's own data and never count. The scan is
+// value-slot-aware, exactly like the supervisor-flag hasFlag scan this
+// intercept pairs with: a `--bg` sitting in a preceding value-taking
+// flag's value slot — `qwen -p --bg`, a launch whose prompt IS the
+// literal string `--bg` — is that launch's data, not a background
+// launch. Without the skip the gate fired and declined the launch for
+// the flag whose value the token was, advice that cannot work (dropping
+// the flag leaves a bare `--bg`). The token test is the shared
+// isBackgroundFlagToken, so the boolean off spellings a `type: 'boolean'`
+// declaration advertises (`--bg=false`, `--bg=0`) are not a launch: the
+// scan keeps going and the argv falls through to the parser instead of
+// dispatching an agent on the prompt `false …`.
+function backgroundFlagIndex(argv: readonly string[]): number {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === '--') {
+      return -1;
+    }
+    // Base parity (mirrors flagIndex): the base scan skipped the token
+    // after its hardcoded value flags unconditionally, even the `--`
+    // sentinel.
+    if (BASE_VALUE_FLAGS.has(token)) {
+      i++;
+      continue;
+    }
+    i = skipOptionValues(argv, i);
+    if (isBackgroundFlagToken(token)) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
@@ -348,8 +446,22 @@ export function resolveBootstrapRoute(
   // name cmd -- -v`, which the mcp fast path persists verbatim),
   // `=`-form tokens (`--model=-v` is one token, not an exact match), and
   // version tokens sitting in a BASE_VALUE_FLAGS value slot.
-  if (hasVersionToken(argv)) {
-    return 'version';
+  //
+  // Order-aware against `--bg` only: a version token AFTER the flag is one
+  // of a background launch's prompt words (`qwen --bg -v audit`, a prompt
+  // assembled from shell variables), and intercepting it printed the
+  // version, cancelled the launch and exited 0 — a wrapper's `qwen --bg -v
+  // "$TASK" && notify` reported success with nothing running. The launch
+  // stays on the default route, where the `--bg` gate declines it naming
+  // `-v` like every other flag it does not honor. A version token BEFORE
+  // the flag keeps base behavior (`qwen --version --bg` prints the
+  // version), as does every argv with no background flag at all.
+  const versionToken = versionTokenIndex(argv);
+  if (versionToken !== -1) {
+    const backgroundFlag = backgroundFlagIndex(argv);
+    if (backgroundFlag === -1 || versionToken < backgroundFlag) {
+      return 'version';
+    }
   }
 
   // Structural gate: unless every token is inside the known-safe grammar,
@@ -528,6 +640,182 @@ export async function runCliEntry(
   if (route === 'version') {
     await printBootstrapVersion();
     return;
+  }
+
+  // Agent View's three entry intercepts run only on the default route,
+  // and therefore only after the guard-token scrub above: the serve-only
+  // credential never reaches the supervisor or the PTY host they can
+  // spawn, and the version/help/subcommand routes keep their established
+  // behavior. Every scan stops at `--`, where the tokens are the user's
+  // own data — a `--bg` or an internal flag passed as a prompt word must
+  // not hijack the launch. The dynamic imports stay gated on the raw-argv
+  // scans so an ordinary launch pays nothing.
+  if (route === 'default') {
+    const separator = rawArgv.indexOf('--');
+    const routableArgv =
+      separator === -1 ? rawArgv : rawArgv.slice(0, separator);
+
+    // Computed BEFORE the internal intercepts: an internal flag typed as
+    // a `--bg` prompt word (`qwen --bg audit
+    // --internal-agent-view-supervisor`) is prompt data the --bg gate
+    // below must decline by name, not a spawn signal — without this
+    // guard the intercept matched first and hijacked the launch into a
+    // daemon the user never asked for. The spawner-produced argv shapes
+    // never carry `--bg` (the supervisor spawns exactly the sole flag
+    // token, the pty host the flag plus launch record and socket path),
+    // so legitimate spawns keep routing.
+    const backgroundFlag = backgroundFlagIndex(argv);
+
+    // The internal intercepts fire only on a spawn-shaped argv: the flag
+    // with no positional before it. Both spawners produce exactly that —
+    // the supervisor `[INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]`, the pty host
+    // `[flag, launchPath, socketPath]`, where the two paths are the
+    // positionals that follow. An ordinary positional-led launch whose
+    // prompt words merely NAME the flag (`qwen fix the
+    // --internal-agent-view-supervisor handling`) is not a spawn: entering
+    // the intercept bound the process-global supervisor socket, persisted
+    // supervisor.json with this pid and served silently in the foreground
+    // until killed, where the merge base's strict parser rejected the same
+    // argv loudly. The pty-host twin died the same way on an unrelated
+    // fs/JSON error, having read two prompt words as a launch record and a
+    // socket path.
+    const firstRoutablePositional = firstPositionalArgIndex(routableArgv);
+    const isSpawnShaped = (flagAt: number): boolean =>
+      flagAt !== -1 &&
+      (firstRoutablePositional === -1 || firstRoutablePositional > flagAt);
+
+    // This process may have been spawned to BE the Agent View supervisor.
+    // The flag that says so is internal — the strict parser below would
+    // reject it, which is why the supervisor never served. The scan is
+    // value-slot-aware (flagIndex's BASE_VALUE_FLAGS/skipOptionValues
+    // skips): the flag typed as a preceding value-taking flag's value —
+    // `qwen -p --internal-agent-view-supervisor` — is data, not a spawn.
+    // The sole-token argv the supervisor spawner actually produces still
+    // routes here.
+    const supervisorFlag =
+      backgroundFlag === -1
+        ? flagIndex(
+            routableArgv,
+            INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+            INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+          )
+        : -1;
+    if (isSpawnShaped(supervisorFlag)) {
+      const { runAsAgentViewSupervisor } = await import(
+        './agent-view/background-entry.js'
+      );
+      await runAsAgentViewSupervisor();
+      return;
+    }
+
+    // This process may have been spawned by the supervisor's dispatch RPC
+    // to BE a session's PTY host: `node <entry>
+    // --internal-agent-view-pty-host <launchPath> <socketPath>`, with the
+    // host's identity riding the environment (PTY_HOST_AUTH_TOKEN_ENV /
+    // PTY_HOST_ID_ENV), not the argv. Same shape of problem as the
+    // supervisor flag above — internal, rejected by the strict parser, so
+    // the spawn must be picked up here before parsing, or the host exits
+    // on 'Unknown arguments' and every --bg launch fails to start a
+    // session. The two tokens after the flag are the launch record and
+    // the socket to serve; a spawn that lacks them falls through to the
+    // parser, which rejects the flag. The scan is value-slot-aware like
+    // its twin above.
+    const ptyHostFlag =
+      backgroundFlag === -1
+        ? flagIndex(
+            routableArgv,
+            INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+            INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+          )
+        : -1;
+    if (isSpawnShaped(ptyHostFlag)) {
+      const launchPath = routableArgv[ptyHostFlag + 1];
+      const socketPath = routableArgv[ptyHostFlag + 2];
+      if (launchPath !== undefined && socketPath !== undefined) {
+        const { runAgentViewPtyHostProcess } = await import(
+          './agent-view/pty-host-process.js'
+        );
+        await runAgentViewPtyHostProcess({ launchPath, socketPath });
+        return;
+      }
+    }
+
+    // `--bg` needs a prompt and a directory, nothing else the interactive
+    // startup path would load. The intercept fires only on flag-led
+    // launches: every positional after the flag is a prompt word, so
+    // `qwen --bg sessions cleanup` dispatches the prompt `sessions
+    // cleanup` — and a prompt that ENDS in the word `help` dispatches
+    // too, because a flag-led launch has no command entrance the parser
+    // could own. A positional BEFORE the flag that the parser honors as a
+    // command entrance means the subcommand launch is the intent: let it
+    // fall through to the parser instead of collecting the subcommand
+    // tokens as a prompt. Those entrances are wider than the canonical
+    // first words — the command modules' aliases (`hook`) and yargs'
+    // builtin `help`, which yargs matches on the LAST positional — so the
+    // bounce reads both positions. The help-word bounce lives INSIDE the
+    // positional-led condition: it exists to serve launches the parser
+    // owns, and a bare term would bounce flag-led prompts ending in
+    // `help` (`qwen --bg write help`) to top-level help with no session.
+    if (backgroundFlag !== -1) {
+      const firstPositionalIndex = firstPositionalArgIndex(argv);
+      const parserOwnsLaunch =
+        firstPositionalIndex !== -1 &&
+        firstPositionalIndex < backgroundFlag &&
+        (TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositionalIndex]!) ||
+          lastPositionalArg(argv) === HELP_COMMAND);
+      // A `--help`/`-h` before `--` is parser-owned like a command
+      // entrance: base rendered help for every ordering of the pair
+      // (`--help --bg=x`, `--bg=x --help`), and the decline's advice —
+      // drop the flag, re-run — turned the help request into a
+      // dispatched session once followed. The scan is value-slot-aware
+      // like the gate's own, so a help token sitting in a value slot
+      // stays data. The fall-through lands on the FULL parser, not the
+      // help fast path: an attached `--bg=<prompt>` is outside the fast
+      // path's known-safe grammar (see argvSafeForFastPath), and the
+      // parser renders help even for the unregistered spelling.
+      //
+      // The whole argv is scanned only when the flag token carries its
+      // prompt INSIDE itself (`--bg=<prompt>`): such a token consumes no
+      // positional words, so base rendered help for every ordering of the
+      // pair (`--help --bg=x`, `--bg=x --help`) and the tokens after it are
+      // still flags. After a BARE `--bg` — and after `--bg=true`, which
+      // means the bare flag — every following token is a prompt word, so
+      // scanning them let `qwen --bg add a --help section to the README` (a
+      // spelling this gate's own reader supports, since the shell splits the
+      // prompt into words) fall through to top-level help: exit 0, prompt
+      // dropped, no session, no diagnostic, while every other unsupported
+      // flag in the same position is declined by name with exit 1. A
+      // `--help` inside one quoted token never triggered this; the trigger
+      // is a help token as its own argv word.
+      const promptInsideFlagToken =
+        backgroundFlagPromptWord(argv[backgroundFlag] ?? '') !== undefined;
+      const helpRequested =
+        flagIndex(
+          promptInsideFlagToken ? argv : argv.slice(0, backgroundFlag),
+          '--help',
+          '-h',
+        ) !== -1;
+      if (!parserOwnsLaunch && !helpRequested) {
+        const { readBackgroundPrompt, runBackgroundDispatch } = await import(
+          './agent-view/background-entry.js'
+        );
+        // Read from the normalized argv, the same array the gate above
+        // trusts: a launch carrying the bundled entrypoint as its first
+        // token must not dispatch that path as the first prompt word.
+        const read = readBackgroundPrompt(argv);
+        if (read !== undefined) {
+          if ('prompt' in read) {
+            process.exitCode = await runBackgroundDispatch(read.prompt);
+          } else {
+            writeStderrLine(
+              `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it, or pass prompt words after --.`,
+            );
+            process.exitCode = 1;
+          }
+          return;
+        }
+      }
+    }
   }
 
   if (route === 'serve') {
