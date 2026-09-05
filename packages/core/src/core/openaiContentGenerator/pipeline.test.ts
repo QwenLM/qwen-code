@@ -2917,6 +2917,7 @@ describe('ContentGenerationPipeline', () => {
         }),
         expect.objectContaining({
           signal: expect.any(AbortSignal),
+          maxRetries: 0,
         }),
       );
       expect(mockReportOpenAiRequest).toHaveBeenCalledWith(

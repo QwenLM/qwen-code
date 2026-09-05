@@ -8065,6 +8065,8 @@ describe('LlmChat', async () => {
           model: 'vision-agent',
           authType: AuthType.USE_OPENAI,
           maxRetries: 1,
+          retryInitialDelayMs: 1,
+          retryMaxDelayMs: 1,
           modalities: { image: true },
         },
         retryAuthType: AuthType.USE_OPENAI,
@@ -8105,8 +8107,8 @@ describe('LlmChat', async () => {
         try {
           return await apiCall();
         } catch (error) {
-          expect(options?.shouldRetryOnError?.(error)).toBe(true);
-          return apiCall();
+          expect(options?.shouldRetryOnError?.(error)).toBe(false);
+          throw error;
         }
       });
 
@@ -12000,49 +12002,81 @@ describe('LlmChat', async () => {
         ).toHaveBeenCalledTimes(1);
       });
 
-      it('should retry on 429 Rate Limit errors', async () => {
-        const error429 = new ApiError({ message: 'Rate Limited', status: 429 });
+      it('surfaces an initial HTTP 429 through the visible stream retry loop', async () => {
+        vi.useFakeTimers();
 
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockRejectedValueOnce(error429)
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: { parts: [{ text: 'Success after retry' }] },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-            })(),
+        try {
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            authType: AuthType.USE_OPENAI,
+            model: 'test-model',
+            maxRetries: 1,
+            retryInitialDelayMs: 1_000,
+            retryMaxDelayMs: 1_000,
+          });
+          const error429 = new ApiError({
+            message: 'Rate Limited',
+            status: 429,
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(error429)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'Success after retry' }] },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-id-429-retry',
+          );
+          const iterator = stream[Symbol.asyncIterator]();
+
+          const first = await iterator.next();
+          expect(first.done).toBe(false);
+          expect(first.value.type).toBe(StreamEventType.RETRY);
+          expect(first.value.retryInfo).toEqual(
+            expect.objectContaining({
+              attempt: 1,
+              maxRetries: 1,
+              delayMs: 1_000,
+            }),
           );
 
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-429-retry',
-        );
+          const nextPromise = iterator.next();
+          await vi.advanceTimersByTimeAsync(1_000);
+          const second = await nextPromise;
 
-        const events: StreamEvent[] = [];
-        for await (const event of stream) {
-          events.push(event);
+          const events: StreamEvent[] = [first.value];
+          if (!second.done) events.push(second.value);
+          for (;;) {
+            const next = await iterator.next();
+            if (next.done) break;
+            events.push(next.value);
+          }
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(
+            events.some(
+              (e) =>
+                e.type === StreamEventType.CHUNK &&
+                e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  'Success after retry',
+            ),
+          ).toBe(true);
+        } finally {
+          vi.useRealTimers();
         }
-
-        // Should be called twice (initial + retry)
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-
-        // Should have successful content
-        expect(
-          events.some(
-            (e) =>
-              e.type === StreamEventType.CHUNK &&
-              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-                'Success after retry',
-          ),
-        ).toBe(true);
       });
 
       it('should not retry on schema depth errors', async () => {
