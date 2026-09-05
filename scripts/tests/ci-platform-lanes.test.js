@@ -471,6 +471,7 @@ describe('post-merge push lane', () => {
       'Generate VS Code companion notices',
       'Check VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
+      'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];

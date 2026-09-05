@@ -6,7 +6,7 @@
 
 import ansiEscapes from 'ansi-escapes';
 
-import { isWsl } from '@qwen-code/qwen-code-core';
+import { isWsl } from '@qwen-code/qwen-code-core/utils/terminal-env.js';
 
 const ESC = '\u001B[';
 export const ERASE_LINE = `${ESC}2K`;

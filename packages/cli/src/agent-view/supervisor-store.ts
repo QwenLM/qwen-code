@@ -7,7 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { atomicWriteFile, Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,

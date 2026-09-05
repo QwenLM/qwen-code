@@ -6,12 +6,12 @@
 
 import { useEffect, useState } from 'react';
 import type { Hunk } from 'diff';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
-  createDebugLogger,
   fetchGitDiff,
   fetchGitDiffHunks,
-  type GitDiffResult,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/gitDiff.js';
+import type { GitDiffResult } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 
 const debugLogger = createDebugLogger('DiffDialog');
 

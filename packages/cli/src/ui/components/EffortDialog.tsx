@@ -8,10 +8,8 @@ import type React from 'react';
 import { useCallback } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import {
-  REASONING_EFFORT_TIERS,
-  type ReasoningEffort,
-} from '@qwen-code/qwen-code-core';
+import { REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';

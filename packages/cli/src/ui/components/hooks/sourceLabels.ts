@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { HooksConfigSource } from '@qwen-code/qwen-code-core';
+import { HooksConfigSource } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { HookConfigDisplayInfo } from './types.js';
 import { getTranslatedSourceDisplayMap } from './constants.js';
 import { t } from '../../../i18n/index.js';

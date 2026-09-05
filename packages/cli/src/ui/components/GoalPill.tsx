@@ -7,12 +7,10 @@
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import { Text } from 'ink';
-import { elapsedActiveTime } from '@qwen-code/qwen-code-core';
-import type {
-  Config,
-  GoalRuntime,
-  GoalSnapshotV2,
-} from '@qwen-code/qwen-code-core';
+import { elapsedActiveTime } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { GoalSnapshotV2 } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import type { GoalRuntime } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';

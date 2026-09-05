@@ -25,7 +25,8 @@ import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-import { isPathWithinRoot, parseRule } from '@qwen-code/qwen-code-core';
+import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
 import { matchesSearchQuery } from './dialogs-core.js';
 import {

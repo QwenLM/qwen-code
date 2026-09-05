@@ -14,7 +14,7 @@
 import { t } from '../../i18n/index.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import { isUserTextContent } from '../utils/historyMapping.js';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core';
+import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type { Content } from '@google/genai';
 
 export const REWIND_MAX_VISIBLE_ITEMS = 7;

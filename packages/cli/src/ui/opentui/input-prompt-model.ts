@@ -28,7 +28,7 @@
  * and the keyboard; it delegates every decision here.
  */
 
-import { escapePath } from '@qwen-code/qwen-code-core';
+import { escapePath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { Fzf, type FzfResultItem } from 'fzf';
 import type { Suggestion } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';

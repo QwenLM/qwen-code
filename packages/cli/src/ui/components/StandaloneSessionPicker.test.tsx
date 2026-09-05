@@ -17,9 +17,18 @@ import type {
   SessionListItem,
   ListSessionsResult,
 } from '@qwen-code/qwen-code-core';
+import { getGitBranch } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+// This suite imports getGitBranch from the subpath module itself, so the mock
+// has to name that same specifier: mocking the package root would not
+// intercept it and would drag core's whole index into this suite's module
+// graph. Scope note — the wrapper `StandaloneSessionPicker.tsx` is not in this
+// graph (the tests render `SessionPicker`, which takes `currentBranch` as a
+// prop), so what this mock intercepts is the suite's own import.
+vi.mock('@qwen-code/qwen-code-core/utils/gitUtils.js', async () => {
+  const actual = await vi.importActual(
+    '@qwen-code/qwen-code-core/utils/gitUtils.js',
+  );
   return {
     ...actual,
     getGitBranch: vi.fn().mockReturnValue('main'),
@@ -81,6 +90,23 @@ function createMockSessionService(
       .mockResolvedValue(sessions.length > 0 ? {} : undefined),
   };
 }
+
+describe('mock wiring', () => {
+  it('stubs getGitBranch on the core subpath specifier this suite imports', () => {
+    // Pins two things about this file's own import: the vitest alias resolves
+    // `core/utils/gitUtils.js` to core's TypeScript source, and the vi.mock
+    // above intercepts that specifier (moving the mock back to the package
+    // root makes both assertions fail, and the branch fixture 'main' stops
+    // applying). It does not cover `StandaloneSessionPicker.tsx` — the only
+    // production caller of the stub — because the suite renders `SessionPicker`
+    // and never imports the wrapper; a specifier change there is caught by
+    // scripts/check-core-subpath-exports.mjs, which resolves every
+    // `@qwen-code/qwen-code-core/*` specifier in packages/cli/src against the
+    // built exports map.
+    expect(vi.isMockFunction(getGitBranch)).toBe(true);
+    expect(getGitBranch('/does/not/matter')).toBe('main');
+  });
+});
 
 describe('SessionPicker', () => {
   const flush = async () => {

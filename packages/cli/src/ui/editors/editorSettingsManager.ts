@@ -7,8 +7,8 @@
 import {
   allowEditorTypeInSandbox,
   checkHasEditorType,
-  type EditorType,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/editor.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 
 export interface EditorDisplay {
   name: string;

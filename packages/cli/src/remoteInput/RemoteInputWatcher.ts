@@ -15,7 +15,7 @@ import {
   watchFile,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('REMOTE_INPUT');
 

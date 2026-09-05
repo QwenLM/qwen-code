@@ -6,11 +6,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawnMock, platformMock, existsSyncMock } = vi.hoisted(() => ({
-  spawnMock: vi.fn(() => ({ on: vi.fn() })),
-  platformMock: vi.fn(() => 'darwin'),
-  existsSyncMock: vi.fn(() => false),
-}));
+const { spawnMock, platformMock, existsSyncMock, writeFileSyncMock } =
+  vi.hoisted(() => ({
+    spawnMock: vi.fn(() => ({ on: vi.fn() })),
+    platformMock: vi.fn(() => 'darwin'),
+    existsSyncMock: vi.fn(() => false),
+    writeFileSyncMock: vi.fn(),
+  }));
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
@@ -26,7 +28,7 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 vi.mock('node:fs', () => ({
-  writeFileSync: vi.fn(),
+  writeFileSync: writeFileSyncMock,
   mkdtempSync: vi.fn(() => '/tmp/qwen-dev-test'),
   rmSync: vi.fn(),
   existsSync: existsSyncMock,
@@ -136,5 +138,44 @@ describe('scripts/dev.js launcher', () => {
       if (inherited === undefined) delete process.env.QWEN_CODE_CLI;
       else process.env.QWEN_CODE_CLI = inherited;
     }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the dev entry executable for QWEN_CODE_CLI subprocesses',
+    async () => {
+      const fs = await vi.importActual('node:fs');
+      expect(() =>
+        fs.accessSync(new URL('../dev.js', import.meta.url), fs.constants.X_OK),
+      ).not.toThrow();
+    },
+  );
+
+  it('redirects file-backed core subpaths to source and named subpaths through exports', async () => {
+    await import('../dev.js?loader-subpaths');
+    const loaderSource = writeFileSyncMock.mock.calls.find(([filePath]) =>
+      normalizePath(filePath).endsWith('/loader.mjs'),
+    )[1];
+    const loader = await import(
+      `data:text/javascript,${encodeURIComponent(loaderSource)}`
+    );
+    const nextResolve = vi.fn(() => ({ url: 'fallback' }));
+
+    expect(
+      loader.resolve(
+        '@qwen-code/qwen-code-core/utils/debugLogger.js',
+        {},
+        nextResolve,
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        shortCircuit: true,
+        url: expect.stringMatching(
+          /packages\/core\/src\/utils\/debugLogger\.ts$/,
+        ),
+      }),
+    );
+    expect(
+      loader.resolve('@qwen-code/qwen-code-core/goalWire', {}, nextResolve),
+    ).toEqual({ url: 'fallback' });
   });
 });
