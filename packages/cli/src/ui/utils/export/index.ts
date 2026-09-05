@@ -14,8 +14,6 @@ export { normalizeSessionData } from './normalize.js';
 export { toMarkdown } from './formatters/markdown.js';
 export {
   toHtml,
-  loadHtmlTemplate,
-  injectDataIntoHtmlTemplate,
   injectDocumentIntoHtmlTemplate,
   renderExportTranscriptDocumentToHtml,
 } from './formatters/html.js';
