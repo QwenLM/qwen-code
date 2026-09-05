@@ -11,7 +11,7 @@ import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
 } from '../utils/textUtils.js';
-import type { HistoryItem, IndividualToolCallDisplay } from '../types.js';
+import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
   UserMessage,
@@ -21,7 +21,10 @@ import {
   ThinkMessage,
   ThinkMessageContent,
 } from './messages/ConversationMessages.js';
-import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
+import {
+  ToolGroupMessage,
+  isSubagentToolEntry,
+} from './messages/ToolGroupMessage.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import {
@@ -212,16 +215,6 @@ const ClickableThinkMessage: React.FC<{
   );
 };
 
-function isSubagentToolCall(tool: IndividualToolCallDisplay): boolean {
-  const rd = tool.resultDisplay;
-  return (
-    typeof rd === 'object' &&
-    rd !== null &&
-    'type' in rd &&
-    (rd as { type?: string }).type === 'task_execution'
-  );
-}
-
 function getHistoryItemMarginTop(item: HistoryItem): number {
   switch (item.type) {
     case 'gemini':
@@ -321,7 +314,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         tool.status === ToolCallStatus.Success ||
         tool.status === ToolCallStatus.Error,
     ) &&
-    !item.tools.some(isSubagentToolCall);
+    !item.tools.some(isSubagentToolEntry);
   const failedToolCount = collapseToolGroup
     ? item.tools.filter((tool) => tool.status === ToolCallStatus.Error).length
     : 0;

@@ -1899,11 +1899,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { vimEnabled, vimMode } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
-  const { toggleFocusMode, syncFocusMode } = useFocusModeActions();
+  const { toggleFocusMode } = useFocusModeActions();
   const focusModeEnabled = useFocusModeEnabled();
-  useEffect(() => {
-    syncFocusMode();
-  }, [settings.merged.ui?.focusMode, syncFocusMode]);
   const previousFocusMode = useRef(focusModeEnabled);
   useEffect(() => {
     if (previousFocusMode.current !== focusModeEnabled) {
