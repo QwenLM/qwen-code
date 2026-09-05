@@ -195,12 +195,12 @@ export class SubagentManager {
   }
 
   private getBuiltinAgent(name: string): SubagentConfig | null {
-    const config = BuiltinAgentRegistry.getBuiltinAgent(name);
+    const config = BuiltinAgentRegistry.getBuiltinAgent(name, this.config);
     return config ? this.applyBuiltinSettings(config) : null;
   }
 
   private getBuiltinAgents(): SubagentConfig[] {
-    return BuiltinAgentRegistry.getBuiltinAgents().map((config) =>
+    return BuiltinAgentRegistry.getBuiltinAgents(this.config).map((config) =>
       this.applyBuiltinSettings(config),
     );
   }

@@ -5,6 +5,7 @@
  */
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 import type { SubagentConfig } from './types.js';
 
 /**
@@ -39,14 +40,20 @@ export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
  */
 export const REVIEW_BUILTIN_SUBAGENT_TYPE = 'review-agent';
 
-/**
- * Registry of built-in subagents that are always available to all users.
- * These agents are embedded in the codebase and cannot be modified or deleted.
- */
-export class BuiltinAgentRegistry {
-  private static readonly BUILTIN_AGENTS: Array<
-    Omit<SubagentConfig, 'level' | 'filePath'>
-  > = [
+function buildBuiltinAgents(
+  hasBashSearch: boolean,
+): Array<Omit<SubagentConfig, 'level' | 'filePath'>> {
+  const exploreSearchGuidance = hasBashSearch
+    ? `- Use ${ToolDisplayNames.SHELL} with \`rg --files\`, then pipe the list to another \`rg\` to filter filenames without overriding ignore rules
+- Use ${ToolDisplayNames.SHELL} with \`rg\` for content search; configured ignore files are applied automatically
+- Use \`find\` only for metadata predicates where ignore behavior is not required`
+    : `- Use ${ToolDisplayNames.GLOB} for broad file pattern matching
+- Use ${ToolDisplayNames.GREP} for searching file contents with regex`;
+  const exploreTools = hasBashSearch
+    ? [ToolNames.READ_FILE, ToolNames.SHELL]
+    : [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.GLOB, ToolNames.SHELL];
+
+  return [
     {
       name: DEFAULT_BUILTIN_SUBAGENT_TYPE,
       description:
@@ -91,10 +98,9 @@ Your strengths:
 - Reading and analyzing file contents
 
 Guidelines:
-- Use ${ToolDisplayNames.GLOB} for broad file pattern matching
-- Use ${ToolDisplayNames.GREP} for searching file contents with regex
+${exploreSearchGuidance}
 - Use ${ToolDisplayNames.READ_FILE} when you know the specific file path you need to read
-- Use ${ToolDisplayNames.SHELL} ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
+- Use ${ToolDisplayNames.SHELL} ONLY for read-only operations (rg, grep, find, ls, git status, git log, git diff, cat, head, tail)
 - NEVER use ${ToolDisplayNames.SHELL} for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
 - Adapt your search approach based on the thoroughness level specified by the caller
 - Return file paths as absolute paths in your final response
@@ -112,10 +118,7 @@ Notes:
 - In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.
 - For clear communication with the user the assistant MUST avoid using emojis.`,
       tools: [
-        ToolNames.READ_FILE,
-        ToolNames.GREP,
-        ToolNames.GLOB,
-        ToolNames.SHELL,
+        ...exploreTools,
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,
@@ -335,6 +338,10 @@ Guidelines:
       //     verifier brief's "corroborate via the vendor's own tracker" and a
       //     project rule naming an MCP server both lose their direct route and
       //     fall back to what SHELL can reach.
+      // Unconditional, unlike Explore's list: SKILL.md enumerates this exact
+      // set for the orchestrator to judge "needs a tool outside that set"
+      // against, and a static document cannot track a list that changes with
+      // whether Bash hosts the search tools.
       tools: [
         ToolNames.READ_FILE,
         ToolNames.GREP,
@@ -384,13 +391,29 @@ Notes:
 - Report in the format your assignment specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
   ];
+}
+
+/**
+ * Registry of built-in subagents that are always available to all users.
+ * These agents are embedded in the codebase and cannot be modified or deleted.
+ */
+export class BuiltinAgentRegistry {
+  // Built per access rather than once at module load: whether Bash hosts the
+  // search tools is only known after tool registration probes the bundled
+  // binaries, so reading it at import time permanently captures the
+  // pre-registration fallback.
+  private static buildAgents(
+    searchConfig?: object,
+  ): Array<Omit<SubagentConfig, 'level' | 'filePath'>> {
+    return buildBuiltinAgents(isBashSearchAvailable(searchConfig));
+  }
 
   /**
    * Gets all built-in agent configurations.
    * @returns Array of built-in subagent configurations
    */
-  static getBuiltinAgents(): SubagentConfig[] {
-    return this.BUILTIN_AGENTS.map((agent) => ({
+  static getBuiltinAgents(searchConfig?: object): SubagentConfig[] {
+    return this.buildAgents(searchConfig).map((agent) => ({
       ...agent,
       level: 'builtin' as const,
       filePath: `<builtin:${agent.name}>`,
@@ -403,9 +426,12 @@ Notes:
    * @param name - Name of the built-in agent
    * @returns Built-in agent configuration or null if not found
    */
-  static getBuiltinAgent(name: string): SubagentConfig | null {
+  static getBuiltinAgent(
+    name: string,
+    searchConfig?: object,
+  ): SubagentConfig | null {
     const lowerName = name.toLowerCase();
-    const agent = this.BUILTIN_AGENTS.find(
+    const agent = this.buildAgents(searchConfig).find(
       (a) => a.name.toLowerCase() === lowerName,
     );
     if (!agent) {
@@ -427,7 +453,7 @@ Notes:
    */
   static isBuiltinAgent(name: string): boolean {
     const lowerName = name.toLowerCase();
-    return this.BUILTIN_AGENTS.some(
+    return this.buildAgents().some(
       (agent) => agent.name.toLowerCase() === lowerName,
     );
   }
@@ -437,6 +463,6 @@ Notes:
    * @returns Array of built-in agent names
    */
   static getBuiltinAgentNames(): string[] {
-    return this.BUILTIN_AGENTS.map((agent) => agent.name);
+    return this.buildAgents().map((agent) => agent.name);
   }
 }

@@ -1111,6 +1111,7 @@ export class ArenaManager {
                 undefined,
                 'headless',
                 this.resolvePeerOutputStyle(),
+                this.config,
                 this.config.isTodoWriteEnabled(),
               ),
               contextFiles: this.config.getUserMemory(),

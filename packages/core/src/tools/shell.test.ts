@@ -19,6 +19,8 @@ const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
 }));
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
+const mockWrapWithBashSearchTools = vi.hoisted(() => vi.fn());
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
   isSignalTermination: (signal: number | NodeJS.Signals | null) =>
@@ -33,6 +35,10 @@ vi.mock('../services/shellExecutionService.js', () => ({
 }));
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+  wrapWithBashSearchTools: mockWrapWithBashSearchTools,
 }));
 vi.mock('fs');
 vi.mock('os');
@@ -116,6 +122,10 @@ describe('ShellTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsBashSearchAvailable.mockReturnValue(false);
+    mockWrapWithBashSearchTools.mockImplementation(
+      (command: string) => command,
+    );
 
     mockFileSystemService = {
       readTextFile: vi.fn(),
@@ -1188,6 +1198,33 @@ describe('ShellTool', () => {
       resolveExecutionPromise(fullResult);
     };
 
+    it('executes the Bash search wrapper without changing the user command', async () => {
+      mockWrapWithBashSearchTools.mockReturnValue(
+        'rg() { /vendor/rg "$@"; }\nrg needle .',
+      );
+      const invocation = shellTool.build({
+        command: 'rg needle .',
+        directory: '/test/dir',
+        is_background: false,
+      });
+
+      const resultPromise = invocation.execute(mockAbortSignal);
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      expect(mockWrapWithBashSearchTools).toHaveBeenCalledWith(
+        'rg needle .',
+        mockConfig,
+        '/test/dir',
+      );
+      const executionArgs = mockShellExecutionService.mock.calls[0];
+      expect(executionArgs[0]).toBe('rg() { /vendor/rg "$@"; }\nrg needle .');
+      expect(executionArgs[1]).toBe('/test/dir');
+
+      resolveShellExecution();
+      await resultPromise;
+    });
+
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
 
@@ -1866,6 +1903,31 @@ describe('ShellTool', () => {
       // Returns immediately with id + output path; agent's turn isn't blocked.
       expect(result.llmContent).toContain(entry.shellId);
       expect(result.llmContent).toContain(entry.outputPath);
+    });
+
+    it('injects Bash search tools into background commands', async () => {
+      mockWrapWithBashSearchTools.mockReturnValue('wrapped npm start');
+      const invocation = shellTool.build({
+        command: 'npm start',
+        is_background: true,
+      });
+
+      await invocation.execute(mockAbortSignal);
+
+      expect(mockWrapWithBashSearchTools).toHaveBeenCalledWith(
+        'npm start',
+        mockConfig,
+        '/test/dir',
+      );
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        'wrapped npm start',
+        '/test/dir',
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        expect.objectContaining({}),
+        { streamStdout: true },
+      );
     });
 
     it('settles a background entry as completed when the process exits cleanly', async () => {
@@ -8229,6 +8291,35 @@ describe('ShellTool', () => {
       expect(shellTool.description).toMatchSnapshot();
       expect(getCommandParameterDescription(shellTool)).toBe(
         'Exact bash command to execute as `bash -c <command>`',
+      );
+    });
+
+    it('describes injected Bash search commands when available', () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain('`rg --files`');
+      expect(shellTool.description).toContain('injected rg, grep, and find');
+      expect(shellTool.description).not.toContain(
+        'Content search: Use grep_search',
+      );
+    });
+
+    it('regenerates the model-facing description when availability changes', () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+      const shellTool = new ShellTool(mockConfig);
+      expect(shellTool.schema.description).toContain(
+        'injected rg, grep, and find',
+      );
+
+      mockIsBashSearchAvailable.mockReturnValue(false);
+
+      expect(shellTool.schema.description).not.toContain(
+        'injected rg, grep, and find',
+      );
+      expect(shellTool.schema.description).toContain(
+        'Content search: Use grep_search',
       );
     });
 

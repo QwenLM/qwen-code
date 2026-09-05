@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { isBashSearchAvailable } from '../../utils/bash-search-tools.js';
 import {
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
@@ -688,9 +689,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   }
 
   private subagentManager: SubagentManager;
-  private availableSubagents: SubagentConfig[] =
-    BuiltinAgentRegistry.getBuiltinAgents();
+  private availableSubagents: SubagentConfig[] = [];
   private readonly removeChangeListener: () => void;
+  private readonly removeWorkspaceDirectoriesChangedListener: () => void;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -791,9 +792,15 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     );
 
     this.subagentManager = config.getSubagentManager();
+    this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents(config);
     this.removeChangeListener = this.subagentManager.addChangeListener(() => {
       void this.refreshSubagents();
     });
+    this.removeWorkspaceDirectoriesChangedListener = this.config
+      .getWorkspaceContext()
+      .onDirectoriesChanged(() => {
+        this.updateDescriptionAndSchema();
+      });
 
     // Initialize the tool asynchronously
     this.refreshSubagents();
@@ -801,6 +808,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
 
   dispose(): void {
     this.removeChangeListener();
+    this.removeWorkspaceDirectoriesChangedListener();
   }
 
   /**
@@ -813,7 +821,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.updateDescriptionAndSchema();
     } catch (error) {
       debugLogger.warn('Failed to load agents for Agent tool:', error);
-      this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents();
+      this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents(
+        this.config,
+      );
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
@@ -828,6 +838,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * Updates the tool's description and schema based on available subagents.
    */
   private updateDescriptionAndSchema(): void {
+    const directSearchGuidance = isBashSearchAvailable(this.config)
+      ? `- If you want to locate a file or a specific class definition, use ${ToolNames.SHELL} with \`rg --files\` or \`rg\` instead of ${ToolNames.AGENT}; use ${ToolNames.GREP} or ${ToolNames.GLOB} if the workspace layout changes, and use ${ToolNames.READ_FILE} when you already know the path`
+      : `- If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly`;
     let subagentDescriptions = '';
     if (this.availableSubagents.length === 0) {
       subagentDescriptions =
@@ -856,8 +870,7 @@ ${subagentDescriptions}
 When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
 
 When NOT to use the Agent tool:
-- If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly
+${directSearchGuidance}
 - If you are searching for code within a specific file or set of 2-3 files, use the ${ToolNames.READ_FILE} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
 - Other tasks that are not related to the agent descriptions above
 
