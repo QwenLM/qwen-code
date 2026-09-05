@@ -1050,6 +1050,12 @@ describe('bundled review skill', () => {
     // re-derived it from the file at `--since` time would hand the check
     // the forgery's own hash.
     expect(step).toContain('**Never recompute it from the file**');
+    // Review worktrees are classified by the orchestrator's own naming,
+    // never by anything in the tree — and a `--fix` run names none.
+    expect(step).toContain(
+      'only a worktree this run created and names with `--review-worktree <path>`',
+    );
+    expect(step).toContain('a `--fix` run creates none, so pass nothing');
     expect(step).toContain(
       'the only valid source is the line the snapshot command printed',
     );

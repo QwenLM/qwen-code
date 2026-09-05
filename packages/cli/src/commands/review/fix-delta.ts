@@ -33,16 +33,19 @@
 import type { CommandModule } from 'yargs';
 import type { Dirent } from 'node:fs';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   statSync,
-  writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -50,12 +53,14 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   git,
   gitOpt,
+  gitProbe,
   gitRaw,
   gitWithEnv,
   gitWithEnvRaw,
   gitWithEnvReport,
   gitWithInputRaw,
 } from './lib/git.js';
+import { redirectedAncestor } from './lib/worktree.js';
 
 /** What `--snapshot` writes and `--since` reads back. */
 export interface FixSnapshot {
@@ -184,6 +189,17 @@ function inTreeGitDir(root: string): string | null {
  * `releaseWorktree` refuses a redirected ancestor: the failure direction
  * stops the run, it never contaminates it. Overwriting an existing REGULAR
  * side file stays allowed — Step 6B re-runs with the same name every round.
+ *
+ * Run at entry AND again immediately before each side-file write: the
+ * capture between the two runs executes the repository's own filters
+ * (disclosed, never refused), and a filter child can replace the
+ * deterministic side path with a link after the entry check ran. Nothing
+ * executes code after the capture, so the pre-write check is the one that
+ * holds. A side path INSIDE the repository is checked along its whole
+ * ancestor chain up to the root — a link planted at any component
+ * redirects the write the same way — bounded by the checkout as
+ * `redirectedAncestor` is, because components above the repository are
+ * the user's own layout (`/var` is a link on every macOS box).
  */
 function assertNoRedirectedExcludes(
   root: string,
@@ -218,13 +234,36 @@ function assertNoRedirectedExcludes(
     try {
       link = lstatSync(resolve(p)).isSymbolicLink();
     } catch {
-      continue;
+      // No leaf yet — the ancestor check below still applies.
     }
     if (link) {
       throw new Error(
         `fix-delta: side path ${p} is a symlink; refusing to write through ` +
           'the redirect.',
       );
+    }
+    if (inRepoSidePaths(root, [p]).length > 0) {
+      // From the nearest component that EXISTS: the side path's directory
+      // is created after this check, and a walk started at a path that
+      // is not there yet answers nothing about the links above it.
+      let dir = dirname(resolve(p));
+      for (;;) {
+        try {
+          lstatSync(dir);
+          break;
+        } catch {
+          const up = dirname(dir);
+          if (up === dir) break;
+          dir = up;
+        }
+      }
+      const redirected = redirectedAncestor(dir, root);
+      if (redirected !== null) {
+        throw new Error(
+          `fix-delta: ${redirected} is a symlink above the side path ${p}; ` +
+            'refusing to write through the redirect.',
+        );
+      }
     }
   }
 }
@@ -257,9 +296,15 @@ export function snapshotWorkingTree(
     if (
       gitOpt('-C', root, 'rev-parse', '--verify', '--quiet', 'HEAD') !== null
     ) {
-      gitWithEnv(env, ['-C', root, ...probePins(root), 'read-tree', 'HEAD']);
+      gitWithEnv(env, ['-C', root, ...capturePins(root), 'read-tree', 'HEAD']);
     } else {
-      gitWithEnv(env, ['-C', root, ...probePins(root), 'read-tree', '--empty']);
+      gitWithEnv(env, [
+        '-C',
+        root,
+        ...capturePins(root),
+        'read-tree',
+        '--empty',
+      ]);
     }
     // `--sparse`: in a sparse-checkout repository `add` refuses to run once
     // ANY untracked file — e.g. this command's own side file — sits outside
@@ -268,16 +313,25 @@ export function snapshotWorkingTree(
     // `--ignore-errors`: the tolerated skip below must not stop the run from
     // recording everything else — without it the fatal aborts before the
     // throwaway index receives ANY of the other paths.
+    // A side path that the repository IGNORES cannot enter `add -A` and
+    // must not be named to it either: git exits 1 on a pathspec item under
+    // an ignored directory, even a negative one ("The following paths are
+    // ignored by one of your .gitignore files") — and the flow's own side
+    // files sit under `.qwen/tmp`, which repositories such as this one
+    // ignore wholesale, so the skill's own invocation refused in exactly
+    // those checkouts. The probe and the comparison keep every side path:
+    // neither complains, and a tracked side path is never reported
+    // ignored, so it stays excluded from the capture too.
     const add = gitWithEnvReport(env, [
       '-C',
       root,
-      ...probePins(root),
+      ...capturePins(root),
       'add',
       '-A',
       '--sparse',
       '--ignore-errors',
       '--',
-      ...excludePathspec(root, sidePaths),
+      ...excludePathspec(root, capturableSidePaths(root, sidePaths)),
     ]);
     assertCompleteCapture(add, filtersConfigured);
     // The families are excluded above because the flow WRITES them between
@@ -302,7 +356,7 @@ export function snapshotWorkingTree(
           // and through stdin rather than spawn args, which would coerce a
           // non-UTF-8 name to U+FFFD and update a path that does not exist.
           '--literal-pathspecs',
-          ...probePins(root),
+          ...capturePins(root),
           'add',
           '-u',
           '--sparse',
@@ -314,10 +368,35 @@ export function snapshotWorkingTree(
       );
       assertCompleteCapture(update, filtersConfigured);
     }
-    return gitWithEnv(env, ['-C', root, ...probePins(root), 'write-tree']);
+    return gitWithEnv(env, ['-C', root, ...capturePins(root), 'write-tree']);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+/**
+ * The side paths git would ACCEPT in an `add` pathspec: the ones not
+ * ignored. `check-ignore -q` answers 0 for an ignored path, 1 for one that
+ * is not; a tracked path is never reported ignored (the index outranks the
+ * rules), and an answer git cannot give keeps the path excluded — if it
+ * was ignored after all, the capture refuses as before rather than
+ * recording the side file.
+ */
+function capturableSidePaths(
+  root: string,
+  sidePaths: readonly string[],
+): string[] {
+  return sidePaths.filter((rel) => {
+    const probe = gitProbe(
+      '-C',
+      root,
+      'check-ignore',
+      '-q',
+      '--',
+      rel.split(sep).join('/'),
+    );
+    return probe.status !== 0;
+  });
 }
 
 /**
@@ -536,7 +615,8 @@ export function assertCompleteCapture(
  * the depth costs is paid back elsewhere rather than here: the tracked half
  * of a family match is recorded after this exclusion has run
  * (`snapshotWorkingTree`), and the probe side never lets a REPOSITORY hide
- * behind a family name (`probeExcluded`).
+ * behind a family name — only a worktree the orchestrator names is walked
+ * instead of probed (`probeExcluded`).
  */
 export function excludePathspec(
   root: string,
@@ -581,9 +661,9 @@ function literalExcludes(
  * reads, so an edit inside it appeared nowhere and drew no blind-spot line,
  * while the identical plant under any other name was disclosed. The probe
  * therefore SEES the families and prunes what it discovers by what it IS
- * (`probeExcluded`) — the review's own worktrees, known from git's own
- * registry — which, unlike a pathspec, can tell a planted repository from
- * the bookkeeping the family is named for.
+ * (`probeExcluded`) — the review worktrees the orchestrator named — which,
+ * unlike a pathspec, can tell a planted repository from the bookkeeping
+ * the family is named for.
  *
  * The comparison needs no family exclusion either: the capture has already
  * kept the flow's untracked side files out of both trees, and what the
@@ -738,9 +818,9 @@ function captureSteeringSurfaces(root: string): string[] {
  * precedence and path resolution — the derivation a hand-read of one file
  * cannot match.
  */
-function renderSteeringPaths(root: string, files: readonly Buffer[]): number[] {
+function renderSteeringPaths(root: string, files: readonly Buffer[]): Buffer[] {
   if (files.length === 0) return [];
-  const all = files.map((_, i) => i);
+  const all = [...files];
   let raw: string;
   try {
     // The RAW name bytes on stdin, never the display decode: `decodePath`
@@ -765,14 +845,54 @@ function renderSteeringPaths(root: string, files: readonly Buffer[]): number[] {
   // matched nothing would fail open the same way. The VALUES are ASCII, so
   // the decode cannot corrupt what is actually read.
   const fields = raw.split('\0');
-  const steered: number[] = [];
+  const steered: Buffer[] = [];
   for (let i = 0; i < files.length; i++) {
     const value = fields[i * 3 + 2];
     // Fewer records than paths: the rest were never answered for.
     if (value === undefined) return [...steered, ...all.slice(i)];
-    if (value !== 'unspecified') steered.push(i);
+    if (value !== 'unspecified') steered.push(files[i]);
   }
   return steered;
+}
+
+/**
+ * The SOURCE names of the renames between two trees. `diff-tree -M` folds
+ * a rename into one entry under its new name, but it renders the pair off
+ * the OLD name's `diff` attribute — a `-diff` on the source path turns the
+ * pair into an opaque binary patch while the new name answers
+ * `unspecified`. The steering probe therefore asks about both names; the
+ * folded `files` list stays what the summary and the recorded set read.
+ */
+function renameSourcesBetweenTrees(
+  root: string,
+  fromTree: string,
+  toTree: string,
+  sidePaths: readonly string[],
+): Buffer[] {
+  const raw = gitRaw(
+    '-C',
+    root,
+    ...probePins(root),
+    'diff-tree',
+    '-r',
+    '--name-status',
+    '-z',
+    '-M',
+    '--diff-filter=R',
+    fromTree,
+    toTree,
+    '--',
+    ...literalPathspec(root, sidePaths),
+  );
+  // Records are `R<score> NUL <old> NUL <new> NUL`.
+  const fields = splitNul(raw);
+  const sources: Buffer[] = [];
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    if (fields[i][0] === 0x52 /* R */ && fields[i + 1].length > 0) {
+      sources.push(fields[i + 1]);
+    }
+  }
+  return sources;
 }
 
 /**
@@ -900,6 +1020,39 @@ function probePins(path: string): string[] {
 }
 
 /**
+ * The capture's pins: the probe's, plus `core.autocrlf=false`. The capture
+ * exists to record what is ON DISK; under `core.autocrlf=input`/`true`
+ * both moments would store CRLF→LF-normalised blobs, so an edit confined
+ * to line endings leaves the two trees identical — a bare all-clear over an
+ * edit that was applied (a `\r` in a shell script is not nothing). Pinned
+ * off, both captures store the raw bytes and the delta is exact; the pin
+ * is shared by both moments, so it changes nothing else in the diff.
+ *
+ * Only the capture: the nested-repository probes keep git's own view of
+ * "modified". Pinning them too would make every text file of an
+ * `autocrlf=true` checkout (CRLF on disk, LF in the index) read modified
+ * at both moments — permanent dirt whose digest never moves, behind which
+ * a real content edit would be filed as pre-existing. What the probe
+ * cannot see under normalisation is an edit confined to line endings
+ * INSIDE a nested repository; a `text`/`eol` attribute in a tracked
+ * `.gitattributes` normalises the same way for the capture, and neither is
+ * closed here — both are stated in DESIGN.md.
+ */
+function capturePins(path: string): string[] {
+  // `core.safecrlf=false` beside it: with the conversion pinned off, a
+  // `safecrlf=true` checkout's round-trip check would judge the pinned
+  // direction irreversible and `die` on the first CRLF file — a check that
+  // means nothing for a throwaway index recording the bytes on disk.
+  return [
+    ...probePins(path),
+    '-c',
+    'core.autocrlf=false',
+    '-c',
+    'core.safecrlf=false',
+  ];
+}
+
+/**
  * The state of a nested repository's own uncommitted content, and — when it
  * could be read at all — a DIGEST of that state.
  *
@@ -932,6 +1085,14 @@ function probeNestedRepoState(absPath: Buffer): {
     ...probePins(path),
     '-c',
     'status.showUntrackedFiles=all',
+    // The DIGEST is taken off this output as a string, and the spawn
+    // decodes it as UTF-8: under `core.quotePath=false` — plantable in the
+    // nested repository's own config, or set globally — a name that is not
+    // valid UTF-8 arrives as raw bytes and decodes to U+FFFD, so two
+    // different interior states could hash the same. Pinned on, every such
+    // name is C-quoted to ASCII and the digest is exact.
+    '-c',
+    'core.quotePath=true',
     '--no-optional-locks',
     'status',
     // `=v2`, not the v1 short format, because the DIGEST is taken off this
@@ -1095,63 +1256,58 @@ export const IGNORED_WALK_BUDGET = 100_000;
 interface ExclusionContext {
   /** The audited repository's root, as the command derived it. */
   root: string;
+  /**
+   * `root`'s filesystem identity (`dev`/`ino`): a symlink that resolves to
+   * the audited repository ITSELF (or a walk that re-enters it through a
+   * link to an ancestor) would otherwise classify the audited tree as its
+   * own nested repository and report every fix edit as invisible dirt the
+   * hunks in fact show. Identity, not a resolved spelling: on a
+   * case-insensitive filesystem a link spelled in another case resolves
+   * to a different string for the same directory, and a bind mount to a
+   * different path entirely.
+   */
+  rootIdentity: { dev: number; ino: number } | null;
   /** The in-tree git dir relative to `root`, when the git dir sits inside. */
   gitDirRel: string | null;
   /**
-   * The audited repository's COMMON git dir, resolved: its linked worktrees
-   * are registered under `<common>/worktrees/`, and that registry — not a
-   * name — is what tells the flow's own review worktree from a repository
-   * planted under the same name.
+   * The review worktrees the ORCHESTRATOR named (`--review-worktree`),
+   * resolved. These are the flow's own checkouts — walked for planted
+   * repositories, never probed as dirt. Nothing else is: a repository at
+   * a family-shaped name, a gitfile pointing into the registry, a
+   * directory recreated over a stale registry entry — each was an
+   * entrance while the classification rested on something in the tree,
+   * which the reviewed code can write. The orchestrator's arguments are
+   * the one channel it cannot.
    */
-  commonDir: string | null;
+  reviewWorktrees: Set<string>;
 }
 
-function exclusionContext(root: string): ExclusionContext {
-  const common = commonGitDir(root);
-  let commonDir: string | null = null;
-  if (common !== null) {
+function exclusionContext(
+  root: string,
+  reviewWorktrees: readonly string[],
+): ExclusionContext {
+  let rootIdentity: { dev: number; ino: number } | null = null;
+  try {
+    const st = statSync(root);
+    rootIdentity = { dev: st.dev, ino: st.ino };
+  } catch {
+    // Unreadable: nothing can be recognised as root, and nothing is.
+  }
+  const named = new Set<string>();
+  for (const wt of reviewWorktrees) {
     try {
-      commonDir = realpathSync(common);
+      // Resolved the way `--out`/`--since` are — against the process cwd.
+      named.add(realpathSync(resolve(wt)));
     } catch {
-      commonDir = common;
+      // A named worktree that does not exist names nothing to exclude.
     }
   }
-  return { root, gitDirRel: inTreeGitDir(root), commonDir };
-}
-
-/** The worktree family (`review-pr-*`), split for the segment match below. */
-const WORKTREE_FAMILY = (() => {
-  const family =
-    FIX_DELTA_EXCLUDES.find((f) => f.endsWith('/review-pr-*')) ??
-    FIX_DELTA_EXCLUDES[1];
-  const segments = family.split('/');
-  const last = segments[segments.length - 1];
   return {
-    lead: segments.slice(0, -1),
-    prefix: last.endsWith('*') ? last.slice(0, -1) : last,
+    root,
+    rootIdentity,
+    gitDirRel: inTreeGitDir(root),
+    reviewWorktrees: named,
   };
-})();
-
-/** True when `rel` carries the worktree family's name at any depth. */
-function inWorktreeFamily(rel: Buffer): boolean {
-  // `decodePath` renders both discovery routes — git's `-z` status (`/` on
-  // every platform) and the walk (`sep`) — in git's separator, so the
-  // comparison is separator-agnostic on every platform. The family name is
-  // pure ASCII, so the decode cannot collide it with a differently-encoded
-  // neighbour the way an arbitrary git-dir name can.
-  const segments = decodePath(rel).split('/');
-  const { lead, prefix } = WORKTREE_FAMILY;
-  for (let i = 0; i + lead.length < segments.length; i++) {
-    let matched = true;
-    for (let j = 0; j < lead.length; j++) {
-      if (segments[i + j] !== lead[j]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched && segments[i + lead.length].startsWith(prefix)) return true;
-  }
-  return false;
 }
 
 /** True when `rel` is the in-tree git dir or anything under it. */
@@ -1174,56 +1330,6 @@ function underInTreeGitDir(rel: Buffer, gitDirRel: string | null): boolean {
 }
 
 /**
- * True when the repository at `abs` is a LINKED WORKTREE of the audited
- * repository: its `.git` is a gitfile pointing into the audited common
- * dir's `worktrees/` registry. That is what the flow's own review worktrees
- * are (`git worktree add` under `.qwen/tmp/review-pr-*`), and what a
- * repository planted under that name is not — a `git init` there carries a
- * `.git` DIRECTORY, and a gitfile into any other registry is somebody
- * else's worktree. Anything that cannot be read as such — no `.git`, a
- * directory, an unparseable or unresolvable pointer, a name the string
- * decode cannot carry — answers false, and the path is probed: the failure
- * direction over-warns, it never silences a blind spot.
- */
-function isRegisteredWorktreeOf(
-  abs: Buffer,
-  commonDir: string | null,
-): boolean {
-  if (commonDir === null) return false;
-  let gitfile: string;
-  try {
-    const dotGit = joinBytes(abs, DOT_GIT);
-    if (!lstatSync(dotGit).isFile()) return false;
-    gitfile = readFileSync(dotGit, 'utf8');
-  } catch {
-    return false;
-  }
-  const match = /^gitdir:\s*(.+?)\s*$/.exec(gitfile.split('\n')[0] ?? '');
-  if (match === null) return false;
-  let target: string;
-  try {
-    // A relative pointer resolves against the worktree that holds it.
-    target = realpathSync(resolve(abs.toString('utf8'), match[1]));
-  } catch {
-    return false;
-  }
-  if (!target.startsWith(join(commonDir, 'worktrees') + sep)) return false;
-  // The registry entry binds BACK: `<entry>/gitdir` names the gitfile of
-  // the one worktree it belongs to. A gitfile is a plain file anyone can
-  // write, so a plant at another path pointing into a genuine entry would
-  // otherwise be pruned as that worktree — the entry's own back-link is
-  // what a plant cannot forge without writing into the git dir.
-  try {
-    const back = realpathSync(
-      resolve(target, readFileSync(join(target, 'gitdir'), 'utf8').trim()),
-    );
-    return back === realpathSync(joinBytes(abs, DOT_GIT));
-  } catch {
-    return false;
-  }
-}
-
-/**
  * The exclusion applied to what the probe DISCOVERS. The capture excludes
  * the review's name families by pathspec, but a collapsed ignored
  * directory hides its children from any pathspec — without this check the
@@ -1231,31 +1337,29 @@ function isRegisteredWorktreeOf(
  * `.qwen`) and probes them as blind-spot dirt, the very thing the
  * exclusion exists to remove.
  *
- * Two things are excluded, and a NAME alone is neither of them:
+ * Two things are excluded, and nothing IN THE TREE decides either:
  *
  * - the in-tree git dir, in the rare repository whose git dir sits inside
  *   its worktree — not blind-spot content, and byte-compared;
- * - a review worktree: a repository under the worktree family name
- *   (`.qwen/tmp/review-pr-*`, at any depth) whose `.git` is a gitfile into
- *   the audited repository's own `worktrees/` registry.
+ * - a review worktree the orchestrator NAMED (`--review-worktree`),
+ *   compared by resolved path.
  *
- * Everything else the families name is walked or probed like any other
- * path. Pruning by name was an entrance three times over: a repository
- * planted at a side-file family name (`qwen-review-hide`) or one level
- * under it (`qwen-review-hide/inner`) was hidden from both trees by the
- * capture pathspec AND from every probe route by the prune, and a
- * `git init` planted at a worktree family name was pruned the same way —
- * each an edit that appeared in no hunks and drew no blind-spot line while
- * the identical plant under any other name was disclosed. The side-file
- * family holds files, which the probe never asks about, so walking it
- * costs a directory listing and finds nothing; and git's own registry,
- * unlike a name, cannot be claimed by a plant.
+ * Everything else is walked or probed like any other path. Every
+ * tree-side classification was an entrance in turn: a family NAME (a
+ * repository planted at `qwen-review-hide`, or one level under it, or a
+ * `git init` at `review-pr-planted`), then git's worktree REGISTRY (a
+ * gitfile pointing into a genuine entry), then the registry with a
+ * back-link (a directory recreated over a stale entry, whose back-link
+ * now names the squat). Each is something the reviewed code can write;
+ * the orchestrator's own arguments are the one thing it cannot. A local
+ * `--fix` review names no worktree at all, so every repository the probe
+ * finds — a concurrent PR review's worktree included — is content, and
+ * its dirt is disclosed.
  *
  * The two answers differ in what the caller does next. The git dir is
- * never entered. A review worktree is not PROBED — its own dirt is the
- * review's — but it IS walked: a repository planted inside it
- * (`review-pr-1/inner`) is as invisible to both trees as one planted
- * beside it, and pruning the whole subtree was that entrance.
+ * never entered. A named review worktree is not PROBED — its own dirt is
+ * the review's — but it IS walked: a repository planted inside it is as
+ * invisible to both trees as one planted beside it.
  */
 type Exclusion = 'git-dir' | 'review-worktree' | null;
 
@@ -1265,18 +1369,22 @@ function probeExcluded(
   ctx: ExclusionContext,
 ): Exclusion {
   if (underInTreeGitDir(rel, ctx.gitDirRel)) return 'git-dir';
-  return inWorktreeFamily(rel) && isRegisteredWorktreeOf(abs, ctx.commonDir)
-    ? 'review-worktree'
-    : null;
+  if (ctx.reviewWorktrees.size === 0) return null;
+  try {
+    return ctx.reviewWorktrees.has(realpathSync(abs))
+      ? 'review-worktree'
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * The exclusion keys on the DISCOVERED name; a symlink's own name need not
- * be family-shaped for its TARGET to be a review worktree or the in-tree
- * git dir. Resolve the target and apply the same exclusion to it — a link
- * reaching excluded content is excluded content. A target that does not
- * resolve, or resolves outside the repository, has no root-relative name
- * to match and is left to the probe.
+ * A symlink's own name says nothing about its TARGET being a review
+ * worktree or the in-tree git dir. Resolve the target and apply the same
+ * exclusion to it — a link reaching excluded content is excluded content.
+ * A target that does not resolve, or resolves outside the repository, has
+ * no root-relative name to match and is left to the probe.
  */
 function linkTargetExcluded(abs: Buffer, ctx: ExclusionContext): Exclusion {
   let resolved: string;
@@ -1386,6 +1494,10 @@ function reposUnder(
         continue;
       }
       if (existsSync(joinBytes(childAbs, DOT_GIT))) {
+        // The audited repository itself, re-entered through a link to an
+        // ancestor: its edits are exactly what the tree comparison sees,
+        // and probing it here reports them as invisible dirt.
+        if (isAuditedRoot(childAbs, ctx)) continue;
         repos.push({ abs: childAbs, rel: childRel });
       } else {
         queue.push({ abs: childAbs, rel: childRel });
@@ -1393,6 +1505,17 @@ function reposUnder(
     }
   }
   return { repos, unreadable, exhausted: false };
+}
+
+/** True when `abs` IS the audited repository's own root (by identity). */
+function isAuditedRoot(abs: Buffer, ctx: ExclusionContext): boolean {
+  if (ctx.rootIdentity === null) return false;
+  try {
+    const st = statSync(abs);
+    return st.dev === ctx.rootIdentity.dev && st.ino === ctx.rootIdentity.ino;
+  } catch {
+    return false;
+  }
 }
 
 /** What the blind-spot probe accumulates as it walks the discovery routes. */
@@ -1422,14 +1545,6 @@ function probeNestedRepo(abs: Buffer, rel: Buffer, state: ProbeState): void {
 }
 
 /**
- * A path named by a status entry or by the index that may be a symlink
- * reaching a repository: the link itself is what `add -A` records, so an
- * edit through it into that repository is invisible the same way a
- * gitlink's interior is. The exclusion checks key on the link's own name
- * AND on the resolved target, and only a directory that carries a git dir
- * is probed — the class this model names.
- */
-/**
  * Walk a directory for repositories and probe what it finds — the one
  * treatment for a collapsed ignored directory, a link target that is not
  * itself a repository, and a review worktree's interior. What the walk
@@ -1448,6 +1563,17 @@ function walkAndProbe(
   if (found.exhausted) state.unresolved.add(dirRel.toString('latin1'));
 }
 
+/**
+ * A path named by a status entry or by the index that may be a symlink
+ * reaching a repository: the link itself is what `add -A` records, so an
+ * edit through it into that repository is invisible the same way a
+ * gitlink's interior is. The exclusion checks key on the link's own name
+ * AND on the resolved target, and only a directory that carries a git dir
+ * is probed — the class this model names. A link that resolves to the
+ * audited repository ITSELF is returned from: its edits are the tree
+ * comparison's own, and probing root as its own nested repository
+ * reported every fix edit as invisible dirt the hunks in fact showed.
+ */
 function probeLinkedRepo(
   rootBuf: Buffer,
   rel: Buffer,
@@ -1469,6 +1595,7 @@ function probeLinkedRepo(
   } catch {
     return;
   }
+  if (isAuditedRoot(abs, ctx)) return;
   const target = own ?? linkTargetExcluded(abs, ctx);
   if (target === 'git-dir') return;
   if (target === 'review-worktree') {
@@ -1558,6 +1685,7 @@ function probeLinkedRepo(
 function probeBlindSpotState(
   root: string,
   sidePaths: readonly string[] = [],
+  reviewWorktrees: readonly string[] = [],
 ): {
   dirty: string[];
   unresolved: string[];
@@ -1589,7 +1717,7 @@ function probeBlindSpotState(
     ...literalPathspec(root, sidePaths),
   );
   const rootBuf = Buffer.from(root);
-  const ctx = exclusionContext(root);
+  const ctx = exclusionContext(root, reviewWorktrees);
   const dirty = new Set<string>();
   const unresolved = new Set<string>();
   const seen = new Set<string>();
@@ -1736,9 +1864,10 @@ function submoduleBlindSpot(dirty: string[], hunksEmpty: boolean): string {
   return (
     `fix-delta: ${one ? 'submodule' : 'submodules'} ${dirty.join(', ')} ` +
     `${one ? 'holds' : 'hold'} uncommitted edits this command cannot see — ` +
-    'a snapshot records only the superproject tree, and a submodule enters ' +
-    'it as its gitlink alone, so edits inside a submodule are outside this ' +
-    'model until they are committed there. ' +
+    'a snapshot records only the superproject tree, and a nested ' +
+    'repository (a submodule, a linked worktree, one an ignored directory ' +
+    'hides) enters it as a gitlink at most, so edits inside it are outside ' +
+    'this model. ' +
     (hunksEmpty
       ? 'The hunks file stays empty; the audit cannot see the edit.'
       : 'The hunks file does not show them; the audit cannot see those edits.')
@@ -1916,6 +2045,34 @@ function assertRootHoldsCwd(root: string): void {
         '(`git config --unset core.worktree`) and re-run.',
     );
   }
+  // Containment is not identity: a `core.worktree` naming an ANCESTOR of
+  // the cwd passes the test above, and when the audited repository sits
+  // inside another repository's checkout the whole measurement then
+  // switches to the outer one — `add -A` against the outer tree records
+  // the audited repository as a gitlink alone, so the fix is captured
+  // nowhere, the throwaway index and its objects land in the outer git
+  // dir, and both moments agree on the wrong repository. The git dir
+  // discovered from the cwd and the git dir the derived root belongs to
+  // must be the same repository.
+  const fromCwd = git('rev-parse', '--absolute-git-dir');
+  const fromRoot = git('-C', root, 'rev-parse', '--absolute-git-dir');
+  const same = (a: string, b: string): boolean => {
+    try {
+      return realpathSync(a) === realpathSync(b);
+    } catch {
+      return a === b;
+    }
+  };
+  if (!same(fromCwd, fromRoot)) {
+    throw new Error(
+      `fix-delta: the repository at ${fromCwd} names ${root} as its working ` +
+        `tree, but that tree belongs to ${fromRoot} — a repo-local ` +
+        '`core.worktree` points this repository at an enclosing checkout, ' +
+        'and a capture taken there would record this repository as a ' +
+        'gitlink and the fix nowhere. Unset it (`git config --unset ' +
+        'core.worktree`) and re-run.',
+    );
+  }
 }
 
 export interface FixDeltaArgs {
@@ -1933,7 +2090,35 @@ export interface FixDeltaArgs {
    * without the fingerprint, and refuses a file that no longer matches it.
    */
   fingerprint?: string;
+  /**
+   * The review worktrees THIS flow created, named by the orchestrator:
+   * walked for planted repositories, never probed as dirt. A local `--fix`
+   * review names none. See `ExclusionContext.reviewWorktrees`.
+   */
+  reviewWorktrees?: readonly string[];
   out: string;
+}
+
+/**
+ * Write a side file without following a link at the leaf. The pre-write
+ * check above lstats the path; the window between that lstat and the
+ * open is the one a detached child of a filter could still race, so on
+ * platforms that have it the open itself refuses a symlink
+ * (`O_NOFOLLOW`). Where the constant is absent the check alone stands.
+ */
+function writeSideFile(path: string, data: Buffer): void {
+  const noFollow = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const fd = openSync(
+    path,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow,
+    0o644,
+  );
+  try {
+    let off = 0;
+    while (off < data.length) off += writeSync(fd, data, off);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** True when the steering surfaces name a clean/process filter. */
@@ -1947,14 +2132,26 @@ function snapshotFingerprint(bytes: Buffer): string {
 }
 
 export function runFixDelta(args: FixDeltaArgs): void {
-  if (args.snapshot === Boolean(args.since)) {
+  // Presence, not truthiness: yargs parses a bare `--since` as the empty
+  // string, and `--snapshot --since` ran in snapshot mode with `''` as a
+  // side path — which `resolve('')` turned into the process cwd, excluded
+  // literally, so a run from a subdirectory recorded that subtree at HEAD
+  // and reported the user's own edits there as the fix's.
+  if (args.snapshot === (args.since !== undefined)) {
     throw new Error(
       'fix-delta: pass exactly one of --snapshot (record the tree before the ' +
         'first edit) or --since <snapshot.json> (diff the tree now against it).',
     );
   }
+  if (args.since === '') {
+    throw new Error(
+      'fix-delta: --since needs the snapshot file `--snapshot --out <file>` ' +
+        'wrote; an empty path names nothing.',
+    );
+  }
   const root = git('rev-parse', '--show-toplevel');
   assertRootHoldsCwd(root);
+  const reviewWorktrees = args.reviewWorktrees ?? [];
   assertNoRedirectedExcludes(root, [args.out, args.since]);
   // The command's own `--out` (and, in `--since` mode, the `--since` file
   // itself) are side files of THIS run exactly like the review's families:
@@ -1969,7 +2166,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     const steering = captureSteeringSurfaces(root);
     if (steering.length > 0) writeStderrLine(captureSteeringNote(steering));
     const tree = snapshotWorkingTree(root, sidePaths, hasFilter(steering));
-    const probe = probeBlindSpotState(root, sidePaths);
+    const probe = probeBlindSpotState(root, sidePaths, reviewWorktrees);
     const snapshot: FixSnapshot = {
       root,
       tree,
@@ -1987,7 +2184,10 @@ export function runFixDelta(args: FixDeltaArgs): void {
       digests: probe.digests,
     };
     const record = Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`);
-    writeFileSync(resolve(args.out), record);
+    // Re-checked here, after the capture ran the repository's filters and
+    // before the one write: see `assertNoRedirectedExcludes`.
+    assertNoRedirectedExcludes(root, [args.out]);
+    writeSideFile(resolve(args.out), record);
     // The FULL tree sha and the record's fingerprint, on one line: the
     // orchestrator reads this line and hands the fingerprint back to
     // `--since`, which is the only thing that anchors the baseline outside
@@ -2087,14 +2287,15 @@ export function runFixDelta(args: FixDeltaArgs): void {
     now === snapshot.tree
       ? Buffer.alloc(0)
       : patchBetweenTrees(root, snapshot.tree, now, sidePaths);
-  writeFileSync(resolve(args.out), diff);
+  assertNoRedirectedExcludes(root, [args.out]);
+  writeSideFile(resolve(args.out), diff);
   // Edits inside a submodule never move its gitlink, so the tree comparison
   // is blind to them whether or not the superproject diff is empty — probe
   // in both cases. Dirt recorded at snapshot time is not the fix's doing;
   // only NEW dirt names a blind spot, and an unresolved path over-warns at
   // EVERY comparison: the baseline never recorded one, and silence over a
   // path the probe cannot answer is a false all-clear.
-  const probe = probeBlindSpotState(root, sidePaths);
+  const probe = probeBlindSpotState(root, sidePaths, reviewWorktrees);
   const dirtyNow = probe.dirty;
   const unresolvedNow = probe.unresolved;
   // "Already dirty" is not the question; "the same dirt" is. A path in the
@@ -2216,10 +2417,13 @@ export function runFixDelta(args: FixDeltaArgs): void {
     }
     return;
   }
-  const steeredRendering = renderSteeringPaths(root, files);
+  const steeredRendering = renderSteeringPaths(root, [
+    ...files,
+    ...renameSourcesBetweenTrees(root, snapshot.tree, now, sidePaths),
+  ]);
   if (steeredRendering.length > 0) {
     writeStderrLine(
-      renderSteeringNote(steeredRendering.map((i) => decodePath(files[i]))),
+      renderSteeringNote(steeredRendering.map((name) => decodePath(name))),
     );
   }
   const names = files.map((name) => decodePath(name));
@@ -2276,6 +2480,15 @@ export const fixDeltaCommand: CommandModule = {
           'With --since: the fingerprint --snapshot printed for that file; ' +
           'the file is refused without it, or when it no longer matches',
       })
+      .option('review-worktree', {
+        type: 'string',
+        array: true,
+        describe:
+          'A review worktree this flow created (repeatable; resolved ' +
+          'against the cwd like --out): walked for planted repositories, ' +
+          'never probed as dirt. Every other repository in the tree is ' +
+          'content.',
+      })
       .option('out', {
         type: 'string',
         demandOption: true,
@@ -2286,6 +2499,7 @@ export const fixDeltaCommand: CommandModule = {
       snapshot: argv['snapshot'] === true,
       since: argv['since'] as string | undefined,
       fingerprint: argv['fingerprint'] as string | undefined,
+      reviewWorktrees: (argv['review-worktree'] as string[] | undefined) ?? [],
       out: argv['out'] as string,
     });
   },

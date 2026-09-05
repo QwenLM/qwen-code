@@ -87,6 +87,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -96,7 +97,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Mock } from 'vitest';
 import yargs from 'yargs';
@@ -135,12 +136,25 @@ describe('fix-delta', () => {
   const fingerprintOf = (file: string) =>
     createHash('sha256').update(readFileSync(file)).digest('hex');
   /** `--since`, the way the flow invokes it: with the record's fingerprint. */
-  const runSince = (since = snapshotFile(), outFile = hunksFile()) =>
+  const runSince = (
+    since = snapshotFile(),
+    outFile = hunksFile(),
+    reviewWorktrees: readonly string[] = [],
+  ) =>
     runFixDelta({
       snapshot: false,
       since,
       fingerprint: fingerprintOf(since),
+      reviewWorktrees,
       out: outFile,
+    });
+  /** `--snapshot` naming the review worktrees THIS flow created. */
+  const runSnapshot = (reviewWorktrees: readonly string[] = []) =>
+    runFixDelta({
+      snapshot: true,
+      since: undefined,
+      reviewWorktrees,
+      out: snapshotFile(),
     });
 
   /** A scratch repository to add as a submodule: one committed file. */
@@ -1192,12 +1206,14 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'x\n',
     );
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([join(repo, '.qwen', 'tmp', 'review-pr-1')]);
     writeFileSync(
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'y\n',
     );
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [
+      join(repo, '.qwen', 'tmp', 'review-pr-1'),
+    ]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -1223,7 +1239,7 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'x\n',
     );
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([join(repo, '.qwen', 'tmp', 'review-pr-1')]);
     const snap = JSON.parse(
       readFileSync(snapshotFile(), 'utf8'),
     ) as FixSnapshot;
@@ -1234,7 +1250,9 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'y\n',
     );
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [
+      join(repo, '.qwen', 'tmp', 'review-pr-1'),
+    ]);
     const lines = stderr();
     expect(lines.some((l) => l.includes('review-pr-1'))).toBe(false);
     expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
@@ -1841,7 +1859,7 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'x\n',
     );
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([join(repo, '.qwen', 'tmp', 'review-pr-1')]);
     const snap = JSON.parse(
       readFileSync(snapshotFile(), 'utf8'),
     ) as FixSnapshot;
@@ -1852,7 +1870,9 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'y\n',
     );
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [
+      join(repo, '.qwen', 'tmp', 'review-pr-1'),
+    ]);
     const lines = stderr();
     expect(lines.some((l) => l.includes('review-pr-1'))).toBe(false);
     expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
@@ -1971,6 +1991,11 @@ describe('fix-delta', () => {
     await expect(async () =>
       parse(['fix-delta', '--since', snapshotFile(), '--out', hunksFile()]),
     ).rejects.toThrow(/--since needs --fingerprint/);
+    // A bare `--since` parses to the empty string: presence, not
+    // truthiness, decides the mode.
+    await expect(async () =>
+      parse(['fix-delta', '--snapshot', '--since', '--out', snapshotFile()]),
+    ).rejects.toThrow(/exactly one of --snapshot/);
     // yargs raises the missing-argument refusal synchronously from inside
     // parseAsync; an async wrapper turns either shape into a rejection.
     await expect(async () =>
@@ -1988,6 +2013,21 @@ describe('fix-delta', () => {
       'neither mode',
       { snapshot: false, since: undefined },
       /exactly one of --snapshot/,
+    ],
+    [
+      // yargs parses a bare `--since` as the empty string: presence, not
+      // truthiness, is the mode test, or `--snapshot --since` ran in
+      // snapshot mode with `''` as a side path — the process cwd, excluded
+      // literally, so a run from a subdirectory recorded that subtree at
+      // HEAD and reported the user's own edits there as the fix's.
+      'both modes with a bare --since',
+      { snapshot: true, since: '' },
+      /exactly one of --snapshot/,
+    ],
+    [
+      'a bare --since alone',
+      { snapshot: false, since: '' },
+      /--since needs the snapshot file/,
     ],
   ])('refuses %s', (_name, args, message) => {
     expect(() => runFixDelta({ ...args, out: hunksFile() })).toThrow(message);
@@ -2174,16 +2214,16 @@ describe('fix-delta', () => {
     git('add', '-A');
     git('commit', '-qm', 'ignore ig');
     mkdirSync(join(repo, 'ig'), { recursive: true });
-    // The review's own worktree is what `git worktree add` registers under
-    // the family name — a repository merely planted there is not it, and
-    // is probed like any other (see `isRegisteredWorktreeOf`).
+    // The review's own worktree is the one the orchestrator NAMES
+    // (`--review-worktree`) — a repository merely planted at the family
+    // name is not it, and is probed like any other (see `probeExcluded`).
     const target = join(repo, '.qwen', 'tmp', 'review-pr-1');
     git('worktree', 'add', '-q', '--detach', target);
     symlinkSync(target, join(repo, 'ig', 'x'));
 
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([target]);
     writeFileSync(join(target, 'a.ts'), 'dirtied between the states\n');
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [target]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2201,9 +2241,9 @@ describe('fix-delta', () => {
     git('worktree', 'add', '-q', '--detach', target);
     symlinkSync(target, join(repo, 'x'));
 
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([target]);
     writeFileSync(join(target, 'a.ts'), 'dirtied between the states\n');
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [target]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2963,12 +3003,12 @@ describe('fix-delta', () => {
     ).toThrow(/--since needs --fingerprint/);
   });
 
-  it('probes a gitfile that points into the registry without binding back', () => {
+  it('probes a gitfile that points into the registry when the orchestrator did not name it', () => {
     // A gitfile is a plain file anyone can write: a plant at another path
     // pointing into a GENUINE registry entry was pruned as that worktree,
-    // while the capture pathspec hid it from both trees. The entry's own
-    // `gitdir` back-link names the one worktree it belongs to, and a plant
-    // cannot forge that without writing into the git dir.
+    // while the capture pathspec hid it from both trees. Nothing in the
+    // tree classifies a review worktree any more — only the path the
+    // orchestrator names — so the plant is probed like any repository.
     git(
       'worktree',
       'add',
@@ -2984,9 +3024,11 @@ describe('fix-delta', () => {
     );
     writeFileSync(join(evil, 'payload.txt'), 'v1\n');
 
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([join(repo, '.qwen', 'tmp', 'review-pr-1')]);
     writeFileSync(join(evil, 'payload2.txt'), 'the hidden fix\n');
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [
+      join(repo, '.qwen', 'tmp', 'review-pr-1'),
+    ]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -3000,7 +3042,7 @@ describe('fix-delta', () => {
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
   });
 
-  it('names a repository planted inside a registered review worktree', () => {
+  it('names a repository planted inside a named review worktree', () => {
     // The worktree itself is the review's and is not probed — but its
     // subtree was dropped whole, so a repository planted one level inside
     // it was discovered by no route while the capture pathspec removed it
@@ -3016,9 +3058,9 @@ describe('fix-delta', () => {
     gitAt(inner, 'add', '-A');
     gitAt(inner, 'commit', '-qm', 'init');
 
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([wt]);
     writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [wt]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -3030,7 +3072,7 @@ describe('fix-delta', () => {
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
   });
 
-  it('walks a registered review worktree reached through the ignored-directory walk', () => {
+  it('walks a named review worktree reached through the ignored-directory walk', () => {
     // The walk route: with `.qwen` ignored the worktree is reached only by
     // walking the collapsed `! .qwen/` entry, and the walk must enqueue a
     // review worktree rather than prune its subtree.
@@ -3048,9 +3090,9 @@ describe('fix-delta', () => {
     gitAt(inner, 'add', '-A');
     gitAt(inner, 'commit', '-qm', 'init');
 
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([wt]);
     writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [wt]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -3062,7 +3104,7 @@ describe('fix-delta', () => {
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
   });
 
-  it('walks a registered review worktree reached through a symlink', () => {
+  it('walks a named review worktree reached through a symlink', () => {
     // The symlink route: a top-level link at a non-family name resolves to
     // the review worktree. The link's target is excluded content, but the
     // exclusion is "walk, do not probe" — a repository inside the target
@@ -3079,9 +3121,9 @@ describe('fix-delta', () => {
     gitAt(inner, 'commit', '-qm', 'init');
     symlinkSync(wt, join(repo, 'x'));
 
-    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runSnapshot([wt]);
     writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
-    runSince();
+    runSince(snapshotFile(), hunksFile(), [wt]);
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -3289,5 +3331,379 @@ describe('fix-delta', () => {
     expect(() =>
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
     ).toThrow(/a clean\/process filter is configured/);
+  });
+
+  it('never classifies the audited repository as its own nested repository', () => {
+    // A committed link `self -> .` resolves to the audited root: every
+    // discovery route (`? self`, `! self`, a tracked mode-120000 link)
+    // followed it into root's own git dir and probed the audited tree as
+    // a submodule — reporting every fix edit as invisible dirt while the
+    // hunks recorded exactly those edits, a provably false claim on every
+    // fix round, plantable by the PR author.
+    symlinkSync('.', join(repo, 'self'));
+    git('add', '-A');
+    git('commit', '-qm', 'commit a link to the root');
+
+    runSnapshot();
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 2;');
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
+    expect(lines.some((l) => l.includes('pre-existing'))).toBe(false);
+    expect(lines.at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+    );
+  });
+
+  it('never re-enters the audited repository through a link the walk reaches', () => {
+    // The walk variant: a link inside an ignored directory resolves to the
+    // audited root itself, which carries a `.git` of its own, and the walk
+    // probed the audited tree as a nested repository under a synthetic
+    // name (a link to root's PARENT rediscovers it the same way one level
+    // down).
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    mkdirSync(join(repo, 'ig', 'box'), { recursive: true });
+    symlinkSync(repo, join(repo, 'ig', 'box', 'back'));
+
+    runSnapshot();
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('cannot see') || l.includes('pre-existing')),
+    ).toBe(false);
+    expect(lines.at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+    );
+  });
+
+  it('re-checks the side path for a redirect after the capture ran the filters', () => {
+    // The entry check is taken once; the capture then executes the
+    // repository's filters (disclosed, never refused). A filter child that
+    // swaps the deterministic `--out` path for a symlink after the check
+    // had the record written THROUGH the link — the victim's content
+    // replaced, unrecoverably when untracked. The check runs again
+    // immediately before the write, when nothing further executes code.
+    const victim = join(out, 'victim.txt');
+    writeFileSync(victim, 'sentinel — must survive\n');
+    const filter = join(out, 'swap.sh');
+    writeFileSync(
+      filter,
+      `#!/bin/sh\nrm -f '${snapshotFile()}'\nln -s '${victim}' '${snapshotFile()}'\ncat\n`,
+    );
+    chmodSync(filter, 0o755);
+    git('config', 'filter.swap.clean', filter);
+    writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=swap\n');
+
+    expect(() => runSnapshot()).toThrow(/side path .* is a symlink/);
+    expect(readFileSync(victim, 'utf8')).toBe('sentinel — must survive\n');
+  });
+
+  it('refuses a redirected ancestor of an in-repository side path', () => {
+    // A link planted at any component above the side path redirects the
+    // write the same way a link at the leaf does; bounded by the checkout,
+    // so the user's own layout above the repository (`/var` on macOS) is
+    // never walked.
+    mkdirSync(join(out, 'elsewhere'));
+    symlinkSync(join(out, 'elsewhere'), join(repo, 'redirected'));
+    expect(() =>
+      runFixDelta({
+        snapshot: true,
+        since: undefined,
+        out: join(repo, 'redirected', 'deep', 'snapshot.json'),
+      }),
+    ).toThrow(/is a symlink above the side path/);
+    expect(existsSync(join(out, 'elsewhere', 'deep'))).toBe(false);
+  });
+
+  it('discloses a diff attribute on the SOURCE name of a rename', () => {
+    // `diff-tree -M` folds a rename into one entry under its new name, but
+    // renders the pair off the OLD name's `diff` attribute: a `-diff` on
+    // the source path turned the pair into an opaque binary patch while
+    // the folded list's only name answered `unspecified` — no note.
+    const body = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    writeFileSync(join(repo, 'a.txt'), `${body}\n`);
+    git('add', '-A');
+    git('commit', '-qm', 'a.txt');
+
+    runSnapshot();
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), 'a.txt -diff\n');
+    renameSync(join(repo, 'a.txt'), join(repo, 'b.txt'));
+    writeFileSync(join(repo, 'b.txt'), `${body}\nline 30 — the fix\n`);
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('GIT binary patch');
+    expect(
+      stderr().some(
+        (l) =>
+          l.includes('steers how the hunks above render') &&
+          l.includes('a.txt'),
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses a core.worktree that names an enclosing checkout', () => {
+    // The containment gate passes for an ANCESTOR: the audited repository
+    // sits inside another repository's checkout, `core.worktree` names
+    // that checkout, and the whole measurement switched to the outer
+    // repository — the audited one recorded as a gitlink, the fix
+    // captured nowhere, both moments agreeing on the wrong tree. The git
+    // dir discovered from the cwd must be the git dir the derived root
+    // belongs to.
+    const outer = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-outer-')),
+    );
+    const cwdHere = process.cwd();
+    try {
+      gitAt(outer, 'init', '-q', '-b', 'main');
+      gitAt(outer, 'config', 'user.email', 't@t.t');
+      gitAt(outer, 'config', 'user.name', 't');
+      writeFileSync(join(outer, 'outer.txt'), 'outer\n');
+      gitAt(outer, 'add', '-A');
+      gitAt(outer, 'commit', '-qm', 'outer');
+      const audited = join(outer, 'audited');
+      mkdirSync(audited);
+      gitAt(audited, 'init', '-q', '-b', 'main');
+      gitAt(audited, 'config', 'user.email', 't@t.t');
+      gitAt(audited, 'config', 'user.name', 't');
+      writeFileSync(join(audited, 'a.ts'), 'export const x = 1;\n');
+      gitAt(audited, 'add', '-A');
+      gitAt(audited, 'commit', '-qm', 'audited');
+      gitAt(audited, 'config', 'core.worktree', outer);
+      process.chdir(audited);
+
+      expect(() =>
+        runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+      ).toThrow(/points this repository at an enclosing checkout/);
+      expect(existsSync(snapshotFile())).toBe(false);
+      // …and nothing landed in the outer git dir.
+      expect(
+        readdirSync(join(outer, '.git')).some((n) =>
+          n.startsWith('qwen-fix-delta-'),
+        ),
+      ).toBe(false);
+    } finally {
+      process.chdir(cwdHere);
+      rmSync(outer, { recursive: true, force: true });
+    }
+  });
+
+  it('records an edit confined to line endings under core.autocrlf', () => {
+    // Under `core.autocrlf=input` both captures stored the normalised
+    // blob: HEAD holds LF, the worktree holds CRLF (a Windows checkout, a
+    // tool's rewrite), and the conversion made the CRLF worktree file
+    // capture as the LF blob it already was — so the fix's CRLF→LF rewrite
+    // left the two trees identical and the run all-cleared over an edit
+    // that was applied. The capture is pinned to the raw bytes; the pin is
+    // shared by both moments.
+    writeFileSync(join(repo, 'crlf.txt'), 'line1\nline2\n');
+    git('add', '-A');
+    git('commit', '-qm', 'lf in the repository');
+    git('config', 'core.autocrlf', 'input');
+    writeFileSync(join(repo, 'crlf.txt'), 'line1\r\nline2\r\n');
+
+    runSnapshot();
+    writeFileSync(join(repo, 'crlf.txt'), 'line1\nline2\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('crlf.txt');
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — crlf.txt',
+    );
+  });
+
+  it('probes a directory recreated over a stale registry entry', () => {
+    // The squat: a worktree is registered, its directory removed (the
+    // entry survives, stale), and a directory recreated at the same path
+    // with a gitfile pointing at that entry plus hidden loose files. Both
+    // halves of a registry back-link check pass — the entry's back-link
+    // genuinely names the squat's own `.git` — so any tree-side
+    // classification walks it and never probes it, while the capture
+    // excludes the family subtree. Only the orchestrator's own naming
+    // decides now, and this path was not named.
+    const wt = join(repo, '.qwen', 'tmp', 'review-pr-hide');
+    git('worktree', 'add', '-q', '--detach', wt);
+    const gitfile = readFileSync(join(wt, '.git'), 'utf8');
+    rmSync(wt, { recursive: true, force: true });
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, '.git'), gitfile);
+    writeFileSync(join(wt, 'hidden.txt'), 'v1\n');
+
+    runSnapshot();
+    writeFileSync(join(wt, 'hidden.txt'), 'the hidden fix\n');
+    writeFileSync(join(wt, 'hidden2.txt'), 'more hidden\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('review-pr-hide'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  // POSIX-only: a byte that is not valid UTF-8 cannot be a name on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'keeps the digest exact under core.quotePath=false',
+    () => {
+      // The digest is taken off the status output as a string: under
+      // `core.quotePath=false` — plantable in the nested repository's own
+      // config — a name that is not valid UTF-8 arrived as raw bytes and
+      // decoded to U+FFFD, so two different interior states hashed the
+      // same and a real edit was stamped pre-existing.
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      const inner = join(repo, 'ig', 'inner');
+      mkdirSync(inner, { recursive: true });
+      gitAt(inner, 'init', '-q', '-b', 'main');
+      gitAt(inner, 'config', 'user.email', 't@t.t');
+      gitAt(inner, 'config', 'user.name', 't');
+      gitAt(inner, 'config', 'core.quotePath', 'false');
+      writeFileSync(join(inner, 'f.txt'), 'v1\n');
+      gitAt(inner, 'add', '-A');
+      gitAt(inner, 'commit', '-qm', 'init');
+      const innerBuf = Buffer.from(inner);
+      const nameA = Buffer.concat([
+        innerBuf,
+        Buffer.from('/a'),
+        Buffer.from([0xe9]),
+        Buffer.from('.bin'),
+      ]);
+      const nameB = Buffer.concat([
+        innerBuf,
+        Buffer.from('/a'),
+        Buffer.from([0xc9]),
+        Buffer.from('.bin'),
+      ]);
+      overwriteSh(nameA, 'v1');
+
+      runSnapshot();
+      // The fix: the untracked name with byte E9 is gone, the one with C9
+      // is there — different interior states that decode to the same
+      // U+FFFD-mangled line.
+      execFileSync('/bin/sh', [], {
+        input: Buffer.concat([
+          Buffer.from("set -e\nrm -f '"),
+          nameA,
+          Buffer.from("'\n"),
+        ]),
+      });
+      overwriteSh(nameB, 'v2');
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('cannot see') && l.includes('ig/inner')),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('pre-existing'))).toBe(false);
+    },
+  );
+
+  it("captures under the skill's own side paths when the repository ignores .qwen", () => {
+    // The exact invocation Step 6B makes — `--out .qwen/tmp/qwen-review-…`
+    // inside the tree — in a repository that ignores `.qwen/*` (this
+    // repository does): git exits 1 on any pathspec item under an ignored
+    // directory, negative items included, so the capture refused in
+    // precisely those checkouts. An ignored side path cannot enter
+    // `add -A` and is left out of its pathspec; the probe and the
+    // comparison keep it.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/*\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore .qwen');
+    const snapshot = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'qwen-review-local-fix-snapshot.json',
+    );
+    const hunksOut = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'qwen-review-local-fix-hunks.diff',
+    );
+    runFixDelta({ snapshot: true, since: undefined, out: snapshot });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 9;\n');
+    runSince(snapshot, hunksOut);
+
+    const hunks = readFileSync(hunksOut, 'utf8');
+    expect(hunks).toContain('+export const x = 9;');
+    expect(hunks).not.toContain('fix-snapshot.json');
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+    );
+  });
+
+  it('recognises the audited root by identity, not by the spelling a link resolves to', () => {
+    // On a case-insensitive filesystem a link spelled in another case
+    // resolves to a different string for the same directory; a resolved-
+    // path comparison then probed the audited tree as its own nested
+    // repository. On a case-sensitive one the link dangles and is skipped
+    // either way.
+    const spelled = join(dirname(repo), basename(repo).toUpperCase());
+    symlinkSync(spelled, join(repo, 'self'));
+    git('add', '-A');
+    git('commit', '-qm', 'commit a differently-spelled link to the root');
+
+    runSnapshot();
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('cannot see') || l.includes('pre-existing')),
+    ).toBe(false);
+    expect(lines.at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+    );
+  });
+
+  it('captures a safecrlf=true checkout under the line-ending pin', () => {
+    // `core.autocrlf=true` + `core.safecrlf=true` + `* text=auto` with an
+    // all-CRLF checkout: under the user's own config the round trip is
+    // reversible and `add` is silent; with only the autocrlf pin the
+    // pinned direction is irreversible and safecrlf `die`s on the first
+    // file — a refusal `--ignore-errors` cannot tolerate.
+    writeFileSync(join(repo, '.gitattributes'), '* text=auto\n');
+    writeFileSync(join(repo, 'win.txt'), 'line1\r\nline2\r\n');
+    git('-c', 'core.autocrlf=true', 'add', '-A');
+    git('-c', 'core.autocrlf=true', 'commit', '-qm', 'text=auto');
+    git('config', 'core.autocrlf', 'true');
+    git('config', 'core.safecrlf', 'true');
+
+    expect(() => runSnapshot()).not.toThrow();
+    writeFileSync(join(repo, 'win.txt'), 'line1\r\nline2\r\nline3\r\n');
+    expect(() => runSince()).not.toThrow();
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('win.txt');
+  });
+
+  it('re-checks the hunks path for a redirect after the --since capture ran the filters', () => {
+    // The `--since` twin of the snapshot re-check: the capture at `--since`
+    // runs the filters too, and the hunks write follows it.
+    const victim = join(out, 'victim.txt');
+    writeFileSync(victim, 'sentinel — must survive\n');
+    runSnapshot();
+    const filter = join(out, 'swap-since.sh');
+    writeFileSync(
+      filter,
+      `#!/bin/sh\nrm -f '${hunksFile()}'\nln -s '${victim}' '${hunksFile()}'\ncat\n`,
+    );
+    chmodSync(filter, 0o755);
+    git('config', 'filter.swap.clean', filter);
+    writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=swap\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
+
+    expect(() => runSince()).toThrow(/side path .* is a symlink/);
+    expect(readFileSync(victim, 'utf8')).toBe('sentinel — must survive\n');
   });
 });
