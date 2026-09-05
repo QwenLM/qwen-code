@@ -1176,6 +1176,88 @@ describe('runChannelDaemonWorker', () => {
     );
   });
 
+  it('waits for channel disconnect drains before stopping the bridge', async () => {
+    const sdk = createSdk();
+    let releaseDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const disconnect = vi.fn();
+    const channel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      waitForDisconnect: vi.fn(() => {
+        expect(disconnect).toHaveBeenCalledOnce();
+        return drain;
+      }),
+      name: 'telegram',
+      runLoopPrompt: vi.fn().mockResolvedValue('done'),
+      validateWebhookTask: vi.fn(),
+    };
+    mockCreateChannel.mockReturnValueOnce(channel);
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const closing = handle.close();
+    await vi.waitFor(() =>
+      expect(channel.waitForDisconnect).toHaveBeenCalled(),
+    );
+    expect(channel.disconnect).toHaveBeenCalledOnce();
+    expect(channel.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      channel.waitForDisconnect.mock.invocationCallOrder[0]!,
+    );
+    expect(mockBridgeStop).not.toHaveBeenCalled();
+
+    releaseDrain();
+    await closing;
+
+    expect(mockBridgeStop).toHaveBeenCalledOnce();
+  });
+
+  it('continues shutdown when a channel disconnect drain never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const sdk = createSdk();
+      const disconnect = vi.fn();
+      const waitForDisconnect = vi.fn(() => new Promise<void>(() => {}));
+      mockCreateChannel.mockReturnValueOnce({
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect,
+        waitForDisconnect,
+        name: 'telegram',
+        runLoopPrompt: vi.fn().mockResolvedValue('done'),
+        validateWebhookTask: vi.fn(),
+      });
+      const handle = await runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      });
+
+      const closing = handle.close();
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(waitForDisconnect).toHaveBeenCalledOnce();
+      expect(mockBridgeStop).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+
+      expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+        '[Channel] disconnect drain exceeded 8000ms; continuing worker shutdown.',
+      );
+      expect(mockBridgeStop).toHaveBeenCalledOnce();
+      expect(mockRouterDispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('starts named sessions with per-channel state and no loop controller', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([
@@ -2104,6 +2186,75 @@ describe('runChannelDaemonWorker', () => {
     expect(disconnect).toHaveBeenCalled();
     expect(mockSanitizeLogText).toHaveBeenCalledWith('connect boom', 512);
     expect(mockBridgeStop).toHaveBeenCalled();
+  });
+
+  it('waits for a failed adapter to drain during startup rollback', async () => {
+    const sdk = createSdk();
+    let releaseDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(() => {
+      expect(disconnect).toHaveBeenCalled();
+      return drain;
+    });
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockRejectedValue(new Error('connect boom')),
+      disconnect,
+      waitForDisconnect,
+      name: 'telegram',
+    });
+
+    const starting = runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const rejection = starting.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalled());
+
+    expect(mockBridgeStop).not.toHaveBeenCalled();
+
+    releaseDrain();
+    expect(await rejection).toEqual(
+      expect.objectContaining({ message: 'No channels connected.' }),
+    );
+
+    expect(mockBridgeStop).toHaveBeenCalledOnce();
+  });
+
+  it('continues startup rollback when a disconnect drain never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const sdk = createSdk();
+      const disconnect = vi.fn();
+      const waitForDisconnect = vi.fn(() => new Promise<void>(() => {}));
+      mockCreateChannel.mockResolvedValueOnce({
+        connect: vi.fn().mockRejectedValue(new Error('connect boom')),
+        disconnect,
+        waitForDisconnect,
+        name: 'telegram',
+      });
+
+      const rejection = runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(8_000);
+
+      expect(await rejection).toEqual(
+        expect.objectContaining({ message: 'No channels connected.' }),
+      );
+      expect(waitForDisconnect).toHaveBeenCalledOnce();
+      expect(mockBridgeStop).toHaveBeenCalledOnce();
+      expect(mockRouterDispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('waits for each startup failure report before connecting the next channel', async () => {

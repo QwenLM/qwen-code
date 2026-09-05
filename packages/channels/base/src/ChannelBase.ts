@@ -1232,6 +1232,10 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
+
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
    * on a specific issue/PR. The default falls through to sendMessage(chatId,
@@ -5652,7 +5656,7 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
@@ -5704,7 +5708,9 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,

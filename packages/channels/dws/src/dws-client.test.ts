@@ -13,6 +13,7 @@ import {
   type DwsCommandRunner,
   type DwsImDispatch,
   type DwsImMessage,
+  type DwsImSource,
 } from './dws-client.js';
 import type {
   DwsEventProcessStarter,
@@ -400,6 +401,80 @@ describe('DwsClient', () => {
       eventTime: 1_725_000_000_000,
     });
   });
+
+  it.each<{
+    label: string;
+    source: DwsImSource;
+    type: DwsImMessage['type'];
+  }>([
+    {
+      label: '@',
+      source: { kind: 'at' },
+      type: 'user_im_message_receive_at',
+    },
+    {
+      label: 'explicit group',
+      source: { kind: 'group', conversationId: 'conversation-a' },
+      type: 'user_im_message_receive_group',
+    },
+    {
+      label: 'all-group',
+      source: { kind: 'group-all' },
+      type: 'user_im_message_receive_group_all',
+    },
+  ])(
+    'does not make the $label event reader wait for message processing',
+    async ({ source, type }) => {
+      let onLine!: (line: string) => void | Promise<void>;
+      const eventStarter = vi.fn<DwsEventProcessStarter>(
+        async (_executable, _args, lineHandler) => {
+          onLine = lineHandler;
+          return subscription();
+        },
+      );
+      const client = new DwsClient(
+        { executable: '/opt/dws' },
+        vi.fn(),
+        eventStarter,
+      );
+      let releaseTurn!: () => void;
+      const turn = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      const onMessage = vi.fn(
+        (): DwsImDispatch => ({
+          admitted: Promise.resolve(),
+          completed: turn,
+        }),
+      );
+
+      await client.subscribeToIm(source, onMessage, vi.fn());
+      let lineSettled = false;
+      const delivery = Promise.resolve(
+        onLine(
+          json({
+            type,
+            event_id: 'event-a',
+            message_id: 'message-a',
+            conversation_id: 'conversation-a',
+            content: '@QwenBot first request',
+            sender_open_dingtalk_id: 'user-a',
+            sender: 'User A',
+          }),
+        ),
+      ).then(() => {
+        lineSettled = true;
+      });
+
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(lineSettled).toBe(true);
+      } finally {
+        releaseTurn();
+        await delivery;
+      }
+    },
+  );
 
   it('subscribes to all ordinary direct messages without a user filter', async () => {
     let onLine!: (line: string) => void | Promise<void>;

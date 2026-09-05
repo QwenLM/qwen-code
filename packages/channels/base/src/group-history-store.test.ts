@@ -44,6 +44,17 @@ describe('GroupHistoryStore', () => {
     expect(store.drain('k', 2).map((item) => item.text)).toEqual(['b', 'c']);
   });
 
+  it('keeps only one entry for a repeated message ID', () => {
+    const path = filePath();
+    const store = new GroupHistoryStore(path);
+    const repeated = { ...entry('same message'), messageId: 'message-1' };
+
+    store.record('k', repeated, 10);
+    store.record('k', repeated, 10);
+
+    expect(new GroupHistoryStore(path).drain('k', 10)).toEqual([repeated]);
+  });
+
   it('replays only the latest entries from disk', () => {
     const path = filePath();
     const store = new GroupHistoryStore(path);
