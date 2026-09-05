@@ -5648,6 +5648,8 @@ export const useLlmStream = (
         return;
       }
 
+      const toolResultPartsForPause = responsesToSend.slice();
+
       // Drain steerable user messages at this sampling boundary and append
       // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
@@ -5826,7 +5828,10 @@ export const useLlmStream = (
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
           if (llmClient) {
-            llmClient.addHistory({ role: 'user', parts: responsesToSend });
+            llmClient.addHistory({
+              role: 'user',
+              parts: toolResultPartsForPause,
+            });
           }
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -5841,7 +5846,10 @@ export const useLlmStream = (
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (llmClient) {
-          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+          llmClient.addHistory({
+            role: 'user',
+            parts: toolResultPartsForPause,
+          });
         }
         await failClosedGoalTurn(
           toolGoalBinding,

@@ -23701,6 +23701,56 @@ describe('Session', () => {
         expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalledWith(turnKey);
       });
 
+      it('releases a pre-model Goal permit when recording its pause fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-close-write-failure',
+        };
+        const turnKey = 'goal-runtime:turn-close-write-failure';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+        let cancelClose: (() => void) | undefined;
+        mockChatRecordingService.recordGoalRuntimeMessage.mockImplementation(
+          () => {
+            cancelClose = session.beginClose();
+            void session.cancelPendingPrompt();
+          },
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        cancelClose?.();
+      });
+
       it('records the model failure that pauses an ACP Goal turn', async () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',

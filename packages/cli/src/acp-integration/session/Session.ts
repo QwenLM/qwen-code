@@ -2568,15 +2568,24 @@ export class Session implements SessionContext {
             turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON) &&
           runtime.getSnapshot().goal?.status === 'active'
         ) {
-          await runtime.dispatch({
-            action: 'pause',
-            expectedGoalId: turn.permit.goalId,
-            expectedRevision: turn.permit.revision,
-            reason:
-              turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
-                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-                : GOAL_PAUSE_REASON_USER_INTERRUPT,
-          });
+          try {
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: turn.permit.goalId,
+              expectedRevision: turn.permit.revision,
+              reason:
+                turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+                  ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                  : GOAL_PAUSE_REASON_USER_INTERRUPT,
+            });
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to record pre-model ACP Goal turn settlement: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            await runtime.releaseTurn(turn.turnKey);
+          }
         } else {
           await runtime.releaseTurn(turn.turnKey);
         }

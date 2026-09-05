@@ -5201,7 +5201,6 @@ describe('useLlmStream', () => {
         () => {},
         () => Promise.resolve(),
         false,
-        false,
         () => {},
         () => {},
         () => {},
@@ -5382,7 +5381,6 @@ describe('useLlmStream', () => {
         () => {},
         () => Promise.resolve(),
         false,
-        false,
         () => {},
         () => {},
         () => {},
@@ -5544,7 +5542,6 @@ describe('useLlmStream', () => {
         () => {},
         () => Promise.resolve(),
         false,
-        false,
         () => {},
         () => {},
         () => {},
@@ -5602,11 +5599,10 @@ describe('useLlmStream', () => {
     );
   });
 
-  it('pairs a Goal tool batch into history when the turn is cancelled during the boundary drain', async () => {
+  it('pairs a cancelled Goal batch without persisting a restored steer', async () => {
     // A batch that passes the first cancellation check is already marked
-    // submitted by the time the boundary drain awaits. An Esc landing in that
-    // await takes the later exit, which owes the same pairing -- otherwise
-    // the next `/goal resume` sends unanswered function calls.
+    // submitted by the time the boundary drain resolves an in-band pause. The
+    // later exit owes the same pairing, but must not persist a steer it restores.
     const permit: GoalTurnPermit = {
       goalId: 'goal-drain-cancel',
       revision: 4,
@@ -5667,9 +5663,9 @@ describe('useLlmStream', () => {
         } as unknown as AnyToolInvocation,
       }) as unknown as TrackedCompletedToolCall;
 
-    // One queued `/goal` message is enough to make the boundary drain await:
-    // the hook hands it to the slash-command handler, which is held open
-    // below so the Esc lands inside that await.
+    // A plain steer resolved before an in-band `/goal pause` is both appended
+    // to the pending submission and eligible for restoration when that command
+    // preempts the Goal binding.
     let queuedSteerMessages: string[] = [];
     const midTurnDrainRef = {
       current: vi.fn<() => string[]>(() => {
@@ -5678,13 +5674,14 @@ describe('useLlmStream', () => {
         return drained;
       }),
     };
-    let releaseSlashCommand: (() => void) | undefined;
-    mockHandleSlashCommand.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          releaseSlashCommand = () => resolve(false);
-        }),
-    );
+    const midTurnRestoreRef = {
+      current: vi.fn<(messages: string[]) => void>(),
+    };
+    const preemptDuringSlashCommand = vi.fn();
+    mockHandleSlashCommand.mockImplementation(async () => {
+      preemptDuringSlashCommand();
+      return false;
+    });
 
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -5721,7 +5718,14 @@ describe('useLlmStream', () => {
         80,
         24,
         midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        midTurnRestoreRef,
       ),
+    );
+    preemptDuringSlashCommand.mockImplementation(() =>
+      result.current.preemptGoalTurn('paused by in-band command'),
     );
 
     mockSendMessageStream.mockImplementationOnce(() =>
@@ -5765,26 +5769,26 @@ describe('useLlmStream', () => {
     );
     rerender();
     client.addHistory.mockClear();
-    queuedSteerMessages = ['/goal status'];
-    const batch = act(async () => {
+    queuedSteerMessages = ['steer it this way', '/goal pause'];
+    await act(async () => {
       await capturedOnComplete?.([
         completedTool('done-tool'),
         completedTool('cont-tool'),
       ]);
     });
-    await waitFor(() => {
-      expect(releaseSlashCommand).toBeDefined();
-    });
-    act(() => {
-      result.current.cancelOngoingRequest();
-    });
-    releaseSlashCommand?.();
-    await batch;
 
     expect(client.addHistory).toHaveBeenCalledWith({
       role: 'user',
       parts: [{ text: 'done-tool response' }, { text: 'cont-tool response' }],
     });
+    expect(client.addHistory).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        parts: expect.arrayContaining([{ text: 'steer it this way' }]),
+      }),
+    );
+    expect(midTurnRestoreRef.current).toHaveBeenCalledWith([
+      'steer it this way',
+    ]);
     // The cancelled batch never reached the model.
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
   });
