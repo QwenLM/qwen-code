@@ -9904,6 +9904,57 @@ describe('Session', () => {
       );
     });
 
+    it('cancels a pending teammate approval when the team is detached', async () => {
+      let resolvePermission:
+        | ((response: RequestPermissionResponse) => void)
+        | undefined;
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolvePermission = resolve;
+          }),
+      );
+      const teamEvents = new EventEmitter();
+      const manager = {
+        setLeaderMessageCallback: vi.fn(),
+        getEventEmitter: () => teamEvents,
+      } as unknown as core.TeamManager;
+      const managerChanged = vi.mocked(mockConfig.onTeamManagerChange).mock
+        .calls[0]?.[0];
+      managerChanged?.(manager);
+      const respond = vi.fn().mockResolvedValue(undefined);
+
+      teamEvents.emit(core.TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+        teammateName: 'writer',
+        toolName: 'write_file',
+        toolInput: { file_path: '/repo/result.txt', content: 'done' },
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Write result.txt',
+          fileName: '/repo/result.txt',
+          filePath: '/repo/result.txt',
+          originalContent: '',
+          newContent: 'done',
+          fileDiff: '+done',
+        },
+        respond,
+        timestamp: Date.now(),
+      } satisfies core.TeammateApprovalRequestEvent);
+
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+      managerChanged?.(null);
+      await vi.waitFor(() =>
+        expect(respond).toHaveBeenCalledWith(
+          core.ToolConfirmationOutcome.Cancel,
+        ),
+      );
+      resolvePermission?.({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
     it('attaches structured agent metadata built from the canonical entry label', async () => {
       mockChat.sendMessageStream = vi
         .fn()

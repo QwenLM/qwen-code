@@ -422,6 +422,7 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+const TEAM_MANAGER_CHANGED_ABORT_REASON = 'qwen:team-manager-changed';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
@@ -2079,7 +2080,7 @@ export class Session implements SessionContext {
   #teammateApprovalListener:
     | ((event: TeammateApprovalRequestEvent) => void)
     | undefined;
-  private readonly teammateApprovalAbortController = new AbortController();
+  private teammateApprovalAbortController = new AbortController();
   private workflowHistory: WorkflowSnapshot[];
   /**
    * R7-5: runIds whose snapshot write this session has observed. Latches
@@ -9476,6 +9477,7 @@ export class Session implements SessionContext {
       this.#detachTeamManager();
       this.#boundTeamManager = manager;
       if (!manager) return;
+      this.teammateApprovalAbortController = new AbortController();
 
       manager.setLeaderMessageCallback((modelText, displayText) => {
         if (this.#boundTeamManager !== manager) return;
@@ -9505,6 +9507,9 @@ export class Session implements SessionContext {
 
   #detachTeamManager(): void {
     if (!this.#boundTeamManager) return;
+    this.teammateApprovalAbortController.abort(
+      TEAM_MANAGER_CHANGED_ABORT_REASON,
+    );
     this.#boundTeamManager.setLeaderMessageCallback(null);
     if (this.#teammateApprovalListener) {
       this.#boundTeamManager

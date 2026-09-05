@@ -131,6 +131,7 @@ export function createMockToolRegistry() {
     getAllToolNames: vi.fn().mockReturnValue([]),
     registerTool: vi.fn(),
     copyDiscoveredToolsFrom: vi.fn(),
+    discoverToolsForServer: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     tools: new Map(),
   };
