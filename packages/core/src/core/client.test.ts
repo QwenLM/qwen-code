@@ -11951,6 +11951,45 @@ Other open files:
         expect(request.input.message_id.length).toBeGreaterThan(0);
       });
 
+      it('discards MessageDisplay text from a failed fresh attempt', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({}),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'MessageDisplay',
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'stale answer' };
+            yield { type: LlmEventType.Retry, isContinuation: false };
+            yield { type: LlmEventType.Content, value: 'current answer' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-message-display-retry',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        expect(mockMessageBus.request).toHaveBeenCalledTimes(1);
+        expect(mockMessageBus.request.mock.calls[0][0]).toMatchObject({
+          eventName: 'MessageDisplay',
+          input: {
+            displayed_text: 'current answer',
+            is_final: true,
+          },
+        });
+      });
+
       it('fires a debounced mid-stream flush once the debounce window elapses, then a separate final flush', async () => {
         vi.useFakeTimers();
         const mockMessageBus = {

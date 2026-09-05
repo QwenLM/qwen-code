@@ -377,7 +377,12 @@ function setFakeHome(home: string): () => void {
 // Helper to create async generator with chunks (avoids memory leak).
 // COMPRESSED events carry `info` instead of `value`.
 function createStreamWithChunks(
-  chunks: Array<{ type: unknown; value?: unknown; info?: unknown }>,
+  chunks: Array<{
+    type: unknown;
+    value?: unknown;
+    info?: unknown;
+    isContinuation?: boolean;
+  }>,
 ) {
   return (async function* () {
     for (const chunk of chunks) {
@@ -9767,6 +9772,118 @@ describe('Session', () => {
         },
       );
     });
+
+    it.each([
+      {
+        name: 'fresh retry',
+        event: { type: core.StreamEventType.RETRY },
+      },
+      {
+        name: 'model fallback',
+        event: {
+          type: core.StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'primary',
+            toModel: 'fallback',
+            fallbackIndex: 1,
+          },
+        },
+      },
+    ])(
+      'discards stale background notification state on $name',
+      async ({ event }) => {
+        const messageBus = { request: vi.fn().mockResolvedValue({}) };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation(
+            (eventName: string) => eventName === 'MessageDisplay',
+          );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'stale answer' }] } },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 111,
+                    candidatesTokenCount: 222,
+                  },
+                },
+              },
+              event,
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'current answer' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+        callback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              content: { type: 'text', text: 'current answer' },
+              _meta: expect.objectContaining({
+                source: 'background_notification_response',
+              }),
+            }),
+          });
+        });
+
+        const responseUpdates = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([request]) => request.update)
+          .filter(
+            (update) =>
+              update._meta?.['source'] === 'background_notification_response',
+          );
+        expect(responseUpdates).toHaveLength(1);
+        expect(responseUpdates[0]).toEqual(
+          expect.objectContaining({
+            content: { type: 'text', text: 'current answer' },
+          }),
+        );
+        expect(session.cumulativeUsage).toMatchObject({
+          promptTokens: 0,
+          candidateTokens: 0,
+        });
+
+        const finalDisplay = messageBus.request.mock.calls
+          .map(([request]) => request)
+          .find(
+            (request) =>
+              request.eventName === 'MessageDisplay' && request.input.is_final,
+          );
+        expect(finalDisplay?.input.displayed_text).toBe('current answer');
+      },
+    );
 
     it('attaches structured agent metadata built from the canonical entry label', async () => {
       mockChat.sendMessageStream = vi

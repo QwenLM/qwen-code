@@ -89,6 +89,7 @@ export * from './core/inlineMediaLimit.js';
 export * from './core/insightProtocol.js';
 export * from './core/logger.js';
 export * from './core/message-display-dispatcher.js';
+export * from './core/model-stream-attempt-state.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/output-styles.js';
