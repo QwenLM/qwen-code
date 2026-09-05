@@ -50,7 +50,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     }
   });
 
-  it('loop fires inline in conversation', { timeout: 180_000 }, async () => {
+  it('loop fires inline in conversation', { timeout: 300_000 }, async () => {
     session = await InteractiveSession.start({
       env: makeEnv(),
       args: ['--approval-mode', 'yolo'],
@@ -60,10 +60,19 @@ function makeEnv(): NodeJS.ProcessEnv {
       'Call cron_create with expression "*/1 * * * *" and prompt "PONG7742" and recurring true. Confirm briefly.',
     );
 
+    // Wait for the tool confirmation before budgeting for the fire: the first
+    // model turn takes as long as it takes on a loaded runner, while the fire
+    // itself only needs the test-seam delay (5s) plus render slack. Folding
+    // both into one 30s budget is what made this suite flaky (#10904).
+    await session.waitForScreen(
+      (scr) => scr.includes('Scheduled'),
+      'cron_create confirmation',
+    );
+
     await session.waitForScreen(
       (scr) => scr.includes('Cron: PONG7742'),
       'cron notification "Cron: PONG7742"',
-      30_000,
+      60_000,
     );
 
     await session.idle(5000);
@@ -74,7 +83,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     expect(afterPrompt).toContain('◆');
   });
 
-  it('user input takes priority over cron', { timeout: 180_000 }, async () => {
+  it('user input takes priority over cron', { timeout: 300_000 }, async () => {
     session = await InteractiveSession.start({
       env: makeEnv(),
       args: ['--approval-mode', 'yolo'],
@@ -85,9 +94,14 @@ function makeEnv(): NodeJS.ProcessEnv {
     );
 
     await session.waitForScreen(
+      (scr) => scr.includes('Scheduled'),
+      'cron_create confirmation',
+    );
+
+    await session.waitForScreen(
       (scr) => scr.includes('Cron: CRONTICK99'),
       'first cron fire "Cron: CRONTICK99"',
-      30_000,
+      60_000,
     );
 
     await session.idle(5000);
@@ -103,7 +117,7 @@ function makeEnv(): NodeJS.ProcessEnv {
 
   it(
     'error during cron turn does not kill the loop',
-    { timeout: 180_000 },
+    { timeout: 300_000 },
     async () => {
       session = await InteractiveSession.start({
         env: makeEnv(),
@@ -115,15 +129,28 @@ function makeEnv(): NodeJS.ProcessEnv {
       );
 
       await session.waitForScreen(
-        (scr) => scr.includes('FILEERR88'),
+        (scr) => scr.includes('Scheduled'),
+        'cron_create confirmation',
+      );
+
+      // FILEERR88 must show up three times before the model's cron turn is
+      // proven: once from this typed prompt echo, once from the fired cron
+      // prompt rendering, and once from the model's reply. A bare includes()
+      // would pass on the echo alone and never observe the fire. This assumes
+      // the cron notification renders the full prompt text (test 1 above
+      // relies on the same for PONG7742); if a long prompt ever gets
+      // truncated there, this count needs adjusting, not the budget.
+      await session.waitForScreen(
+        (scr) => (scr.match(/FILEERR88/g) ?? []).length >= 3,
         'model reporting FILEERR88 from cron prompt',
-        30_000,
       );
 
       await session.idle(5000);
       await session.send('Reply with exactly ALIVE99 nothing else');
+      // Same echo discipline as USERPRIORITY77 above: the marker must appear
+      // in the reply, not only in the typed prompt.
       await session.waitForScreen(
-        (scr) => scr.includes('ALIVE99'),
+        (scr) => scr.indexOf('ALIVE99') !== scr.lastIndexOf('ALIVE99'),
         'model response ALIVE99',
       );
     },
