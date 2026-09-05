@@ -285,7 +285,7 @@ function sanitizeProviderWarning(warning: string): string {
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
     const segment = warning.slice(next.index, segmentEnd);
-    result += sanitizeProviderWarningSegment(segment, next.marker.length);
+    result += sanitizeProviderWarningSegment(segment);
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
@@ -320,34 +320,20 @@ function findUrlSegmentEnd(
   return Math.min(lineEnd, nextUrl?.index ?? value.length);
 }
 
-function sanitizeProviderWarningSegment(
-  segment: string,
-  markerLength: number,
-): string {
-  const at = segment.indexOf('@', markerLength);
-  if (
-    at !== -1 &&
-    hasCredentialPrefix(segment, markerLength, at) &&
-    segment[at + 1] !== undefined &&
-    /[A-Za-z0-9.[\]-]/.test(segment[at + 1])
-  ) {
-    return `${segment.slice(0, markerLength)}${segment.slice(at + 1)}`;
+function sanitizeProviderWarningSegment(segment: string): string {
+  // When the whole segment is a URL that sanitizeProviderBaseUrl confirms
+  // carries real userinfo (it changes the segment), use its result directly.
+  // This handles space-containing-credential URLs that URL_LIKE_PATTERN cannot
+  // match past the whitespace, and the '@'-in-password shape (last '@' wins).
+  // The veto in sanitizeProviderBaseUrl leaves pathless-URL + prose-email
+  // shapes unchanged, so a prose email's '@' is never stripped. #8136.
+  const sanitized = sanitizeProviderBaseUrl(segment);
+  if (sanitized !== segment) {
+    return sanitized;
   }
-
   return segment.replace(URL_LIKE_PATTERN, (url) =>
     sanitizeProviderBaseUrl(url),
   );
-}
-
-function hasCredentialPrefix(
-  segment: string,
-  markerLength: number,
-  at: number,
-): boolean {
-  const colon = segment.indexOf(':', markerLength);
-  if (colon === -1 || colon > at) return false;
-  const username = segment.slice(markerLength, colon);
-  return !/[/?#\s'"`<>]/.test(username);
 }
 
 function buildCurrent(
