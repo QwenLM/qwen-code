@@ -30,7 +30,7 @@ import { pathTool } from '../script-lint.js';
 // The topology gate lives in `budget.ts` — it is a size ruling, and the round
 // cap needs the same one. Re-exported here because this file was its home and
 // the roster is where a reader looks for "which fan-out was owed".
-export { isTerritoryFanOut } from './budget.js';
+export { isTerritoryFanOut, isFixAuditRound } from './budget.js';
 import { isTerritoryFanOut } from './budget.js';
 
 /**
@@ -85,6 +85,12 @@ export interface RosterPlan {
    */
   effort?: unknown;
   repositoryContext?: unknown;
+  /**
+   * The capture command's incremental ruling. The roster reads it through
+   * `isTerritoryFanOut` — a critical-posture round keeps the territory
+   * shape and the full agent set whatever the narrowed delta's size says.
+   */
+  incremental?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -210,6 +216,18 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // issue-fidelity pass regardless of whether it has a worktree. Both halves of
   // the identity, because the brief builder needs both — requiring an agent
   // nobody could build would wedge the run.
+  // …and on a fix-audit round too (#10104). The posture's first draft
+  // dropped Agent 0 here on the claim that the one Critical-grade fidelity
+  // regression — a fix commit removing behaviour the issue required — is
+  // the removed-behavior audit's territory (1b), which the round keeps. A
+  // probe through the real pipeline disproved the claim in its canonical
+  // shape: the published scope is assembled from `base..head`, and
+  // behaviour the PR itself added is absent at the merge base and — once a
+  // fix commit removes it — absent at head, so the removal appears on
+  // NEITHER side: `removedLines` stays 0, `hasDeletions` drops 1b, and no
+  // chunk territory displays it. Issue fidelity re-checks head against the
+  // issue whatever the diff displays, so it is the one auditor that can
+  // still see the class, and the round keeps it.
   if (isPositivePrNumber(plan.prNumber) && typeof plan.ownerRepo === 'string') {
     add('0');
   }

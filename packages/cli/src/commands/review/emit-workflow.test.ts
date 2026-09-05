@@ -240,6 +240,33 @@ describe('emit-workflow — what it refuses', () => {
     expect(readRecordedPrompts(planPath).size).toBe(0);
   });
 
+  // The growth premise is a SIZE fact: a fix-audit round reads as a
+  // territory fan-out whatever its narrowed sizes say, but its roster is
+  // bounded by the same size fields — so the blocker rules on size alone.
+  it('serves a 3A-sized fix-audit round and still refuses a 3B-sized one (#10136)', () => {
+    const posture = {
+      since: 'a'.repeat(40),
+      effective: true,
+      posture: 'critical',
+      postureCause: 'round',
+      scope: {
+        anchor: 'a'.repeat(40),
+        deltaFiles: ['src/a.ts'],
+        interaction: [],
+      },
+    };
+    const narrow = localPlan({ incremental: posture });
+    expect(fanOutBlocker(narrow as unknown as RosterPlan)).toBeNull();
+    const wide = localPlan({
+      incremental: posture,
+      srcDiffLines: 2000,
+      diffLines: 6000,
+    });
+    expect(fanOutBlocker(wide as unknown as RosterPlan)).toMatch(
+      /territory fan-out \(Step 3B\)/,
+    );
+  });
+
   // A plan whose sizes failed to arrive is not a small review — its topology
   // is UNKNOWABLE, and `isTerritoryFanOut`'s missing-to-zero coercion would
   // bake the guess that it is 3A into the script.

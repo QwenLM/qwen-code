@@ -35,6 +35,7 @@ import { buildDiffPlan } from './lib/diff-plan.js';
 import { buildPlanReport } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { makeDiff } from './lib/test-utils.js';
+import { requiredAgents } from './lib/roster.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -1526,6 +1527,299 @@ describe('fetch-pr report assembly', () => {
     // the plan naming it is worth nothing if no chunk holds its diff.
     expect(writtenDiff()).toContain('b/a.ts');
     expect(writtenDiff()).toContain('b/b.ts');
+  });
+
+  it('resolves the critical posture from the side file and seam-bounds the widening (#10104)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // `b.ts` imports the changed file, but on lines its own single hunk
+    // (new-side 1-2) does not display — the seam-bounded widening keeps the
+    // file with none of its hunks.
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        // The previous posted round: round 7, so this round is 8 — past the
+        // auto floor's round schedule.
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('round');
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'], seam: { kept: 0, total: 1 } },
+    ]);
+    // The file publishes header-only: still in scope (a chunk holds it, its
+    // brief asks the seam question), none of its cleared hunks re-shown.
+    const diff = writtenDiff() ?? '';
+    expect(diff).toContain('diff --git a/b.ts b/b.ts');
+    expect(diff).not.toContain('+y2');
+    expect(diff).toContain('+added');
+    // The recorded round cap prices the territory tier the posture flips to,
+    // not the small tier the narrowed sizes would read.
+    expect(report.budget.reverseAuditRounds).toBe(5);
+  });
+
+  // The capture-time recovery of the operator's RECORDED floor (#10136
+  // R1-5): the same record compose and submit read, bound to the same
+  // identity axes. Each test plants the CLI's own args record beside a side
+  // file that would otherwise resolve the posture.
+  function postureSideFile(path: unknown): string | null {
+    if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+      return JSON.stringify({ round: 7, findings: [], posted: 1, floor: 'c' });
+    }
+    return null;
+  }
+
+  it('a recorded `--severity-floor suggestion` turns the posture off at capture (#10136)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      const side = postureSideFile(path);
+      if (side !== null) return side;
+      // The session's own record: this PR, posture explicitly off.
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return '42 --severity-floor suggestion';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    // The side file alone would resolve `round`; the record wins, and the
+    // round keeps the full shape: no posture, the interaction file
+    // republished in full with no seam census.
+    expect(report.incremental.posture).toBeUndefined();
+    expect(report.incremental.postureCause).toBeUndefined();
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    expect(writtenDiff() ?? '').toContain('+y2');
+  });
+
+  it('a recorded `--severity-floor critical` engages the posture on an early anchored re-review (#10136)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return "import { added } from './a.js';\nadded();\n";
+      }
+      // Round 2 — years short of the schedule, no streak.
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({ round: 1, findings: [], posted: 1 });
+      }
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return '42 --severity-floor critical';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('explicit');
+    expect(report.budget.reverseAuditRounds).toBe(5);
+  });
+
+  it("binds a URL-shaped record's host to the remote under review, as submit does (#10136 R1-12)", async () => {
+    // The record names a GHE host; no `--host` flag and no GH_HOST reach
+    // this capture. `resolveGhHost` alone reads github.com and the record
+    // would not bind — the operator's posture-off would be missed and the
+    // narrowed shape spent against it. The remote under review carries the
+    // host, and the chain reads it.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse'
+        ? 'f00df00df00d'
+        : args[0] === 'remote' && args[1] === 'get-url'
+          ? 'git@ghe.example.com:acme/widgets.git\n'
+          : '',
+    );
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return "import { added } from './a.js';\nadded();\n";
+      }
+      const side = postureSideFile(path);
+      if (side !== null) return side;
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return 'https://ghe.example.com/acme/widgets/pull/42 --severity-floor suggestion';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.posture).toBeUndefined();
+      expect(report.incremental.postureCause).toBeUndefined();
+    } finally {
+      if (savedHost !== undefined) process.env['GH_HOST'] = savedHost;
+    }
+
+    // The control: the same record with a remote on ANOTHER host does not
+    // bind, and the side file resolves the posture — the axis is live.
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse'
+        ? 'f00df00df00d'
+        : args[0] === 'remote' && args[1] === 'get-url'
+          ? 'git@github.com:acme/widgets.git\n'
+          : '',
+    );
+    delete process.env['GH_HOST'];
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.posture).toBe('critical');
+      expect(report.incremental.postureCause).toBe('round');
+    } finally {
+      if (savedHost !== undefined) process.env['GH_HOST'] = savedHost;
+    }
+  });
+
+  it('keeps a heavy interaction file unbounded so its invariant agents launch (#10136)', async () => {
+    // Heaviness is classified from the PUBLISHED slice. If the seam bound
+    // trimmed a file whose FULL-RANGE slice clears the heavy bar, the plan
+    // would flip it to non-heavy, `heavyFiles()` would drop it, and the
+    // invariant agents that read it whole from the worktree — the only
+    // auditors of hunks a backward base move smuggles in — would never
+    // launch, on exactly the rounds the bound runs. The bound therefore
+    // lifts wholesale for a heavy full-range slice: no seam record, every
+    // hunk republished, and the roster still owes the invariant agents.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    const heavyBulk = Array.from({ length: 800 }, (_, i) => `+heavy ${i}`);
+    const HEAVY_FULL = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,3 +1,4 @@',
+      ' line',
+      '+added',
+      ' line2',
+      ' line3',
+      '',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      // Hunk on the seam (the import + its one use)…
+      '@@ -1,1 +1,2 @@',
+      " import { added } from './a.js';",
+      '+added();',
+      // …and a heavy hunk far from it. Full-range changedLines = 801.
+      '@@ -100,2 +101,802 @@',
+      ' ctx',
+      ...heavyBulk,
+      ' ctx2',
+      '',
+    ].join('\n');
+    // fileLines 1102 — preLines = 1102 - 801 = 301 clears the heavy bar's
+    // pre-image floor beside the 801 changed lines.
+    const B_SOURCE =
+      "import { added } from './a.js';\nadded();\n" +
+      Array.from({ length: 1100 }, (_, i) => `filler ${i}`).join('\n');
+    servesBothRanges(HEAVY_FULL, DELTA_DIFF);
+    // The plan report resolves post-image line counts via `git show
+    // <sha>:<path>` — serve b.ts's content there too, or the plan sees a
+    // zero-line file and classifies it non-heavy whatever the bound did.
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args[0] === 'show' && args[1] === 'f00df00df00d:b.ts'
+        ? Buffer.from(B_SOURCE)
+        : args.includes(`${ANCHOR}..f00df00df00d`)
+          ? Buffer.from(DELTA_DIFF)
+          : args.includes(`${BASE}..f00df00df00d`)
+            ? Buffer.from(HEAVY_FULL)
+            : Buffer.from(''),
+    );
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return B_SOURCE;
+      }
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    // No seam record: the bound was lifted, so both hunks republish.
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    const diff = writtenDiff() ?? '';
+    expect(diff).toContain('+added();');
+    expect(diff).toContain('+heavy 0');
+    expect(diff).toContain('+heavy 799');
+    // The plan classifies it heavy from the published slice, and the roster
+    // requires the whole-file invariant agents for it.
+    const b = (report.files as Array<{ path: string; heavy: boolean }>).find(
+      (f) => f.path === 'b.ts',
+    );
+    expect(b?.heavy).toBe(true);
+    const agentKeys = requiredAgents(report).map((a) => a.key);
+    expect(agentKeys).toContain('invariant-a--b.ts');
+    expect(agentKeys).toContain('invariant-b--b.ts');
+    expect(agentKeys).toContain('invariant-c--b.ts');
   });
 
   it('drops a widening candidate whose real path leaves the worktree', async () => {

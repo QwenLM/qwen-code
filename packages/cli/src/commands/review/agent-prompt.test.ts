@@ -5093,6 +5093,369 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(rounds).toContain(2);
   });
 
+  it('a fix-audit round narrows the wave and the note names it (#10104)', () => {
+    // Chunk 13 is the delta territory; 14 and 15 hold interaction files.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+              seam: { kept: 2, total: 2 },
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    // 13 is delta (ordinary rules, yield+dry: hot); 15 yielded last wave;
+    // 14 is a non-delta territory whose latest audit is dry — narrowed out
+    // after ONE dry receipt, where plain retirement would need two.
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).toContain('— chunk 15 ─');
+    expect(out).not.toContain('— chunk 14 ─');
+    expect(out).toContain('posture-narrowed chunk(s) skipped');
+    expect(out).toContain('posture narrowing (#10104)');
+    expect(out).toContain('chunk 14 — not a delta territory, dry in round 2');
+    // The note states the scheduler's inclusion rule — a non-delta chunk
+    // whose latest receipt is uncertified stays hot too (#10136 R1-13) —
+    // and the preamble's tail grammar announces the note (R1-17).
+    expect(out).toContain(
+      'every non-delta chunk the previous waves could not certify dry',
+    );
+    expect(out).toContain('uncertified (unknown)');
+    expect(out).toContain(
+      'stale against a same-digest yield or uncertified receipt',
+    );
+    expect(out).toContain('under the ordinary retirement rules');
+    expect(out).toContain('returns to the ordinary retirement rules');
+    expect(out).toContain(
+      'followed by the retirement and posture-narrowing notes, when there are any',
+    );
+    // The reverse-auditor's territory bullet for chunk 15's interaction
+    // file: a census that kept every hunk is named as such, never as a
+    // shed (#10136 R1-7).
+    const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-3--'),
+    );
+    if (key15 === undefined) throw new Error('chunk 15 was not built');
+    const brief = readFileSync(briefPath(plan, key15), 'utf8');
+    expect(brief).toContain(
+      'all 2 hunk(s) display a seam line and are republished',
+    );
+    expect(brief).not.toContain('not re-shown');
+    // The reverse auditor's brief carries the fix-audit framing too — the
+    // floor governs posting, never finding (#10136).
+    expect(brief).toContain('Fix-audit round (critical posting posture)');
+    expect(brief).toContain('the floor governs posting, never');
+  });
+
+  it('a reverse-audit brief names a shed census as seam-bounded, and a plain round carries no banner (#10136)', () => {
+    const shed = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+              seam: { kept: 1, total: 3 },
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(shed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-1--'),
+    );
+    if (key15 === undefined) throw new Error('chunk 15 was not built');
+    const brief = readFileSync(briefPath(plan, key15), 'utf8');
+    expect(brief).toContain(
+      'seam-bounded: 1 of 3 hunk(s) republished; the rest were cleared by an earlier round and are not re-shown',
+    );
+    expect(brief).toContain('Fix-audit round (critical posting posture)');
+
+    // Without the posture: the same incremental scope, no banner.
+    const plain = {
+      ...shed,
+      incremental: { ...shed.incremental, posture: undefined },
+    };
+    writeFileSync(plan, JSON.stringify(plain));
+    utimesSync(plan, old, old);
+    runRound(1);
+    const key15b = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-1--'),
+    );
+    if (key15b === undefined) throw new Error('chunk 15 was not built');
+    const plainBrief = readFileSync(briefPath(plan, key15b), 'utf8');
+    expect(plainBrief).not.toContain('Fix-audit round');
+  });
+
+  it('a round that converges through narrowing names the narrowed chunks in CONVERGED (#10136 R1-10)', () => {
+    // The cleanest fix-audit run: the delta chunk retires on two dry
+    // receipts, the interaction chunks narrow out on their single one, and
+    // round 3 builds nothing. No round output carries the `posture
+    // narrowing:` note for it, so the CONVERGED explanation must — chunk by
+    // chunk, exactly as a built round would have.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('Posture-narrowed this round (#10104):');
+    expect(msg).toContain('chunk 14 — not a delta territory, dry in round 2');
+    expect(msg).toContain('chunk 15 — not a delta territory, dry in round 2');
+    expect(msg).not.toContain('chunk 13 — not a delta territory');
+  });
+
+  it('a chunk the scope record never classified restores the ordinary schedule (#10136 R12-1)', () => {
+    // The scope covers chunk 13's delta file and names NO interaction
+    // files, yet chunks 14 and 15 hold files — a state an honest capture
+    // cannot produce (the published sections tile touched ∪ interaction).
+    // Narrowing would price 14 and 15 out of the wave on one dry receipt
+    // each; the containment check reads the plan as corrupted and runs the
+    // ordinary schedule instead: every chunk audited, nothing narrowed.
+    const corrupt = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(corrupt));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    // Two dry receipts each for 14 and 15 — the narrowing would price both
+    // out on the single receipt and the ordinary rules RETIRE them: both
+    // skip round 3, and only the note tells the two schedules apart. The
+    // containment gate is what makes it the retirement note.
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('1 auditors required this round');
+    expect(out).toContain('2 retired chunk(s) skipped');
+    expect(out).toContain('retirement: a chunk whose two most recent audits');
+    expect(out).not.toContain('posture narrowing');
+    expect(out).not.toContain('posture-narrowed');
+  });
+
+  it('a chunk file entry without a usable path is malformed input: ordinary schedule (#10136)', () => {
+    // The containment gate must not skip what it cannot read: a file entry
+    // whose path is not a non-empty string is a chunk the record cannot
+    // classify either way, and the schedule falls back to auditing it.
+    const corrupt = {
+      ...PLAN,
+      chunks: (PLAN.chunks as Array<{ id: number; files: unknown[] }>).map(
+        (c) => (c.id === 14 ? { ...c, files: [{ path: 7 }] } : c),
+      ),
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(corrupt));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    // Two dry receipts each: the narrowing would narrow, the ordinary
+    // rules retire — the note names which schedule ran.
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('2 retired chunk(s) skipped');
+    expect(out).not.toContain('posture-narrowed');
+  });
+
+  it('the per-chunk path names the narrowed chunks in CONVERGED too (#10136 R1-10)', () => {
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+
+    // A single-chunk rebuild of a round nobody admitted: the schedule has
+    // converged, and the refusal must carry the same narrowed list the
+    // `--all-chunks` refusal does.
+    process.exitCode = undefined;
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      chunk: 14,
+      findings,
+      round: 3,
+    });
+    expect(process.exitCode).toBe(5);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('Posture-narrowed this round (#10104):');
+    expect(msg).toContain('chunk 14 — not a delta territory, dry in round 2');
+    expect(msg).toContain('chunk 15 — not a delta territory, dry in round 2');
+  });
+
+  it('a delta list no chunk covers degrades to the ordinary schedule, never an empty narrowing (#10104)', () => {
+    // A hand-edited plan can name delta files no chunk holds — an honest
+    // capture cannot produce the disjoint state, so the input class is the
+    // corrupted plan these gates exist for. An EMPTY delta-territory set
+    // would treat every chunk as non-delta: from round 3 each leaves after
+    // one dry receipt, the round exits 5 on a false "clean convergence",
+    // and the territory this round exists to audit was examined only in
+    // rounds 1-2. Every sibling reader fails malformed input toward MORE
+    // coverage; the schedule must too — null restores the byte-for-byte
+    // ordinary schedule.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['src/disjoint.ts'],
+          // Every chunk file IS classified (interaction), so the
+          // containment gate passes and the EMPTY delta-coverage guard is
+          // the one ruling here.
+          interaction: [
+            'packages/cli/src/commands/review/x.test.ts',
+            'a.ts',
+            'bundle.min.js',
+          ].map((path) => ({ path, importsChanged: ['src/disjoint.ts'] })),
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    // Chunk 13 yielded in round 2, so the ordinary rules keep it hot; 14
+    // and 15 retire on two dry rounds.
+    expect(out).toContain('1 auditors required this round');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).not.toContain('posture narrowing (#10104)');
+  });
+
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
@@ -6958,6 +7321,96 @@ describe('incremental-scope briefs', () => {
     expect(seam).toContain('cleared by the previous round');
     expect(seam).toContain('INTERACTION only');
     expect(seam).toContain('src/changed.ts');
+  });
+
+  it('a fix-audit round frames the brief and discloses the seam bound (#10104)', () => {
+    const fixAudit = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          ...INCREMENTAL_PLAN.incremental.scope,
+          interaction: [
+            {
+              path: 'src/caller.ts',
+              importsChanged: ['src/changed.ts'],
+              seam: { kept: 1, total: 4 },
+            },
+          ],
+        },
+      },
+    };
+    const delta = buildChunkAgentPrompt(fixAudit, 1);
+    expect(delta).toContain('Fix-audit round (critical posting posture)');
+    expect(delta).toContain('the floor governs posting, never');
+    // The banner's deferral claim carries the deterministic carve-out the
+    // reroute applies — an auditor trusting "never posted" unqualified
+    // could drop a `[test]` finding the floor keeps inline at any floor.
+    expect(delta).toContain('never posted — except pre-confirmed');
+
+    const seam = buildChunkAgentPrompt(fixAudit, 2);
+    expect(seam).toContain('SEAM-BOUNDED: 1 of 4 hunk(s)');
+    expect(seam).toContain('still yours in full, from the worktree');
+
+    // Without the posture, no fix-audit frame and no seam clause — the seam
+    // census is a fix-audit fact, and a plan without one renders none.
+    const plain = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
+    expect(plain).not.toContain('Fix-audit round');
+    expect(plain).not.toContain('SEAM-BOUNDED');
+  });
+
+  it('a census that kept every hunk is briefed as complete, never as seam-bounded (#10136 R1-7)', () => {
+    const whole = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          ...INCREMENTAL_PLAN.incremental.scope,
+          interaction: [
+            {
+              path: 'src/caller.ts',
+              importsChanged: ['src/changed.ts'],
+              seam: { kept: 4, total: 4 },
+            },
+          ],
+        },
+      },
+    };
+    const seam = buildChunkAgentPrompt(whole, 2);
+    expect(seam).not.toContain('SEAM-BOUNDED');
+    expect(seam).not.toContain('not re-shown');
+    expect(seam).toContain('The seam scan kept every one of its 4 hunk(s)');
+    expect(seam).toContain('its diff here is complete');
+  });
+
+  it('a malformed seam census renders no seam clause', () => {
+    const bad = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        scope: {
+          ...INCREMENTAL_PLAN.incremental.scope,
+          interaction: [
+            {
+              path: 'src/caller.ts',
+              importsChanged: ['src/changed.ts'],
+              seam: { kept: 5, total: 2 },
+            },
+          ],
+        },
+      },
+    };
+    const seam = buildChunkAgentPrompt(bad, 2);
+    expect(seam).toContain('INTERACTION only');
+    expect(seam).not.toContain('SEAM-BOUNDED');
   });
 
   it('whole-diff role briefs carry the frame once, up front', () => {

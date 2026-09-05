@@ -54,7 +54,11 @@ import {
   roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
-import { LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
+import {
+  interactionEntryOf,
+  isFixAuditRound,
+  LARGE_REVERSE_AUDIT_ROUNDS,
+} from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   HOSTNAME_RE,
@@ -99,6 +103,7 @@ import {
   type LedgerFinding,
 } from './lib/ledger.js';
 import { mdField, stripCommentGrammar } from './lib/md-field.js';
+import { CRITICAL_FLOOR_ROUND, FLAT_STREAK_TO_ENGAGE } from './lib/posture.js';
 import {
   convergenceAdvisory,
   convergenceAssessment,
@@ -950,6 +955,7 @@ export function criticalFloorKind(
   contextUnavailable: boolean,
   prevRound: number,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): CriticalFloorKind | undefined {
   // The REPORTING reading, and it folds an absent or unrecognisable floor
   // into `auto` the way `composeReviewBody` already does ("A floor the
@@ -985,6 +991,7 @@ export function criticalFloorKind(
     contextUnavailable,
     prevRound,
     signalEngaged,
+    fixAuditPlan,
   );
 }
 
@@ -1006,6 +1013,7 @@ export function criticalFloorInEffect(
   contextUnavailable: boolean,
   prevRound: number,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): boolean {
   return (
     floorResolvesCritical(
@@ -1013,6 +1021,7 @@ export function criticalFloorInEffect(
       contextUnavailable,
       prevRound,
       signalEngaged,
+      fixAuditPlan,
     ) !== undefined
   );
 }
@@ -1023,6 +1032,7 @@ function floorResolvesCritical(
   contextUnavailable: boolean,
   prevRound: number,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): CriticalFloorKind | undefined {
   // `prevRound` is the PREVIOUS posted round, so the review being composed
   // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
@@ -1030,7 +1040,11 @@ function floorResolvesCritical(
   // critical".
   const thisRound = prevRound + 1;
   if (floor === 'critical') return 'explicit';
-  if (floor === 'auto' && !contextUnavailable && thisRound >= 6) {
+  if (
+    floor === 'auto' &&
+    !contextUnavailable &&
+    thisRound >= CRITICAL_FLOOR_ROUND
+  ) {
     return 'auto-resolved';
   }
   // The signal-driven early trigger (#9903): the convergence diagnosis's
@@ -1044,6 +1058,19 @@ function floorResolvesCritical(
   if (floor === 'auto' && !contextUnavailable && signalEngaged === true) {
     return 'auto-signaled';
   }
+  // The fix-audit arm (#10104): the PLAN records that the capture resolved
+  // this round's posture to critical from the same side-file facts the two
+  // arms above read — and the round's SHAPE was spent on that resolution
+  // (narrowed fan-out, seam-bounded republication, narrowed waves).
+  // Where the arms above cannot re-derive it — a context-unavailable
+  // compose, or a side file rewritten between capture and compose — the
+  // plan's own record still resolves the floor, because the alternative is
+  // the one combination nothing licenses: a round that narrowed its
+  // coverage on the posture and then posts Suggestions in full, beside a
+  // disclosure describing the posture it did not run. Gated on `auto`
+  // exactly like the other arms: an explicit `suggestion` is the operator
+  // turning the posture off, and it wins over a stale plan record.
+  if (floor === 'auto' && fixAuditPlan === true) return 'auto-resolved';
   return undefined;
 }
 
@@ -1061,12 +1088,16 @@ function floorResolvesCritical(
  * exists as code, here, where the drafts are already in hand.
  *
  * Enforcement fires ONLY where the deferral licence already holds: an
- * explicit `critical` floor at any round, `auto` at round ≥ 6, or `auto`
- * with the flat-trend streak at its bar (#9903) — the `auto` arms only
- * with the round knowable. Everything else fails OPEN exactly as the
+ * explicit `critical` floor at any round, `auto` at round ≥ 6, `auto`
+ * with the flat-trend streak at its bar (#9903) — those two `auto` arms
+ * only with the round knowable — or `auto` beside the plan's own fix-audit
+ * record (#10104), which holds even context-unavailable and at round 1
+ * because the capture already spent the round's shape on the resolution.
+ * Everything else fails OPEN exactly as the
  * posture itself does — an unrecognisable floor, `auto` before round 6 with
- * the streak below its bar, `auto` in the context-unavailable state (the
- * round is unknowable), `--severity-floor suggestion` (posture off): a
+ * the streak below its bar, `auto` in the context-unavailable state without
+ * a fix-audit plan record (the round is unknowable), `--severity-floor
+ * suggestion` (posture off): a
  * posting bar in doubt posts. The rounds-2–5
  * code-age rule stays model-side on purpose — it needs the worktree git
  * checks this module does not have.
@@ -1085,6 +1116,7 @@ export function floorEnforcedReroute(
   prevRound: number,
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): { indices: number[]; entries: DeferredEntry[] } {
   if (
     !criticalFloorInEffect(
@@ -1092,6 +1124,7 @@ export function floorEnforcedReroute(
       contextUnavailable,
       prevRound,
       signalEngaged,
+      fixAuditPlan,
     )
   ) {
     return { indices: [], entries: [] };
@@ -2261,12 +2294,17 @@ export function composeReview(
   // here (`=== true`); the authoritative shape check stays in
   // `composeReviewBody`, which runs on the same input immediately after
   // and throws the same TypeError either way.
+  // The plan's own posture record (#10104) — the third evidence source the
+  // resolution reads, so a fix-audit round's posting bar can never disagree
+  // with the shape it already ran.
+  const fixAuditPlan = fixAuditShapeFacts(input.planPath) !== null;
   const reroute = floorEnforcedReroute(
     input.severityFloor,
     input.contextUnavailable === true,
     prevRound,
     Array.isArray(input.draftedComments) ? input.draftedComments : [],
     signalEngaged,
+    fixAuditPlan,
   );
   // The one resolution, read by the enforcement above and reported by the
   // diagnosis below — and stamped into this round's marker, so the NEXT round
@@ -2276,6 +2314,7 @@ export function composeReview(
     input.contextUnavailable === true,
     prevRound,
     signalEngaged,
+    fixAuditPlan,
   );
   let effective = input;
   if (reroute.indices.length > 0) {
@@ -2331,6 +2370,7 @@ export function composeReview(
     input.contextUnavailable === true,
     prevRound,
     signalEngaged,
+    fixAuditPlan,
   );
   const postedLedger = buildPostedLedger(
     effective,
@@ -2569,18 +2609,9 @@ export const CHURN_MIN_FRESH = 4;
  */
 export const CHURN_STREAK_TO_FILE = 2;
 
-/**
- * How many consecutive rounds of a not-falling first-time-finding rate
- * engage the severity floor ahead of the round-6 schedule (#9903).
- *
- * Two, for the argument `CHURN_STREAK_TO_FILE` above states: one flat round
- * is a step, two is the shortest window in which "the rate is not falling"
- * is an observation. The bar is read off the ledger's `flatRounds` streak,
- * which a round advances when its OWN measured trend fires and resets when
- * it falls — so reaching it always takes two measured firing rounds; a
- * carried or pinned streak never adds.
- */
-export const FLAT_STREAK_TO_ENGAGE = 2;
+// The flat-trend bar lives in `lib/posture.ts` beside the round schedule:
+// the capture command's plan-time posture prediction (#10104) reads the same
+// two constants this resolution does, so the two cannot drift.
 
 /**
  * This round's census, or null when it cannot be read as one.
@@ -3297,12 +3328,17 @@ function ledgerMarkerFor(
       // ABSENT floor reads as `auto` in the REPORTING reading (a present but
       // unrecognisable one reads as nothing at all — see
       // `criticalFloorKind`), and `auto` resolves determinately from the
-      // round number and the context state. The ENFORCEMENT reading folds
+      // round number, the context state, and the plan's fix-audit posture
+      // record (#10104) — the last is the one that holds the posture
+      // through a context-unavailable round, so a stamp reading `c` on a
+      // round-3 context-unavailable compose is the record resolving, not a
+      // corrupt stamp. The ENFORCEMENT reading folds
       // nothing and fails open on both; the gap between the two is what the
       // mechanism-health check discloses. Recording it only when the state NAMED a floor
       // left the guard blind under the DEFAULT configuration — where the
-      // posture genuinely transitions at round 6 and again on a transient
-      // context failure — so a real posture change read as loop divergence,
+      // posture genuinely transitions at round 6 and, absent a fix-audit
+      // plan record, again on a transient context failure — so a real
+      // posture change read as loop divergence,
       // which is the misreading the field exists to prevent. What must not
       // be invented is a posture nobody can derive; this one is derived from
       // the same fold the advice and the enforcement backstop already use.
@@ -3438,6 +3474,84 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
     return ingestBodyCriticals(value);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * The plan's fix-audit posture record (#10104), for the body's round-shape
+ * disclosure — null on every plan that did not run one. Read defensively:
+ * the plan sits behind a model-written path, and a malformed block must
+ * silence the disclosure rather than render `undefined` into a posted body.
+ */
+function fixAuditShapeFacts(planPath: string | undefined): {
+  cause: 'explicit' | 'round' | 'flat-trend' | null;
+  /** Interaction entries the brief builder would render — one admission. */
+  interactionFiles: number;
+  /** Entries whose census sheds at least one hunk (`kept < total`). */
+  seamFiles: number;
+  seamKept: number;
+  seamTotal: number;
+  /** Entries whose census kept every hunk (`kept === total`). */
+  wholeFiles: number;
+} | null {
+  try {
+    if (!planPath) return null;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      incremental?: unknown;
+    };
+    // The SAME admission `isFixAuditRound` applies — one bar, called,
+    // not restated: this reader gates the floor arm and the body's
+    // disclosure, that one the roster and the tier, and a weaker bar here
+    // let a garbled scope run the FULL shape while the floor deferred and
+    // the body described a fix-audit round nobody ran.
+    if (!isFixAuditRound(plan)) return null;
+    const rec = plan.incremental as {
+      postureCause?: unknown;
+      scope?: unknown;
+    };
+    const scope = rec.scope;
+    const interaction = (scope as { interaction?: unknown }).interaction;
+    let interactionFiles = 0;
+    let seamFiles = 0;
+    let seamKept = 0;
+    let seamTotal = 0;
+    let wholeFiles = 0;
+    if (Array.isArray(interaction)) {
+      for (const raw of interaction) {
+        // The SAME admission the brief builder applies — `interactionEntryOf`,
+        // called, not restated (#10136): an entry the briefs would not render
+        // (no path, no surviving edge) counts for nothing here either, and a
+        // census that cannot be true ("5 of 2 republished") is silenced,
+        // never rendered into a posted body.
+        const e = interactionEntryOf(raw);
+        if (e === null) continue;
+        interactionFiles += 1;
+        if (e.seam === undefined) continue;
+        if (e.seam.kept < e.seam.total) {
+          seamFiles += 1;
+          seamKept += e.seam.kept;
+          seamTotal += e.seam.total;
+        } else {
+          wholeFiles += 1;
+        }
+      }
+    }
+    const cause =
+      rec.postureCause === 'explicit' ||
+      rec.postureCause === 'round' ||
+      rec.postureCause === 'flat-trend'
+        ? rec.postureCause
+        : null;
+    return {
+      cause,
+      interactionFiles,
+      seamFiles,
+      seamKept,
+      seamTotal,
+      wholeFiles,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -3589,12 +3703,14 @@ function composeReviewBody(
   }
   // The channel's OTHER precondition: deferring is only ever licensed by
   // the posture — `critical` at any round; `auto` from round 2 (the
-  // code-age rule) and round 6 (the floor); never an explicit `suggestion`
-  // (the operator turned the posture off) and never round 1 of `auto` (no
-  // posture, no age reference). An unlicensed deferral is a model
-  // mis-execution that would silently un-post findings — but the response
-  // is a CAP, not a refusal: a thrown compose loses the WHOLE round,
-  // Criticals included, and `prevRound` is a best-effort side-file read
+  // code-age rule) and round 6 (the floor); `auto` beside the plan's own
+  // fix-audit record (#10104); never an explicit `suggestion` (the
+  // operator turned the posture off) and never round 1 of `auto` without
+  // that record (no posture, no age reference). An unlicensed deferral
+  // is a model mis-execution that would silently un-post findings — but
+  // the response is a CAP, not a refusal: a thrown compose loses the
+  // WHOLE round, Criticals included, and `prevRound` is a best-effort
+  // side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
   // must degrade to a disclosed, uncertified verdict, never to no verdict
   // at all. The findings render; the cap keeps anything from certifying
@@ -3604,7 +3720,9 @@ function composeReviewBody(
   // A floor the module does not recognise — absent, null, or a
   // model-transcribed spelling drift ("Critical", "auto ", "") — is folded
   // into ONE state: unknown. It caps as unlicensed when a deferral list
-  // exists (fail-closed, disclosed) and is inert when it does not — a
+  // exists and no fix-audit plan record licenses it (#10104 — the record
+  // is the licence in that state, see `unlicensedDeferral`), fail-closed
+  // and disclosed, and is inert when no list exists — a
   // refusal here would lose the whole round over a field that changes no
   // output on a zero-deferral run, the exact outcome the licence block is
   // written to avoid. Model-transcribed prose is not a NaN count.
@@ -4564,15 +4682,29 @@ function composeReviewBody(
     'contextUnavailable',
   );
 
+  // The plan's posture record, read BEFORE the licence below (#10104): the
+  // same fact the floor arm in `composeReview` acted on. Where it is
+  // present the round's shape was already spent on the critical resolution,
+  // so its deferrals are licensed even in the two states the doubt arms
+  // below name — the licence may not flag the very deferral the floor arm
+  // enforced. The disclosure further down reads this same const.
+  const fixAudit = fixAuditShapeFacts(input.planPath);
+
   // The deferral licence, decided here because two of its arms need inputs
   // parsed above: deferring is only ever licensed by the posture —
   // `critical` at any round; `auto` from round 2 (the code-age rule) and
-  // round 6 (the floor); never an explicit `suggestion` (posture off),
-  // never round 1 of `auto` (no posture, no age reference), never `auto` in
-  // the context-unavailable state (the round is unknowable — SKILL resolves
-  // it as round 1), and never with the field ABSENT beside a non-empty list
-  // (the licence cannot be checked, and the channel ships in the same PR as
-  // the field — omission is fail-closed, not grandfathered). The response
+  // round 6 (the floor); `auto` beside the plan's own fix-audit record
+  // (#10104), whatever the round or the context state; never an explicit
+  // `suggestion` (posture off), never round 1 of `auto` WITHOUT the plan
+  // record (no posture, no age reference), never `auto` in the
+  // context-unavailable state WITHOUT the plan record (the round is
+  // unknowable — SKILL resolves it as round 1), and never with the field
+  // ABSENT beside a non-empty list when the plan carries no fix-audit
+  // record (the licence cannot be checked, and the channel ships in the
+  // same PR as the field — omission is fail-closed, not grandfathered).
+  // A present plan record IS the licence in that state: the round's shape
+  // was spent on the critical resolution, and the deferral is what the
+  // floor arm enforced. The response
   // is a CAP, not a refusal: a thrown compose loses the whole round,
   // Criticals included, and `prevRound` is a best-effort side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
@@ -4582,13 +4714,13 @@ function composeReviewBody(
   const unlicensedDeferral =
     deferredSuggestions.length === 0
       ? null
-      : floorAbsent
+      : floorAbsent && fixAudit === null
         ? 'the state carried no recognisable `severityFloor`, so the licence cannot be checked'
         : severityFloor === 'suggestion'
           ? 'the operator turned the posture off (`--severity-floor suggestion`)'
-          : severityFloor === 'auto' && contextUnavailable
+          : severityFloor === 'auto' && contextUnavailable && fixAudit === null
             ? 'the round is unknowable in the context-unavailable state'
-            : severityFloor === 'auto' && prevRound === 0
+            : severityFloor === 'auto' && prevRound === 0 && fixAudit === null
               ? 'no posture is engaged on round 1 and no age reference exists'
               : null;
   const presubmitRaw: unknown = input.presubmit ?? {};
@@ -6193,6 +6325,185 @@ function composeReviewBody(
       ]
     : [];
 
+  // The fix-audit round-shape disclosure (#10104), non-capping: when the
+  // capture resolved the critical posture, the round's SHAPE changed — the
+  // fan-out covered the delta and its seams instead of the full territory,
+  // interaction files republished seam-bounded, and the reverse-audit waves
+  // narrowed. Every one of those is a reduction the
+  // posted record must own rather than leave to a diff of agent counts, the
+  // same accounting rule the retirement and floor-enforcement notes follow.
+  const fixAuditCauseEn =
+    fixAudit?.cause === 'explicit'
+      ? 'the operator-set critical floor'
+      : fixAudit?.cause === 'flat-trend'
+        ? 'the flat first-time-finding trend'
+        : fixAudit?.cause === 'round'
+          ? 'the round schedule'
+          : 'the critical posting floor';
+  const fixAuditCauseZh =
+    fixAudit?.cause === 'explicit'
+      ? '操作者显式设置的 critical 下限'
+      : fixAudit?.cause === 'flat-trend'
+        ? '首次发现速率持平的信号'
+        : fixAudit?.cause === 'round'
+          ? '轮次日程'
+          : 'critical 发布下限';
+  // The deferral claim states what THIS round's floor actually ENFORCED —
+  // the strict reading `floorEnforcedReroute` acted on — not the reporting
+  // reading: the two diverge on a floor the state omitted, which the
+  // report folds to `auto` (the plan arm resolves it) while enforcement
+  // fails open, and keying the claim off the reporting reading posted
+  // "recorded and deferred" beside the very Suggestions posting inline in
+  // the same body.
+  const fixAuditFloorEngaged = convergence?.floorEnforcementEngaged === true;
+  // The open-floor sentence names its true cause, and the causes are THREE
+  // distinct facts: an explicit `suggestion` floor the operator set, a
+  // floor the state omitted, and a present value the module cannot read —
+  // the strict reading fails open on all of them. Keying the split on the
+  // REPORTING resolution folded the third into the first: the compose state
+  // is model-written, and a transcribed drift ("critcal", "blocker", "")
+  // beside the plan record posted "the operator turned the posture off" —
+  // an operator intent that never happened.
+  const fixAuditOpenCauseEn =
+    floorRaw === 'suggestion'
+      ? '(the operator turned the posture off)'
+      : input.severityFloor === undefined || input.severityFloor === null
+        ? '(the floor record was absent, and the enforcement reading fails open)'
+        : '(the state carried a floor value this module cannot read, and the strict reading cannot act on it)';
+  const fixAuditOpenCauseZh =
+    floorRaw === 'suggestion'
+      ? '（操作者关闭了该姿态）'
+      : input.severityFloor === undefined || input.severityFloor === null
+        ? '（下限记录缺失，强制读取按开放放行）'
+        : '（状态携带了本模块无法识别的下限值，强制读取无法对其生效）';
+  // Beside a non-empty deferral list the open arm may not assert the
+  // no-withholding universal the very same body falsifies: deferral IS the
+  // floor's withholding in this module's terminology — the convergence
+  // posture IS the floor resolution — so beside the list the sentence owns
+  // what the open arm DID (the backstop moved nothing) and routes the
+  // deferrals to the posture, never to a resolved floor (#10136). The
+  // empty-list arm keeps the universal. Beside an explicit `suggestion`
+  // floor the deferrals have NO posture to be routed by — the operator
+  // turned it off, and the licence chain above stamps them unlicensed
+  // (`unlicensedDeferral`) — so that arm says exactly that, in the same
+  // body the licence sentence caps (#10136 R13-1).
+  const fixAuditOpenTailEn =
+    deferredSuggestions.length > 0
+      ? floorRaw === 'suggestion'
+        ? ', so the mechanical backstop moved nothing — the deferrals ' +
+          'listed below carry no posture licence (the operator turned the ' +
+          'posture off), and this verdict is capped for them; only the ' +
+          'narrowed shape above applied.'
+        : ', so the mechanical backstop moved nothing — the deferrals listed ' +
+          'below were routed by the convergence posture, not moved by a ' +
+          'resolved floor; only the narrowed shape above applied.'
+      : ', so no finding was withheld by a floor — only the narrowed shape ' +
+        'above applied.';
+  const fixAuditOpenTailZh =
+    deferredSuggestions.length > 0
+      ? floorRaw === 'suggestion'
+        ? '，机械兜底未移动任何内容——下方列出的延后没有姿态授权（操作者关闭了该姿态），本判定因此受限；只有上述收窄形态生效。'
+        : '，机械兜底未移动任何内容——下方列出的延后由收敛姿态路由，而非已解析下限的移动；只有上述收窄形态生效。'
+      : '，没有任何发现被下限扣留——只有上述收窄形态生效。';
+  // The engaged arm asserts a below-Critical deferral only beside one
+  // (#10136 R16-1): the merged list the deferral block renders carries
+  // Criticals too — the fails-closed/new-surface ones the axes defer, from
+  // the reroute and the model channel alike — so a list holding only those
+  // has NO finding below Critical in it, and "findings below Critical were
+  // recorded and deferred" would name findings that do not exist. Keyed
+  // on the same merged list `deferredCriticals` reads. With nothing
+  // deferred at all the floor either saw nothing below Critical, or only
+  // the pre-confirmed deterministic findings it leaves inline — which is
+  // what `suggestionsInline` counts once enforcement has moved everything
+  // else.
+  const deferredBelowCritical = deferredSuggestions.some(
+    (e) => e.severity !== 'Critical',
+  );
+  const fixAuditFloorEn = fixAuditFloorEngaged
+    ? deferredBelowCritical
+      ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+      : deferredSuggestions.length > 0
+        ? 'The deferred findings below are Criticals deferred by their axes (fails-closed on new surface) — nothing below Critical was withheld this round' +
+          (suggestionsInline > 0
+            ? ', and the pre-confirmed `[build]`/`[test]`/`[probe]` findings below Critical stay inline at any floor.'
+            : '.')
+        : suggestionsInline > 0
+          ? 'The floor was engaged and nothing was deferred this round; the only Suggestions the floor leaves inline are pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+          : 'The floor was engaged and nothing below Critical reached it this round — any such finding would have been recorded and deferred, never posted (pre-confirmed `[build]`/`[test]`/`[probe]` findings excepted).'
+    : 'The posting floor itself resolved OPEN at compose time this round ' +
+      fixAuditOpenCauseEn +
+      fixAuditOpenTailEn;
+  const fixAuditFloorZh = fixAuditFloorEngaged
+    ? deferredBelowCritical
+      ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+      : deferredSuggestions.length > 0
+        ? '下方延后的发现都是按其轴向延后的 Critical（新表面上的 fails-closed）——本轮没有任何低于 Critical 的发现被扣留' +
+          (suggestionsInline > 0
+            ? '，预确认的 `[build]`/`[test]`/`[probe]` 低于 Critical 的发现在任何下限下都留在行内。'
+            : '。')
+        : suggestionsInline > 0
+          ? '下限已生效且本轮没有延后；下限唯一留在行内的 Suggestion 是预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+          : '下限已生效，本轮没有任何低于 Critical 的发现触及它——若有，也只会记录延后、不发布（预确认的 `[build]`/`[test]`/`[probe]` 发现除外）。'
+    : '但本轮发布下限在 compose 期实际解析为开放' +
+      fixAuditOpenCauseZh +
+      fixAuditOpenTailZh;
+  // The census names a REDUCTION only where one happened (#10136): a file
+  // whose every hunk displays a seam line republished whole, and counting
+  // it among the seam-bounded ones claimed a shed that never was. Files
+  // the scan kept whole are named as such; files with no census at all
+  // (a doubt state) republished in full and are not counted either way.
+  const fixAuditSeamEn =
+    fixAudit && fixAudit.seamFiles > 0
+      ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
+        (fixAudit.wholeFiles > 0
+          ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+          : ')')
+      : fixAudit && fixAudit.wholeFiles > 0
+        ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+        : '';
+  const fixAuditSeamZh =
+    fixAudit && fixAudit.seamFiles > 0
+      ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
+        (fixAudit.wholeFiles > 0
+          ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+          : '）')
+      : fixAudit && fixAudit.wholeFiles > 0
+        ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+        : '';
+  const fixAuditShapeBlock: Bi[] = fixAudit
+    ? [
+        {
+          trim: 2,
+          en:
+            `Round shape: this re-review ran as a fix-audit round under the critical ` +
+            `posting posture (engaged by ${fixAuditCauseEn}) — the territory fan-out ` +
+            `covered the commits since the previous round` +
+            (fixAudit.interactionFiles > 0
+              ? ` plus their import-seam interaction files${fixAuditSeamEn}`
+              : ' (no still-clean importer re-entered the scope)') +
+            `, and the reverse-audit waves ` +
+            `re-launched delta territories under the ordinary retirement ` +
+            `rules (a twice-dry one only on its cold-check rounds) and ` +
+            `non-delta chunks the previous waves could not certify dry (a ` +
+            `yield, an uncertified receipt or no audit history keeps a chunk ` +
+            `in the wave; a dry receipt stale against a same-digest yield or ` +
+            `uncertified receipt returns it to the ordinary retirement ` +
+            `rules). ${fixAuditFloorEn}`,
+          zh:
+            `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
+            `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
+            (fixAudit.interactionFiles > 0
+              ? `及其 import 接缝 interaction 文件${fixAuditSeamZh}`
+              : '（没有仍然干净的 importer 重新进入范围）') +
+            `，反向审计各波按普通退役规则重发 delta ` +
+            `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
+            `chunk（出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据对` +
+            `同摘要的发现或未认证收据已过时，则让它回到普通退役规则）。` +
+            `${fixAuditFloorZh}`,
+        },
+      ]
+    : [];
+
   // The not-reviewed disclosures yield after the deferral display and before
   // the convergence observation: they say what the review could not certify,
   // which the verdict's own cap already carries, so trimming them costs
@@ -6365,6 +6676,7 @@ function composeReviewBody(
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
+      ...fixAuditShapeBlock,
       ...unlicensedDeferralBlock,
       ...deferredSuggestionsBlock,
       ...convergenceBlock,
@@ -6435,6 +6747,7 @@ function composeReviewBody(
         ...deferredBlock,
         ...testPlanBlock,
         ...repositoryContextBlock,
+        ...fixAuditShapeBlock,
         ...unlicensedDeferralBlock,
         ...deferredSuggestionsBlock,
         // Both of these are spread for symmetry with the branches above and
@@ -6456,6 +6769,7 @@ function composeReviewBody(
         deferredBlock.length ||
         testPlanBlock.length ||
         repositoryContextBlock.length ||
+        fixAuditShapeBlock.length ||
         deferredSuggestionsBlock.length ||
         // Unreachable today and kept deliberately: an APPROVE is composed
         // from zero findings, which means zero posted comments and zero
@@ -6679,6 +6993,11 @@ function composeReviewBody(
   // 6d. Repository proof boundaries (non-capping) — dimensions the context
   //     planner recommends disclosing without claiming the code is defective.
   clauses.push(...repositoryContextBlock);
+
+  // 6d-2. Fix-audit round-shape disclosure (non-capping) — the critical
+  //     posture changed what this round fanned out over; the posted record
+  //     owns the reduction.
+  clauses.push(...fixAuditShapeBlock);
 
   // 6e. Convergence-posture deferrals — the licence disclosure (capping)
   //     precedes the list (non-capping).

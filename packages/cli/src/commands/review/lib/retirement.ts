@@ -110,7 +110,25 @@ export interface RoundSchedule {
   coldChecks: number[];
   /** Retired chunks NOT due this round — the retirement note names these. */
   skipped: RetiredChunk[];
-  /** Every chunk is retired and none is due: the audit has converged. */
+  /**
+   * Chunks the fix-audit posture narrowed out of the wave (#10104): not a
+   * delta territory, and the most recent audit on record is a substantive
+   * dry receipt not stale against a same-digest yield or uncertified
+   * receipt. Unlike a retired chunk they get no alternating cold check —
+   * on a critical-posture round the wave re-launches the delta territories
+   * under the ordinary retirement rules and every non-delta chunk the
+   * previous waves could not certify dry: a yield, an uncertified receipt
+   * or no history keeps the chunk in the wave, and a stale dry receipt
+   * returns it to the ordinary rules (hot until twice dry, then
+   * cold-checked). The note disclosing the narrowing IS this list. Empty
+   * whenever the caller passed no narrowing context.
+   */
+  narrowed: Array<{ chunkId: number; dryRound: number }>;
+  /**
+   * No chunk is due: retired chunks are between cold checks, posture-narrowed
+   * chunks have left the wave (#10104 — on a fix-audit round a non-delta
+   * chunk converges on its single dry receipt), and the audit has converged.
+   */
   converged: boolean;
   /**
    * One line per chunk whose two most recent audits are NEITHER dry enough
@@ -128,7 +146,7 @@ export interface RoundSchedule {
  * loosely on purpose: its width is the digest function's business, and a key
  * this regex misses is merely history this module cannot see — fail-open.
  */
-const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]+$/;
+const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--([0-9a-f]+)$/;
 
 /**
  * Every launch the builder emits for this loop carries the literal role id —
@@ -693,6 +711,17 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
  * the two-most-recent-dry rule and is due every round again; no state is
  * kept anywhere, the history IS the state.
  *
+ * Narrowing (#10104): on a fix-audit round the caller passes the delta
+ * territories, and from round 3 a NON-delta chunk leaves the wave after ONE
+ * substantive dry audit — no alternating cold check brings it back. That is
+ * the posture's deliberate recall trade ("re-launch only the chunks that
+ * produced findings in the previous wave, plus the delta chunks"), and it
+ * narrows the wave's WIDTH instead of lowering the round cap, because the
+ * late waves are where measured fix-induced Criticals kept surfacing. The
+ * failure directions are unchanged: an `unknown` outcome still reads as
+ * hot, a yield still re-launches, and with no narrowing context the
+ * schedule is exactly what it always was.
+ *
  * Throws whatever the transcript or record readers throw
  * (`TranscriptsUnavailableError` included): the CALLER owns the fail-open,
  * because the right degradation — build every chunk — is a build decision,
@@ -704,6 +733,7 @@ export function scheduleReverseAuditRound(
   round: number,
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
+  narrowing?: { deltaChunkIds: ReadonlySet<number> } | null,
 ): RoundSchedule {
   // Rounds 1 and 2 establish each chunk's record; retirement needs two
   // consecutive dry audits, so nothing can retire before round 3.
@@ -712,6 +742,7 @@ export function scheduleReverseAuditRound(
       due: [...chunkIds],
       coldChecks: [],
       skipped: [],
+      narrowed: [],
       converged: false,
       diagnostics: [],
     };
@@ -750,6 +781,7 @@ export function scheduleReverseAuditRound(
   const records: Array<{
     chunkId: number;
     round: number;
+    digest: string;
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
@@ -763,6 +795,7 @@ export function scheduleReverseAuditRound(
     records.push({
       chunkId: Number(m[1]),
       round: r,
+      digest: m[3],
       // Flattened ONCE per record, beside the once-per-transcript flatten
       // below: the pairing walk pays neither half per (record, transcript)
       // pair.
@@ -867,7 +900,14 @@ export function scheduleReverseAuditRound(
   // it dry.
   const history = new Map<
     number,
-    Map<number, { outcomes: AuditOutcome[]; failures: CertificationFailure[] }>
+    Map<
+      number,
+      {
+        outcomes: AuditOutcome[];
+        failures: CertificationFailure[];
+        digests: Set<string>;
+      }
+    >
   >();
   records.forEach((rec, i) => {
     let byRound = history.get(rec.chunkId);
@@ -875,15 +915,21 @@ export function scheduleReverseAuditRound(
       byRound = new Map();
       history.set(rec.chunkId, byRound);
     }
-    const entry = byRound.get(rec.round) ?? { outcomes: [], failures: [] };
+    const entry = byRound.get(rec.round) ?? {
+      outcomes: [],
+      failures: [],
+      digests: new Set<string>(),
+    };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
+    entry.digests.add(rec.digest);
     byRound.set(rec.round, entry);
   });
 
   const due: number[] = [];
   const coldChecks: number[] = [];
   const skipped: RetiredChunk[] = [];
+  const narrowed: Array<{ chunkId: number; dryRound: number }> = [];
   const diagnostics: string[] = [];
   for (const chunkId of chunkIds) {
     const audits = [...(history.get(chunkId)?.entries() ?? [])]
@@ -891,8 +937,40 @@ export function scheduleReverseAuditRound(
         round: r,
         outcome: mergeOutcomes(entry.outcomes),
         failures: entry.failures,
+        digests: [...entry.digests],
       }))
       .sort((a, b) => a.round - b.round);
+    // The posture narrowing, ruled before retirement so a non-delta chunk
+    // never earns a cold-check slot the posture does not run: its most
+    // recent audit being provably dry is the whole bar. Everything less
+    // certain — no history, an unknown, a yield — falls through to the
+    // ordinary rules and stays hot, the same fail-toward-auditing floor as
+    // every other refusal in this file. One dry receipt is NOT decisive
+    // when it shares its findings digest with ANY round the record does
+    // not certify dry — a yield, or an uncertified `unknown`: fix-audit
+    // rounds run their first two waves as a convergence pair against the
+    // SAME cumulative list (#10136), and findings merge into that list
+    // unconditionally — the yield scan refuses a filed finding whose file
+    // line is a substring of a listed entry, classifying the receipt
+    // `unknown` while the orchestrator still merges the finding — so the
+    // dry member was built before those findings entered it. It never saw
+    // them, and pricing the chunk out of the wave on it would certify
+    // convergence over live findings. Serial rounds are untouched: a round
+    // built after merged findings carries the list's different digest.
+    if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
+      const latest = audits[audits.length - 1];
+      if (latest !== undefined && latest.outcome === 'dry') {
+        const staleAgainstYield = audits.some(
+          (a) =>
+            a.outcome !== 'dry' &&
+            a.digests.some((d) => latest.digests.includes(d)),
+        );
+        if (!staleAgainstYield) {
+          narrowed.push({ chunkId, dryRound: latest.round });
+          continue;
+        }
+      }
+    }
     const lastTwo = audits.slice(-2);
     const retired =
       lastTwo.length === 2 && lastTwo.every((a) => a.outcome === 'dry');
@@ -953,11 +1031,14 @@ export function scheduleReverseAuditRound(
     due,
     coldChecks,
     skipped,
+    narrowed,
     // An empty `chunkIds` empties `due` vacuously — nothing was ever under
     // audit, so nothing has proven itself cold. `runAllChunks` refuses a
     // chunkless plan long before scheduling, but this function is exported,
     // and convergence is an exit-5 termination rule: it must not be
-    // reachable from nothing.
+    // reachable from nothing. A narrowed-out chunk does not block
+    // convergence: leaving the wave is what the posture ruled for it, and
+    // the note that discloses the narrowing is the record of the trade.
     converged: chunkIds.length > 0 && due.length === 0,
     diagnostics,
   };
