@@ -5,9 +5,14 @@ import postcss, { type Rule } from 'postcss';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
+const TRANSCRIPT_DIST_PATH = resolve(DIST_DIR, 'transcript.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
+}
+
+function readTranscriptBundle(): string {
+  return readFileSync(TRANSCRIPT_DIST_PATH, 'utf8');
 }
 
 function readPackageJavascript(): string {
@@ -301,5 +306,41 @@ describe('build artifact — package boundary', () => {
 
     expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
     expect(hasInlineFont).toBe(true);
+  });
+});
+
+describe('build artifact — transcript entry (#11031)', () => {
+  // `@qwen-code/web-shell/transcript` exists so the self-contained
+  // `/export html` document renderer can bundle the read-only transcript
+  // without the interactive shell. Nothing here is enforced by tree shaking:
+  // the package root injects its stylesheet as a top-level side effect, which
+  // no bundler can drop, so the boundary has to be a real entry point.
+  it('does not pull the editor stack into the transcript entry', () => {
+    const bundle = readTranscriptBundle();
+    // Import specifiers of externals survive minification verbatim, so their
+    // absence is a reliable signal that the module never entered the graph.
+    expect(bundle).not.toContain('@codemirror/');
+    expect(bundle).not.toContain('"codemirror"');
+    expect(bundle).not.toContain('vaul');
+  });
+
+  it('still carries what a transcript actually renders', () => {
+    const bundle = readTranscriptBundle();
+    expect(bundle).toContain('react-markdown');
+    expect(bundle).toContain('WebShellTranscript');
+  });
+
+  it('injects its stylesheet under its own entry key', () => {
+    // Separate rollup runs produce different stylesheets per entry, so the
+    // injection guard is keyed per entry — a shared key would let whichever
+    // entry loaded first suppress the other's rules.
+    expect(readBundle()).toContain('data-qwen-web-shell-entry="index"');
+    expect(readTranscriptBundle()).toContain(
+      'data-qwen-web-shell-entry="transcript"',
+    );
+    // Both keep the shared marker that shadow-root style adoption reads.
+    expect(readTranscriptBundle()).toContain(
+      's.dataset.qwenWebShell="component"',
+    );
   });
 });

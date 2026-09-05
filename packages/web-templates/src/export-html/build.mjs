@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import process from 'node:process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -31,13 +32,60 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // bundle-size assertions in packages/sdk-typescript/scripts/build.js.
 // Before #11031 was fixed, the document entry imported the @qwen-code/web-shell
 // package root and inlined the full interactive shell into every export:
-// 19,523,259 runtime bytes. The hard limit sits below that so the same
-// regression fails the build instead of landing silently.
-// Baseline: 17,963,937 bytes after the #11031 fix, measured with
-// `cd packages/web-templates && node src/export-html/build.mjs`
-// (the build prints the document runtime size).
+// 19,523,259 runtime bytes.
+//
+// A byte cap alone is a weak ratchet — it only catches growth, and only once
+// it is large. The structural guard below (FORBIDDEN_DOCUMENT_INPUTS) is the
+// real one: it names the module graphs that must never reach an export and
+// fails with the reason. Keep both.
+//
+// Re-measure and lower these two constants after any change to the document
+// entry's dependencies:
+//   cd packages/web-templates && node src/export-html/build.mjs
+// (the build prints `Document export runtime is N bytes`.)
 const DOCUMENT_RUNTIME_WARNING_BYTES = 18_500_000;
 const MAX_DOCUMENT_RUNTIME_BYTES = 19_000_000;
+
+// Modules that must not be reachable from the document entry, checked against
+// the esbuild metafile inputs after the bundle is produced.
+const FORBIDDEN_DOCUMENT_INPUTS = [
+  {
+    pattern: /(^|\/)node_modules\/(shiki|@shikijs)\//,
+    why:
+      'Shiki is unreachable in document mode (CodeBlock renders plain <pre>) ' +
+      'and its Oniguruma WASM engine is blocked by the export CSP; it is ' +
+      'resolved to src/document-shiki-stub.ts by the strip plugin below.',
+  },
+  {
+    pattern: /web-shell\/dist\/index\.js$/,
+    why:
+      'The @qwen-code/web-shell package root drags the interactive shell ' +
+      '(App, daemon providers, editor/terminal chrome) into every export. ' +
+      'Import @qwen-code/web-shell/transcript instead (#11031).',
+  },
+  {
+    pattern: /(^|\/)node_modules\/(codemirror|@codemirror)\//,
+    why:
+      'A read-only export has no composer. CodeMirror last reached it through ' +
+      'three composer-tag getters that UserMessage imported from ' +
+      'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
+      'is editor-free. Import from there, not from the composer hook.',
+  },
+];
+
+// `shiki` and `@shikijs/*` are replaced wholesale rather than marked external:
+// the export must stay self-contained, so an external specifier would simply
+// fail to resolve in the browser. See src/document-shiki-stub.ts for why this
+// is dead code in an export.
+const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
+const stripDocumentDeadModules = {
+  name: 'strip-document-dead-modules',
+  setup(build) {
+    build.onResolve({ filter: /^(shiki|@shikijs)(\/|$)/ }, () => ({
+      path: documentShikiStub,
+    }));
+  },
+};
 const { version: exportTranscriptRendererVersion } = JSON.parse(
   await readFile(join(assetsDir, '..', '..', 'package.json'), 'utf8'),
 );
@@ -112,6 +160,8 @@ const documentBuildResult = await build({
   bundle: true,
   minify: true,
   write: false,
+  metafile: true,
+  plugins: [stripDocumentDeadModules],
   outdir: join(assetsDistDir, 'document'),
   platform: 'browser',
   format: 'iife',
@@ -148,6 +198,48 @@ const documentCssBundle = documentBuildResult.outputFiles.find((file) =>
 if (!documentJsBundle || !documentCssBundle) {
   throw new Error('Failed to generate document export bundles.');
 }
+// Re-measuring the budget should not require editing this file. The size line
+// below says *how much*; this says *what of*, which is the question a
+// regression actually raises.
+const documentInputs = documentBuildResult.metafile.inputs;
+const inputBytesByPackage = new Map();
+for (const [input, { bytes }] of Object.entries(documentInputs)) {
+  const match = input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//);
+  const key = match ? match[1] : 'first-party';
+  inputBytesByPackage.set(key, (inputBytesByPackage.get(key) ?? 0) + bytes);
+}
+const topInputs = [...inputBytesByPackage]
+  .sort(([, left], [, right]) => right - left)
+  .slice(0, 8)
+  .map(([name, bytes]) => `${name} ${bytes}`)
+  .join(', ');
+console.log(`Document export top inputs (pre-minify bytes): ${topInputs}`);
+if (process.env.EXPORT_HTML_METAFILE) {
+  await writeFile(
+    process.env.EXPORT_HTML_METAFILE,
+    JSON.stringify(documentBuildResult.metafile),
+  );
+  console.log(
+    `Document export metafile written to ${process.env.EXPORT_HTML_METAFILE}`,
+  );
+}
+
+const forbiddenInputs = Object.keys(documentInputs)
+  .map((input) => ({
+    input,
+    rule: FORBIDDEN_DOCUMENT_INPUTS.find(({ pattern }) => pattern.test(input)),
+  }))
+  .filter((entry) => entry.rule);
+if (forbiddenInputs.length > 0) {
+  const reasons = [...new Set(forbiddenInputs.map(({ rule }) => rule.why))];
+  const examples = forbiddenInputs.slice(0, 5).map(({ input }) => `  ${input}`);
+  throw new Error(
+    `The document export bundle reached ${forbiddenInputs.length} forbidden input(s):\n` +
+      `${examples.join('\n')}\n` +
+      `${reasons.map((why) => `- ${why}`).join('\n')}`,
+  );
+}
+
 const documentRuntimeBytes =
   Buffer.byteLength(documentJsBundle.text) +
   Buffer.byteLength(documentCssBundle.text);

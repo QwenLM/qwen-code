@@ -111,18 +111,33 @@ function injectCssModules(): Plugin {
         // Every entry that renders components must carry the scoped
         // stylesheet. The transcript entry is consumed on its own by the
         // `/export html` document build, so it cannot inherit the CSS from
-        // the root entry; runtime injection stays idempotent (the style tag
-        // is only appended when missing).
-        const isComponentEntryFacade =
-          item.facadeModuleId?.endsWith('/client/index.tsx') ||
-          item.facadeModuleId?.endsWith('/client/transcript.ts');
-        if (!isComponentEntryFacade) {
+        // the root entry.
+        //
+        // The two entries are built in separate rollup runs and therefore
+        // carry *different* stylesheets (the transcript one is a subset), so
+        // the injection guard is keyed per entry via
+        // `data-qwen-web-shell-entry`. A single shared key would let whichever
+        // entry loads first win: a host that imports both
+        // `@qwen-code/web-shell` and `@qwen-code/web-shell/transcript` would
+        // silently lose the editor/dialog rules if the transcript entry ran
+        // first. Injection stays idempotent per entry, and the overlapping
+        // rules are byte-identical, so injecting both is a no-op beyond the
+        // duplicated bytes. Both tags keep `data-qwen-web-shell="component"`
+        // so shadow-root style adoption (client/shadowDom.ts) still finds
+        // them; that reader concatenates every match rather than taking the
+        // first.
+        const entry = item.facadeModuleId?.endsWith('/client/transcript.ts')
+          ? 'transcript'
+          : item.facadeModuleId?.endsWith('/client/index.tsx')
+            ? 'index'
+            : undefined;
+        if (!entry) {
           continue;
         }
         item.code =
           `const __qwenWebShellCss=${escapedCss};\n` +
-          `if(typeof document!=="undefined"&&!document.querySelector('style[data-qwen-web-shell="component"]')){` +
-          `const s=document.createElement("style");s.dataset.qwenWebShell="component";s.textContent=__qwenWebShellCss;try{document.head.appendChild(s);}catch(e){console.warn("[qwen-web-shell] CSS injection blocked by CSP:",e);}}\n` +
+          `if(typeof document!=="undefined"&&!document.querySelector('style[data-qwen-web-shell-entry="${entry}"]')){` +
+          `const s=document.createElement("style");s.dataset.qwenWebShell="component";s.dataset.qwenWebShellEntry="${entry}";s.textContent=__qwenWebShellCss;try{document.head.appendChild(s);}catch(e){console.warn("[qwen-web-shell] CSS injection blocked by CSP:",e);}}\n` +
           item.code;
       }
     },
