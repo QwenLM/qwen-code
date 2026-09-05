@@ -109,6 +109,7 @@ import {
   type SessionTurnIndexState,
 } from './turnIndexStore.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
+import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
   getCurrentMode,
   getSessionDisplayName,
@@ -283,6 +284,8 @@ const SESSION_TURN_NAVIGATION_FEATURE = 'session_turn_navigation';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
+const WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE =
+  'workspace_skills_config_runtime';
 function resolveStandaloneApprovalMode(
   value: string | undefined,
 ): DaemonApprovalMode | undefined {
@@ -1979,6 +1982,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const canReadPrimaryAcpStatus =
               canPreheatPrimaryWorkspace &&
               capabilityFeatures.includes(WORKSPACE_ACP_STATUS_FEATURE);
+            const canUseSkillsConfigRuntime =
+              workspaceScoped &&
+              effectWorkspaceCwd !== undefined &&
+              capabilityFeatures.includes(
+                WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE,
+              );
+            const skillsRuntimeClient =
+              canUseSkillsConfigRuntime && effectWorkspaceCwd
+                ? client.workspaceByCwd(effectWorkspaceCwd)
+                : undefined;
             if (
               (shouldDeferInitialSessionCreation ||
                 manualSessionClearRef.current) &&
@@ -2049,8 +2062,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
-                  client.workspaceSkills(),
-                  canReadPrimaryAcpStatus
+                  skillsRuntimeClient
+                    ? skillsRuntimeClient.workspaceConfigSkills()
+                    : client.workspaceSkills(),
+                  !canUseSkillsConfigRuntime && canReadPrimaryAcpStatus
                     ? client.workspaceAcpStatus()
                     : Promise.resolve(undefined),
                   effectWorkspaceCwd
@@ -2118,7 +2133,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? current.skills
                   : deferredSkills,
               }));
-              if (
+              if (skillsRuntimeClient) {
+                void (async () => {
+                  try {
+                    const runtime = await skillsRuntimeClient.ensureRuntime();
+                    const refreshed = await loadReadyWorkspaceSkills(
+                      skillsRuntimeClient,
+                      runtime,
+                      () =>
+                        disposed ||
+                        abort.signal.aborted ||
+                        connectionRef.current.sessionId !== undefined,
+                    );
+                    if (!refreshed) return;
+                    const { commands, skills: refreshedSkills } =
+                      mapWorkspaceSkills(refreshed);
+                    setConnection((current) =>
+                      current.sessionId
+                        ? current
+                        : { ...current, commands, skills: refreshedSkills },
+                    );
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] workspace Skills runtime preparation failed:',
+                      error,
+                    );
+                  }
+                })();
+              } else if (
                 canPreheatPrimaryWorkspace &&
                 !(
                   acpStatusResult.status === 'fulfilled' &&
@@ -5641,7 +5683,10 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   if (!isRecord(meta)) return null;
   const status = normalizeGoalStatus(meta['goalStatus']);
   if (status) {
-    return createGoalStatusUiEvent(event, status);
+    return createGoalStatusUiEvent(
+      event,
+      restoreCanonicalGoalStatusKind(status, meta['goalState']),
+    );
   }
 
   const terminal = normalizeGoalTerminal(meta['goalTerminal']);
@@ -5679,6 +5724,18 @@ function createGoalStatusUiEvent(
   };
 }
 
+function restoreCanonicalGoalStatusKind(
+  status: Record<string, unknown>,
+  goalState: unknown,
+): Record<string, unknown> {
+  // V2 updates pair a legacy card with canonical state. Keep the legacy wire
+  // value stable for older clients while restoring its precise Web Shell label.
+  if (status['kind'] !== 'aborted' || !isRecord(goalState)) return status;
+  const goal = goalState['goal'];
+  if (!isRecord(goal) || goal['status'] !== 'usage_limited') return status;
+  return { ...status, kind: 'usage_limited' };
+}
+
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const kind = getString(value, 'kind');
@@ -5688,6 +5745,7 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'achieved' &&
     kind !== 'failed' &&
     kind !== 'aborted' &&
+    kind !== 'usage_limited' &&
     // Rejecting 'paused' made every surface keep showing a paused goal as
     // actively running: the card never rendered and the active-goal
     // derivation fell back to the previous 'set' card.

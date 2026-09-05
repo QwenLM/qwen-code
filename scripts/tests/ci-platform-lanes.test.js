@@ -330,6 +330,31 @@ describe('post-merge push lane', () => {
     expect(condOf('lint_and_static')).toBe(condOf('test'));
   });
 
+  it('routes lint_and_static through the classify_pr fork-trust output', () => {
+    // runs-on is where the contributor code this describe's other pins talk
+    // about actually executes. classify_pr's pick_runner is the fork-trust
+    // boundary — untrusted fork PRs stay on hosted runners — and a literal
+    // pool label array here would bypass that indirection whole (and desync
+    // from timeout-minutes, which reads the same output). Whole-expression
+    // match, as no-ak-integration-ci does for test_windows.
+    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
+      String(ci.jobs.test['runs-on']),
+    );
+    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
+    // The needs edge is what makes every needs.classify_pr.outputs.* this
+    // describe relies on non-empty at runtime. Drop it and the lane silently
+    // decouples from the classifier: runs-on falls through the `|| '…'` to
+    // hosted runners, skip_ci reads '' so a release-sync PR promised a no-op
+    // pass runs the full battery, and `Use trusted CI profile` takes its
+    // documented degraded empty→full fallback.
+    expect(
+      [].concat(ci.jobs.lint_and_static.needs ?? []),
+      'lint_and_static must consume the classifier',
+    ).toContain('classify_pr');
+  });
+
   it('lint_and_static keeps the minimal token its required-check role needs', () => {
     // This block overrides the workflow-level `checks: write` /
     // `statuses: write` grant. The lane runs contributor code (`npm ci`
@@ -347,31 +372,134 @@ describe('post-merge push lane', () => {
     // lint one stale — resolved by hand that time. Field-for-field equality
     // over every same-named step turns the next drift into a red test
     // instead of a review archaeology exercise.
+    // Recursive canonicalisation — NOT JSON.stringify's array replacer,
+    // which is a property allowlist applied at every nesting level: with it,
+    // each step's nested `with:` and `env:` serialised as `{}`, so the guard
+    // was blind to drift in Checkout's ref/fetch-depth, setup-node's
+    // versions, and — the consequential one — `Use trusted CI profile`'s
+    // TRUSTED_CI_PROFILE binding, whose drift to a literal would skip every
+    // profile-gated step while reporting green.
+    const canon = (v) =>
+      Array.isArray(v)
+        ? v.map(canon)
+        : v && typeof v === 'object'
+          ? Object.fromEntries(
+              Object.keys(v)
+                .sort()
+                .map((k) => [k, canon(v[k])]),
+            )
+          : v;
+    // Exempt the FIELD that must differ, not the whole step: the collector's
+    // artifact name is per-job (upload-artifact v4+ rejects duplicates when
+    // both jobs fail in one run; ci-disk-pressure.test.mjs asserts the
+    // notEqual), but a whole-step exemption left its `uses:` revision — the
+    // one action pin in the job — compared by nothing.
     const byName = (job) =>
       new Map(
-        (ci.jobs[job].steps ?? []).map((s) => [
-          s.name,
-          JSON.stringify(s, Object.keys(s).sort()),
-        ]),
+        (ci.jobs[job].steps ?? []).map((s) => {
+          const { name: _artifactName, ...restWith } = s.with ?? {};
+          return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
+        }),
       );
     const t = byName('test');
     const l = byName('lint_and_static');
-    // The one same-named step that MUST differ: both jobs can fail in one
-    // run, and upload-artifact v4+ rejects duplicate artifact names, so the
-    // collector carries a per-job name. Everything else that shares a name
-    // must be byte-identical.
-    const deliberatelyDivergent = new Set(['Upload disk-pressure samples']);
-    const shared = [...t.keys()].filter(
-      (n) => l.has(n) && !deliberatelyDivergent.has(n),
-    );
+    // The serializer is the guard's eyes: both sides of every comparison below
+    // flow through it, so a regression that drops nested fields compares `{}`
+    // to `{}` and the drift loop reports green — the exact array-replacer blind
+    // spot the recursion above replaced. Pin a known nested key on the
+    // serialized OUTPUT rather than on canon alone, because the regression that
+    // matters is a call site swapped back to an allowlist, which a canon-only
+    // fixture cannot see.
+    expect(t.get('Checkout')).toContain('"fetch-depth":1');
+    const shared = [...t.keys()].filter((n) => l.has(n));
     // The prelude is what is duplicated; if this floor ever drops, steps
-    // were renamed apart and the guard is no longer guarding anything.
-    expect(shared.length).toBeGreaterThanOrEqual(12);
+    // were renamed apart and the guard is no longer guarding anything. 13 and
+    // not 12: the collector is deliberately in both jobs, so it is in the
+    // intersection, and a floor below the real count lets any one shared step
+    // be deleted out of either job without turning this red.
+    expect(shared.length).toBeGreaterThanOrEqual(13);
     for (const n of shared) {
       expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
         t.get(n),
       );
     }
+    // Name-keyed maps are order-blind, and order is load-bearing here: the
+    // `steps` context only exposes steps that have already run, and a
+    // nonexistent property reads as '' — so if `Use trusted CI profile`
+    // (id: ci_profile) ever lands below its consumers, every
+    // `ci_profile == 'full'` gate evaluates '' == 'full' and the lane
+    // completes green having executed nothing.
+    const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
+    const sharedSet = new Set(shared);
+    expect(
+      namesIn('lint_and_static').filter((n) => sharedSet.has(n)),
+      'shared prelude reordered between the two jobs',
+    ).toEqual(namesIn('test').filter((n) => sharedSet.has(n)));
+    const lintNames = namesIn('lint_and_static');
+    expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
+      lintNames.indexOf('Install dependencies'),
+    );
+  });
+
+  it('keeps the moved lint/static payload present, gated, and out of test', () => {
+    // The shared-prelude equality above only sees the name INTERSECTION; the
+    // twenty moved steps — the payload this job exists to run — were pinned
+    // by nothing: deleting `Run Prettier`, flipping its gate to
+    // `docs_only`, or re-adding a copy to `test` all left every suite
+    // green. A required check that silently stops running ESLint or the
+    // lockfile audit still reports green on every PR; pin the payload by
+    // name, order and gate. Two members deliberately carry different gates
+    // and are asserted as such below — do not "normalise" them: the size
+    // gate must run on github_ci_only PRs (a .github/-only PR is exactly
+    // the one most likely to breach the 500 KB workflow limit), and the
+    // helper-checks step IS the github_ci_only fast path.
+    const FULL_PAYLOAD = [
+      'Audit critical runtime dependencies',
+      'Check lockfile',
+      'Check desktop workspace isolation',
+      'Check TUI dependency direction',
+      'Install linters',
+      'Run ESLint',
+      'Run actionlint',
+      'Run shellcheck',
+      'Run yamllint',
+      'Run Prettier',
+      'Run sensitive keyword linter',
+      'Run i18n check',
+      'Generate settings schema',
+      'Check settings schema is up-to-date',
+      'Generate VS Code companion notices',
+      'Check VS Code companion notices are up-to-date',
+      'Check serve fast-path bundle closure',
+      'Run .github/scripts helper tests',
+    ];
+    const steps = ci.jobs.lint_and_static.steps ?? [];
+    const stepByName = new Map(steps.map((x) => [x.name, x]));
+    const testNames = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
+    const prelude = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
+    // Order and completeness in one shot: the full-gated steps that are not
+    // part of the shared prelude must be exactly this list, in this order.
+    expect(
+      steps
+        .filter(
+          (x) =>
+            String(x.if ?? '').includes("ci_profile == 'full'") &&
+            !prelude.has(x.name),
+        )
+        .map((x) => x.name),
+    ).toEqual(FULL_PAYLOAD);
+    for (const n of FULL_PAYLOAD) {
+      expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
+    }
+    // The two deliberately-different gates, pinned as they are.
+    expect(String(stepByName.get('Check workflow file size').if)).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
+    );
+    expect(String(stepByName.get('GitHub CI helper checks').if)).toContain(
+      "ci_profile == 'github_ci_only'",
+    );
+    expect(testNames.has('Check workflow file size')).toBe(false);
+    expect(testNames.has('GitHub CI helper checks')).toBe(false);
   });
 
   it('classify_pr admits push in its event allowlist', () => {

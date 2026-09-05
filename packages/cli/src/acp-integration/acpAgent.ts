@@ -9196,8 +9196,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          const readTurnIndexPage = async () => {
             if (rawSnapshot === undefined) {
               await this.sessions
                 .get(sessionId)
@@ -9215,7 +9214,11 @@ class QwenAgent implements Agent {
                 ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
               },
             )) as unknown as Record<string, unknown>;
-          });
+          };
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            readTurnIndexPage,
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
@@ -13980,7 +13983,7 @@ class QwenAgent implements Agent {
     if (!provisionalWorkspace) {
       startNonInteractiveOpenAILogHousekeeping(config, settings);
     }
-    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    // ACP sessions served to browser clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
     if (!provisionalWorkspace) {

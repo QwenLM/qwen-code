@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render as renderDom, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
@@ -311,6 +311,33 @@ describe('startInteractiveUI cross-session messaging', () => {
       getHeldExpiryMs: () => number | null;
     };
     expect(never.getHeldExpiryMs()).toBeNull();
+  });
+
+  it('wires the effective inbound-policy scope into the gate', async () => {
+    const settings = {
+      merged: {
+        ui: { hideWindowTitle: true },
+        agents: {
+          crossSessionMessaging: true,
+          crossSessionInbound: 'hold',
+        },
+      },
+      isTrusted: true,
+      workspaceSettingsActive: true,
+      forScope: (scope: SettingScope) => ({
+        settings:
+          scope === SettingScope.Workspace
+            ? { agents: { crossSessionInbound: 'hold' } }
+            : {},
+      }),
+    } as unknown as LoadedSettings;
+
+    await start(makeConfig(), settings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      getPolicyScope: () => string | undefined;
+    };
+    expect(options.getPolicyScope()).toBe('workspace');
   });
 
   it('forwards the inbox token, not only the address, into the record', async () => {
