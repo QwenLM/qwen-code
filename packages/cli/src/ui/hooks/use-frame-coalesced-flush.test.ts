@@ -53,6 +53,18 @@ describe('useFrameCoalescedFlush', () => {
     expect(flush).toHaveBeenCalledTimes(2);
   });
 
+  it('reports whether the current coalescing window is active', () => {
+    const flush = vi.fn();
+    const { result } = renderHook(() => useFrameCoalescedFlush(flush, 16));
+
+    expect(result.current.isWindowActive()).toBe(false);
+    act(() => result.current.schedule());
+    expect(result.current.isWindowActive()).toBe(true);
+
+    act(() => vi.advanceTimersByTime(16));
+    expect(result.current.isWindowActive()).toBe(false);
+  });
+
   it('coalesces repeated schedules inside one frame', () => {
     const flush = vi.fn();
     const { result } = renderHook(() => useFrameCoalescedFlush(flush, 16));

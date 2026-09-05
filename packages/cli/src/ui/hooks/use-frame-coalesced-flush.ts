@@ -66,7 +66,13 @@ export function useFrameCoalescedFlush(
     }
   }, []);
 
+  const isWindowActive = useCallback(() => {
+    if (timer.current !== null) return true;
+    const lastFlush = lastFlushAt.current;
+    return lastFlush !== null && performance.now() - lastFlush < frameMs;
+  }, [frameMs]);
+
   useEffect(() => cancel, [cancel]);
 
-  return { schedule, cancel };
+  return { schedule, cancel, isWindowActive };
 }

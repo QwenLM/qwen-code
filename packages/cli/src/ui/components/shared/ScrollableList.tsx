@@ -138,8 +138,11 @@ function ScrollableList<T>(
     }
   }, []);
 
-  const { schedule: scheduleScrollFlush, cancel: cancelScrollFlush } =
-    useFrameCoalescedFlush(applyPendingScroll);
+  const {
+    schedule: scheduleScrollFlush,
+    cancel: cancelScrollFlush,
+    isWindowActive: isScrollFlushWindowActive,
+  } = useFrameCoalescedFlush(applyPendingScroll);
 
   // Discard any queued wheel/drag intent and cancel an in-flight flush. Used
   // when a scrollbar press takes over: without it, a wheel burst scheduled
@@ -176,14 +179,16 @@ function ScrollableList<T>(
         return;
       }
       if (event.name === 'scroll-up') {
+        if (!isScrollFlushWindowActive()) pendingWheelDelta.current = 0;
         pendingWheelDelta.current -= WHEEL_LINES_PER_TICK;
         scheduleScrollFlush();
       } else if (event.name === 'scroll-down') {
+        if (!isScrollFlushWindowActive()) pendingWheelDelta.current = 0;
         pendingWheelDelta.current += WHEEL_LINES_PER_TICK;
         scheduleScrollFlush();
       }
     },
-    [scheduleScrollFlush, cancelPendingScroll],
+    [scheduleScrollFlush, cancelPendingScroll, isScrollFlushWindowActive],
   );
 
   // The VP viewport owns the wheel (this IS the in-app scroller), so opt out
