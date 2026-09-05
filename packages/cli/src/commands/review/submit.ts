@@ -120,6 +120,7 @@ import {
   stripForgedFooterLines,
   stripForUnattributedPost,
   stripReviewFooter,
+  stripReviewFooterLine,
   swallowsAppendedMarker,
 } from './lib/review-footer.js';
 
@@ -218,7 +219,13 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // The readback strip iterates the WHOLE stacked-marker run a looping
   // model drafts; compose quotes this entry as-is behind the template
   // marker, so a carried second marker would post inside the blocker line.
-  const claim = body === null ? null : carriedClaimLine(body);
+  // The claim LINE strips too — the one-line shape this entry posts as:
+  // the whole-body strip keeps a footer quoted in code, and with an empty
+  // claim the separator strip eats the newline+colon and that footer's
+  // first line becomes the "claim". `carriedClaimLine` is the readback's
+  // own claim-line read (marker and separator stripped, CR-aware).
+  const line = body === null ? null : carriedClaimLine(body);
+  const claim = line === null ? null : stripReviewFooterLine(line);
   // The gate only relocates bodies with substance past the marker, but the
   // claim line itself can still be empty (content on a later line) or a
   // fence delimiter (a marker-alone body leading into a fence) — junk the

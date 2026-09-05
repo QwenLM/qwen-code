@@ -66,13 +66,7 @@ import {
   indentColumns,
 } from './inline-counts.js';
 import { ledgerClaimLine, type FixedFinding } from '../compose-review.js';
-import {
-  HTML_BLOCK_OPEN_RE,
-  HTML_BLOCK_TAG_NAMES,
-  QUOTE_PREFIX_RE,
-  fenceOpener,
-  stripForUnattributedPost,
-} from './review-footer.js';
+import { QUOTE_PREFIX_RE, stripForUnattributedPost } from './review-footer.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
 export interface ReviewThread {
@@ -625,6 +619,73 @@ const LINK_REF_DEF_RE =
  */
 const TABLE_DELIMITER_ROW_RE =
   /^[ \t]*(?:\|[ \t]*)?:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*(?:\|[ \t]*)?\r?$/;
+
+// ---------------------------------------------------------------------------
+// The stamp's line model. The strips in review-footer.ts classify whole
+// bodies with the CommonMark parser (`scanLines`); the stamp decides on ONE
+// line — the marker's, or the first content line under it — where the
+// block grammar is these start conditions, and the readback legs share the
+// same statements through inline-counts.ts. Verified against micromark,
+// markdown-it and marked on generated bodies (#9940 review, audits 1-6).
+// ---------------------------------------------------------------------------
+
+/** Fence delimiter runs (``` or ~~~), openers and closers alike. */
+const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
+
+/**
+ * The fence OPENER rule — the ONE statement `scanLines` and the stamp skip
+ * (`stampCarriedId`) both apply: a delimiter run of ``` or ~~~ after at
+ * most three indentation characters opens a fence, EXCEPT a backtick run
+ * whose info string carries a backtick — CommonMark forbids that spelling,
+ * so the line is ordinary paragraph text (tilde fences may carry one). The
+ * indentation count is the line model's own — a tab is one character
+ * here, where CommonMark counts it as four columns — so both ends agree on
+ * a tab-led run; the difference only ever widens a skip. A delimiter-only test over-skipped
+ * exactly that line out of its id stamp, posting an id-less root behind
+ * a disclosure naming a fence that does not exist (#9940 review, round
+ * 25). Returns the opener's character and run length — the state a
+ * closer must match — or null.
+ */
+function fenceOpener(content: string): { char: string; len: number } | null {
+  const open = FENCE_RUN_RE.exec(content);
+  if (open === null) return null;
+  const run = open[1]!;
+  if (run[0] === '`' && content.slice(open[0].length).includes('`')) {
+    return null;
+  }
+  return { char: run[0]!, len: run.length };
+}
+
+// The CommonMark type-6 block-level tag names, opening or closing.
+const HTML_BLOCK_TAG_NAMES =
+  '(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)';
+
+/**
+ * The simple HTML-block opener the line-map tracks (see `scanLines`): an
+ * opening tag, or a CLOSING block-level tag — `</div>` alone on a line
+ * starts a blank-line-terminated HTML block exactly as `<div>` does.
+ * Exported for the id stamp's first-line guard (#9940 review): the type-1
+ * end rule (`HTML_TYPE1_OPEN_RE`) does not matter there — open or close,
+ * an opener the stamp breaks flips the block structure the gate
+ * validated.
+ */
+const HTML_BLOCK_OPEN_RE = new RegExp(
+  // The type-1 (`<pre`, `<script`, `<style`, `<textarea`) and type-6
+  // (block-level tag name) start conditions end at the tag NAME — a
+  // space, `>`, `/>` or the line end after it — and the rest of the line
+  // is the block's own content: `<div class="x">foo` opens an HTML block
+  // (CommonMark 4.6). The whole-line alternatives below approximate type 7
+  // (a complete tag alone on its line); the round-27 review showed the
+  // type-6 line with trailing text escaping them (#9940 review).
+  //
+  // The unclosed-tag alternative carries no trailing `[ \t]*` of its own:
+  // with the `>` optional, `[^>]*` and the trailing whitespace class both
+  // matched spaces and the engine re-split them at every length — 60,000
+  // spaces after `<a` cost 1.7 s per call, paid by every posted comment
+  // twice (#9940 review, audit). One class per character keeps it linear.
+  `^(?:<(?:pre|script|style|textarea)(?:[ \\t>]|\\r?$)|</?${HTML_BLOCK_TAG_NAMES}(?:[ \\t]|/?>|\\r?$)|(?:<[A-Za-z][^>]*>[ \\t]*|<[A-Za-z][^>]*|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>[ \\t]*)\\r?$)`,
+  'i',
+);
 
 /**
  * A complete HTML tag alone on its line — the CommonMark type-7 HTML block
