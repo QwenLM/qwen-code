@@ -1,4 +1,5 @@
 import type { CommandModule } from 'yargs';
+import { isSameProcess } from '@qwen-code/qwen-code-core';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   readServiceInfo,
@@ -84,28 +85,44 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
 
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
 
-    if (!signalService(info.pid, 'SIGTERM')) {
+    if (!signalService(info.pid, 'SIGTERM', info.procStart)) {
+      // A refusal only proves no signal went out — `signalService` also refuses
+      // when the recorded token cannot be re-read. Dropping the record of a
+      // service that is still alive would leave it untracked and let the next
+      // `channel start` spawn a duplicate on the same credentials.
+      if (isSameProcess(info.pid, info.procStart)) {
+        writeStderrLine(
+          'Failed to signal the service, which is still running; its record was left in place.',
+        );
+        process.exit(1);
+      }
       writeStderrLine(
         'Failed to send signal — process may have already exited.',
       );
-      removeServiceInfo();
+      removeServiceInfo(info);
       process.exit(0);
     }
 
-    const exited = await waitForExit(info.pid, 5000);
+    const exited = await waitForExit(info.pid, 5000, 200, info.procStart);
 
     if (exited) {
       // Clean up in case the process didn't delete its own PID file
-      removeServiceInfo();
+      removeServiceInfo(info);
       writeStdoutLine('Service stopped.');
     } else {
       writeStderrLine(
         'Service did not exit within 5 seconds. Sending SIGKILL...',
       );
-      signalService(info.pid, 'SIGKILL');
-      await waitForExit(info.pid, 2000);
-      removeServiceInfo();
-      writeStdoutLine('Service killed.');
+      signalService(info.pid, 'SIGKILL', info.procStart);
+      if (await waitForExit(info.pid, 2000, 200, info.procStart)) {
+        removeServiceInfo(info);
+        writeStdoutLine('Service killed.');
+      } else {
+        writeStderrLine(
+          'Service is still running; its record was left in place.',
+        );
+        process.exit(1);
+      }
     }
 
     process.exit(0);

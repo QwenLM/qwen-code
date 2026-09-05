@@ -585,6 +585,35 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('reports an unverifiable pidfile instead of a concurrent start', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    const err = Object.assign(
+      new Error(
+        'Channel service pidfile /home/u/.qwen/channels/service.pid holds a record this machine cannot verify.',
+      ),
+      { code: 'channel_service_conflict' },
+    );
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockChannelDisconnect).toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(`Error: ${err.message}`);
+  });
+
   it('continues pidfile race cleanup when teardown steps throw', async () => {
     const channels = { telegram: { type: 'telegram' } };
     const err = new Error('EEXIST') as NodeJS.ErrnoException;

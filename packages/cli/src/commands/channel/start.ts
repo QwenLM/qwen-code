@@ -90,6 +90,13 @@ function channelMemoryOptions(
   };
 }
 
+function isUnverifiablePidfileError(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    (err as NodeJS.ErrnoException).code === 'channel_service_conflict'
+  );
+}
+
 function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
   try {
     writeServiceInfo(channels);
@@ -99,6 +106,12 @@ function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
       writeStderrLine(
         'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
       );
+      process.exit(1);
+    }
+    if (isUnverifiablePidfileError(err)) {
+      // Retrying cannot clear a record this side can never verify, so the
+      // pidfile's own recovery step replaces the concurrent-startup advice.
+      writeStderrLine(`Error: ${err.message}`);
       process.exit(1);
     }
     throw err;
