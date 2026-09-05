@@ -4081,6 +4081,26 @@ describe('Session', () => {
     await session.waitForActiveTurnsToSettle();
   });
 
+  it('polls rather than spins when the active turn publishes no completion', async () => {
+    // `historyMutationActive` blocks `#hasActiveTurn()` without publishing a
+    // completion promise, so the wait has nothing to await. Yielding on
+    // `setImmediate` alone would cycle the event loop as fast as it can turn
+    // and burn a core for the whole wait — on the conditional-close path that
+    // is the full drain budget. Counting the yields is the observable proxy:
+    // the polled wait makes none from this path.
+    const releaseMutation = session.beginHistoryMutation();
+    const immediateSpy = vi.spyOn(globalThis, 'setImmediate');
+    try {
+      const waiting = session.waitForActiveTurnsToSettle();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      releaseMutation();
+      await waiting;
+      expect(immediateSpy).toHaveBeenCalledTimes(0);
+    } finally {
+      immediateSpy.mockRestore();
+    }
+  });
+
   it('rejects a prompt when the close gate starts during writer admission', async () => {
     let resolveAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {

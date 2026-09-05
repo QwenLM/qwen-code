@@ -181,6 +181,7 @@ import {
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
+  activeWorkCloseRetryDelayMs,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
@@ -1162,6 +1163,21 @@ interface SessionEntry {
    * snapshot settle the question.
    */
   activeWorkCloseInFlight: boolean;
+  /**
+   * Consecutive conditional-close probes that produced no answer. A run
+   * counter, not a lifetime total: it resets to 0 as soon as the child answers
+   * either way, so a Session that recovers is probed on the next snapshot with
+   * no memory of the earlier failures.
+   */
+  activeWorkCloseFailures: number;
+  /**
+   * Epoch ms before which `entryIsAutoCloseCandidate` suppresses a probe.
+   * Derived from `activeWorkCloseFailures` via `activeWorkCloseRetryDelayMs`;
+   * `null` while probing stays immediate. Gated at the candidacy check rather
+   * than inside the probe so the reaper's own log line stops firing too —
+   * a suppressed probe that still announced itself would read as progress.
+   */
+  activeWorkCloseRetryAt: number | null;
   /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
    * carries its `promptId`, summary, and an `abortController` so the
@@ -3161,6 +3177,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ) {
       return false;
     }
+    // A probe the child could not answer is retried on the next snapshot, but
+    // not on every snapshot forever: a Session the child can never settle
+    // would otherwise be re-probed at the report cadence for the lifetime of
+    // the daemon, each probe spending a full drain budget and each one holding
+    // this Session closed to admission while it runs. The delay is derived
+    // from a run of consecutive failures and cleared the moment the child
+    // answers, so a transient wedge costs one deferral rather than being
+    // stranded.
+    if (
+      entry.activeWorkCloseRetryAt !== null &&
+      Date.now() < entry.activeWorkCloseRetryAt
+    ) {
+      return false;
+    }
     // DAEMON-005: hold the session open during the prompt-settled grace
     // window so a poll-based client can reconnect without forcing a
     // session-rebuild epoch_reset resync.
@@ -3455,12 +3485,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.childHolds = adopted;
         entry.childHoldsAt = Date.now();
       }
+      // The child answered, so the run of unanswered probes is over: whatever
+      // it said, the next snapshot is allowed to ask again immediately.
+      entry.activeWorkCloseFailures = 0;
+      entry.activeWorkCloseRetryAt = null;
       return false;
     } catch (err) {
+      entry.activeWorkCloseFailures++;
+      const delayMs = activeWorkCloseRetryDelayMs(
+        entry.activeWorkCloseFailures,
+      );
+      entry.activeWorkCloseRetryAt =
+        delayMs === null ? null : Date.now() + delayMs;
       writeStderrLine(
         `qwen serve: close-if-unheld for session ${JSON.stringify(entry.sessionId)} ` +
-          `did not resolve (${err instanceof Error ? err.message : String(err)}); ` +
-          `leaving it in place for the next snapshot to settle`,
+          `did not resolve (${extractErrorMessage(err)}); ` +
+          (delayMs === null
+            ? `leaving it in place for the next snapshot to settle`
+            : `leaving it in place and deferring the next probe by ${delayMs}ms ` +
+              `after ${entry.activeWorkCloseFailures} consecutive failures`),
       );
       return false;
     }
@@ -3518,6 +3561,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           entry,
           reported.has(sessionId) ? 'child_idle' : 'child_dropped',
         );
+      } else {
+        // Reporting held work is an answer, so a run of unanswered close
+        // probes is over: once this Session goes idle again the daemon may
+        // probe it on the next snapshot instead of waiting out a backoff that
+        // was earned against a different state of the world.
+        entry.activeWorkCloseFailures = 0;
+        entry.activeWorkCloseRetryAt = null;
       }
     }
   }
@@ -6925,6 +6975,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       childHolds: null,
       childHoldsAt: null,
       activeWorkCloseInFlight: false,
+      activeWorkCloseFailures: 0,
+      activeWorkCloseRetryAt: null,
       retryAllowed: false,
       promptSettledAt: null,
       promptSettledCloseTimer: undefined,
