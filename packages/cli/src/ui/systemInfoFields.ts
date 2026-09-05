@@ -134,7 +134,7 @@ function formatProxy(proxy?: string): string {
   return redactProxy(proxy);
 }
 
-function redactProxy(proxy: string): string {
+export function redactProxy(proxy: string): string {
   try {
     const url = new URL(proxy);
     if (url.username || url.password) {

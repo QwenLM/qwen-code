@@ -130,6 +130,51 @@ describe('permissionUtils', () => {
       ]);
     });
 
+    it('offers switch-to-Default after consecutive classifier failures', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'consecutive_unavailable',
+          message: 'Auto Mode could not classify consecutive actions.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toContainEqual({
+        optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+        name: 'Switch to Default Mode and allow once (recommended)',
+        kind: 'allow_once',
+      });
+    });
+
+    it('keeps blocked retries in Auto Mode and hides persistent choices', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'classifier_blocked_retry',
+          message: 'This exact action was previously blocked.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
+    });
+
     it('can hide project persistence while keeping user persistence', () => {
       const options = toPermissionOptions(
         {
@@ -157,6 +202,39 @@ describe('permissionUtils', () => {
           optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
         }),
       );
+    });
+
+    it('keeps one-shot and always-allow options on edit approvals', () => {
+      const options = toPermissionOptions({
+        type: 'edit',
+        title: 'Confirm edit',
+        fileName: 'a.txt',
+        filePath: '/tmp/a.txt',
+        fileDiff: 'diff',
+        originalContent: 'a',
+        newContent: 'b',
+        onConfirm: async () => undefined,
+      });
+
+      // Both kinds must stay present and in this wire order: the web-shell
+      // native Accept path selects by kind preference (allow_once first), so
+      // a missing allow_once would escalate a single Accept into
+      // "Allow All Edits".
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlways,
+          name: 'Allow All Edits',
+          kind: 'allow_always',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
     });
   });
 

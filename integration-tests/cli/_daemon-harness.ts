@@ -118,6 +118,8 @@ export async function spawnDaemon(
     '127.0.0.1',
     '--workspace',
     workspaceCwd,
+    '--initialize-timeout-ms',
+    '60000',
     ...extraArgs,
   ];
 

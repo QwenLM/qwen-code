@@ -128,8 +128,15 @@ function bindInvocationContextPolicy(
   }
 }
 
-const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+// The MCP undici dispatcher runs with headersTimeout: 0, bodyTimeout: 0
+// (see getOrCreateMcpDispatcher in runtimeFetchOptions.ts), and every caller
+// of the optional GET/SSE probe is fire-and-forget, so nothing above this
+// wrapper will ever time out a body that sends headers but never completes.
+// This excerpt is best-effort diagnostics only — bound it so a stalled body
+// can't leak a reader/connection for the life of the process.
+const STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS = 2_000;
 
 export function getMcpOAuthDialogInstruction(
   action: 'authenticate' | 're-authenticate',
@@ -177,11 +184,11 @@ async function readResponseBodyExcerpt(
     return undefined;
   }
 
-  const decoder = new TextDecoder();
-  let body = '';
-  let bytesRead = 0;
-  let truncated = false;
-  try {
+  const readLoop = async (): Promise<string | undefined> => {
+    const decoder = new TextDecoder();
+    let body = '';
+    let bytesRead = 0;
+    let truncated = false;
     while (bytesRead < STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT) {
       const { done, value } = await reader.read();
       if (done) {
@@ -225,7 +232,23 @@ async function readResponseBodyExcerpt(
       excerpt.length > STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT
       ? `${excerpt.slice(0, STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT)}...`
       : excerpt;
+  };
+
+  try {
+    return await runWithTimeout(
+      readLoop(),
+      STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS,
+      'Streamable HTTP GET SSE fallback body excerpt',
+    );
   } catch {
+    // Timed out (or the read failed): drop the diagnostics and cancel this
+    // clone's tee branch so the abandoned read settles instead of dangling.
+    // Cancelling one branch alone does not run the underlying source's
+    // cancel algorithm — it's the caller's response.body?.cancel() below
+    // that cancels the sibling branch and actually releases the connection.
+    reader.cancel().catch(() => {
+      // Best-effort cleanup; the caller still returns the 405 sentinel.
+    });
     return undefined;
   }
 }
@@ -250,8 +273,14 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 
 /**
  * Wraps fetch to preserve OAuth challenges before the SDK discards response
- * metadata and to normalize Spring AI-style 400 responses to the SDK's
- * unsupported sentinel for the optional Streamable HTTP GET SSE request.
+ * metadata and to normalize conventional "GET not supported" rejections of
+ * the optional Streamable HTTP GET SSE request to the SDK's unsupported
+ * sentinel: Spring AI rejects it with 400 (#4521), and servers with no GET
+ * route at all — e.g. the official SDK's stateless
+ * `StreamableHTTPServerTransport` behind Express, whose default fallthrough
+ * answers 404 — reject it with 404 (#8784). A raw 405 needs no rewriting
+ * (the SDK tolerates it natively) and 401 must stay untouched (the OAuth
+ * challenge detection above depends on observing it).
  *
  * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
  * 405 response as "GET SSE unsupported" and continues in POST-only mode.

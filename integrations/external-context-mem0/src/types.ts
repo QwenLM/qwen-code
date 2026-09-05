@@ -11,9 +11,9 @@ export type AuthenticationKind =
 
 export type ScopeLocation = 'json' | 'json.filters' | 'query' | 'omit';
 
-export interface InstanceConfigV1 {
-  schemaVersion: 1;
-  preset: string;
+export interface InstanceConfigV2 {
+  schemaVersion: 2;
+  dialectPath: string;
   endpoint: {
     origin: string;
     basePath: string;
@@ -55,7 +55,7 @@ export interface DialectV1 {
 }
 
 export interface RuntimeConfiguration {
-  instance: InstanceConfigV1;
+  instance: InstanceConfigV2;
   dialect: DialectV1;
   credential: string;
 }

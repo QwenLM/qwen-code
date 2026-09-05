@@ -13,6 +13,7 @@ import {
   FzfWorkerHandle,
   installInProcessFzfTransport,
 } from './fzfWorkerHandle.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('FzfWorkerHandle', () => {
   const restorers: Array<() => void> = [];
@@ -83,7 +84,7 @@ describe('FzfWorkerHandle', () => {
       const setupMs = Date.now() - before;
       // Worker spawn is at least ~10 ms even on a fast machine. The in-thread
       // path is tens of microseconds. Generous bound to avoid CI flake.
-      expect(setupMs).toBeLessThan(50);
+      expectWithinLatencyBudget(setupMs, 50);
 
       const results = await handle.find('y');
       expect(results.map((r) => r.item)).toContain('y.ts');

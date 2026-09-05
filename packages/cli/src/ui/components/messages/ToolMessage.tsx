@@ -53,6 +53,7 @@ import {
   toCodePoints,
 } from '../../utils/textUtils.js';
 import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
+import { toggleKeyHint } from './ConversationMessages.js';
 
 import {
   ToolStatusIndicator,
@@ -607,7 +608,14 @@ const StringResultRenderer: React.FC<{
   renderAsMarkdown: boolean;
   availableHeight?: number;
   childWidth: number;
-}> = ({ data, renderAsMarkdown, availableHeight, childWidth }) => {
+  registerOverflow?: boolean;
+}> = ({
+  data,
+  renderAsMarkdown,
+  availableHeight,
+  childWidth,
+  registerOverflow,
+}) => {
   let displayData = data;
 
   // Truncate if too long
@@ -640,6 +648,7 @@ const StringResultRenderer: React.FC<{
       maxWidth={childWidth}
       additionalHiddenLinesCount={sliced.hiddenLinesCount}
       sourceBoundaries={sliced.sourceBoundaries}
+      registerOverflow={registerOverflow}
     >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
@@ -706,6 +715,14 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
    */
   fullDetail?: boolean;
   /**
+   * `ui.showToolCallArgs`. When true, an extra row under the tool header
+   * prints the raw `args` JSON, recovering parameters that
+   * `invocation.getDescription()` summarizes away (Edit shows only the
+   * filename, Read only the path). Independent of `fullDetail`, which owns
+   * result-output expansion; this one only ever adds the args row.
+   */
+  showToolCallArgs?: boolean;
+  /**
    * Whether this subagent owns keyboard input for the inline approval
    * surface — when true the focus-holder banner renders and the
    * underlying ToolConfirmationMessage receives keystrokes; when false
@@ -746,6 +763,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   fullDetail,
+  showToolCallArgs,
+  args,
   isFocused,
   isPending,
   executionStartTime,
@@ -845,12 +864,24 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight !== undefined
       ? shellCapHeight + 1
       : availableHeight;
+  // Ctrl+s ("show more lines") lifts height clamps but not the
+  // ui.shellOutputMaxLines cap (#10640): when the shell cap is what hides
+  // lines, keep them out of the overflow state so the ctrl+s hint does not
+  // advertise lines that pressing ctrl+s cannot reveal.
+  const shellCapIgnoresShowMore =
+    isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
   // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox
-  if (availableHeight) {
+  // to render as plain text, which is contained within the terminal using MaxSizedBox.
+  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
+  // (#10640): constrainHeight=false drops the height budget (availableHeight
+  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
+  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
+  // (default true), so without this the capped shell output would escape
+  // through the markdown branch, which MaxSizedBox does not contain.
+  if (availableHeight || isCappingShell) {
     renderOutputAsMarkdown = false;
   }
 
@@ -897,7 +928,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
   // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
-  // `if (availableHeight)` guard above doesn't catch this because fullDetail
+  // markdown-suppression guard above doesn't catch this because fullDetail
   // lifts the height cap (availableTerminalHeight is undefined in transcript).
   if (usingDetailedDisplay) {
     renderOutputAsMarkdown = false;
@@ -917,6 +948,22 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCollapsibleTool(name) &&
     (effectiveDisplayRenderer.type === 'string' ||
       effectiveDisplayRenderer.type === 'ansi');
+
+  const inlineToolArgs = React.useMemo(
+    () =>
+      showToolCallArgs
+        ? formatInlineToolArgs(
+            args,
+            description,
+            fullDetail === true,
+            // The row renders at `innerWidth` (the header's status-indicator
+            // gutter is padding, not content), so that is the width the
+            // line cap has to reason about.
+            innerWidth > 0 ? innerWidth : undefined,
+          )
+        : undefined,
+    [showToolCallArgs, args, description, fullDetail, innerWidth],
+  );
 
   return (
     <Box paddingY={0} flexDirection="column">
@@ -951,6 +998,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {inlineToolArgs !== undefined && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <Text color={theme.text.secondary} wrap="wrap">
+            {inlineToolArgs}
+          </Text>
+        </Box>
+      )}
       {visionBridgeNoticeText && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <StringResultRenderer
@@ -1023,6 +1077,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
+                registerOverflow={!shellCapIgnoresShowMore}
               />
             )}
           </Box>
@@ -1059,6 +1114,149 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     </Box>
   );
 };
+
+/**
+ * Absolute column cap for the inline args row in the main view. Generous enough
+ * for a real MCP payload, small enough that a WriteFile `content` arg cannot
+ * bury the conversation. Applies when the row width is unknown; otherwise
+ * whichever of this and `TOOL_ARGS_INLINE_MAX_LINES` is tighter wins. Lifted in
+ * full-detail mode — `ui.showToolCallArgs` gives you the args, Ctrl+O gives you
+ * everything.
+ */
+const TOOL_ARGS_INLINE_MAX_CHARS = 1000;
+
+/**
+ * Wrapped-row cap for the inline args row.
+ *
+ * `ToolGroupMessage` budgets terminal height per tool from
+ * `availableTerminalHeight - staticHeight - countOneLineToolCalls`, and that
+ * budget only ever reaches the result-output renderers — a tool with no
+ * `resultDisplay` is counted as exactly one line. The args row sits outside
+ * both, so a character-only cap let a single pending batch draw far past the
+ * viewport (six calls at the 1000-char cap measured ~72 rows into a 20-row
+ * frame). Once the live, non-`<Static>` frame exceeds the terminal height,
+ * ink's `shouldClearTerminalForFrame` wipes scrollback on every repaint —
+ * exactly the #5798 condition the parallel-agent hand-off above exists to
+ * avoid. Bounding the row in *rows* keeps a group's live frame proportional to
+ * its tool count; Ctrl+O remains the release valve.
+ */
+export const TOOL_ARGS_INLINE_MAX_LINES = 2;
+
+/**
+ * One-line JSON for the `ui.showToolCallArgs` row, or undefined when there is
+ * nothing worth adding.
+ *
+ * Skipped when `description` already IS the args JSON: MCP invocations return
+ * `safeJsonStringify(params)` from `getDescription()`, so rendering both would
+ * print the same payload twice.
+ *
+ * The result is model- and MCP-controlled text, so it goes through the same
+ * `sanitizeTerminalText` pipeline as the other untrusted renders in this
+ * component (`detailedDisplay`, the vision-bridge notice). `JSON.stringify`
+ * escapes C0 controls and `escapeAnsiCtrlCodes` neutralizes ESC-prefixed
+ * sequences, but neither touches Unicode bidi overrides — which would let a
+ * malicious arg visually reorder the very payload this row exists to expose
+ * (Trojan Source, CVE-2021-42572).
+ *
+ * Sanitization runs last, on the returned string: the dedup comparison and the
+ * `+N chars` accounting below both read the raw `json`, so the hidden-character
+ * count stays honest about the actual arguments.
+ *
+ * `rowWidth` is the width in columns the row renders at (`innerWidth` in the
+ * component). When given, the row is bounded to `TOOL_ARGS_INLINE_MAX_LINES`
+ * wrapped rows rather than by character count alone — see that constant.
+ */
+export function formatInlineToolArgs(
+  args: Record<string, unknown> | undefined,
+  description: string,
+  uncapped: boolean,
+  rowWidth?: number,
+): string | undefined {
+  if (!args || Object.keys(args).length === 0) {
+    return undefined;
+  }
+
+  let json: string;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    // Circular or otherwise unserializable args — the header line is all we
+    // can honestly show.
+    return undefined;
+  }
+
+  const trimmedDescription = description.trim();
+  if (trimmedDescription.startsWith('{')) {
+    try {
+      if (
+        JSON.stringify(JSON.parse(trimmedDescription) as unknown) === json ||
+        trimmedDescription === json
+      ) {
+        return undefined;
+      }
+    } catch {
+      // Only looks like JSON — fall through and render the args row.
+    }
+  }
+
+  if (uncapped) {
+    return sanitizeTerminalText(json);
+  }
+
+  // Whichever bound is tighter. Without a known row width the column cap is all
+  // we have; with one, `TOOL_ARGS_INLINE_MAX_LINES` rows is the real ceiling.
+  const budget =
+    rowWidth !== undefined && rowWidth > 0
+      ? Math.min(
+          TOOL_ARGS_INLINE_MAX_CHARS,
+          Math.floor(rowWidth) * TOOL_ARGS_INLINE_MAX_LINES,
+        )
+      : TOOL_ARGS_INLINE_MAX_CHARS;
+
+  // Reserve the marker's own columns inside the budget — otherwise the
+  // `+N chars` tail is precisely what spills onto the row after the last one we
+  // are allowed to draw. `json.length` is an upper bound on the digit count.
+  const markerWidth = `… +${json.length} chars (${toggleKeyHint})`.length;
+  const headBudget = Math.max(1, budget - markerWidth);
+
+  // Walk code points, measuring columns. Two reasons not to `slice` code units:
+  // a raw cut can land between the halves of a surrogate pair (an emoji or a
+  // supplementary-plane CJK char in an argument) and leave an orphan the
+  // terminal draws as a replacement glyph; and columns, not code units, are
+  // what decide where ink wraps — a full-width CJK argument fills the row in
+  // half the characters.
+  let columns = 0;
+  let cut = -1;
+  for (let i = 0; i < json.length; ) {
+    const unit = json.charCodeAt(i);
+    const size =
+      unit >= 0xd800 && unit <= 0xdbff && i + 1 < json.length ? 2 : 1;
+    const width = Math.max(getCachedStringWidth(json.slice(i, i + size)), 1);
+    if (columns + width > headBudget) {
+      cut = i;
+      break;
+    }
+    columns += width;
+    i += size;
+  }
+
+  if (cut < 0) {
+    return sanitizeTerminalText(json);
+  }
+
+  // `+N chars` counts code points, matching the rest of this file's
+  // `toCodePoints` accounting: a code-unit count over-reports by one per astral
+  // character, so a payload of emoji would advertise twice what Ctrl+O reveals.
+  let hidden = 0;
+  for (let i = cut; i < json.length; ) {
+    const unit = json.charCodeAt(i);
+    i += unit >= 0xd800 && unit <= 0xdbff && i + 1 < json.length ? 2 : 1;
+    hidden++;
+  }
+  return sanitizeTerminalText(
+    `${json.slice(0, cut)}… +${hidden} chars (${toggleKeyHint})`,
+  );
+}
 
 function isDescriptionRepeatedInPrompt(
   description: string,

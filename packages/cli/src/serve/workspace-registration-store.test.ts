@@ -18,6 +18,14 @@ import {
   workspaceRegistrationScopeHash,
 } from './workspace-registration-store.js';
 
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
 const cleanup: string[] = [];
 
 async function tempHome(): Promise<string> {
@@ -391,6 +399,57 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).rejects.toThrow(/regular file/);
   });
 
+  it('reports an unverifiable store identity as a store error', async () => {
+    const home = await tempHome();
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const modifiedPromises = {
+        ...actual.promises,
+        lstat: vi.fn(
+          async (...args: Parameters<typeof actual.promises.lstat>) => {
+            const stats = await actual.promises.lstat(...args);
+            return new Proxy(stats, {
+              get: (target, property, receiver) =>
+                property === 'ino'
+                  ? 0
+                  : Reflect.get(target, property, receiver),
+            });
+          },
+        ),
+      };
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        promises: modifiedPromises,
+      };
+      return { ...modified, default: modified };
+    });
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: [],
+        }),
+      );
+
+      await expect(store.read()).rejects.toThrow(
+        /identity could not be verified/,
+      );
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('rejects an oversized store', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
@@ -472,9 +531,16 @@ describe('WorkspaceRegistrationStore', () => {
         }),
       },
     }));
-    vi.doMock('@qwen-code/qwen-code-core', () => ({
-      atomicWriteFile: vi.fn().mockRejectedValue(writeError),
-    }));
+    // The read path uses the leaf noFollowOpen export, so this barrel mock
+    // remains limited to the deferred write helper under test.
+    vi.doMock('@qwen-code/qwen-code-core', async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+      return {
+        ...actual,
+        atomicWriteFile: vi.fn().mockRejectedValue(writeError),
+      };
+    });
     try {
       const storeModule = await import('./workspace-registration-store.js');
       const store = new storeModule.WorkspaceRegistrationStore(

@@ -193,13 +193,11 @@ export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
  * can emit hundreds of frames (test plan reports 13 for a short
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
- * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set for chatty Stage 1
- * sessions, with ~30–60× headroom over a typical-but-busy turn at
- * the cost of a few hundred KB of RAM per session. Operators can
- * override per-daemon via `qwen serve --event-ring-size <n>`.
+ * be exhausted by a moderate turn before the client reconnected.
+ * 8000 is the current daemon design target; operators with very
+ * long agentic turns can raise it via `qwen serve --event-ring-size <n>`.
  */
-export const DEFAULT_RING_SIZE = 8000;
+export const DEFAULT_RING_SIZE = 8_000;
 /**
  * Fraction of the frame and byte caps at which a `slow_client_warning`
  * synthetic frame is force-pushed to the at-risk subscriber. The warning

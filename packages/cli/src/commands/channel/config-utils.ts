@@ -4,7 +4,10 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  isInternalSecretEnvVar,
+} from '@qwen-code/qwen-code-core';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -15,6 +18,21 @@ export { findCliEntryPath } from './cli-entry-path.js';
 
 type WebhookEnvironment = Readonly<Record<string, string | undefined>>;
 
+/**
+ * Channel config is loaded from merged settings, which a trusted repository
+ * contributes to, and the resolved values are sent as credentials to
+ * repo-configured endpoints — so Qwen-internal secrets are never resolved
+ * here. Throwing matches this module's contract for every other unusable
+ * reference (unset, empty), instead of silently yielding a literal.
+ */
+function assertNotInternalSecret(envName: string, reference: string): void {
+  if (isInternalSecretEnvVar(envName)) {
+    throw new Error(
+      `Environment variable ${envName} is a Qwen-internal secret and is never resolved into channel configuration (referenced as ${reference})`,
+    );
+  }
+}
+
 export function resolveEnvVars(
   value: string,
   env: WebhookEnvironment = process.env,
@@ -24,6 +42,7 @@ export function resolveEnvVars(
   }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
+    assertNotInternalSecret(envName, value);
     const envValue = env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -108,6 +127,7 @@ function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (value.startsWith('$$')) return value.substring(1);
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
+    assertNotInternalSecret(envName, value);
     const envValue = process.env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -322,6 +342,7 @@ function resolveWebhookSecretEnv(
       `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
     );
   }
+  assertNotInternalSecret(envName, `${path}.secretEnv`);
   const envValue = env[envName];
   if (envValue === undefined) {
     throw new Error(

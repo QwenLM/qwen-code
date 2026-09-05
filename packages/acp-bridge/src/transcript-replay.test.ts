@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTranscriptReplayMachine,
+  createTranscriptToolCallResultUpdate,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
   type TranscriptReplayStateV1,
 } from './transcript-replay.js';
@@ -78,6 +79,58 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('stamps stable segment identity across replayed text parts', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'first' },
+            { text: 'second' },
+            { text: 'thinking', thought: true },
+          ],
+        },
+      }),
+    );
+    const segmentIds = projected.map(
+      (update) =>
+        (
+          update._meta as
+            | { qwenTranscript?: { segmentId?: string } }
+            | undefined
+        )?.qwenTranscript?.segmentId,
+    );
+
+    expect(segmentIds).toEqual([
+      'assistant-1:0',
+      'assistant-1:0',
+      'assistant-1:2',
+    ]);
+  });
+
+  it('keeps raw function responses out of the safe result preview', () => {
+    const update = createTranscriptToolCallResultUpdate({
+      toolName: 'read',
+      callId: 'read-1',
+      success: true,
+      contentPrefix: [
+        {
+          type: 'content',
+          content: { type: 'text', text: 'Visible prefix' },
+        },
+      ],
+      message: [{ text: 'Visible result' }],
+    });
+
+    expect(update._meta).toMatchObject({
+      qwenTranscript: {
+        resultPreviewText: 'Visible prefix',
+      },
+    });
+    expect(JSON.stringify(update._meta)).not.toContain('Visible result');
+  });
+
   it('does not replay internal Goal runtime prompts as user messages', () => {
     expect(
       updates(
@@ -1409,6 +1462,18 @@ describe('createTranscriptReplayMachine', () => {
       'agent_message_chunk',
       'agent_message_chunk',
     ]);
+    expect(
+      assistant
+        .slice(0, 2)
+        .map(
+          (update) =>
+            (
+              update._meta as
+                | { qwenTranscript?: { segmentId?: string } }
+                | undefined
+            )?.qwenTranscript?.segmentId,
+        ),
+    ).toEqual(['assistant-1:0', 'assistant-1:1']);
 
     const plan = updates(
       machine,
@@ -1422,6 +1487,7 @@ describe('createTranscriptReplayMachine', () => {
           resultDisplay: {
             type: 'todo_list',
             planId: 'plan-1',
+            sessionWorkflow: true,
             todos: [
               {
                 id: 'ship',
@@ -1447,6 +1513,7 @@ describe('createTranscriptReplayMachine', () => {
         },
       ],
       _meta: {
+        qwenSessionWorkflow: true,
         stats: {
           promptTokens: 5,
           candidateTokens: 3,

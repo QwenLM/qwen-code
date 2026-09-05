@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import { useStdout, type ReadonlyFrame } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
@@ -20,6 +20,7 @@ import { getSelectedText } from './selection-text.js';
 import { spanAtForMode } from './selection-span.js';
 import {
   terminalToGrid,
+  snapWideChar,
   pointInViewport,
   clampToViewport,
   type ViewportRect,
@@ -65,19 +66,44 @@ const sameViewportRect = (
   previous.width === current.width &&
   previous.height === current.height;
 
+/**
+ * Read-only view of the controller's live selection, for consumers that must
+ * not own the state (the context-menu "Copy Selection" item). The ref is
+ * populated on mount and cleared on unmount; `null` while no controller is
+ * mounted.
+ */
+export interface SelectionQuery {
+  /** Reading-order range of the current selection, or null when none. */
+  getRange: () => NormalizedSelection | null;
+}
+
 export interface TextSelectionControllerProps {
   /** Selection is only handled while active (VP mode, no dialog, focused). */
   isActive: boolean;
+  /**
+   * Temporarily ignore mouse events WITHOUT clearing the current selection.
+   * Used while the context menu owns the pointer: the existing selection must
+   * survive (the menu's "Copy Selection" offers it), but new presses must not
+   * start or extend a selection underneath the menu. Deactivation
+   * (`isActive`) still clears; pausing does not.
+   */
+  eventsPaused?: boolean;
   /** Reads from the history viewport; called at event time (may be null early). */
   getViewportRect: () => ViewportRect | null;
   /** Additional selectable regions outside the history viewport. */
   getAdditionalSelectableRects?: () => readonly ViewportRect[];
   getScrollState: () => ScrollState;
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
+  /** Optional sink exposing the live selection range to other components. */
+  selectionQueryRef?: MutableRefObject<SelectionQuery | null>;
 }
 
-/** Max gap between clicks (ms) to count as a double/triple click. */
-const MULTI_CLICK_MS = 400;
+/**
+ * Max gap between clicks (ms) to count as a double/triple click. Shared with
+ * ContentMouseController, whose delayed link-open window must match this
+ * value so a second press always lands inside it and cancels the open.
+ */
+export const MULTI_CLICK_MS = 400;
 const debugLogger = createDebugLogger('TEXT_SELECTION');
 
 interface ClickRecord {
@@ -201,14 +227,7 @@ export function TextSelectionController(
         terminalHeight,
         frameHeight,
       );
-      const row = buffer.frame?.cells[point.y];
-      const snappedPoint =
-        point.x > 0 &&
-        row?.[point.x]?.value === '' &&
-        row[point.x - 1]?.fullWidth
-          ? { ...point, x: point.x - 1 }
-          : point;
-      return snappedPoint;
+      return snapWideChar(buffer.frame, point);
     },
     [getBuffer, stdout],
   );
@@ -255,6 +274,20 @@ export function TextSelectionController(
   const handleMouse = useCallback(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
+
+      // While paused (context menu owns the pointer) ignore press/move/release
+      // so they can't start or extend a selection under the menu — but do NOT
+      // clear: the existing selection is what the menu's Copy Selection
+      // offers. Nothing can scroll the viewport while paused, so wheel ticks
+      // are dropped here too (before the scroll-clear branch). A left-release
+      // must still finish a drag that was in flight when the menu opened, or
+      // the stale dragging state misroutes the next press/release pair.
+      if (propsRef.current.eventsPaused) {
+        if (event.name === 'left-release') {
+          selection.finish();
+        }
+        return;
+      }
 
       // History scrolls invalidate history-owned selection coordinates. Footer
       // selections live outside the scrollable viewport and remain valid.
@@ -446,6 +479,32 @@ export function TextSelectionController(
       clearSelection();
     }
   }, [props.isActive, clearSelection]);
+
+  // Expose the live selection to an external query ref (context menu "Copy
+  // Selection"). A collapsed char-mode selection is a bare click (cleared on
+  // release anyway) and carries no text; a collapsed word/line span still
+  // holds its cell(s), so it stays offerable.
+  const selectionQueryRef = props.selectionQueryRef;
+  useEffect(() => {
+    if (!selectionQueryRef) {
+      return;
+    }
+    selectionQueryRef.current = {
+      getRange: () => {
+        const selection = selectionRef.current;
+        if (
+          selection.isEmpty ||
+          (selection.isCollapsed && selection.mode === 'char')
+        ) {
+          return null;
+        }
+        return selection.normalized();
+      },
+    };
+    return () => {
+      selectionQueryRef.current = null;
+    };
+  }, [selectionQueryRef]);
 
   return null;
 }

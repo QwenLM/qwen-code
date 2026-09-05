@@ -26,6 +26,11 @@
   overflow-y: auto;
 }
 
+:global([data-transcript-render-mode='document']) .lines {
+  max-height: none;
+  overflow-y: visible;
+}
+
 .line {
   display: flex;
   padding: 0 8px;
