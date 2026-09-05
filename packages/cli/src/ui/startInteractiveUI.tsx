@@ -451,7 +451,7 @@ export async function startInteractiveUI(
   // registry record, and `patchSessionRecord` no-ops when there is no record
   // yet, so binding any earlier would publish the socket path into nothing.
   // Not awaited — startup must never block on binding a socket.
-  if (settings.merged.agents?.crossSessionMessaging !== true) {
+  if (!config.isCrossSessionMessagingEnabled()) {
     publishPeerMessaging(null);
   } else {
     let exiting = false;

@@ -162,7 +162,10 @@ async function main() {
         'Unrecognized JSONL format (expected ChatRecord-per-line).',
       );
     }
-    sessionData = await buildProductSessionData(records, collectSessionMetadata);
+    sessionData = await buildProductSessionData(
+      records,
+      collectSessionMetadata,
+    );
   }
 
   const html = toHtml(sessionData, records);

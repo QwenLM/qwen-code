@@ -100,11 +100,16 @@ interface Fake {
 function makeContext(
   peerMessaging: Fake | null,
   crossSessionMessaging?: boolean,
+  effectiveCrossSessionMessaging = crossSessionMessaging,
 ): CommandContext {
   return {
     services: {
       peerMessaging,
       settings: { merged: { agents: { crossSessionMessaging } } },
+      config: {
+        isCrossSessionMessagingEnabled: () =>
+          effectiveCrossSessionMessaging === true,
+      },
     },
   } as unknown as CommandContext;
 }
@@ -362,6 +367,20 @@ describe('/peers', () => {
     expect(result.messageType).toBe('error');
     expect(result.content).toContain('failed to register');
     expect(result.content).not.toContain('Enable it with');
+  });
+
+  it('reports effective safe-mode policy as off', async () => {
+    const result = await peersCommand.action!(
+      makeContext(null, true, false),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('Cross-session messaging is off');
+    expect(result.content).not.toContain('failed to bind');
   });
 
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {
