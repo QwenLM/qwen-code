@@ -596,9 +596,12 @@ export class WorkspaceChannelSettingsStore {
   ): Promise<ChannelSettingsSnapshot> {
     assertSafeChannelName(name);
     const current = this.assertRevision(options.expectedRevision);
+    const configured = Object.hasOwn(current.channels, name);
+    if (!configured && !current.startupNames.includes(name)) return current;
     const channels = { ...current.channels };
     delete channels[name];
-    const hasAllSentinel = current.startupNames.some(isAllStartupName);
+    const hasAllSentinel =
+      configured && current.startupNames.some(isAllStartupName);
     const startupNames = hasAllSentinel
       ? Object.keys(channels).some(
           (channelName) => !isAllStartupName(channelName),

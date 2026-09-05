@@ -444,14 +444,24 @@ export function createChannelManagementService(
     async remove(name, request) {
       assertManageableInstanceName(name);
       const current = opts.store.snapshot();
-      if (!Object.hasOwn(current.channels, name)) {
-        throw new ChannelManagementError(
-          'channel_instance_not_found',
-          `Channel "${name}" is not configured in this workspace.`,
-        );
-      }
-      assertWorkspaceConfig(current.channels[name]!);
+      const configured = Object.hasOwn(current.channels, name);
+      if (configured) assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
+      if (!configured) {
+        const workers = workerFor(name);
+        const committed = opts.manager.committedChannelNames().includes(name);
+        if (
+          (committed || workers.length > 0) &&
+          (!committed ||
+            workers.length !== 1 ||
+            workers[0]!.workspaceCwd !== opts.workspaceCwd)
+        ) {
+          throw new ChannelManagementError(
+            'channel_runtime_owner_mismatch',
+            `Channel "${name}" does not have one confirmed runtime owner in this workspace.`,
+          );
+        }
+      }
       if (workspaceCommittedNames().includes(name)) {
         assertOwnedRuntime(name);
         await stopChannel(name);

@@ -569,6 +569,111 @@ describe('createChannelManagementService', () => {
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
+  it('converges an explicitly deleted owned worker after its config disappears', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {} }),
+      committedNames: ['old-bot'],
+    });
+    expect((await service.list()).instances).toEqual({});
+    expect(manager.state().workers).toHaveLength(1);
+
+    await expect(
+      service.remove('old-bot', { expectedRevision: 'rev-1' }),
+    ).resolves.toMatchObject({ snapshot: { instances: {} } });
+
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'old-bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(manager.state().workers).toEqual([]);
+    expect(manager.state().selection).toBeNull();
+    expect(store.remove).toHaveBeenCalledOnce();
+  });
+
+  it('rejects stale missing-config deletion before stopping its worker', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {} }),
+      committedNames: ['bot'],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('propagates missing-config worker stop failure without persisting deletion', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
+      committedNames: ['bot'],
+    });
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      Object.assign(new Error('stop unconfirmed'), {
+        code: 'channel_worker_stop_failed',
+      }),
+    );
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_worker_stop_failed' });
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(manager.committedChannelNames()).toEqual(['bot']);
+  });
+
+  it.each(['foreign', 'ambiguous', 'unknown', 'uncommitted'])(
+    'rejects missing-config deletion with %s runtime ownership',
+    async (ownership) => {
+      const { service, store, manager } = setup({
+        snapshot: settingsSnapshot({ channels: {} }),
+        committedNames: ['bot'],
+      });
+      const state = manager.state();
+      const worker = state.workers[0]!;
+      vi.mocked(manager.state).mockReturnValue({
+        ...state,
+        workers:
+          ownership === 'unknown'
+            ? []
+            : ownership === 'ambiguous'
+              ? [worker, { ...worker, workspaceCwd: '/ws/other' }]
+              : [
+                  {
+                    ...worker,
+                    workspaceCwd:
+                      ownership === 'foreign' ? '/ws/other' : WORKSPACE,
+                  },
+                ],
+      });
+      if (ownership === 'uncommitted') {
+        vi.mocked(manager.committedChannelNames).mockReturnValue([]);
+      }
+
+      await expect(
+        service.remove('bot', { expectedRevision: 'rev-1' }),
+      ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+      expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+      expect(store.remove).not.toHaveBeenCalled();
+    },
+  );
+
+  it('makes repeated missing-config deletion idempotent and clears stale startup names', async () => {
+    const { service, manager, persisted } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
+      committedNames: ['bot'],
+    });
+    const first = await service.remove('bot', { expectedRevision: 'rev-1' });
+    const second = await service.remove('bot', {
+      expectedRevision: first.snapshot.revision,
+    });
+
+    expect(second.snapshot.instances).toEqual({});
+    expect(second.instance.runtime.state).toBe('stopped');
+    expect(persisted().startupNames).toEqual([]);
+    expect(manager.setChannelEnabled).toHaveBeenCalledTimes(1);
+    expect(manager.state().workers).toEqual([]);
+  });
+
   it('delegates starts and stops to the manager atomic mutation lane', async () => {
     const { service, store, manager } = setup({
       committedNames: ['first', 'second'],
@@ -890,7 +995,7 @@ describe('createChannelManagementService', () => {
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
-  it('rejects lifecycle operations for a nonexistent channel', async () => {
+  it('rejects start, stop and restart for a nonexistent channel', async () => {
     const { service, manager } = setup({ committedNames: [] });
 
     await expect(service.restart('nonexistent')).rejects.toMatchObject({
@@ -899,9 +1004,6 @@ describe('createChannelManagementService', () => {
     await expect(service.start('nonexistent')).rejects.toMatchObject({
       code: 'channel_instance_not_found',
     });
-    await expect(
-      service.remove('nonexistent', { expectedRevision: 'rev-1' }),
-    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
     await expect(service.stop('nonexistent')).rejects.toMatchObject({
       code: 'channel_instance_not_found',
     });

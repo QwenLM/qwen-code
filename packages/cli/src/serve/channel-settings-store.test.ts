@@ -1853,6 +1853,55 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('does not rewrite legacy all startup when deleting an absent name', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "all": { "type": "telegram", "token": "$ALL_TOKEN" } },
+  "serve": { "channels": ["all"] }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    const current = store.snapshot();
+
+    await expect(
+      store.remove('missing', { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+    const next = await store.remove('missing', {
+      expectedRevision: current.revision,
+    });
+
+    expect(next).toEqual(current);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it.each([['other'], ['all']])(
+    'removes only the absent channel startup name while preserving %s',
+    async (remaining) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: { [remaining]: { type: 'telegram', token: '$TEST_TOKEN' } },
+          serve: { channels: [remaining, 'missing'] },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const current = store.snapshot();
+
+      const next = await store.remove('missing', {
+        expectedRevision: current.revision,
+      });
+      const repeated = await store.remove('missing', {
+        expectedRevision: next.revision,
+      });
+
+      expect(next.channels).toEqual(current.channels);
+      expect(next.startupNames).toEqual([remaining]);
+      expect(repeated).toEqual(next);
+      const persisted = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      expect(persisted.serve.channels).toEqual([remaining]);
+    },
+  );
+
   it('preserves the all sentinel when removing a legacy all config beside other instances', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
