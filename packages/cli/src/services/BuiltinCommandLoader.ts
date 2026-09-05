@@ -35,7 +35,7 @@ import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { effortCommand } from '../ui/commands/effort-command.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
-import { focusCommand } from '../ui/commands/focusCommand.js';
+import { focusCommand } from '../ui/commands/focus-command.js';
 import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { goalCommand } from '../ui/commands/goalCommand.js';

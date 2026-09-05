@@ -481,6 +481,8 @@ export default {
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
+  'Focus mode is not supported by this renderer.':
+    'O modo foco não é compatível com esta interface.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'alternar modo foco (ocultar raciocínio e ruído de chamadas de ferramentas)',
   'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':

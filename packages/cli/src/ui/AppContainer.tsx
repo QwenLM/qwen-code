@@ -157,7 +157,10 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
-import { useFocusModeActions } from './contexts/FocusModeContext.js';
+import {
+  useFocusModeActions,
+  useFocusModeEnabled,
+} from './contexts/FocusModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -1858,7 +1861,18 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { vimEnabled, vimMode } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
-  const { toggleFocusMode } = useFocusModeActions();
+  const { toggleFocusMode, syncFocusMode } = useFocusModeActions();
+  const focusModeEnabled = useFocusModeEnabled();
+  useEffect(() => {
+    syncFocusMode();
+  }, [settings.merged.ui?.focusMode, syncFocusMode]);
+  const previousFocusMode = useRef(focusModeEnabled);
+  useEffect(() => {
+    if (previousFocusMode.current !== focusModeEnabled) {
+      previousFocusMode.current = focusModeEnabled;
+      refreshStatic();
+    }
+  }, [focusModeEnabled, refreshStatic]);
 
   useLayoutEffect(() => {
     if (vimEnabled && buffer.text.length > 0) {

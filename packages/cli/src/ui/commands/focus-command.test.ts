@@ -5,8 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { focusCommand } from './focusCommand.js';
-import { SettingScope } from '../../config/settings.js';
+import { focusCommand } from './focus-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 describe('focusCommand', () => {
@@ -52,20 +51,17 @@ describe('focusCommand', () => {
     });
   });
 
-  it('falls back to a settings write when the host has no toggleFocusMode', async () => {
+  it('does not claim support or change settings when the host has no toggle', async () => {
     const mockContext = createMockCommandContext();
     delete mockContext.ui.toggleFocusMode;
 
     const result = await focusCommand.action!(mockContext, '');
 
-    expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'ui.focusMode',
-      true,
-    );
-    expect(result).toMatchObject({
+    expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
       type: 'message',
-      messageType: 'info',
+      messageType: 'error',
+      content: 'Focus mode is not supported by this renderer.',
     });
   });
 });

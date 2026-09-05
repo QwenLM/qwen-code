@@ -658,6 +658,51 @@ describe('<HistoryItemDisplay />', () => {
       expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
     });
 
+    it.each([
+      ToolCallStatus.Pending,
+      ToolCallStatus.Executing,
+      ToolCallStatus.Confirming,
+      ToolCallStatus.Canceled,
+    ])('keeps a committed group with status %s visible', (status) => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [successTool('c1'), { ...successTool('c2'), status }],
+      };
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+      expect(lastFrame()).not.toContain('hidden (/focus to show)');
+      expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
+    it('keeps successful subagent executions visible', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [
+          {
+            ...successTool('agent'),
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'reviewer',
+              taskDescription: 'Review changes',
+              taskPrompt: 'Review changes',
+              status: 'completed',
+              toolCalls: [],
+            },
+          },
+        ],
+      };
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+      expect(lastFrame()).not.toContain('hidden (/focus to show)');
+      expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
     it('does NOT collapse a pending (still running) tool_group', () => {
       vi.mocked(ToolGroupMessage).mockClear();
       const item: HistoryItem = {
@@ -721,7 +766,11 @@ describe('<HistoryItemDisplay />', () => {
       };
 
       const { lastFrame } = renderInFocusMode(
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+        />,
       );
 
       const output = lastFrame() ?? '';
@@ -737,7 +786,11 @@ describe('<HistoryItemDisplay />', () => {
       };
 
       const { lastFrame } = renderInFocusMode(
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+        />,
       );
 
       expect(lastFrame() ?? '').not.toContain('Continuing the reasoning');

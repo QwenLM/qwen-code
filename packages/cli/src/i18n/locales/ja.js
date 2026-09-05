@@ -364,6 +364,8 @@ export default {
   'Auto Edit': '自動編集',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim モードのオン/オフを切り替え',
+  'Focus mode is not supported by this renderer.':
+    'このレンダラーはフォーカスモードに対応していません。',
   'toggle focus mode (hide reasoning and tool call noise)':
     'フォーカスモードの切り替え（推論とツール呼び出しのノイズを非表示）',
   'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':

@@ -113,8 +113,7 @@ export interface CommandContext {
     toggleVimEnabled: () => Promise<boolean>;
     /**
      * Toggles focus mode via FocusModeContext so the transcript re-renders
-     * immediately. Optional: hosts without the provider (opentui,
-     * non-interactive) omit it and /focus falls back to a settings write.
+     * immediately. Hosts without focus rendering omit it.
      */
     toggleFocusMode?: () => Promise<boolean>;
     setMemoryFileCount: (count: number) => void;

@@ -6,7 +6,6 @@
 
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
-import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
 export const focusCommand: SlashCommand = {
@@ -18,14 +17,14 @@ export const focusCommand: SlashCommand = {
   supportedModes: ['interactive'] as const,
   canRunDuringStreaming: true,
   action: async (context, _args) => {
-    let enabled: boolean;
-    if (context.ui.toggleFocusMode) {
-      enabled = await context.ui.toggleFocusMode();
-    } else {
-      const settings = context.services.settings;
-      enabled = !(settings.merged.ui?.focusMode ?? false);
-      settings.setValue(SettingScope.User, 'ui.focusMode', enabled);
+    if (!context.ui.toggleFocusMode) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Focus mode is not supported by this renderer.'),
+      };
     }
+    const enabled = await context.ui.toggleFocusMode();
 
     return {
       type: 'message',

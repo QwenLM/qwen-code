@@ -476,6 +476,8 @@ export default {
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
+  'Focus mode is not supported by this renderer.':
+    'Режим фокусировки не поддерживается этим интерфейсом.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'переключить режим фокуса (скрыть рассуждения и шум вызовов инструментов)',
   'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':

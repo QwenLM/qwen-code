@@ -22,12 +22,14 @@ const FocusModeStateContext = createContext<boolean>(false);
 
 interface FocusModeActionsType {
   toggleFocusMode: () => Promise<boolean>;
+  syncFocusMode: () => void;
 }
 
 // No-op default keeps consumers safe outside the provider (tests, opentui,
 // non-interactive UI) — toggling there simply reports "still disabled".
 const FocusModeActionsContext = createContext<FocusModeActionsType>({
   toggleFocusMode: async () => false,
+  syncFocusMode: () => {},
 });
 
 export const FocusModeProvider = ({
@@ -50,12 +52,25 @@ export const FocusModeProvider = ({
 
   const toggleFocusMode = useCallback(async () => {
     const newValue = !focusModeEnabledRef.current;
-    setFocusModeEnabled(newValue);
-    await settings.setValue(SettingScope.User, 'ui.focusMode', newValue);
-    return newValue;
+    settings.setValue(SettingScope.User, 'ui.focusMode', newValue, undefined, {
+      throwOnWriteFailure: true,
+    });
+    const enabled = settings.merged.ui?.focusMode ?? false;
+    focusModeEnabledRef.current = enabled;
+    setFocusModeEnabled(enabled);
+    return enabled;
   }, [settings]);
 
-  const actionsValue = useMemo(() => ({ toggleFocusMode }), [toggleFocusMode]);
+  const syncFocusMode = useCallback(() => {
+    const enabled = settings.merged.ui?.focusMode ?? false;
+    focusModeEnabledRef.current = enabled;
+    setFocusModeEnabled(enabled);
+  }, [settings]);
+
+  const actionsValue = useMemo(
+    () => ({ toggleFocusMode, syncFocusMode }),
+    [toggleFocusMode, syncFocusMode],
+  );
 
   return (
     <FocusModeActionsContext.Provider value={actionsValue}>

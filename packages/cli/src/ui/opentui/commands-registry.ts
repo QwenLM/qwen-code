@@ -273,6 +273,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
   { name: 'editor', results: ['dialog'], dialogs: ['editor'] },
   { name: 'effort', results: ['dialog', 'message'], dialogs: ['effort'] },
   { name: 'export', results: ['message'] },
+  { name: 'focus', results: ['message'] },
   {
     name: 'extensions',
     results: ['dialog', 'message'],

@@ -739,6 +739,7 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
+  'Focus mode is not supported by this renderer.': '目前的介面不支援專注模式。',
   'toggle focus mode (hide reasoning and tool call noise)':
     '切換專注模式（隱藏推理內容和工具呼叫噪音）',
   'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
