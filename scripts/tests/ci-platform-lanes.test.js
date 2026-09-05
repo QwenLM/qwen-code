@@ -657,8 +657,8 @@ describe('GitHub helper tests', () => {
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
     // fresh hosted runner (#10548 review R6-1). The full-profile helper step
-    // still runs every suite, and the merge queue's full run re-checks what
-    // the fast lane skips, so nothing escapes CI.
+    // still runs every suite after `npm ci`, and a push to main always
+    // classifies `full`, so what the fast lane skips is re-checked there.
     const depFree = String(ci.env.HELPER_TESTS_DEP_FREE).trim();
     const fullSuites = String(ci.env.HELPER_TESTS).trim().split(/\s+/);
     expect(depFree).not.toBe('');
@@ -682,17 +682,37 @@ describe('GitHub helper tests', () => {
       expect(depFreeSuites, suite).not.toContain(suite);
       expect(fullSuites, suite).toContain(suite);
     }
-    // The fast lane must consume the dep-free list, not the full one: if the
-    // lane goes back to env.HELPER_TESTS this regression returns.
-    const fastLaneSteps = Object.values(ci.jobs)
-      .flatMap((job) => job.steps ?? [])
-      .filter((step) =>
-        String(step.run ?? '').includes('env.HELPER_TESTS_DEP_FREE'),
+    // The fast lane must consume the dep-free list, not the full one. Select
+    // it by its GATE, never by the list it already consumes: a step that
+    // regressed back to env.HELPER_TESTS would drop out of a content-based
+    // filter, and the hole the filter exists to catch would report green
+    // (#10548 review R6-1 — the first version of this assertion filtered on
+    // `HELPER_TESTS_DEP_FREE` and so pinned the incomplete fix in place while
+    // the sibling `lint_and_static` step still ran the full list with nothing
+    // installed).
+    const fastLaneSteps = Object.entries(ci.jobs)
+      .flatMap(([jobName, job]) =>
+        (job.steps ?? []).map((step) => ({ jobName, step })),
+      )
+      .filter(
+        ({ step }) =>
+          String(step.if ?? '').includes("ci_profile == 'github_ci_only'") &&
+          String(step.run ?? '').includes('node --test'),
       );
+    // One job owns the fast lane; a second copy is duplicated lint bootstrap
+    // and, when it shares the name, a byte-identity break against the shared
+    // prelude guard above.
     expect(fastLaneSteps).toHaveLength(1);
-    expect(
-      String(fastLaneSteps[0].run).replaceAll('HELPER_TESTS_DEP_FREE', ''),
-    ).not.toContain('env.HELPER_TESTS');
+    for (const { jobName, step } of fastLaneSteps) {
+      const where = `${jobName}/${step.name}`;
+      expect(String(step.run), where).toContain('env.HELPER_TESTS_DEP_FREE');
+      // Strip the dep-free name first: `env.HELPER_TESTS` is a substring of
+      // `env.HELPER_TESTS_DEP_FREE`, so an unstripped check is vacuous.
+      expect(
+        String(step.run).replaceAll('HELPER_TESTS_DEP_FREE', ''),
+        where,
+      ).not.toContain('env.HELPER_TESTS');
+    }
   });
 });
 
