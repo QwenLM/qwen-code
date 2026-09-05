@@ -1296,6 +1296,76 @@ describe('SkillTool', () => {
       });
     });
 
+    it('does not re-arm a Skill the user disabled between sessions', () => {
+      // The disabled skill is still in the resumed history. Both live paths
+      // refuse it before applying anything, so restoring its allow rules and
+      // hooks would silently switch an auto-approval back on after the user
+      // turned it off — the same fail-open shape this PR exists to close.
+      vi.mocked(registerSkillHooks).mockClear();
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager: vi.fn().mockReturnValue({}),
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+
+      const gated: SkillConfig = {
+        name: 'gated-skill',
+        description: 'Gated',
+        level: 'user',
+        filePath: '/home/user/.qwen/skills/gated-skill/SKILL.md',
+        skillRoot: '/home/user/.qwen/skills/gated-skill',
+        body: 'Gated body.',
+        allowedTools: ['Edit'],
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: 'command', command: './gate.sh' }],
+            },
+          ],
+        } as unknown as SkillConfig['hooks'],
+      };
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([gated]);
+
+      const output = buildSkillLlmContent(
+        '/home/user/.qwen/skills/gated-skill',
+        gated.body,
+      );
+      skillTool.restoreLoadedSkillsFromHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                args: { skill: 'gated-skill' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ]);
+
+      // Bookkeeping still happens — the body is in the restored context, and
+      // the dedup guard has to know about it.
+      expect(skillTool.getLoadedSkillNames()).toEqual(new Set(['gated-skill']));
+      // But nothing is re-armed.
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
     it('does not restore command output that matches an unrelated cached Skill', () => {
       const output = buildSkillLlmContent(
         '/project/.qwen/skills/code-review',

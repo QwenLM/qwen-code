@@ -403,8 +403,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           continue;
         }
 
+        // Bookkeeping is unconditional: the body is in the restored context
+        // regardless, and the dedup guard must know about it.
         this.loadedSkillContents.add(skill.output);
         this.loadedSkillNames.add(skill.name);
+
         // Session hooks and allow rules live only in memory, so a resumed
         // session starts with none of them — while the restored body still
         // carries the skill's instructions to the model. Without this the
@@ -413,7 +416,16 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         // nothing prompts a re-invocation that would re-apply them. That is
         // the same fail-open shape this path is meant to prevent. Both
         // registrations dedup, and the trust gate is re-applied here.
-        applySkillSideEffects(this.config, skill.config);
+        //
+        // Enabledness is re-checked because it can change between sessions:
+        // a skill invoked, then disabled via `skills.disabled`, is still in
+        // this history. Both live paths refuse a disabled skill before
+        // applying anything (`executeDisabledSkill`; the loader's disabled
+        // branch), so restoring its allow rules and hooks would re-arm an
+        // auto-approval the user has since switched off.
+        if (this.config.isSkillEnabled(skill.config)) {
+          applySkillSideEffects(this.config, skill.config);
+        }
       }
     }
   }

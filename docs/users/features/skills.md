@@ -220,7 +220,8 @@ exit 0
 
 Notes:
 
-- Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>` — and a session resumed with `--continue` / `--resume` re-registers the hooks of every Skill still loaded in its context.
+- Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
+- Resuming a session with `--continue` / `--resume` re-registers the hooks of Skills the **model** invoked, because those invocations are recorded in the conversation as tool calls. A Skill you started yourself with `/<skill-name>` is submitted as an ordinary prompt and leaves no such record, so its hooks are **not** restored on resume even though its instructions may still be in context. Re-run `/<skill-name>` after resuming to re-arm the gate. Hooks are also not restored for a Skill you have disabled via `skills.disabled` since it was invoked.
 - Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
 - A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and folder trust is re-checked each time a hook fires — revoking trust mid-session silences them without a restart. The same gate applies to `allowedTools`.
 - `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
