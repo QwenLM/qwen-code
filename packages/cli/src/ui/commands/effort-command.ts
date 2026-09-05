@@ -56,20 +56,20 @@ export const effortCommand: SlashCommand = {
 
     const args = context.invocation?.args?.trim() || actionArgs.trim();
     const availableTiers = getReasoningEffortsForConfig(config);
+
+    if (availableTiers.length === 0) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('The current model does not expose reasoning effort tiers.'),
+      };
+    }
+
     const availableTierList = availableTiers.join(', ');
 
     // No argument: open the interactive picker, or (non-interactive/ACP) report
     // the current tier and the available options.
     if (!args) {
-      if (availableTiers.length === 0) {
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: t(
-            'The current model does not expose reasoning effort tiers.',
-          ),
-        };
-      }
       if (context.executionMode === 'interactive') {
         return { type: 'dialog', dialog: 'effort' };
       }

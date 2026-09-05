@@ -56,6 +56,7 @@ import {
 import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import type { ModelReasoningCapabilities } from '../../models/types.js';
+import { parseModelReasoningCapabilities } from '../reasoning-effort.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 const OPENAI_STRICT_SCHEMA_KEYS = new Set([
@@ -884,11 +885,13 @@ export class ContentGenerationPipeline {
 
     const authType = this.contentGeneratorConfig.authType;
     const reasoningCapabilities = authType
-      ? this.config.cliConfig.getResolvedModelConfig?.(
-          authType,
-          context.model,
-          this.contentGeneratorConfig.baseUrl,
-        )?.capabilities.reasoning
+      ? parseModelReasoningCapabilities(
+          this.config.cliConfig.getResolvedModelConfig?.(
+            authType,
+            context.model,
+            this.contentGeneratorConfig.baseUrl,
+          )?.capabilities.reasoning,
+        )
       : undefined;
     if (
       reasoningCapabilities &&
@@ -900,10 +903,17 @@ export class ContentGenerationPipeline {
         reasoning: this.contentGeneratorConfig.reasoning,
       } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
     }
-    baseRequest = applyConfiguredReasoningEffort(
-      baseRequest,
-      reasoningCapabilities,
-    );
+    // A `reasoning` object the user put in `samplingParams` ships verbatim (the
+    // contract `clampConfiguredReasoningEffort` keeps), so the capability
+    // mapping must leave it for the provider hook to translate.
+    if (
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined
+    ) {
+      baseRequest = applyConfiguredReasoningEffort(
+        baseRequest,
+        reasoningCapabilities,
+      );
+    }
 
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.

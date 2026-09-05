@@ -38,3 +38,7 @@ configuration is the only source of its new capability.
 Qwen 3.8, DeepSeek snapshots, Kimi K3, and GLM models are deliberately deferred
 to a separate configuration-only PR. MiniMax M3, Step 3.7, and Coding Plan
 remain excluded.
+
+The TUI effort picker reads only provider capabilities, while the ACP picker
+also reads the built-in manifest, so the two still disagree for manifest-only
+models. Unifying them is deferred with the configuration-only PR above.

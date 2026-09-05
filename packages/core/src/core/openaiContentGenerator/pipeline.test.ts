@@ -1740,6 +1740,132 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
+    // Shared wiring for the capability cases below: an identity provider hook
+    // so the assertions read the pipeline's own output, and a resolved model
+    // config carrying whatever capability the case declares.
+    async function executeWithCapability(
+      capability: unknown,
+      configOverrides: Partial<ContentGeneratorConfig>,
+      model = 'deepseek-v4-pro',
+    ): Promise<Record<string, unknown>> {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model,
+        baseUrl: 'https://example.com/v1',
+        ...configOverrides,
+      } as ContentGeneratorConfig;
+      mockCliConfig = {
+        getResolvedModelConfig: vi
+          .fn()
+          .mockReturnValue({ capabilities: { reasoning: capability } }),
+      } as unknown as Config;
+      mockConfig = {
+        ...mockConfig,
+        cliConfig: mockCliConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        { model, contents: [{ parts: [{ text: 'Hello' }], role: 'user' }] },
+        'main',
+      );
+      return (mockClient.chat.completions.create as Mock).mock.calls[0][0];
+    }
+
+    it.each([
+      ['enable_thinking', false, undefined, undefined],
+      ['reasoning_effort', undefined, 'none', undefined],
+    ] as const)(
+      'emits the declared %s disable field when reasoning is off',
+      async (disableField, enableThinking, reasoningEffort, thinking) => {
+        const apiCall = await executeWithCapability(
+          {
+            thinking: true,
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+            disableField,
+          },
+          { reasoning: false },
+        );
+        expect(apiCall['enable_thinking']).toBe(enableThinking);
+        expect(apiCall['reasoning_effort']).toBe(reasoningEffort);
+        expect(apiCall['thinking']).toBe(thinking);
+      },
+    );
+
+    it('emits no disable shape for a capability that forbids disabling', async () => {
+      const apiCall = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'thinking',
+          canDisable: false,
+        },
+        { reasoning: false },
+      );
+      expect(apiCall['thinking']).toBeUndefined();
+      expect(apiCall['reasoning_effort']).toBeUndefined();
+      expect(apiCall['enable_thinking']).toBeUndefined();
+    });
+
+    it('ignores a capability that omits the disable field', async () => {
+      // `disableField` is the capability's only member with no fallback, so an
+      // entry without it is refused wholesale: the configured tier must reach
+      // the provider hook exactly as it would for a model with no capability.
+      const apiCall = await executeWithCapability(
+        { thinking: true, efforts: ['high', 'max'] },
+        { reasoning: { effort: 'low' }, samplingParams: undefined },
+        'qwen3.9-plus',
+      );
+      expect(apiCall['reasoning']).toEqual({ effort: 'low' });
+      expect(apiCall['reasoning_effort']).toBeUndefined();
+    });
+
+    it('does not let an unparsable canDisable suppress the disable shape', async () => {
+      const apiCall = await executeWithCapability(
+        { thinking: true, toggleOnly: true, canDisable: false },
+        { reasoning: false, samplingParams: undefined },
+        'qwen3.9-plus',
+      );
+      expect(apiCall['chat_template_kwargs']).toEqual({
+        enable_thinking: false,
+      });
+    });
+
+    it('leaves a samplingParams reasoning object for the provider hook', async () => {
+      // `samplingParams` is the user's own wire shape and ships verbatim — the
+      // contract `clampConfiguredReasoningEffort` already keeps — so a tier the
+      // capability does not list must still reach the provider hook that
+      // translates it instead of being deleted here.
+      const apiCall = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'thinking',
+        },
+        {
+          samplingParams: {
+            reasoning: { effort: 'xhigh' },
+          } as ContentGeneratorConfig['samplingParams'],
+        },
+      );
+      expect(apiCall['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(apiCall['reasoning_effort']).toBeUndefined();
+    });
+
     it('emits thinking:disabled on DeepSeek hostname when includeThoughts is false', async () => {
       // DeepSeek V4+ defaults thinking.type to 'enabled' — just stripping
       // the effort knob keeps thinking on, leaking latency/cost into side

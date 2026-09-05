@@ -71,6 +71,27 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ type: 'message', messageType: 'info' });
   });
 
+  it('does not answer an explicit tier with an empty choice list', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'toggle-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, 'medium');
+    expect(res).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(res).not.toMatchObject({ messageType: 'error' });
+    expect(JSON.stringify(res)).not.toContain('Choose one of:');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
   it('lists tiers when called with no args non-interactively', async () => {
     const nonInteractive = { ...context, executionMode: 'non_interactive' };
     const res = await effortCommand.action!(

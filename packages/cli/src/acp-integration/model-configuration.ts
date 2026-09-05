@@ -5,6 +5,7 @@
  */
 
 import {
+  parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   type Config,
   type ContentGeneratorConfig,
@@ -127,7 +128,7 @@ export function getModelConfiguration(
       readonly reasoning?: ModelReasoningConfiguration;
     }
   | undefined {
-  const configured = validateReasoningConfiguration(reasoning);
+  const configured = parseModelReasoningCapabilities(reasoning);
   return configured
     ? { reasoning: configured }
     : modelId
@@ -149,7 +150,7 @@ export function getConfiguredModelReasoning(
   const configured = authType
     ? config.getResolvedModelConfig?.(authType, modelId, baseUrl)
     : undefined;
-  const reasoning = validateReasoningConfiguration(
+  const reasoning = parseModelReasoningCapabilities(
     configured?.capabilities?.reasoning,
   );
   return (
@@ -165,41 +166,6 @@ export function getReasoningEffortsForConfig(
   const reasoning = getConfiguredModelReasoning(config, modelId, false);
   if (reasoning) return reasoning.toggleOnly ? [] : reasoning.efforts;
   return REASONING_EFFORT_TIERS;
-}
-
-function validateReasoningConfiguration(
-  value: unknown,
-): ModelReasoningConfiguration | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const candidate = value as Record<string, unknown>;
-  if (candidate['thinking'] !== true) return undefined;
-  if (
-    !['enable_thinking', 'reasoning_effort', 'thinking'].includes(
-      typeof candidate['disableField'] === 'string'
-        ? candidate['disableField']
-        : '',
-    )
-  ) {
-    return undefined;
-  }
-  if (candidate['toggleOnly'] === true)
-    return candidate as ModelReasoningConfiguration;
-  const efforts = candidate['efforts'];
-  if (
-    !Array.isArray(efforts) ||
-    !efforts.every(
-      (effort) =>
-        typeof effort === 'string' &&
-        REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort),
-    )
-  ) {
-    return undefined;
-  }
-  const defaultEffort = candidate['defaultEffort'];
-  if (defaultEffort !== undefined && !efforts.includes(defaultEffort)) {
-    return undefined;
-  }
-  return candidate as ModelReasoningConfiguration;
 }
 
 export function parseReasoningSelection(
