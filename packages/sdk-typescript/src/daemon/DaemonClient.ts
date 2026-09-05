@@ -497,7 +497,7 @@ function stripTrailingSlashes(url: string): string {
  *
  * Defensive on three axes:
  *   1. **Browser-safe**: `globalThis.process` indirection. The SDK is
- *      imported by `@qwen-code/webui`; a literal
+ *      imported by `@qwen-code/web-shell`; a literal
  *      `process.env[...]` would explode at module load on browser
  *      bundles. Browser globals don't expose `process` so this returns
  *      `undefined` cleanly there.
