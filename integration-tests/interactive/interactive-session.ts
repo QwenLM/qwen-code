@@ -199,6 +199,11 @@ export class InteractiveSession {
     return lines.join('\n');
   }
 
+  async screenBufferType(): Promise<'normal' | 'alternate'> {
+    await this.flush();
+    return this.terminal.buffer.active.type;
+  }
+
   /**
    * Poll the screen until `predicate` returns true.
    * Returns the screen text when matched.

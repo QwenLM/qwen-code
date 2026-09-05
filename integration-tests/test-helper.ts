@@ -249,6 +249,10 @@ export class TestRig {
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
+      ui: {
+        focusMode: false,
+        ...((options.settings?.['ui'] as Record<string, unknown>) ?? {}),
+      },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),

@@ -37,6 +37,57 @@ afterEach(async () => {
 });
 
 describe('fake OpenAI server', () => {
+  it.each([false, true])(
+    'serves optional reasoning (stream: %s)',
+    async (stream) => {
+      server = await startFakeOpenAIServer(() => ({
+        reasoning: 'FAKE_REASONING_TRACE',
+        content: 'FAKE_ANSWER',
+      }));
+      const response = await fetch(`${server.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'fake-model', stream, messages: [] }),
+      });
+      expect(response.status).toBe(200);
+      if (stream) {
+        const frames = (await response.text())
+          .split('\n\n')
+          .filter((frame) => frame.startsWith('data: {'))
+          .map((frame) => JSON.parse(frame.slice(6)));
+        expect(frames).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              choices: [
+                expect.objectContaining({
+                  delta: { reasoning_content: 'FAKE_REASONING_TRACE' },
+                }),
+              ],
+            }),
+            expect.objectContaining({
+              choices: [
+                expect.objectContaining({
+                  delta: { content: 'FAKE_ANSWER' },
+                }),
+              ],
+            }),
+          ]),
+        );
+      } else {
+        await expect(response.json()).resolves.toMatchObject({
+          choices: [
+            {
+              message: {
+                reasoning_content: 'FAKE_REASONING_TRACE',
+                content: 'FAKE_ANSWER',
+              },
+            },
+          ],
+        });
+      }
+    },
+  );
+
   it('serves non-streaming and streaming chat completions', async () => {
     server = await startFakeOpenAIServer(({ requestIndex }) =>
       requestIndex === 0

@@ -20,6 +20,18 @@ import {
 import { pickE2eRenderer } from '../renderer-matrix.js';
 import { InteractiveSession } from './interactive-session.js';
 
+const interactiveEnv = {
+  ...Object.fromEntries(
+    Object.keys(process.env)
+      .filter(
+        (key) => key === 'CONTINUOUS_INTEGRATION' || key.startsWith('CI_'),
+      )
+      .map((key) => [key, 'false']),
+  ),
+  CI: 'false',
+  TERM: 'xterm-256color',
+};
+
 describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
   let rig: TestRig;
   let server: FakeOpenAIServer | undefined;
@@ -50,7 +62,12 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
             enableManagedAutoMemory: false,
             enableManagedAutoDream: false,
           },
-          ui: { enableFollowupSuggestions: false, useTerminalBuffer },
+          ui: {
+            // This isolated home tests User-scope persistence, not a workspace pin.
+            focusMode: undefined,
+            enableFollowupSuggestions: false,
+            useTerminalBuffer,
+          },
           security: { auth: { selectedType: 'openai' } },
         },
       });
@@ -74,6 +91,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
         cols: 140,
         rows: 60,
         env: {
+          ...interactiveEnv,
           QWEN_CODE_LANG: 'en',
           QWEN_HOME: qwenHome,
           QWEN_RUNTIME_DIR: join(rig.testDir!, 'runtime'),
@@ -92,6 +110,9 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
         ],
       });
       await session.idle();
+      expect(await session.screenBufferType()).toBe(
+        useTerminalBuffer ? 'alternate' : 'normal',
+      );
       await session.send('Run the deterministic failure fixture.');
       await session.waitFor('FOCUS_ERROR_HANDLED');
       await session.idle();
@@ -130,7 +151,11 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
             enableManagedAutoMemory: false,
             enableManagedAutoDream: false,
           },
-          ui: { enableFollowupSuggestions: false, useTerminalBuffer },
+          ui: {
+            focusMode: undefined,
+            enableFollowupSuggestions: false,
+            useTerminalBuffer,
+          },
           security: { auth: { selectedType: 'openai' } },
         },
       });
@@ -143,7 +168,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
             ? {
                 toolCalls: [fakeToolCall('read_file', { file_path: filePath })],
               }
-            : { content: 'FOCUS_ANSWER' },
+            : { reasoning: 'FOCUS_REASONING_TRACE', content: 'FOCUS_ANSWER' },
         fakeServerHostOptions(),
       );
       const options = {
@@ -151,6 +176,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
         cols: 140,
         rows: 60,
         env: {
+          ...interactiveEnv,
           QWEN_CODE_LANG: 'en',
           QWEN_HOME: qwenHome,
           QWEN_RUNTIME_DIR: join(rig.testDir!, 'runtime'),
@@ -170,10 +196,16 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       };
       session = await InteractiveSession.start(options);
       await session.idle();
+      expect(await session.screenBufferType()).toBe(
+        useTerminalBuffer ? 'alternate' : 'normal',
+      );
       await session.send('Inspect the fixture.');
       await session.waitFor('FOCUS_ANSWER');
       await session.idle();
+      session.sendKey('\u001bt');
+      await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
+      expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
       expect(JSON.stringify(server.requests[1]!.body)).toContain(
         'FOCUS_TOOL_RESULT',
       );
@@ -181,27 +213,31 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.send('/focus');
       await session.idle();
       const focused = await session.screen();
-      expect(focused).toContain('1 tool call hidden (/focus to show)');
+      expect(focused).toContain('1 tool call hidden (Ctrl+O for details)');
       expect(focused).not.toContain('focus-result.txt');
+      expect(focused).not.toContain('FOCUS_REASONING_TRACE');
       expect(focused).toContain('FOCUS_ANSWER');
 
       session.sendKey('\u000f');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
+      expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
       expect(await session.screen()).not.toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       session.sendKey('\u000f');
       await session.idle();
+      expect(await session.screen()).not.toContain('FOCUS_REASONING_TRACE');
       expect(await session.screen()).toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
 
       await session.send('/focus');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
+      expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
       expect(await session.screen()).not.toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       await session.send('/focus');
       await session.idle();
@@ -217,9 +253,10 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.waitFor('FOCUS_ANSWER');
       await session.idle();
       expect(await session.screen()).toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       expect(await session.screen()).not.toContain('focus-result.txt');
+      expect(await session.screen()).not.toContain('FOCUS_REASONING_TRACE');
       expect(server.requests).toHaveLength(4);
 
       await session.send('/settings');
@@ -235,14 +272,14 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).not.toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       expect(server.requests).toHaveLength(4);
 
       await session.send('/focus');
       await session.idle();
       expect(await session.screen()).toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       await session.send('/settings');
       await session.idle(200, 5000);
@@ -256,7 +293,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).not.toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       const reset = JSON.parse(
         await readFile(join(qwenHome, 'settings.json'), 'utf8'),
@@ -267,7 +304,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.send('/config ui.focusMode=true');
       await session.idle();
       expect(await session.screen()).toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       expect(await session.screen()).not.toContain('focus-result.txt');
       await session.send('/config ui.focusMode');
@@ -277,7 +314,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).not.toContain(
-        '1 tool call hidden (/focus to show)',
+        '1 tool call hidden (Ctrl+O for details)',
       );
       expect(server.requests).toHaveLength(4);
     },
