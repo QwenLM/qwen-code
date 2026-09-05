@@ -203,6 +203,27 @@ describe('createSpawnChannelFactory env policy', () => {
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
   });
 
+  it('merges non-scrubbed overrides into the spawned child env', async () => {
+    // Pins the behavior the forwarding attestation claims: the factory's
+    // second argument actually reaches the child. Dropping the overrides
+    // argument from the `scrubChildEnv` call must turn this red. The key must
+    // sit outside SCRUBBED_CHILD_ENV_KEYS — a scrubbed key would assert
+    // absence rather than forwarding.
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+
+    const factory = createSpawnChannelFactory();
+    await factory('/tmp/project', {
+      QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+    });
+
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME']).toBe(
+      '1',
+    );
+  });
+
   it('marks the spawned ACP child as daemon-spawned for telemetry', async () => {
     mockSpawn.mockReturnValue(createFakeChildProcess());
 
@@ -463,15 +484,42 @@ describe('createSpawnChannelFactory env policy', () => {
     ).not.toThrow();
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(third),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
 
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
+      budget: 'prepared_response',
     });
     await vi.waitFor(() =>
       expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
     );
     writer.releaseLock();
+  });
+
+  it('attributes outbound operation budget failures', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 1,
+        maxQueuedBytes: 4096,
+      },
+    })('/tmp/project');
+
+    const release = channel.transportGuard?.reserveOutboundOperation([
+      'first',
+      {},
+    ]);
+    expect(() =>
+      channel.transportGuard?.reserveOutboundOperation(['second', {}]),
+    ).toThrow('NDJSON outbound_operation queue limit exceeded');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+      budget: 'outbound_operation',
+      maxQueuedMessages: 1,
+    });
+    release?.();
   });
 
   it('stops estimating a large response once its byte budget is exceeded', async () => {
@@ -505,7 +553,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     expect(elementReads).toBeLessThan(1_000);
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
@@ -528,7 +576,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });

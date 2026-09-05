@@ -63,6 +63,7 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       JSON: 'json',
       STREAM_JSON: 'stream-json',
     },
+    REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
     DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
     DEFAULT_MAX_SUBAGENT_DEPTH: 5,
     DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -1088,6 +1089,82 @@ describe('createDaemonWorkspaceService', () => {
       expect(query).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps legacy Skill delete authoritative to the live runtime inventory', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Extension Skill',
+            level: 'extension',
+            modelInvocable: true,
+          },
+        ],
+      });
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'User Skill',
+            level: 'user',
+            modelInvocable: true,
+            installedPath: '/tmp/.qwen/skills/review/SKILL.md',
+          },
+        ],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await expect(
+        svc.deleteWorkspaceSkill(makeCtx(), 'review', 'global'),
+      ).rejects.toMatchObject({ code: 'skill_not_managed' });
+      expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when config Skill enumeration is unavailable', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: false,
+          skills: [],
+          errors: [{ kind: 'skills', status: 'error', error: 'boom' }],
+        }),
+        { invalidate },
+      );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await expect(
+        svc.deleteWorkspaceSkill(makeCtx(), 'review', 'global', {
+          refreshRuntime: false,
+        }),
+      ).rejects.toMatchObject({
+        code: 'skills_config_unavailable',
+        statusCode: 503,
+      });
+      expect(invalidate).toHaveBeenCalledWith('/ws');
+    });
+
     it('invalidateWorkspaceSkillsStatus drops the cached child skills answer', async () => {
       const liveStatus = {
         v: 1,
@@ -1135,6 +1212,42 @@ describe('createDaemonWorkspaceService', () => {
       const result = await svc.getWorkspaceSkillsStatus(makeCtx());
       expect(result.skills).toEqual([]);
       expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+    });
+
+    it('reuses the daemon-local config Skills inventory', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [],
+        }),
+        { invalidate },
+      );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ workspaceSkillsStatusProvider, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceSkillsConfigStatus(makeCtx());
+
+      expect(invalidate).not.toHaveBeenCalled();
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+    });
+
+    it('does not use config fallback for runtime Skills', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_method: string, idle: () => unknown) => idle());
+      const workspaceSkillsStatusProvider = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, workspaceSkillsStatusProvider }),
+      );
+
+      await expect(
+        svc.getWorkspaceSkillsRuntimeStatus(makeCtx()),
+      ).resolves.toMatchObject({ initialized: false, skills: [] });
+      expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
     });
 
     it('getWorkspaceSkillsStatus falls back to the daemon-local provider when the child never answered', async () => {
@@ -1692,6 +1805,60 @@ describe('createDaemonWorkspaceService', () => {
           sessionsFailed: 0,
         }),
       );
+    });
+
+    it('leaves runtime refresh to the coordinator when requested', async () => {
+      const invalidate = vi.fn();
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          workspaceSkillsStatusProvider: Object.assign(vi.fn(), { invalidate }),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false, {
+          refreshRuntime: false,
+        }),
+      ).resolves.toMatchObject({ activation: 'reconciling' });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            mutation: expect.objectContaining({ activation: 'reconciling' }),
+          }),
+        }),
+      );
+    });
+
+    it('reports a live no-op as applied without refreshing', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: false,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false, {
+          refreshRuntime: false,
+        }),
+      ).resolves.toMatchObject({ activation: 'applied' });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
     });
 
     it('shares mutation ids within a request and renews them across requests', async () => {

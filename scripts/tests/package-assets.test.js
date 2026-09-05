@@ -561,6 +561,31 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies the HTML export renderer into the published package', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    writeFile(
+      rootDir,
+      'packages/web-templates/src/export-html/dist/export-transcript-document.js',
+      'window.QwenExportRenderer = true;',
+    );
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist', 'export-transcript-document.js'),
+        'utf8',
+      ),
+    ).toBe('window.QwenExportRenderer = true;');
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.files).toContain('export-transcript-document.js');
+  });
+
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
     writeFile(
@@ -930,12 +955,12 @@ describe('package asset scripts', () => {
     ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
-  it('enforces a 96 MiB default unpacked size budget', () => {
+  it('enforces a 128 MiB default unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     writeFile(rootDir, 'dist/chunks/large.bin', '');
     const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
-    truncateSync(largeFile, 95 * 1024 * 1024);
+    truncateSync(largeFile, 127 * 1024 * 1024);
     stubConsole();
 
     expect(() =>
@@ -945,7 +970,7 @@ describe('package asset scripts', () => {
       }),
     ).not.toThrow();
 
-    truncateSync(largeFile, 96 * 1024 * 1024);
+    truncateSync(largeFile, 128 * 1024 * 1024);
 
     expect(() =>
       preparePackage({
@@ -953,7 +978,7 @@ describe('package asset scripts', () => {
         requireNativeAudioCapture: false,
       }),
     ).toThrow(
-      /Prepared package unpacked size \d+ bytes exceeds 100663296 bytes/,
+      /Prepared package unpacked size \d+ bytes exceeds 134217728 bytes/,
     );
   });
 
@@ -1306,6 +1331,11 @@ describe('package asset scripts', () => {
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });
+    writeFile(
+      rootDir,
+      'dist/export-transcript-document.js',
+      'window.QwenExportRenderer = true;\n',
+    );
   }
 
   function writeFile(rootDir, relativePath, content) {

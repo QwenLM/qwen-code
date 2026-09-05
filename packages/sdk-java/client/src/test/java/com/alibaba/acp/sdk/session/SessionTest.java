@@ -35,12 +35,14 @@ import com.alibaba.acp.sdk.transport.process.ProcessTransport;
 import com.alibaba.acp.sdk.transport.process.ProcessTransportOptions;
 import com.alibaba.acp.sdk.utils.Timeout;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.alibaba.acp.sdk.protocol.domain.permission.PermissionOptionKind.ALLOW_ALWAYS;
 
+@Tag("integration")
 class SessionTest {
     private static final Logger logger = LoggerFactory.getLogger(SessionTest.class);
     @Test

@@ -56,6 +56,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
   // `GET /session/:id/mid-turn-messages` returns the messages still waiting
@@ -85,6 +86,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   permission_vote: { since: 'v1' },
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
+  workspace_skills_config_runtime: { since: 'v1' },
   workspace_providers: { since: 'v1' },
   workspace_acp_preheat: { since: 'v1' },
   workspace_acp_status: { since: 'v1' },
@@ -122,10 +124,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_agents: { since: 'v1' },
+  session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
+  session_resources: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
@@ -134,8 +139,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
   standalone_sessions_v1: { since: 'v1' },
+  standalone_session_options_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
+  session_turn_navigation: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -306,7 +313,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // can pre-flight whether the daemon will honor their cross-origin
   // request before issuing it (and parsing a 403). The configured
   // pattern list is intentionally NOT echoed in the capabilities
-  // envelope — browser webui knows its own origin, and surfacing the
+  // envelope — a browser client knows its own origin, and surfacing the
   // list would let an unauthenticated `/capabilities` reader
   // enumerate every trusted origin, which is useful recon for a
   // misconfigured deployment.
@@ -328,6 +335,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   writer_idle_timeout: { since: 'v1' },
   non_blocking_prompt: { since: 'v1' },
   session_language: { since: 'v1' },
+  // Sessionless user-level language sync (`POST /language`) for hosts that
+  // switch language before any session exists (issue #10234). Advertised
+  // CONDITIONALLY with `workspace_settings`: the route persists user-scope
+  // settings, so daemons without settings persistence omit the tag and
+  // return 404.
+  user_language_sync: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
@@ -374,6 +387,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  // The daemon host can open a workspace directory in the host's OS file
+  // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
+  // Windows, xdg-open on a Linux host with a display). Headless hosts omit
+  // the tag so clients hide the Open-locally affordance instead of
+  // surfacing a guaranteed launch failure.
+  workspace_local_open: { since: 'v1' },
+  // The daemon host can open a terminal window in a workspace directory
+  // (`open -a Terminal` on macOS, wt.exe/cmd.exe on Windows, a common
+  // terminal emulator on a Linux host with a display). Headless hosts omit
+  // the tag so clients hide the Open-in-terminal affordance instead of
+  // surfacing a guaranteed launch failure.
+  workspace_local_terminal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -423,6 +448,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },
+  // Worktree-backed session create/load responses are durably persisted and
+  // carry per-response `persisted-v1` attestation.
+  session_worktree_persistence_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -522,6 +550,8 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -573,6 +603,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
   ],
+  [
+    'standalone_session_options_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
   [
@@ -593,6 +627,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['user_language_sync', (toggles) => toggles.persistSettingAvailable === true],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
     'workspace_voice_transcription',
@@ -667,6 +702,18 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'workspace_runtime',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_skills_config_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_local_open',
+    (toggles) => toggles.localPathOpenAvailable === true,
+  ],
+  [
+    'workspace_local_terminal',
+    (toggles) => toggles.localTerminalOpenAvailable === true,
   ],
   [
     'workspace_qualified_acp',

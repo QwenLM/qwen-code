@@ -270,9 +270,15 @@ export function buildChangedMcpToolsReminder(
 export function buildMcpServerInstructionsReminder(
   toolRegistry: ToolRegistry,
 ): string | null {
-  const serverInstructions = Array.from(
-    toolRegistry.getMcpServerInstructions().entries(),
-  )
+  return buildMcpServerInstructionsReminderFromEntries(
+    toolRegistry.getMcpServerInstructions(),
+  );
+}
+
+export function buildMcpServerInstructionsReminderFromEntries(
+  instructionsByServer: ReadonlyMap<string, string>,
+): string | null {
+  const serverInstructions = Array.from(instructionsByServer.entries())
     .filter(([, instructions]) => instructions.trim().length > 0)
     .sort(([left], [right]) => left.localeCompare(right));
 

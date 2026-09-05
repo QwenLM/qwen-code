@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'nonce-__EXPORT_NONCE__'; style-src-elem 'nonce-__EXPORT_NONCE__'; style-src-attr 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; font-src data:; base-uri 'none'; form-action 'none'"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,__FAVICON_DATA__"
+    />
+    <title>Qwen Code Chat Export</title>
+    <style nonce="__EXPORT_NONCE__">
+      __DOCUMENT_INLINE_CSS__
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script
+      nonce="__EXPORT_NONCE__"
+      id="transcript-document"
+      type="application/json"
+    ></script>
+    <script nonce="__EXPORT_NONCE__">
+      (function () {
+        var showLoadError = function () {
+          if (document.body.dataset.renderComplete) return;
+          document.body.dataset.renderComplete = 'error';
+          var app = document.getElementById('app');
+          app.setAttribute('role', 'alert');
+          app.textContent =
+            'Unable to load this chat export. This Qwen Code build may not have a published renderer yet; also check your network connection.';
+        };
+        var createElement = document.createElement.bind(document);
+        document.createElement = function (name, options) {
+          var element = createElement(name, options);
+          if (String(name).toLowerCase() === 'style') {
+            element.setAttribute('nonce', '__EXPORT_NONCE__');
+          }
+          return element;
+        };
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (
+              event.target === window ||
+              (event.target && event.target.id === 'transcript-renderer')
+            ) {
+              showLoadError();
+            }
+          },
+          true,
+        );
+        window.addEventListener('unhandledrejection', showLoadError);
+      })();
+    </script>
+    <script
+      nonce="__EXPORT_NONCE__"
+      id="transcript-renderer"
+      integrity="__DOCUMENT_RENDERER_INTEGRITY__"
+      crossorigin="anonymous"
+      src="__DOCUMENT_RENDERER_URL__"
+    ></script>
+  </body>
+</html>

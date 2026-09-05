@@ -14,6 +14,14 @@ export default defineConfig({
   },
   test: {
     setupFiles: ['./test/setup.ts'],
+    // Same shared-ECS ceilings as packages/cli: the jsdom component tests
+    // here were the bulk of the release failures at vitest's 5s default.
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     exclude: [...configDefaults.exclude, 'e2e/**'],
     reporters: ['default', ['junit', { suiteName: '@qwen-code/web-shell' }]],
     outputFile: {
@@ -22,6 +30,8 @@ export default defineConfig({
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
+      // Same switch as cli/core: only the post-merge main run collects it.
+      enabled: process.env['QWEN_CI_COVERAGE'] === '1',
       provider: 'v8',
       reportsDirectory: '../coverage',
       reporter: ['text-summary', 'json-summary', 'html'],

@@ -7,6 +7,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
+import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -46,6 +47,15 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // The review prebuild (commands/review/lib/prebuild.ts) is an operator
+  // decision: CI welds it as real step env, a local operator exports it. A
+  // project `.env` must not opt its own review into the blocking
+  // install+build prefix — and the read-time provenance check there cannot
+  // see file-sourcing across a process boundary (a child inherits the value
+  // with an empty registry), so the key must never enter the environment
+  // from repository content at all. prebuild.test.ts pins the membership
+  // with both real symbols.
+  'QWEN_REVIEW_PREBUILD',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -195,12 +205,25 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
+  // every workspace's session attachments. A project `.env` redirecting it
+  // would capture uploads for ALL workspaces the daemon serves — and reads
+  // consult the configured root first, so attacker-modified bytes would be
+  // served back — with no recovery after unsetting the variable. The
+  // location is an operator decision (documented as a per-daemon opt-in), so
+  // only the daemon's launch environment or a home `.env` may set it.
+  'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env
   // distributed to every workspace's session children — reopening the #8653
   // vector for any repo whose .env happens to carry DEV=true.
   'DEV',
+  // The Conversations provenance marker is a private daemon-to-child signal:
+  // a project `.env` or settings.env must never mark an ordinary workspace
+  // child as Conversations-hosted (it would force the writer lease and the
+  // unbound-durable-task skip onto sessions the contract does not cover).
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -234,6 +257,20 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
       pattern.test(lowerKey),
     )
   );
+}
+
+// Private daemon→child provenance markers. Unlike the private ACP capability
+// (a random per-spawn nonce), these are fixed constants, so a home-scoped
+// `.env` could forge one — and home-scoped files are deliberately exempt from
+// the hardcoded project exclusions above. No env file at any scope may set
+// them: the only legitimate carrier is the spawner's child env, which the CLI
+// entry point captures and deletes before any environment-file load.
+const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+]);
+
+export function isPrivateProvenanceEnvKey(key: string): boolean {
+  return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
 }
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [

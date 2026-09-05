@@ -283,6 +283,66 @@ describe('setupStartupWorktree', () => {
     }
   });
 
+  it('re-attaches an existing PR-backed worktree by its literal pr-<N> slug', async () => {
+    // `qwen --worktree=#42` created `.qwen/worktrees/pr-42`; a later
+    // `qwen --resume <sid> --worktree pr-42` names that same worktree by
+    // its slug. The reserved shape must not lock the user out of it:
+    // re-attach creates no slug and binds nothing.
+    const upstream = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-wt-pr-reattach-upstream-'),
+    );
+    const upstreamResolved = await fs.realpath(upstream);
+    await exec('git', ['init', '-q', '--bare', '-b', 'main'], {
+      cwd: upstreamResolved,
+    });
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+    await exec('git', ['remote', 'add', 'origin', upstreamResolved], {
+      cwd: tempRepo,
+    });
+    await exec('git', ['push', '-q', 'origin', 'main'], { cwd: tempRepo });
+    await exec('git', ['push', '-q', 'origin', 'HEAD:refs/pull/42/head'], {
+      cwd: tempRepo,
+    });
+    try {
+      const created = await setupStartupWorktree('#42');
+      expect(created!.ok).toBe(true);
+      if (!created!.ok) return;
+      expect(created!.context.slug).toBe('pr-42');
+
+      process.chdir(tempRepo);
+      const reattached = await setupStartupWorktree('pr-42');
+      expect(reattached!.ok).toBe(true);
+      if (!reattached!.ok) return;
+      expect(reattached!.context.wasReattached).toBe(true);
+      expect(reattached!.context.slug).toBe('pr-42');
+      expect(reattached!.context.branch).toBe('worktree-pr-42');
+      expect(reattached!.context.worktreePath).toBe(
+        created!.context.worktreePath,
+      );
+    } finally {
+      process.chdir(tempRepo);
+      await fs.rm(upstream, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a literal pr-<N> slug when no such worktree exists', async () => {
+    // Creating a worktree in the reserved shape would bind the session to
+    // PR N it never touched — only the `#N` form may create one.
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('pr-42');
+    expect(res).not.toBeNull();
+    expect(res!.ok).toBe(false);
+    if (res!.ok) return;
+    expect(res!.error).toContain('reserved for PR-backed worktrees');
+    expect(res!.error).toContain('--worktree=#42');
+    await expect(
+      fs.stat(path.join(tempRepo, '.qwen', 'worktrees', 'pr-42')),
+    ).rejects.toThrow();
+  });
+
   it('re-attaches to an existing worktree instead of erroring (Phase 6 G1 fix)', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);

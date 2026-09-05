@@ -23,6 +23,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
@@ -37,6 +38,7 @@ import {
   type DaemonApprovalMode,
   type DaemonEvent,
   type DaemonSseConnectReason,
+  type DaemonStandaloneSessionOptions,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
@@ -75,6 +77,7 @@ import {
   sessionContextKey,
 } from './session-context.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
+import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
   getCurrentMode,
   getSessionDisplayName,
@@ -202,6 +205,8 @@ const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
+const WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE =
+  'workspace_skills_config_runtime';
 function resolveStandaloneApprovalMode(
   value: string | undefined,
 ): DaemonApprovalMode | undefined {
@@ -546,6 +551,13 @@ function projectSubagentToolUpdate(
   const status = boundedString(rawOutput?.['status'], 80);
   const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
+  const skills = Array.isArray(rawOutput?.['skills'])
+    ? rawOutput['skills']
+        .slice(0, 32)
+        .flatMap((skill) =>
+          boundedString(skill, 120) ? [boundedString(skill, 120)!] : [],
+        )
+    : [];
   const projectedInput = rawInput
     ? {
         ...(subagentType ? { subagent_type: subagentType } : {}),
@@ -573,6 +585,7 @@ function projectSubagentToolUpdate(
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),
+        ...(skills.length > 0 ? { skills } : {}),
         ...(executionSummary
           ? {
               executionSummary: {
@@ -1510,6 +1523,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const canReadPrimaryAcpStatus =
               canPreheatPrimaryWorkspace &&
               capabilityFeatures.includes(WORKSPACE_ACP_STATUS_FEATURE);
+            const canUseSkillsConfigRuntime =
+              workspaceScoped &&
+              effectWorkspaceCwd !== undefined &&
+              capabilityFeatures.includes(
+                WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE,
+              );
+            const skillsRuntimeClient =
+              canUseSkillsConfigRuntime && effectWorkspaceCwd
+                ? client.workspaceByCwd(effectWorkspaceCwd)
+                : undefined;
             if (
               (shouldDeferInitialSessionCreation ||
                 manualSessionClearRef.current) &&
@@ -1518,8 +1541,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !shouldCreateFreshSession
             ) {
               if (!workspaceScoped) {
+                let standaloneOptions:
+                  | DaemonStandaloneSessionOptions
+                  | undefined;
+                if (
+                  effectSessionContext?.kind === 'standalone' &&
+                  capabilityFeatures.includes(
+                    STANDALONE_SESSION_OPTIONS_CAPABILITY,
+                  )
+                ) {
+                  try {
+                    standaloneOptions =
+                      await client.getStandaloneSessionOptions();
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] standalone session options failed in deferred connect:',
+                      error,
+                    );
+                  }
+                }
+                if (disposed || abort.signal.aborted) return;
+                const providerModelStatus =
+                  mapProviderStatus(standaloneOptions);
+                // The options request can outlive a first-prompt create: the
+                // composer does not block while this branch is still
+                // connecting, so the session may already be attached by the
+                // time the response lands. Never publish over it.
                 setConnection((current) =>
-                  current.status === 'error'
+                  current.status === 'error' || current.sessionId
                     ? current
                     : {
                         ...clearNonWorkspaceSessionState(current),
@@ -1531,10 +1580,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         gitStatus: undefined,
                         commands: undefined,
                         skills: undefined,
-                        models: undefined,
-                        currentModel: undefined,
-                        currentMode: undefined,
-                        contextWindow: undefined,
+                        models: standaloneOptions
+                          ? providerModelStatus.models
+                          : undefined,
+                        currentModel: providerModelStatus.currentModel,
+                        currentMode: providerModelStatus.currentMode,
+                        contextWindow: providerModelStatus.contextWindow,
                         providers: undefined,
                         capabilities: caps,
                         error: undefined,
@@ -1552,8 +1603,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
-                  client.workspaceSkills(),
-                  canReadPrimaryAcpStatus
+                  skillsRuntimeClient
+                    ? skillsRuntimeClient.workspaceConfigSkills()
+                    : client.workspaceSkills(),
+                  !canUseSkillsConfigRuntime && canReadPrimaryAcpStatus
                     ? client.workspaceAcpStatus()
                     : Promise.resolve(undefined),
                   effectWorkspaceCwd
@@ -1621,7 +1674,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? current.skills
                   : deferredSkills,
               }));
-              if (
+              if (skillsRuntimeClient) {
+                void (async () => {
+                  try {
+                    const runtime = await skillsRuntimeClient.ensureRuntime();
+                    const refreshed = await loadReadyWorkspaceSkills(
+                      skillsRuntimeClient,
+                      runtime,
+                      () =>
+                        disposed ||
+                        abort.signal.aborted ||
+                        connectionRef.current.sessionId !== undefined,
+                    );
+                    if (!refreshed) return;
+                    const { commands, skills: refreshedSkills } =
+                      mapWorkspaceSkills(refreshed);
+                    setConnection((current) =>
+                      current.sessionId
+                        ? current
+                        : { ...current, commands, skills: refreshedSkills },
+                    );
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] workspace Skills runtime preparation failed:',
+                      error,
+                    );
+                  }
+                })();
+              } else if (
                 canPreheatPrimaryWorkspace &&
                 !(
                   acpStatusResult.status === 'fulfilled' &&
@@ -2387,11 +2467,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const sideEffectEvents = eventGroups.flatMap(
               (group) => group.sideEffects,
             );
-            if (activeWorkspaceScoped && sideEffectEvents.length > 0) {
-              bumpWorkspaceEventSignals(
+            if (sideEffectEvents.length > 0) {
+              bumpSessionEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
-                activeSession.workspaceCwd,
+                activeWorkspaceScoped ? activeSession.workspaceCwd : undefined,
+                false,
               );
             }
             if (replayExceededCapacity) {
@@ -2712,10 +2793,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentMode: currentMode ?? current.currentMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
-                  ? mapSessionContextReasoning(
-                      context,
-                      current.reasoning?.effort,
-                    )
+                  ? mapSessionContextReasoning(context)
                   : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
@@ -2724,7 +2802,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
               providers: activeWorkspaceScoped
-                ? (providers ?? current.providers)
+                ? configSnapshotCurrent
+                  ? (providers ?? current.providers)
+                  : current.providers
                 : undefined,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: configSnapshotCurrent
@@ -2921,13 +3001,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              if (activeWorkspaceScoped) {
-                bumpWorkspaceEventSignals(
-                  uiEvents,
-                  setWorkspaceEventSignals,
-                  activeProductSessionContext.cwd,
-                );
-              }
+              bumpSessionEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeWorkspaceScoped
+                  ? activeProductSessionContext.cwd
+                  : undefined,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -3972,13 +4052,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             overrides?.approvalMode ??
               createSessionRequestRef.current?.approvalMode,
           );
+          const modelServiceId =
+            overrides?.modelServiceId ??
+            createSessionRequestRef.current?.modelServiceId;
           return DaemonSessionClient.createStandalone(client, {
-            ...(createSessionRequestRef.current?.modelServiceId !== undefined
-              ? {
-                  modelServiceId:
-                    createSessionRequestRef.current.modelServiceId,
-                }
-              : {}),
+            ...(modelServiceId !== undefined ? { modelServiceId } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           });
         },
@@ -4810,7 +4888,10 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   if (!isRecord(meta)) return null;
   const status = normalizeGoalStatus(meta['goalStatus']);
   if (status) {
-    return createGoalStatusUiEvent(event, status);
+    return createGoalStatusUiEvent(
+      event,
+      restoreCanonicalGoalStatusKind(status, meta['goalState']),
+    );
   }
 
   const terminal = normalizeGoalTerminal(meta['goalTerminal']);
@@ -4848,6 +4929,18 @@ function createGoalStatusUiEvent(
   };
 }
 
+function restoreCanonicalGoalStatusKind(
+  status: Record<string, unknown>,
+  goalState: unknown,
+): Record<string, unknown> {
+  // V2 updates pair a legacy card with canonical state. Keep the legacy wire
+  // value stable for older clients while restoring its precise Web Shell label.
+  if (status['kind'] !== 'aborted' || !isRecord(goalState)) return status;
+  const goal = goalState['goal'];
+  if (!isRecord(goal) || goal['status'] !== 'usage_limited') return status;
+  return { ...status, kind: 'usage_limited' };
+}
+
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const kind = getString(value, 'kind');
@@ -4857,6 +4950,7 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'achieved' &&
     kind !== 'failed' &&
     kind !== 'aborted' &&
+    kind !== 'usage_limited' &&
     // Rejecting 'paused' made every surface keep showing a paused goal as
     // actively running: the card never rendered and the active-goal
     // derivation fell back to the previous 'set' card.
@@ -4916,10 +5010,11 @@ function getNumber(
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
 }
 
-function bumpWorkspaceEventSignals(
+function bumpSessionEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
-  workspaceCwd: string,
+  workspaceCwd?: string,
+  includeArtifactEvents = true,
 ): void {
   let memory = 0;
   let agents = 0;
@@ -4939,6 +5034,11 @@ function bumpWorkspaceEventSignals(
   let auth = 0;
 
   for (const event of events) {
+    if (event.type === 'session.artifact.changed') {
+      if (includeArtifactEvents) artifacts += 1;
+      continue;
+    }
+    if (!workspaceCwd) continue;
     switch (event.type) {
       case 'workspace.memory.changed':
         memory += 1;
@@ -4978,9 +5078,6 @@ function bumpWorkspaceEventSignals(
           failed: event.failed,
         };
         break;
-      case 'session.artifact.changed':
-        artifacts += 1;
-        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -5012,7 +5109,9 @@ function bumpWorkspaceEventSignals(
     return;
 
   setSignals((current) => {
-    const existing = current.skillMutationsByCwd?.[workspaceCwd] ?? [];
+    const existing = workspaceCwd
+      ? (current.skillMutationsByCwd?.[workspaceCwd] ?? [])
+      : [];
     const existingIds = new Set(existing.map((mutation) => mutation.id));
     const newSkillMutations = skillMutations.filter(
       (mutation) => !existingIds.has(mutation.id),
@@ -5046,7 +5145,7 @@ function bumpWorkspaceEventSignals(
         : current.lastSkillMutation
           ? { lastSkillMutation: current.lastSkillMutation }
           : {}),
-      ...(newSkillMutations.length > 0
+      ...(newSkillMutations.length > 0 && workspaceCwd
         ? {
             skillMutationsByCwd: {
               ...current.skillMutationsByCwd,
