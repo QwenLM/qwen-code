@@ -129,13 +129,14 @@ This means the `baseUrl` you configure should be compatible with the correspondi
 
 ### OpenAI-compatible providers (`openai`)
 
-This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter and Requesty.
+This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter, Requesty, and MindsHub.
 
 ```json
 {
   "env": {
     "OPENAI_API_KEY": "sk-your-actual-openai-key-here",
     "OPENROUTER_API_KEY": "sk-or-your-actual-openrouter-key-here",
+    "MINDSHUB_API_KEY": "<api-key>",
     "REQUESTY_API_KEY": "sk-your-actual-requesty-key-here"
   },
   "modelProviders": {
@@ -209,6 +210,19 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
             "temperature": 0.7
           }
         }
+      },
+      {
+        "id": "mindshub_air",
+        "name": "MindsHub Air (via MindsHub)",
+        "envKey": "MINDSHUB_API_KEY",
+        "baseUrl": "https://api.mindshub.ai/v1",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 3,
+          "samplingParams": {
+            "temperature": 0.7
+          }
+        }
       }
     ]
   }
@@ -220,6 +234,7 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 ```json
 {
   "env": {
+    "MINDSHUB_API_KEY": "<api-key>",
     "ANTHROPIC_API_KEY": "sk-ant-your-actual-anthropic-key-here"
   },
   "modelProviders": {
@@ -252,11 +267,33 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
             "max_tokens": 4096
           }
         }
+      },
+      {
+        "id": "mindshub_air",
+        "name": "MindsHub Air (via MindsHub)",
+        "envKey": "MINDSHUB_API_KEY",
+        "baseUrl": "https://api.mindshub.ai",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 3,
+          "contextWindowSize": 200000,
+          "samplingParams": {
+            "temperature": 0.7,
+            "max_tokens": 8192
+          }
+        }
       }
     ]
   }
 }
 ```
+
+MindsHub also exposes an Anthropic Messages-compatible endpoint (`/v1/messages`). It
+accepts only `Authorization: Bearer` — the conventional `x-api-key` header is rejected
+with a 401. Qwen Code switches to Bearer automatically for non-Anthropic-native
+`baseUrl`s, so point `envKey` at a bearer token (e.g. `MINDSHUB_API_KEY`) rather than
+`ANTHROPIC_API_KEY`, and set `baseUrl` to the host only (`https://api.mindshub.ai`); the
+Anthropic client appends `/v1/messages` itself.
 
 ### Google Gemini (`gemini`)
 
