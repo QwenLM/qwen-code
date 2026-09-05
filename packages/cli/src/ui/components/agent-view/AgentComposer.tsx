@@ -18,10 +18,9 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
   AgentStatus,
-  isTerminalStatus,
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core';
@@ -71,7 +70,6 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     setAgentInputBufferText,
     setAgentTabBarFocused,
     setAgentApprovalMode,
-    setAgentMessageQueue,
     appendToAgentMessageQueue,
   } = useAgentViewActions();
   const agent = agents.get(agentId);
@@ -198,38 +196,15 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     [buffer, agentTabBarFocused, setAgentTabBarFocused],
   );
 
-  // ── Message queue (accumulate while streaming, flush as one prompt on idle) ──
+  // ── Message queue display ──
   //
-  // The queue lives in AgentViewContext (keyed by agentId), not in local
-  // state: the layout keys this component by the active view, so switching
-  // teammate tabs unmounts it and a local queue would be silently dropped
-  // before the flush below ever runs (#10069).
+  // Queued follow-ups live in AgentViewContext (keyed by agentId) and are
+  // delivered by the provider's always-mounted per-agent flusher, not here:
+  // the layout keys this component by the active view, so a flush effect in
+  // this component would only run while the agent's tab is focused (#10069,
+  // #10148).
 
   const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
-
-  // When agent becomes idle (and not terminal), flush queued messages.
-  const flushedQueueRef = useRef<readonly string[] | null>(null);
-  useEffect(() => {
-    if (
-      streamingState === StreamingState.Idle &&
-      messageQueue.length > 0 &&
-      status !== undefined &&
-      !isTerminalStatus(status)
-    ) {
-      if (flushedQueueRef.current === messageQueue) return;
-      flushedQueueRef.current = messageQueue;
-      const combined = messageQueue.join('\n');
-      setAgentMessageQueue(agentId, []);
-      interactiveAgent?.enqueueMessage(combined);
-    }
-  }, [
-    streamingState,
-    messageQueue,
-    interactiveAgent,
-    status,
-    agentId,
-    setAgentMessageQueue,
-  ]);
 
   const handleSubmit = useCallback(
     (text: string) => {
