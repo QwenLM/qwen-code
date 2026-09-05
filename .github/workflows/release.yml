@@ -574,20 +574,31 @@ jobs:
             if grep -qE '^[[:space:]]*FAIL ' "${log}"; then
               : # A failing test names itself; an annotation adds nothing.
             elif grep -q 'Timeout calling' "${log}"; then
-              # Passed only with proof the run reached its end and nothing
-              # else broke: a normal exit (a signal death is 128+N), a
-              # passing tally, no failing tally, and no unhandled error that
-              # is not the transport. Vitest's worker RPC giving up says
-              # nothing about the product, and --retry cannot cover it —
-              # retries re-run failing TESTS while an unhandled error fails
-              # the run outright. It has now cost this release three
-              # attempts (run 33713579913).
+              # A transport timeout beside a crash reads like a green run once
+              # the tally has printed, and the crash's header is
+              # producer-chosen — a class with no Error/Exception suffix
+              # (PoolTimeout:), a coded internal (Name [ERR_X]:), a non-Error
+              # throw — so no enumeration of header shapes can certify this
+              # log. The conditions below therefore only ever REFUSE a
+              # pass-through (fast-failing on clear breakage evidence); the
+              # pass itself now requires the authoritative check: re-run the
+              # same shard once and demand a green exit. A real break fails
+              # the re-run; a transient worker-RPC death passes it and costs
+              # one extra shard run on a lane that already retries.
               if [ "${status}" -lt 128 ] \
                 && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
                 && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
                 && ! grep -E '^[[:space:]]*[A-Za-z0-9_$]*(Error|Exception)( \[[A-Za-z0-9_]+\])?:' "${log}" | grep -qv 'Timeout calling'; then
-                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
-                exit 0
+                rerun_log="${RUNNER_TEMP:-/tmp}/workspace-tests-rerun-${{ matrix.shard }}.log"
+                rerun_status=0
+                npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}" > "${rerun_log}" 2>&1 || rerun_status=$?
+                if [ "${rerun_status}" -eq 0 ]; then
+                  echo "::warning title=Workspace tests passed through a Vitest transport timeout::The run beside the transport timeout was re-executed and exited green. Treated as a pass."
+                  exit 0
+                fi
+                echo "::warning title=Workspace tests exited ${rerun_status} on a Vitest transport timeout re-run::The shard was re-executed to clear the transport timeout and failed again, so the failure stands."
+                cat "${rerun_log}"
+                exit "${rerun_status}"
               fi
               echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout with no passing tally to back it, so the failure stands. Rerun the job."
             else
