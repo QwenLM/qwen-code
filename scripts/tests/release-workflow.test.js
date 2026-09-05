@@ -639,6 +639,42 @@ describe('release workflow', () => {
     );
   });
 
+  it('lets an operator retune the quality lane timeouts without a PR', () => {
+    // Run 33963757913 lost both lanes at their timeout boundary on a
+    // contended hk4 with no failing step: quality_static at 30m13s in Run
+    // Lint, quality_build at 45m13s in Pack Build Outputs. A timeout kill
+    // reports as 'cancelled', the quality aggregate fails closed on it, and
+    // the release failure was filed against a tree with nothing to fix. Same
+    // remedy as workspace_tests: a runtime knob, defaults unchanged.
+    expect(releaseYaml.jobs.quality_static['timeout-minutes']).toBe(
+      "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}",
+    );
+    expect(releaseYaml.jobs.quality_build['timeout-minutes']).toBe(
+      "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
+    );
+    // A budget the run never states is indistinguishable from a budget nobody
+    // set: a misspelled variable name renders '' and the lane dies at its
+    // default again, with nothing in the log to reconcile the two. Each
+    // tunable lane reports the bound it resolved — through the SAME expression
+    // the timeout uses, so the trace cannot drift from what the runner
+    // enforces — and whether the variable reached the job at all.
+    for (const [id, variable] of [
+      ['quality_static', 'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES'],
+      ['quality_build', 'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES'],
+    ]) {
+      const bound = releaseYaml.jobs[id]['timeout-minutes'];
+      const report = releaseYaml.jobs[id].steps.find(
+        (step) => step.env?.BUDGET === bound,
+      );
+      expect(report?.name, id).toBe('Report timeout budget');
+      expect(report.run, id).toContain(`::notice::${id} timeout budget`);
+      expect(report.run, id).toContain(`${variable} set=\${VARIABLE_SET}`);
+      expect(report.env.VARIABLE_SET, id).toBe(
+        `\${{ vars.${variable} != '' }}`,
+      );
+    }
+  });
+
   it('names which failure this is, and never changes the exit code', () => {
     // A shard that died on Vitest's own worker RPC timing out reads
     // identically to a real break, and this release lost two attempts before
@@ -1433,11 +1469,13 @@ describe('release workflow', () => {
       ),
     ).toEqual({
       prepare: 30,
-      quality_static: 30,
-      quality_build: 45,
+      // The three bounds an operator can retune without a PR; their defaults
+      // are pinned by their own tests above.
+      quality_static:
+        "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}",
+      quality_build:
+        "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
       quality_typecheck: 30,
-      // The one bound an operator can retune without a PR; its default is
-      // pinned by its own test above.
       workspace_tests:
         "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}",
       quality_scripts: 30,
