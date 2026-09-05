@@ -2806,40 +2806,43 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps polling while a persisted subagent is paused', async () => {
-    mockConnection.capabilities.features = ['session_agents'];
-    vi.useFakeTimers();
-    mockWorkspace.client.sessionAgents.mockResolvedValue({
-      v: 1,
-      sessionId: 'session-1',
-      tasks: [
-        {
-          kind: 'agent',
-          id: 'agent-1',
-          label: 'Paused agent',
-          description: 'Waiting to resume',
-          status: 'paused',
-          startTime: 1_000,
-          runtimeMs: 500,
-          isBackgrounded: true,
-        },
-      ],
-    });
-    const { container } = renderApp();
-    await flush();
+  it.each(['paused', 'idle'] as const)(
+    'keeps polling while a persisted agent is %s',
+    async (status) => {
+      mockConnection.capabilities.features = ['session_agents'];
+      vi.useFakeTimers();
+      mockWorkspace.client.sessionAgents.mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        tasks: [
+          {
+            kind: 'agent',
+            id: 'agent-1',
+            label: 'Waiting agent',
+            description: 'Waiting to resume',
+            status,
+            startTime: 1_000,
+            runtimeMs: 500,
+            isBackgrounded: true,
+          },
+        ],
+      });
+      const { container } = renderApp();
+      await flush();
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>(
-          'button[aria-label="Toggle environment information"]',
-        )
-        ?.click();
-    });
-    await flush();
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click();
+      });
+      await flush();
 
-    await act(async () => vi.advanceTimersByTimeAsync(3_000));
-    expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledTimes(2);
-  });
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('stops polling when persisted subagents are complete', async () => {
     mockConnection.capabilities.features = ['session_agents'];
@@ -7713,6 +7716,57 @@ describe('environment agent tasks', () => {
         id: 'agent-task',
         color: 'purple',
       },
+    ]);
+  });
+
+  it('merges a teammate launch with its live team inventory row', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'completed',
+            args: { description: 'Review code' },
+            rawOutput: {
+              type: 'task_execution',
+              subagentName: 'reviewer',
+              status: 'running',
+            },
+          },
+        ],
+      },
+    ] satisfies Message[];
+    const teammate = {
+      kind: 'agent' as const,
+      id: 'reviewer@review-team',
+      label: 'reviewer',
+      description: 'Reviewing authentication flow',
+      status: 'idle' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: false,
+      teamName: 'review-team',
+      color: '#4ECDC4',
+      teamTask: {
+        id: '1',
+        subject: 'Review authentication flow',
+        status: 'in_progress' as const,
+      },
+    };
+
+    expect(getEnvironmentAgentTasks(messages, [teammate])).toEqual([
+      expect.objectContaining({
+        id: 'reviewer@review-team',
+        label: 'reviewer',
+        description: 'Reviewing authentication flow',
+        status: 'idle',
+        toolUseId: 'agent-call',
+        teamName: 'review-team',
+      }),
     ]);
   });
 

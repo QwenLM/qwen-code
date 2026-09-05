@@ -1,6 +1,7 @@
 import {
   BotIcon,
   CircleCheckIcon,
+  CircleDotIcon,
   CirclePauseIcon,
   CircleStopIcon,
   CircleXIcon,
@@ -210,8 +211,11 @@ export function AgentWorkflow({
             className={styles.node}
             data-status={task.status}
             style={positionStyle(layout.positions.get(task.id))}
-            onClick={() => onOpenAgent?.(task)}
-            disabled={!onOpenAgent}
+            onClick={() => {
+              if (!task.teamName) onOpenAgent?.(task);
+            }}
+            disabled={!onOpenAgent || Boolean(task.teamName)}
+            aria-disabled={task.teamName ? true : undefined}
             title={task.description || task.label}
           >
             <span className={styles.nodeTitle}>
@@ -225,6 +229,7 @@ export function AgentWorkflow({
             <span className={styles.nodeMeta}>
               <span className={styles.status} data-status={task.status}>
                 {task.status === 'completed' && <CircleCheckIcon />}
+                {task.status === 'idle' && <CircleDotIcon />}
                 {task.status === 'running' && (
                   <LoaderCircleIcon className={styles.statusRunning} />
                 )}

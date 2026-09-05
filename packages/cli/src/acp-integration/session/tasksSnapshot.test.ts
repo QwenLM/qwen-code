@@ -12,9 +12,11 @@ import type {
   AgentTask,
   Config,
   MonitorTask,
+  TeamManager,
   WorkflowSnapshot,
   WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
 import {
   buildSessionAgentsStatus,
   buildSessionTasksStatus,
@@ -41,6 +43,7 @@ function configWith(
   agents: AgentTask[],
   workflows: WorkflowTask[] = [],
   projectDir = '/tmp',
+  teamManager: TeamManager | null = null,
 ): Config {
   return {
     storage: { getProjectDir: () => projectDir },
@@ -48,10 +51,83 @@ function configWith(
     getBackgroundShellRegistry: () => ({ getAll: () => [] }),
     getMonitorRegistry: () => ({ getAll: () => [] }),
     getWorkflowRunRegistry: () => ({ list: () => workflows }),
+    getTeamManager: () => teamManager,
   } as unknown as Config;
 }
 
 describe('buildSessionAgentsStatus', () => {
+  it('includes team members with explicit idle state and assigned work', async () => {
+    const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'team-status-'));
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    const teamName = 'review-team';
+    const taskDir = path.join(qwenHome, 'tasks', teamName);
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(taskDir, '1.json'),
+      JSON.stringify({
+        id: '1',
+        subject: 'Review authentication flow',
+        description: 'Inspect auth changes',
+        activeForm: 'Reviewing authentication flow',
+        owner: 'reviewer',
+        status: 'in_progress',
+        blocks: [],
+        blockedBy: [],
+      }),
+    );
+    const teammate = {
+      getStatus: () => AgentStatus.IDLE,
+    };
+    const teamManager = {
+      getTeamFile: () => ({
+        name: teamName,
+        createdAt: 500,
+        leadAgentId: 'leader',
+        members: [
+          {
+            agentId: 'reviewer@review-team',
+            name: 'reviewer',
+            color: '#4ECDC4',
+            joinedAt: 1_000,
+            cwd: '/work/qwen-code',
+            tmuxPaneId: '',
+            subscriptions: [],
+          },
+        ],
+      }),
+      getAgentFromBackend: () => teammate,
+    } as unknown as TeamManager;
+
+    try {
+      const snapshot = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], qwenHome, teamManager),
+        4_000,
+      );
+
+      expect(snapshot.tasks).toEqual([
+        expect.objectContaining({
+          id: 'reviewer@review-team',
+          label: 'reviewer',
+          status: 'idle',
+          runtimeMs: 3_000,
+          teamName,
+          color: '#4ECDC4',
+          teamTask: {
+            id: '1',
+            subject: 'Review authentication flow',
+            status: 'in_progress',
+          },
+        }),
+      ]);
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      fs.rmSync(qwenHome, { recursive: true, force: true });
+    }
+  });
+
   it('merges persisted agents with live registry entries by id', async () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
     const sessionDir = path.join(projectDir, 'subagents', 'session-1');

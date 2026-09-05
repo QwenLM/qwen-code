@@ -427,6 +427,42 @@ describe('EnvironmentPanel', () => {
     expect(view.textContent).toContain('Review code');
   });
 
+  it('shows an idle teammate and its assigned shared task', () => {
+    const onOpenAgent = vi.fn();
+    const view = mount({
+      agentTasks: [
+        {
+          kind: 'agent',
+          id: 'reviewer@review-team',
+          label: 'reviewer',
+          description: 'Reviewing authentication flow',
+          color: '#4ECDC4',
+          status: 'idle',
+          startTime: 1,
+          runtimeMs: 10,
+          isBackgrounded: false,
+          teamName: 'review-team',
+          teamTask: {
+            id: '1',
+            subject: 'Review authentication flow',
+            status: 'in_progress',
+          },
+        },
+      ],
+      onOpenAgent,
+    });
+
+    expect(view.textContent).toContain('reviewer');
+    expect(view.textContent).toContain('Review authentication flow');
+    expect(view.textContent).toContain('Idle');
+    expect(view.querySelector('[data-status="idle"]')).not.toBeNull();
+    const teammate = Array.from(view.querySelectorAll('ul button')).find(
+      (button) => button.textContent?.includes('reviewer'),
+    );
+    act(() => teammate?.click());
+    expect(onOpenAgent).not.toHaveBeenCalled();
+  });
+
   it('shows a gray dot when the subagent has no configured color', () => {
     const view = mount({
       agentTasks: [

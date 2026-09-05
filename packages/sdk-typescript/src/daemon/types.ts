@@ -2754,7 +2754,7 @@ export interface DaemonSessionAgentTaskStatus {
   id: string;
   label: string;
   description: string;
-  status: DaemonSessionTaskLifecycleStatus;
+  status: DaemonSessionTaskLifecycleStatus | 'idle';
   startTime: number;
   endTime?: number;
   runtimeMs: number;
@@ -2783,6 +2783,16 @@ export interface DaemonSessionAgentTaskStatus {
   parentName?: string;
   /** Launch depth (0-based; 0 = spawned by the top-level session). */
   depth?: number;
+  /** Active Agent Team name when this row represents a named teammate. */
+  teamName?: string;
+  /** Teammate color assigned by TeamManager. */
+  color?: string;
+  /** Current shared team task, when the teammate owns one. */
+  teamTask?: {
+    id: string;
+    subject: string;
+    status: 'pending' | 'in_progress' | 'completed';
+  };
 }
 
 export interface DaemonSessionShellTaskStatus {

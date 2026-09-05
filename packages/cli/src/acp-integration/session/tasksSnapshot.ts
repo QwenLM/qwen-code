@@ -5,8 +5,10 @@
  */
 
 import {
+  AgentStatus,
   buildBackgroundEntryLabel,
   getSubagentSessionDir,
+  listTasks,
   MAX_AGENT_TRACE_NODES,
   MAX_RETAINED_TERMINAL_AGENTS,
   readAgentMetaAsync,
@@ -95,10 +97,21 @@ function retainAgentTasks(
     .filter(
       (task) =>
         task.status === 'running' ||
+        task.status === 'idle' ||
         pausedIds.has(task.id) ||
         terminalIds.has(task.id),
     )
     .sort((a, b) => a.startTime - b.startTime || a.id.localeCompare(b.id));
+}
+
+function teamAgentStatus(
+  status: AgentStatus,
+): ServeSessionAgentTaskStatus['status'] {
+  if (status === AgentStatus.IDLE) return 'idle';
+  if (status === AgentStatus.INITIALIZING || status === AgentStatus.RUNNING) {
+    return 'running';
+  }
+  return status;
 }
 
 function serializeAgentTask(
@@ -472,6 +485,48 @@ export async function buildSessionAgentsStatus(
 
   for (const entry of config.getBackgroundTaskRegistry().getAll()) {
     agents.set(entry.id, serializeAgentTask(entry, now));
+  }
+
+  const teamManager = config.getTeamManager?.();
+  if (teamManager) {
+    const team = teamManager.getTeamFile();
+    const tasks = await listTasks(team.name);
+    for (const member of team.members) {
+      const agent = teamManager.getAgentFromBackend(member.agentId);
+      if (!agent) continue;
+      const task = tasks.find(
+        (candidate) =>
+          candidate.status === 'in_progress' &&
+          (candidate.owner === member.agentId ||
+            candidate.owner === member.name),
+      );
+      agents.set(member.agentId, {
+        kind: 'agent',
+        id: member.agentId,
+        label: member.name,
+        description:
+          task?.activeForm ??
+          task?.subject ??
+          member.agentType ??
+          'Team member',
+        status: teamAgentStatus(agent.getStatus()),
+        startTime: member.joinedAt,
+        runtimeMs: Math.max(0, now - member.joinedAt),
+        subagentType: member.agentType,
+        isBackgrounded: false,
+        teamName: team.name,
+        ...optionalField('color', member.color),
+        ...(task
+          ? {
+              teamTask: {
+                id: task.id,
+                subject: task.subject,
+                status: task.status,
+              },
+            }
+          : {}),
+      });
+    }
   }
 
   return {
