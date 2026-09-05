@@ -5179,11 +5179,13 @@ describe('Server Config (config.ts)', () => {
       controller.abort(abortReason);
       // A joining caller cannot have its options honored, so an
       // already-aborted signal fails fast instead of blocking on the first
-      // flight.
+      // flight. Assert the rejection while the gate is still held: settling
+      // the first flight first would let a guard placed after the `await`
+      // reject with the same reason and pass.
       const joining = config.initialize({ signal: controller.signal });
+      await expect(joining).rejects.toBe(abortReason);
       release();
       await expect(first).resolves.toBeUndefined();
-      await expect(joining).rejects.toBe(abortReason);
     });
 
     it('shares a failed in-flight initialization with concurrent callers', async () => {
