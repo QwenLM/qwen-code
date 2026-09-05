@@ -74,6 +74,23 @@ describe('buildHigherDisabled', () => {
     expect(higher.lockedIn(prefixed)).toBe('System');
   });
 
+  it('names System over Workspace when both hold the same defaultDisabled entry', () => {
+    // Workspace inserts below System in merge precedence, so a System entry
+    // must win the label even though the workspace file is the nearer one:
+    // deleting the workspace entry cannot unlock while System holds it.
+    const higher = buildHigherDisabled(
+      fakeSettings(
+        {},
+        {
+          [SettingScope.Workspace]: ['pdf'],
+          [SettingScope.System]: ['pdf'],
+        },
+      ),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe('System');
+  });
+
   it('blames the registry-name entry first when scopes hold one spelling each', () => {
     // Which label a tie between the two spellings reports follows the
     // lookup's documented registry-first order, not scope precedence. Both

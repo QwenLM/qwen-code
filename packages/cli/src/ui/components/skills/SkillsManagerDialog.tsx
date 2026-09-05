@@ -187,14 +187,17 @@ export function buildHigherDisabled(settings: LoadedSettings): {
     ...scopes.map(([scope]) => scope),
     ...(settings.isTrusted ? [SettingScope.Workspace] : []),
   ];
-  // name -> highest scope holding the entry (lowest precedence inserted
-  // first), so the lock label names the file the user has to edit — a
-  // workspace-origin lock is not a higher scope.
+  // name -> highest scope holding the entry, inserted in true merge
+  // precedence order (SystemDefaults < User < Workspace < System) so the
+  // highest scope that names an entry wins the label and the user is
+  // pointed at the one file whose edit can unlock.
   const hardEntries = new Map<string, string>();
   const defaultEntries = new Map<string, string>();
   for (const [scope, label] of [
-    ...scopes,
+    [SettingScope.SystemDefaults, 'SystemDefaults'],
+    [SettingScope.User, 'User'],
     [SettingScope.Workspace, 'Workspace'],
+    [SettingScope.System, 'System'],
   ] as const) {
     if (scope === SettingScope.Workspace && !settings.isTrusted) continue;
     for (const name of normalizeNames(
