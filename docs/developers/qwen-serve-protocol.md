@@ -2451,9 +2451,10 @@ The transfer is serialized per checkout against worktree restores and other rese
 **Errors:**
 
 - `404` — `session_not_found` when the session record does not exist.
-- `409` — `worktree_reset_not_worktree_session` when the session has no valid Part 4A sidecar (not a worktree session).
+- `409` — `worktree_reset_unsupported` when the session has no valid Part 4A sidecar (not a worktree session).
 - `409` — `worktree_reset_active` when a session involved in the transfer is busy; retry once it settles. Prompt admission on a session mid-transfer fails with the same code.
-- `500` — fail-closed internal errors for corrupt sidecar, invalid marker, or an inconsistent supersede link pair; these signal operator-repair states and are not retryable as-is.
+- `409` — `worktree_reset_invalid_state` for corrupt sidecar, invalid marker, containment failure, or an inconsistent supersede link pair. Always non-destructive: any partial transfer is rolled back before this reaches the caller, and the specific reason is written to the daemon log rather than the wire.
+- `500` — fail-closed internal errors (for example a bridge without reset support, or a relocation rejection after rollback); not retryable as-is.
 
 ### `GET /workspace/:id/session-info` and `GET /workspaces/:workspace/session-info`
 
