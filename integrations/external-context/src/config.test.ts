@@ -79,6 +79,133 @@ describe('loadConfig', () => {
     });
   });
 
+  describe('versioned Mem0 provider', () => {
+    const provider = {
+      type: 'mem0',
+      preset: 'aliyun-polardb-mysql-2026-08',
+      endpoint: {
+        origin: 'https://mem0.example.com:8443',
+        basePath: '',
+      },
+      credentialEnv: 'MEM0_API_KEY',
+      scope: { userId: 'fixed-user' },
+    };
+
+    it('resolves the credential, preset, endpoint, and fixed scope', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, { version: 1, provider });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        version: 1,
+        provider: {
+          type: 'mem0',
+          preset: 'aliyun-polardb-mysql-2026-08',
+          endpoint: {
+            origin: 'https://mem0.example.com:8443',
+            basePath: '',
+          },
+          credential: 'secret-value',
+          scope: { userId: 'fixed-user' },
+        },
+      });
+    });
+
+    it('enables writes for a version 1 Mem0 preset with direct import', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        write: { enabled: true },
+        provider,
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        version: 1,
+        write: { enabled: true },
+        provider: { type: 'mem0' },
+      });
+    });
+
+    it('loads a non-loopback HTTP origin only with allowInsecureHttp', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          ...provider,
+          endpoint: {
+            origin: 'http://192.0.2.1:8080',
+            basePath: '/mem0',
+            allowInsecureHttp: true,
+          },
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        provider: {
+          type: 'mem0',
+          endpoint: { basePath: '/mem0', allowInsecureHttp: true },
+        },
+      });
+    });
+
+    it('rejects missing required and unused scope values for a preset', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          ...provider,
+          scope: { appId: 'unused-app' },
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).rejects.toThrow('External context Mem0 scope is invalid.');
+    });
+
+    it('requires only appId for the Platform V3 preset', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          ...provider,
+          preset: 'mem0-platform-v3',
+          scope: { appId: 'fixed-app' },
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        provider: {
+          type: 'mem0',
+          preset: 'mem0-platform-v3',
+          scope: { appId: 'fixed-app' },
+        },
+      });
+    });
+  });
+
   it('rejects writes for Generic HTTP and v2 configurations', async () => {
     const fixture = await createFixture();
     await writeConfig(fixture, {
@@ -409,6 +536,25 @@ describe('loadConfig', () => {
     expect(message).toBe(
       'Configured external context credential is unavailable.',
     );
+  });
+
+  it('rejects an unresolved credential placeholder', async () => {
+    const fixture = await createFixture();
+    await writeConfig(fixture, {
+      version: 1,
+      provider: {
+        type: 'generic-http-search-v1',
+        baseUrl: 'https://context.example.com',
+        tokenEnv: 'CONTEXT_TOKEN',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        CONTEXT_TOKEN: '${CONTEXT_TOKEN}',
+      }),
+    ).rejects.toThrow('Configured external context credential is unavailable.');
   });
 
   it.each(['__proto__', 'constructor', 'toString'])(
