@@ -2461,6 +2461,23 @@ export async function loadCliConfig(
 
   const config = new Config(configParams);
 
+  // Subagent definitions carrying an `executor` block run their turn in an
+  // external agent process over ACP. `packages/core` has no ACP dependency, so
+  // the factory is injected from here. Without it such a definition fails
+  // loudly at spawn time instead of silently running in-process — which would
+  // substitute a different agent for the one asked for and bill the wrong
+  // provider with no signal either way.
+  //
+  // Registered as a thunk so the ACP executor and its dependency stay off the
+  // CLI startup path: the dynamic import runs on the first subagent that
+  // actually declares an `executor`, not on every `loadCliConfig` call.
+  config.setExternalAgentExecutor({
+    create: (params) =>
+      import('../external-agents/acp-subagent-executor.js').then((module) =>
+        module.acpExternalAgentExecutor.create(params),
+      ),
+  });
+
   if (lspEnabled) {
     try {
       const lspService = new NativeLspService(

@@ -44,6 +44,26 @@ export type SubagentLevel =
   | 'builtin';
 
 /**
+ * Declares that a subagent's turn is executed by an external agent process
+ * speaking ACP, rather than by the in-process reasoning loop.
+ *
+ * `parseAgentExecutor` validates this strictly: an unrecognized `kind`, a
+ * missing/blank `command`, or a malformed `args` yields `undefined`. The
+ * frontmatter loader then **rejects the whole definition** rather than dropping
+ * the field — a dropped field would leave the definition running in-process,
+ * silently substituting a different agent for the one it asked for. This is a
+ * deliberate divergence from the lenient drop used for `mcpServers` and `hooks`.
+ */
+export interface SubagentExecutorSpec {
+  /** Executor kind. `acp` is the only supported value today. */
+  kind: 'acp';
+  /** Executable to run, resolved on PATH. */
+  command: string;
+  /** Arguments passed to `command`. Omitted when the definition declares none. */
+  args?: string[];
+}
+
+/**
  * Core configuration for a subagent as stored in Markdown files.
  * This interface represents the file-based configuration that gets
  * converted to runtime configuration for AgentHeadless.
@@ -160,6 +180,22 @@ export interface SubagentConfig {
    * `HookEventName` literals (`PreToolUse`, `PostToolUse`, ...).
    */
   hooks?: Record<string, unknown>;
+
+  /**
+   * Optional external executor. When present, the subagent's turn is run by an
+   * external agent process instead of the in-process `AgentCore` reasoning
+   * loop; `SubagentManager.createAgentHeadless` dispatches to the executor
+   * injected via `Config.setExternalAgentExecutor`.
+   *
+   * Absent (the default) keeps the in-process executor. A definition that
+   * declares an executor while none is injected fails loudly rather than
+   * silently falling back to in-process.
+   *
+   * `command` is resolved on PATH and carries the same trust model as the
+   * existing `mcpServers` and `hooks` command fields: a project-level agent
+   * file can already name an executable to run.
+   */
+  executor?: SubagentExecutorSpec;
 
   /**
    * Indicates whether this is a built-in agent.

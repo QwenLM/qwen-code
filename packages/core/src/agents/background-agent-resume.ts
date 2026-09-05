@@ -17,6 +17,7 @@ import {
 } from './runtime/agent-events.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
+import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
   buildAgentTranscriptAttach,
   getAgentJsonlPath,
@@ -388,7 +389,7 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
 }
 
 function getCompletionStats(
-  subagent: AgentHeadless,
+  subagent: SubagentExecutor,
   liveToolCallCount: number,
 ): AgentCompletionStats {
   const summary = subagent.getExecutionSummary();
@@ -992,7 +993,7 @@ export class BackgroundAgentResumeService {
 
       const bgEventEmitter = new AgentEventEmitter();
       const launchModel = meta.model ?? meta.persistedCliFlags?.model;
-      let subagent: AgentHeadless;
+      let subagent: SubagentExecutor;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
           activeAgentConfig,
@@ -1784,7 +1785,7 @@ export class BackgroundAgentResumeService {
   }
 
   private async runSubagentStopHookLoop(
-    subagent: AgentHeadless,
+    subagent: SubagentExecutor,
     opts: {
       agentId: string;
       agentType: string;

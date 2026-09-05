@@ -13,6 +13,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./subagentRuntime": {
+      "types": "./dist/src/subagent-runtime.d.ts",
+      "import": "./dist/src/subagent-runtime.js"
+    },
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"

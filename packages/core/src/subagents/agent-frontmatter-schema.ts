@@ -20,6 +20,8 @@
  * its semantics would break existing `.qwen/agents/*.md` files.
  */
 
+import type { SubagentExecutorSpec } from './types.js';
+
 /** Permission mode enum (DL7 `$E` / `kc` constant). */
 export const PERMISSION_MODE_VALUES = [
   'acceptEdits',
@@ -185,4 +187,46 @@ export function parseAgentHooks(
     }
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Parse a frontmatter `executor` value into a `SubagentExecutorSpec`.
+ *
+ * Unlike `mcpServers` and `hooks`, this field is NOT part of the mirrored
+ * Claude Code schema — it is a qwen-code extension (see
+ * `docs/design/claude-code-web-shell-backend.md` §9.3). Because it names an
+ * external process, it is validated strictly enough that a typo cannot
+ * silently change what runs:
+ *
+ *   - non-object / array / null → undefined (whole field dropped)
+ *   - `kind` absent or not `'acp'` → undefined
+ *   - `command` absent, non-string, or blank after trim → undefined
+ *   - `args` present but not an array of strings → undefined. Dropped whole
+ *     rather than filtered: running with silently-truncated arguments is
+ *     worse than not running at all.
+ *
+ * Drop-the-whole-field matches the DL7 lenient posture; the caller warns.
+ */
+export function parseAgentExecutor(
+  value: unknown,
+): SubagentExecutorSpec | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record['kind'] !== 'acp') return undefined;
+  const command = record['command'];
+  if (typeof command !== 'string') return undefined;
+  const trimmedCommand = command.trim();
+  if (trimmedCommand === '') return undefined;
+  const rawArgs = record['args'];
+  if (rawArgs === undefined) {
+    return { kind: 'acp', command: trimmedCommand };
+  }
+  if (!Array.isArray(rawArgs)) return undefined;
+  const args: string[] = [];
+  for (const arg of rawArgs) {
+    if (typeof arg !== 'string') return undefined;
+    args.push(arg);
+  }
+  return { kind: 'acp', command: trimmedCommand, args };
 }
