@@ -30,7 +30,10 @@ test('MDX is executable content, never docs_only', () => {
   assert.equal(classifyChangedFiles(['docs/guide.mdx']), 'full');
   assert.equal(classifyChangedFiles(['docs/guide.MDX']), 'full');
   assert.equal(classifyChangedFiles(['README.mdx']), 'full');
-  assert.equal(classifyChangedFiles(['docs/usage.md', 'docs/guide.mdx']), 'full');
+  assert.equal(
+    classifyChangedFiles(['docs/usage.md', 'docs/guide.mdx']),
+    'full',
+  );
 });
 
 test('falls back to full for root docs names used as directories', () => {

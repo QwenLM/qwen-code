@@ -49,7 +49,11 @@ new AgentSideConnection(
         authMethods: [{ id: 'openai', name: 'Use OpenAI API key' }],
         agentCapabilities: {
           loadSession: false,
-          promptCapabilities: { image: true, audio: false, embeddedContext: false },
+          promptCapabilities: {
+            image: true,
+            audio: false,
+            embeddedContext: false,
+          },
         },
       };
     },
@@ -85,7 +89,11 @@ new AgentSideConnection(
             title: text.slice(0, 80),
           },
           options: [
-            { optionId: 'proceed_once', name: 'Allow once', kind: 'allow_once' },
+            {
+              optionId: 'proceed_once',
+              name: 'Allow once',
+              kind: 'allow_once',
+            },
             { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
           ],
         });
