@@ -469,7 +469,9 @@ describe('ExportTranscriptDocument browser gate', () => {
     await expandAll.click();
     expect(await expandAll.isDisabled()).toBe(true);
     await themeToggle.click();
-    await expect(page.locator('html')).toHaveClass(/light/);
+    await expect
+      .poll(() => page.locator('html').getAttribute('class'))
+      .toMatch(/light/);
     await expect
       .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
       .toBeGreaterThan(0);
