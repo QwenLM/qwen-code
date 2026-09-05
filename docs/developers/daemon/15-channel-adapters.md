@@ -184,6 +184,8 @@ If a replacement fails, newly started workers are stopped and old workers are re
 
 Adapter `connect()` failures are reported separately from worker lifecycle errors. The worker sends each bounded, credential-redacted failure over startup IPC and waits for a supervisor acknowledgement before trying the next adapter. A partially connected worker remains running and exposes `startupFailures` in its snapshot. If every adapter in a dynamic attempt fails, the `502 channel_worker_start_failed` response carries workspace-annotated attempted failures while `state` reflects the rollback result; subsequent GET responses do not retain the attempt. Daemon boot with no connected adapter remains fail-fast. The optional adapter `code` is diagnostic only, and the current `phase` is `connect`.
 
+An explicit `DELETE /workspaces/:workspace/channels/:name` can also converge a missing-config Channel when the manager still confirms exactly one committed Worker owner in the selected Workspace. It stops that owner before removing persisted startup selection; unknown, ambiguous, uncommitted or foreign runtime ownership is rejected. Revision checks and Worker stop failures still apply. If both configuration and runtime are absent, deletion is idempotent. Reading a missing configuration does not trigger cleanup. Remaining committed Channels must still resolve through the existing manager reconciliation; if another selected Channel also lost its configuration, deletion can fail without converging the target.
+
 ## Dependencies
 
 - `packages/channels/base/` — `ChannelBase`, `PollingChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
