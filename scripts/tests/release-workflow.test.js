@@ -643,119 +643,169 @@ describe('release workflow', () => {
     // A shard that died on Vitest's own worker RPC timing out reads
     // identically to a real break, and this release lost two attempts before
     // anyone could tell them apart (run 33713579913). The annotation says
-    // which; the child's status is re-raised untouched on every path that
-    // does not re-run, so no reading of the log can turn a failure green.
-    // The one pass-through is a re-run of the same shard exiting green: the
-    // crash header beside a passing tally is producer-chosen, so the log
-    // alone can never certify it — the guard conditions fast-fail on clear
-    // breakage evidence and the re-run is what grants the pass.
+    // which; the child's status is re-raised untouched, so no reading of the
+    // log can turn a failure green except the one deliberate pass-through.
+    //
+    // That pass-through is granted by Vitest's own count of unhandled errors
+    // (`Errors  N errors`) matching how many carried the transport's message
+    // — not by recognising a crash from its header. The header is
+    // producer-chosen, so a pattern over headers is incomplete by
+    // construction; the rows below carry the shapes that defeat one
+    // (suffix-less class, no class at all) and the shapes that defeat the
+    // count (an extra error the timeouts do not account for, a summary the
+    // run never reached, words a test merely printed).
     const testStep = releaseYaml.jobs.workspace_tests.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
     const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+    const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
+    const tally = ' Tests  10614 passed (10614)';
+    const passedThrough =
+      '::warning title=Workspace tests passed through a Vitest transport timeout::';
+    const stands =
+      '::warning title=Workspace tests exited 1 on a Vitest transport timeout::';
 
-    for (const [label, stub, code, annotation, expected, rerun] of [
+    for (const [label, stub, code, annotation, expected] of [
       // A failing test names itself; an annotation would only add noise.
       ['failing test', ' FAIL  src/a.test.ts > boom', 1, null],
       // Vitest's worker RPC giving up says nothing about the product, and
-      // --retry cannot cover it. The pass now demands the authoritative
-      // proof: the same shard re-executed and green (the stub exits 0 on its
-      // second invocation). It cost this release three attempts before that.
+      // --retry cannot cover it — retries re-run failing TESTS while an
+      // unhandled error fails the run outright. Passed only with proof the
+      // run reached its end and that the transport accounts for every
+      // unhandled error Vitest counted. It cost this release three attempts.
       [
         'transport timeout, run completed',
-        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        `${timeout}\n${tally}\n     Errors  1 error`,
         1,
-        '::warning title=Workspace tests passed through a Vitest transport timeout::',
+        passedThrough,
         0,
-        'green',
       ],
       [
         'transport timeout, killed by a signal',
-        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        `${timeout}\n${tally}\n     Errors  1 error`,
         137,
         '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
       ],
+      // One more error than the transport accounts for: the run broke on
+      // something else as well, whatever its header said.
       [
         'transport timeout beside a real one',
-        'Error: [vitest-worker]: Timeout calling "x"\nError: write after end\n Tests  10614 passed (10614)',
+        `${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+        stands,
       ],
-      // Node prints an unhandled exception under its own class header, so
-      // anchoring the pass-through on a bare `Error:` let a real crash clear
-      // all four legs and ship as a green release.
+      // The two shapes no header pattern reaches. A class whose name carries
+      // no Error/Exception suffix is not hypothetical — 26 of this repo's 293
+      // Error subclasses are named that way, four of them assigning the bare
+      // name to err.name — and a bare string throw prints under Vitest's own
+      // `Unknown Error:` heading, which a header matcher misses on the space.
+      // The count sees both, because it never looks at the header.
       [
-        'transport timeout beside a non-Error exception header',
-        'Error: [vitest-worker]: Timeout calling "x"\nTypeError: Cannot read properties of null (reading port)\n Tests  10614 passed (10614)',
+        'transport timeout beside a suffix-less crash header',
+        `${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
-      ],
-      // Node prints coded internal errors as `Name [ERR_CODE]: message`, with
-      // the bracketed code between the class name and the colon, so a matcher
-      // anchored straight to `Error:` never sees the line.
-      [
-        'transport timeout beside a coded exception header',
-        'Error: [vitest-worker]: Timeout calling "x"\nAssertionError [ERR_ASSERTION]: Expected values to be strictly equal\n Tests  10614 passed (10614)',
-        1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
-      ],
-      // Each of these pins one constituent of the header matcher: the
-      // `Exception` alternative, the digits in the identifier class, and the
-      // `$` it carries. The matcher only ever fast-fails now, but a later
-      // narrowing that drops one of these turns a clear break into a re-run
-      // spend instead of an instant refusal.
-      [
-        'transport timeout beside an Exception-class header',
-        'Error: [vitest-worker]: Timeout calling "x"\nDOMException: operation aborted\n Tests  10614 passed (10614)',
-        1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+        stands,
       ],
       [
-        'transport timeout beside a digit-bearing class header',
-        'Error: [vitest-worker]: Timeout calling "x"\nLargeNonUtf8TextError: range too large\n Tests  10614 passed (10614)',
+        'transport timeout beside a bare string throw',
+        `${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+        stands,
       ],
+      // Ordinary `Error:` lines are test output, not evidence of a break: the
+      // log of the run this guard was written for carries three of them as
+      // fixture data. A matcher over headers refuses the pass-through on
+      // those and reddens a release the guard exists to save; the count is
+      // unmoved by them.
       [
-        'transport timeout beside a $-bearing class header',
-        'Error: [vitest-worker]: Timeout calling "x"\nFoo$Error: minified class crashed\n Tests  10614 passed (10614)',
+        'transport timeout beside Error: lines a test printed',
+        `${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
-      ],
-      // The matcher is whole-file while the proof it demands is per-run, so a
-      // passing tally from one workspace must not cover a later crash.
-      [
-        'transport timeout, tally, then a later crash',
-        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)\nAssertionError: expected 1 to equal 2',
-        1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
-      ],
-      // The class no header enumeration can reach: a crash under a class with
-      // no Error/Exception suffix clears every log-reading guard beside the
-      // transport line and a passing tally. The re-run is the gate: green
-      // clears it (transient death), red stands (real break) — the same log
-      // must be able to produce both verdicts.
-      [
-        'suffix-less exception header, cleared by a green re-run',
-        'Error: [vitest-worker]: Timeout calling "x"\nPoolTimeout: worker pool exhausted\n Tests  10614 passed (10614)',
-        1,
-        '::warning title=Workspace tests passed through a Vitest transport timeout::',
+        passedThrough,
         0,
-        'green',
+      ],
+      // `--workspaces` prints one summary per workspace into one log, so both
+      // figures are whole-file sums: a passing tally cannot cover a later
+      // workspace's crash, and two transport deaths in two workspaces still
+      // pass.
+      [
+        'tally, then a later workspace crashing',
+        `${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
+        1,
+        stands,
+      ],
+      // The shape of the log this guard was written for: several transport
+      // deaths in one run, and the plural summary Vitest prints for more than
+      // one of them (run 33713579913).
+      [
+        'four transport deaths, four unhandled errors',
+        `${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
+        1,
+        passedThrough,
+        0,
       ],
       [
-        'suffix-less exception header, re-run fails too',
-        'Error: [vitest-worker]: Timeout calling "x"\nPoolTimeout: worker pool exhausted\n Tests  10614 passed (10614)',
+        'two workspaces, both lost to the transport',
+        `${timeout}\n Tests  5 passed (5)\n     Errors  1 error\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout re-run::',
+        passedThrough,
+        0,
+      ],
+      // Absent evidence refuses the pass rather than granting it: no summary
+      // line at all, no passing tally, or a failing tally.
+      [
+        'transport timeout, no error summary to count',
+        `${timeout}\n${tally}`,
         1,
-        'fail',
+        stands,
       ],
       [
         'transport timeout, no tally to back it',
         'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+        stands,
+      ],
+      // Vitest's own summary is the only thing that grants the pass, so a
+      // run that never printed a tally does not get one even when its error
+      // count is all transport.
+      [
+        'error summary with no tally to back it',
+        `${timeout}\n     Errors  1 error`,
+        1,
+        stands,
+      ],
+      // `Timeout calling` in a test's own output is not the transport dying:
+      // the branch is entered on Vitest's own `[vitest-worker]:` message, so
+      // a log carrying only the words is unexplained, not passed through.
+      [
+        'Timeout calling printed by a test',
+        `Timeout calling the vendor API\n${tally}`,
+        1,
+        '::error title=Workspace tests exited 1 with no failing test::',
+      ],
+      // ...and the count is anchored on the same message, so those words
+      // beside a real transport death do not inflate it into a mismatch.
+      [
+        'transport timeout, and Timeout calling printed by a test',
+        `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      [
+        'transport timeout, failing tally',
+        `${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
+        1,
+        stands,
+      ],
+      // One workspace can print a passing tally while a later one fails
+      // without ever emitting a FAIL line, so the failing tally is checked
+      // across the whole log rather than trusted to the branch above.
+      [
+        'passing tally in one workspace, failing tally in another',
+        `${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
+        1,
+        stands,
       ],
       [
         'unexplained',
@@ -767,28 +817,7 @@ describe('release workflow', () => {
       const dir = mkdtempSync(join(tmpdir(), 'release-failure-'));
       try {
         const stubPath = join(dir, 'npm');
-        // The pass-through path re-invokes the same command once; the stub
-        // counts its invocations and, when the case models a re-run, behaves
-        // differently on the second call. A case that must not reach a
-        // re-run still gets the counter, and the assertion pins the single
-        // invocation.
-        const rerunBody =
-          rerun === 'green' ? 'exit 0' : `echo '${stub}'\nexit ${code}`;
-        writeFileSync(
-          stubPath,
-          [
-            '#!/bin/sh',
-            'invocations="${RUNNER_TEMP:-/tmp}/npm-invocations"',
-            'n=$(( $(cat "$invocations" 2>/dev/null || echo 0) + 1 ))',
-            'echo "$n" > "$invocations"',
-            'if [ "$n" -ge 2 ]; then',
-            `  ${rerunBody.split('\n').join('\n  ')}`,
-            'fi',
-            `echo '${stub}'`,
-            `exit ${code}`,
-            '',
-          ].join('\n'),
-        );
+        writeFileSync(stubPath, `#!/bin/sh\necho '${stub}'\nexit ${code}\n`);
         chmodSync(stubPath, 0o755);
 
         const result = spawnSync(
@@ -806,10 +835,6 @@ describe('release workflow', () => {
         );
 
         expect(result.status, label).toBe(expected ?? code);
-        const invocations = Number(
-          readFileSync(join(dir, 'npm-invocations'), 'utf8').trim(),
-        );
-        expect(invocations, label).toBe(rerun === undefined ? 1 : 2);
         if (annotation) {
           expect(result.stdout, label).toContain(annotation);
         } else {
