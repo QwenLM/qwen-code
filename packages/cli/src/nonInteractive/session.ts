@@ -639,6 +639,7 @@ class Session {
 
     const promptId = this.getNextPromptId();
     const turnAbortController = this.startTurn();
+    let resultAlreadyEmitted = false;
     try {
       await runNonInteractive(
         this.config,
@@ -654,8 +655,24 @@ class Session {
           captureMonitorNotifications: false,
           captureMonitorRegistrations: false,
           recoverableCancellation: true,
+          onResultEmitted: () => {
+            resultAlreadyEmitted = true;
+          },
         },
       );
+    } catch (error) {
+      if (resultAlreadyEmitted) {
+        debugLogger.error(
+          '[Session] Monitor notification turn failed after emitting a result:',
+          error,
+        );
+        const message = error instanceof Error ? error.message : String(error);
+        this.outputAdapter.emitSystemMessage('monitor_turn_failed', {
+          error: message,
+        });
+        return;
+      }
+      throw error;
     } finally {
       this.finishTurn(turnAbortController);
     }

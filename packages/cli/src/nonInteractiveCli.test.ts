@@ -64,7 +64,10 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
-import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import {
+  _resetCleanupFunctionsForTest,
+  registerCleanup,
+} from './utils/cleanup.js';
 import {
   AlreadyReportedError,
   _resetExitLatchForTest,
@@ -4893,6 +4896,242 @@ describe('runNonInteractive', () => {
     const errorOutput = stderrCalls.map((call) => call[0]).join('');
     expect(errorOutput).toContain('401');
     expect(errorOutput).toContain('Incorrect API key provided');
+  });
+
+  it('emits an error result for API error events in JSON mode', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: LlmEventType.Error,
+      value: {
+        error: {
+          message: '401 Incorrect API key provided',
+          status: 401,
+        },
+      },
+    };
+
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-json-api-error',
+      ),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .trim(),
+    ) as Array<{
+      type: string;
+      subtype?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const results = messages.filter((message) => message.type === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('401') },
+    });
+    expect(results[0].error?.message).toContain('Incorrect API key provided');
+    expect(processStderrSpy).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(String(processStderrSpy.mock.calls[0]?.[0])),
+    ).toMatchObject({
+      error: {
+        type: 'AlreadyReportedError',
+        message: expect.stringContaining('401'),
+        code: 1,
+      },
+    });
+  });
+
+  it('emits an error result for API error events in stream-json mode', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(true);
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: LlmEventType.Error,
+      value: {
+        error: {
+          message: '401 Incorrect API key provided',
+          status: 401,
+        },
+      },
+    };
+
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-json-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line)) as Array<{
+      type: string;
+      subtype?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const results = messages.filter((message) => message.type === 'result');
+
+    expect(
+      messages.filter((message) => message.type === 'assistant'),
+    ).toHaveLength(0);
+    expect(
+      messages.filter((message) => message.type === 'stream_event'),
+    ).toHaveLength(0);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('401') },
+    });
+    expect(results[0].error?.message).toContain('Incorrect API key provided');
+    expect(processStderrSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not run process-exit cleanup for API errors with a session-owned adapter', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const cleanup = vi.fn();
+    const onResultEmitted = vi.fn();
+    registerCleanup(cleanup);
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Error,
+          value: {
+            error: {
+              message: '401 Incorrect API key provided',
+              status: 401,
+            },
+          },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-session-api-error',
+        { adapter, onResultEmitted },
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(onResultEmitted).toHaveBeenCalledOnce();
+  });
+
+  it('emits an error result for API error events while draining stream-json notifications', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+
+    const notificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted an event.</summary>\n' +
+      '</task-notification>';
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor event', notificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Monitor launched.' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 2 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: {
+              error: {
+                message: '401 Incorrect API key provided',
+                status: 401,
+              },
+            },
+          },
+        ]),
+      );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-id-drain-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line)) as Array<{
+      type: string;
+      subtype?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const results = messages.filter((message) => message.type === 'result');
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('401') },
+    });
   });
 
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {

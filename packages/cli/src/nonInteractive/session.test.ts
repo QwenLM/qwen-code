@@ -904,6 +904,130 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('reports a monitor failure without emitting a second result', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start a monitor');
+    let closeInput: (() => void) | undefined;
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+    runNonInteractiveMock
+      .mockImplementationOnce(async () => {
+        monitorCallback?.(
+          'Monitor event',
+          '<task-notification>failed turn</task-notification>',
+          {
+            monitorId: 'mon_error',
+            toolUseId: 'tool_mon_error',
+            status: 'running',
+          },
+        );
+      })
+      .mockImplementationOnce(async (...args: unknown[]) => {
+        const options = args[4] as {
+          adapter: StreamJsonOutputAdapter;
+          onResultEmitted?: () => void;
+        };
+        options.adapter.emitResult({
+          isError: true,
+          errorMessage: 'provider error',
+          durationMs: 1,
+          apiDurationMs: 1,
+          numTurns: 0,
+        });
+        options.onResultEmitted?.();
+        throw new Error('provider error');
+      });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    });
+    closeInput?.();
+    await sessionPromise;
+
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'monitor_turn_failed',
+      { error: 'provider error' },
+    );
+  });
+
+  it('emits an error result when a monitor turn fails before reporting one', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start a monitor');
+    let closeInput: (() => void) | undefined;
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+    runNonInteractiveMock
+      .mockImplementationOnce(async () => {
+        monitorCallback?.(
+          'Monitor event',
+          '<task-notification>failed turn</task-notification>',
+          {
+            monitorId: 'mon_error',
+            toolUseId: 'tool_mon_error',
+            status: 'running',
+          },
+        );
+      })
+      .mockRejectedValueOnce(new Error('provider error'));
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    });
+    closeInput?.();
+    await sessionPromise;
+
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'provider error',
+      }),
+    );
+  });
+
   it('drops a queued running monitor event after cancellation', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start then stop a monitor');
@@ -1277,19 +1401,24 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
 
-  it('handles error from processUserMessage', async () => {
-    const userMessage = createUserMessage('Test message');
-
-    const error = new Error('Processing error');
-    runNonInteractiveMock.mockRejectedValue(error);
+  it('continues to the next user message after a turn fails', async () => {
+    const initRequest = createControlRequest('initialize');
+    const firstMessage = createUserMessage('First message');
+    const secondMessage = createUserMessage('Second message');
+    runNonInteractiveMock
+      .mockRejectedValueOnce(new Error('Processing error'))
+      .mockResolvedValueOnce(undefined);
 
     mockInputReader.read = async function* () {
-      yield userMessage;
+      yield initRequest;
+      yield firstMessage;
+      yield secondMessage;
     };
 
     await runNonInteractiveStreamJson(config, '');
 
-    // Error should be caught and handled gracefully
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    expect(runNonInteractiveMock.mock.calls[1]?.[2]).toBe('Second message');
   });
 
   it('handles stream error gracefully', async () => {
