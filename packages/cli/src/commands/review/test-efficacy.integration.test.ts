@@ -1935,6 +1935,81 @@ exec ${realGit} "$@"
     },
   );
 
+  // POSIX-only: the swap is a `mv` pair driven from the fake runner.
+  it.skipIf(process.platform === 'win32')(
+    'refuses after a swap that happened OUTSIDE any restore',
+    async () => {
+      // Capturing the identity at the top of each restore answers "did the
+      // tree change during THIS restore" — which a planter waits out. It swaps
+      // the root while the PROBE SUITE runs (minutes), and the next restore
+      // then captures the swapped tree's identity as its own baseline and
+      // agrees with itself all the way through. The anchor has to be the
+      // moment the pipeline made the tree, before any PR code ran.
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-anchorvictim-'));
+      let probe = '';
+      try {
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
+          cwd: victim,
+        });
+        execFileSync('git', ['add', '-A'], { cwd: victim });
+        execFileSync(
+          'git',
+          ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'v'],
+          { cwd: victim },
+        );
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const { wt, base } = scaffoldModifiedPr();
+        probe = `${wt}-probe`;
+        // The fake runner IS the PR's test code: it swaps the root from
+        // inside a probe run, between restores.
+        writeFileSync(
+          vitestScript(),
+          `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const stamp = '${probe}.swapped';
+if (!fs.existsSync(stamp) && fs.existsSync('${probe}')) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('sh', ['-c', 'mv ${probe} ${probe}.gone && mv ${victim} ${probe}']);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+        );
+
+        await runHandler({
+          report: join(repo, 'report.json'),
+          worktree: wt,
+          base,
+          out: join(repo, 'out.json'),
+        });
+
+        // The refusal is the assertion. A damage assertion would be wrong
+        // here for a reason worth recording: the run's own CLEANUP
+        // (`discardWorktree`) removes whatever stands at the probe path when
+        // the command ends, so the swapped-in tree is emptied by teardown
+        // regardless of whether the restore and revert refused. That is a
+        // separate site with the same shape, and this anchor does not cover it.
+        const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+        const details = JSON.stringify(out.probed ?? []);
+        expect(details).toContain('stopped being its own root');
+      } finally {
+        if (probe) rmSync(`${probe}.gone`, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the
     // probe tree both derive from the same commit, so the command cannot reach

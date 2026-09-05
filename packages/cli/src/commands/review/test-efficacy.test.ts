@@ -32,6 +32,7 @@ import {
   runOneMutant,
   runOneHunkProbe,
   committedSymlinkProbes,
+  gitfileMarker,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import { MAX_SCREEN_KEYS, sanitizedGitEnv } from './lib/worktree.js';
@@ -850,6 +851,105 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
         isolation.dispose();
         rmSync(shimDir, { recursive: true, force: true });
         rmSync(`${dir}.real`, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('gives a gitfile and a directory markers that cannot collide', () => {
+    // The file's own bytes and the word for "it was a directory" must not
+    // share one string space. If they do, a gitfile whose literal content is
+    // the directory token compares EQUAL to a directory swapped in for it —
+    // capture-1 reads the planted text, capture-2 finds a real directory, and
+    // the pre-spawn re-check passes over the swap.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-marker-'));
+    try {
+      const asFile = join(dir, 'as-file');
+      const asDir = join(dir, 'as-dir');
+      // Every token this function can emit, written as file CONTENT.
+      mkdirSync(asDir);
+      const dirMarker = gitfileMarker(asDir);
+      for (const token of [dirMarker, 'dir', 'other', 'oversized:9']) {
+        writeFileSync(asFile, token);
+        expect(gitfileMarker(asFile)).not.toBe(dirMarker);
+      }
+      // And two gitfiles differing only in bytes a utf8 decode would fold
+      // together must still differ: git resolves the raw bytes.
+      writeFileSync(asFile, Buffer.from([0xff, 0xfe]));
+      const a = gitfileMarker(asFile);
+      writeFileSync(asFile, Buffer.from([0xfe, 0xff]));
+      expect(gitfileMarker(asFile)).not.toBe(a);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // POSIX-only: the swap is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the root is swapped BETWEEN the checkout and the clean',
+    () => {
+      // One re-ask before the first spawn is not enough: the gap to the second
+      // is a whole `checkout --force`, which scales with the tracked-file
+      // count. `clean -ffdx` re-resolves its cwd when it starts, so a swap
+      // landing in that gap sends the DELETE into the swapped-in tree while
+      // the checkout, holding an fd on the original, finishes harmlessly.
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-midspawn-'));
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-mvictim-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-msshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+        asCheckout(dir);
+        writeFileSync(join(dir, 'a.ts'), 'dirtied\n');
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        asCheckout(victim);
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        // Swap AFTER the checkout has been issued, i.e. when the clean is next.
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *checkout\\ --force*)
+    ${realGit} "$@"
+    rc=$?
+    if [ ! -e ${shimDir}/done ]; then
+      touch ${shimDir}/done
+      mv ${dir} ${dir}.gone && mv ${victim} ${dir}
+    fi
+    exit $rc
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            dir,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // Damage first: the swapped-in tree keeps its untracked file, which is
+        // what `clean -ffdx` would have eaten.
+        expect(existsSync(join(dir, 'PRECIOUS'))).toBe(true);
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(`${dir}.gone`, { recursive: true, force: true });
         rmSync(dir, { recursive: true, force: true });
         rmSync(victim, { recursive: true, force: true });
       }

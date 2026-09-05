@@ -596,6 +596,23 @@ export const MAX_SCREEN_KEYS = RESIDUE_PATH_CAP;
 export const MAX_SCREEN_CANDIDATES = 256;
 
 /**
+ * The largest config file the screen will hand to git.
+ *
+ * Bounding the COUNT of candidates without bounding their SIZE leaves the same
+ * denial of service one file over: git parses linearly, the spawn is
+ * synchronous, and the screen runs once per mutant.
+ *
+ * Sized from the measured parse rate — about 6.3 ms per MB — so one candidate
+ * costs at most ~50 ms and a full capped walk stays inside the spawn timeout.
+ * A real git config is kilobytes. It is deliberately far above the largest
+ * legitimate-looking plant a test exercises (a padded `smudge` VALUE at ~1.2
+ * MB, which `--name-only` keeps out of stdout and the screen still reports):
+ * this bound is against files that cannot be parsed in reasonable time, not
+ * against large values, which are a different finding with a different answer.
+ */
+export const MAX_SCREEN_CONFIG_BYTES = 8 * 1024 * 1024;
+
+/**
  * The repo-local `filter.<name>` COMMANDS, when any are defined.
  *
  * A checkout EXECUTES these whenever it rewrites a file, and disabling hooks
@@ -767,6 +784,44 @@ export function carriesReplacementChar(value: string): boolean {
   return value.includes('\uFFFD');
 }
 
+/**
+ * The admin entry whose `gitdir` file points back at `tree`, if any.
+ *
+ * `git worktree add` does NOT always register a tree under its own basename:
+ * a name already taken — crash residue in the never-wiped common dir, or a
+ * directory a probe created — makes it register `<name>1` instead (measured on
+ * git 2.43.0). Deriving the entry from the basename therefore reads a stale
+ * decoy dead-last while the file the checkout honours goes by mid-walk, which
+ * is exactly backwards. Ask the admin entries which one claims the tree.
+ *
+ * Filesystem only: this runs inside a screen whose whole point is to not
+ * depend on git resolving anything for it.
+ */
+function adminConfigClaiming(common: string, tree: string): string | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(join(common, 'worktrees'));
+  } catch {
+    return null;
+  }
+  for (const entry of entries.slice(0, MAX_SCREEN_CANDIDATES)) {
+    try {
+      const backpointer = readFileSync(
+        join(common, 'worktrees', entry, 'gitdir'),
+        'utf8',
+      ).trim();
+      // `<tree>/.git` is what git writes there.
+      if (resolve(dirname(backpointer)) === tree) {
+        return join(common, 'worktrees', entry, 'config.worktree');
+      }
+    } catch {
+      // Unreadable or absent: not the entry we are looking for. The screen's
+      // own walk below still visits it and refuses if it cannot be read.
+    }
+  }
+  return null;
+}
+
 export function localFilterCommands(
   worktree: string,
   /**
@@ -838,16 +893,26 @@ export function localFilterCommands(
   // between it and the checkout. This does not close the window — nothing
   // here can, since a checkout either reads merged config or does not run —
   // it removes the amplification.
-  // The checkout tree's own per-worktree config, held back to the very end.
-  const ownAdminConfig =
+  // The SCREENED tree's own per-worktree config is always a candidate. For a
+  // main working tree `gitDir` IS the common dir, so this is
+  // `<common>/config.worktree` — a file the `worktrees/*` walk below never
+  // reaches and `git worktree add` loads at startup. Deriving the checkout
+  // tree's entry instead of adding to the list dropped it, and for a main
+  // checkout that turned a refusal into an executed plant.
+  const screenedAdminConfig = join(resolve(worktree, gitDir), 'config.worktree');
+
+  // The checkout tree's own, when the caller named a different tree — resolved
+  // from the admin entry that points BACK at it, never from its basename.
+  // `git worktree add` numbers an entry on a name collision (`foo` taken by
+  // crash residue makes the add register `foo1`), so a basename derivation can
+  // hold back a stale decoy while the file the checkout honours is read
+  // mid-walk. `null` when no entry claims it: the tree may not exist yet on
+  // the rebuild path, and then there is nothing there to plant in.
+  const checkoutAdminConfig =
     checkoutTree === undefined || resolve(checkoutTree) === resolve(worktree)
-      ? join(resolve(worktree, gitDir), 'config.worktree')
-      : join(
-          common,
-          'worktrees',
-          basename(resolve(checkoutTree)),
-          'config.worktree',
-        );
+      ? null
+      : adminConfigClaiming(common, resolve(checkoutTree));
+
   const candidates: string[] = [];
   // Every OTHER worktree's per-worktree config too. This screen runs against
   // the review worktree, but the checkout it authorises runs in the SCRATCH
@@ -910,14 +975,26 @@ export function localFilterCommands(
       };
     }
     const candidate = join(common, 'worktrees', entry, 'config.worktree');
-    if (candidate !== ownAdminConfig) candidates.push(candidate);
+    if (candidate !== checkoutAdminConfig) candidates.push(candidate);
+  }
+  // The screened tree's own, when it is not the one held back below. Without
+  // this a cross-tree call skips it entirely — and for a main working tree it
+  // is `<common>/config.worktree`, which no admin walk reaches.
+  if (
+    checkoutAdminConfig !== null &&
+    screenedAdminConfig !== checkoutAdminConfig &&
+    !candidates.includes(screenedAdminConfig)
+  ) {
+    candidates.push(screenedAdminConfig);
   }
   // Then the common config, then — dead last — the file the authorised
   // checkout will actually honour. Order is the whole mitigation here: the
   // admin set above is attacker-paddable, so anything read before it carries a
   // window the plant itself can widen.
   candidates.push(join(common, 'config'));
-  candidates.push(ownAdminConfig);
+  // Dead last: the file the authorised checkout honours. When the caller named
+  // a different tree that is its entry; otherwise the screened tree's own.
+  candidates.push(checkoutAdminConfig ?? screenedAdminConfig);
   // Retention is bounded at INSERTION, not at the report. The caps below limit
   // how many keys are NAMED and how many files are read, but the Set itself
   // would hold every distinct key an attacker wrote — bounded only by the
@@ -929,6 +1006,10 @@ export function localFilterCommands(
   let total = 0;
   let unreadable: string | null = null;
   for (const file of candidates) {
+    // Once a stop is decided nothing later can change it — every caller gates
+    // on `stopped` before it looks at `keys` — so the remaining candidates are
+    // work an attacker chose for us. Each one is a synchronous spawn.
+    if (unreadable !== null) break;
     if (!existsSync(file)) continue;
     // Existence is not readability, and git does not distinguish them for us:
     // an unreadable `--file` exits 1 with a warning on stderr — byte-identical
@@ -938,13 +1019,22 @@ export function localFilterCommands(
     // this must too) that this process can open. Anything else is a candidate
     // the screen could not check, which is a refusal, not a pass.
     let readable = false;
+    let oversized = false;
     try {
-      readable = statSync(file).isFile();
+      const st = statSync(file);
+      readable = st.isFile();
+      // Size, too. git parses a config file linearly, so a half-gigabyte
+      // candidate is seconds of blocked event loop per call — and this screen
+      // runs once per mutant, per hunk probe, for the control and the
+      // baseline. Past the bound the screen has not read what it was asked to
+      // read, which is a refusal, the same answer the other bounds give.
+      // git's own config files are kilobytes.
+      if (readable && st.size > MAX_SCREEN_CONFIG_BYTES) oversized = true;
       if (readable) accessSync(file, fsConstants.R_OK);
     } catch {
       readable = false;
     }
-    if (!readable) {
+    if (!readable || oversized) {
       unreadable ??= file;
       continue;
     }
