@@ -176,8 +176,7 @@ describe('ECS runner qwen update workflow', () => {
   it('reports a failed fleet update only when a pool actually failed', () => {
     // `cancelled` is routine: the per-pool concurrency group cancels an older
     // dispatch's pending legs whenever a newer one arrives.
-    const guard =
-      workflow.match(/ {4}if: "\$\{\{ always\(\)[^"]*"/)?.[0] ?? '';
+    const guard = workflow.match(/ {4}if: "\$\{\{ always\(\)[^"]*"/)?.[0] ?? '';
     assert.ok(guard.includes("needs.resolve.result == 'failure'"));
     assert.ok(guard.includes("needs.update.result == 'failure'"));
     assert.ok(!guard.includes('cancelled'));
@@ -572,7 +571,9 @@ describe('ECS runner qwen update replay', { skip: !replayable }, () => {
     assert.ok(
       reported.body.includes('check whether the pool matrix started at all'),
     );
-    assert.ok(!reported.body.includes('at least one ECS pool is still running'));
+    assert.ok(
+      !reported.body.includes('at least one ECS pool is still running'),
+    );
     assert.ok(!reported.body.includes('`Verify version` step of every pool'));
   });
 
