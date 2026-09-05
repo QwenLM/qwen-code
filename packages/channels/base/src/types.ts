@@ -447,6 +447,8 @@ interface ChannelConfigFieldDescriptorBase {
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
   description?: string;
+  /** Render string fields as a multi-line text area in management UIs. */
+  multiline?: boolean;
 }
 
 export interface ChannelConfigValueFieldDescriptor

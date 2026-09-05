@@ -156,6 +156,30 @@ const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// The shared `instructions` control the channel registry injects into every
+// manageable channel (channel-registry.ts), plus a plain string sibling. The
+// descriptor label for `instructions` intentionally differs from the i18n
+// value so a missing i18n key surfaces the untranslated fallback instead of
+// passing the assertions below.
+const MULTILINE_INSTRUCTIONS: DaemonChannelTypeDescriptor = {
+  type: 'example',
+  displayName: 'Example',
+  manageable: true,
+  fields: [
+    {
+      key: 'instructions',
+      label: 'Session instructions (descriptor)',
+      kind: 'string',
+      multiline: true,
+    },
+    {
+      key: 'apiEndpoint',
+      label: 'API endpoint (descriptor)',
+      kind: 'string',
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -276,6 +300,22 @@ function setInputValue(input: HTMLInputElement, value: string) {
     'value',
   )?.set?.call(input, value);
   input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
+  Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  )?.set?.call(textarea, value);
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function sectionHeadingOf(element: HTMLElement | null): string | null {
+  const heading = element
+    ?.closest('section')
+    ?.querySelector('h3')
+    ?.textContent?.trim();
+  return heading ?? null;
 }
 
 beforeEach(() => {
@@ -473,6 +513,64 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain('Conversation management');
     expect(document.body.textContent).toContain('Conversation isolation');
     expect(document.body.textContent).toContain('By user');
+  });
+
+  it('renders a multiline string field as a textarea and leaves a plain one as an input', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    const instructions = fieldByLabel('Instructions');
+    const endpoint = fieldByLabel('API endpoint (descriptor)');
+
+    expect(instructions?.tagName).toBe('TEXTAREA');
+    expect(endpoint?.tagName).toBe('INPUT');
+  });
+
+  it('groups the shared instructions control with conversation management', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    // `instructions` is not a credential: it is stored in clear text and
+    // injected into the session context, so it belongs with the other shared
+    // session controls rather than in the catch-all credentials panel.
+    expect(sectionHeadingOf(fieldByLabel('Instructions'))).toBe(
+      'Conversation management',
+    );
+    expect(sectionHeadingOf(fieldByLabel('API endpoint (descriptor)'))).toBe(
+      'Credentials',
+    );
+  });
+
+  it('saves a multi-line instructions value with the newline intact', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS, onSave });
+
+    const instructions = fieldByLabel('Instructions');
+    expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setTextareaValue(
+        instructions as HTMLTextAreaElement,
+        '  line one\nline two  ',
+      );
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    // assignField trims the outer whitespace but must not flatten the
+    // embedded newline, or the control cannot carry multi-line guidance.
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          instructions: 'line one\nline two',
+        }),
+      }),
+    );
   });
 
   it('submits a new instance with typed fields and the current revision', async () => {

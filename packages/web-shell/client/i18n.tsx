@@ -3349,6 +3349,9 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.instructions': 'Instructions',
+  'channels.editor.field.shared.instructions.description':
+    'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
@@ -6671,6 +6674,9 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.instructions': '指引',
+  'channels.editor.field.shared.instructions.description':
+    '注入到每个 channel 会话上下文中的指引。部分 channel 在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
