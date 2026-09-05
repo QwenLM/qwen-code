@@ -4320,7 +4320,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getLlmClient()!.getChat();
+    const llmClient = this.config.getLlmClient()!;
+    const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -4334,7 +4335,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -4389,7 +4390,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
+    this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -14072,6 +14073,9 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
+    originalParts = this.#getCurrentChat().resolveImageReferences(
+      originalParts,
+    ) as Part[];
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
       abortSignal,

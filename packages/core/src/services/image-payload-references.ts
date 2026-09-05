@@ -49,6 +49,30 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
   get(id: string): StoredImagePayload | undefined {
     return this.images.get(id);
   }
+
+  clear(): void {
+    this.images.clear();
+  }
+
+  copyTo(target: InMemoryImagePayloadStore): void {
+    for (const [id, image] of this.images) {
+      target.images.set(id, image);
+    }
+  }
+
+  /**
+   * Drop payloads no longer referenced by `contents` and absorb any raw
+   * payloads still inline in them. Call after any operation that replaces
+   * history wholesale (compaction, truncation, thought stripping) so evicted
+   * references do not pin their bytes for the rest of the session.
+   */
+  reconcile(contents: Content[]): void {
+    const referencedIds = collectReferencedImageIds(contents);
+    for (const id of this.images.keys()) {
+      if (!referencedIds.has(id)) this.images.delete(id);
+    }
+    rememberImagePayloads(contents, this);
+  }
 }
 
 export function countAllInlineImages(contents: Content[]): number {
@@ -114,7 +138,9 @@ export function buildReattachParts(
   const recent = recentUniqueImages(candidates, maxRecentImages).map(
     ({ stored }) => stored,
   );
-  const reattachLimit = Math.max(maxRecentImages, 1);
+  // An explicit multi-image prompt must keep every id it named; the recent
+  // window alone would shift all but the last one back out.
+  const reattachLimit = Math.max(maxRecentImages, lastReferencedIds.size, 1);
   if (store) {
     for (const id of lastReferencedIds) {
       if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
@@ -278,7 +304,7 @@ function* inlineImageParts(
   }
 }
 
-function collectReferencedImageIds(contents: Content[]): Set<string> {
+export function collectReferencedImageIds(contents: Content[]): Set<string> {
   const ids = new Set<string>();
   const collect = (parts: Part[] | undefined): void => {
     for (const part of parts ?? []) {
@@ -314,7 +340,7 @@ function recentUniqueImages(
   return recent.reverse();
 }
 
-function imagePartToStoredPayload(part: Part): StoredImagePayload {
+export function imagePartToStoredPayload(part: Part): StoredImagePayload {
   const data = part.inlineData?.data ?? '';
   const mimeType = part.inlineData?.mimeType ?? 'application/octet-stream';
   const hash = createHash('sha256')
@@ -349,4 +375,33 @@ function storedImageToPart(stored: StoredImagePayload): Part {
       displayName: stored.displayName,
     },
   };
+}
+
+/**
+ * Absorb every raw image payload in `contents` into `store` without rewriting
+ * the contents. Used on resume, where history is rebuilt from the original
+ * JSONL and the store must be repopulated before references are resolved.
+ */
+export function rememberImagePayloads(
+  contents: Content[],
+  store: ImagePayloadStore,
+): void {
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        store.put(part);
+      }
+      for (const nested of getFunctionResponseParts(part) ?? []) {
+        if (
+          nested.inlineData?.mimeType?.startsWith('image/') &&
+          nested.inlineData.data
+        ) {
+          store.put(nested);
+        }
+      }
+    }
+  }
 }

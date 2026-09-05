@@ -50,6 +50,7 @@ import {
   getToolCallPreparations,
   setToolCallPreparations,
 } from './tool-call-preparation.js';
+import { imagePartToStoredPayload } from '../services/image-payload-references.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -200,6 +201,10 @@ describe('LlmChat', async () => {
         toolResultsNumToKeep: 1,
       }),
       getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
+      getClearContextOnIdle: vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      }),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
         .fn()
@@ -3682,6 +3687,118 @@ describe('LlmChat', async () => {
           },
         ]),
       });
+    });
+
+    it('adds stable refs before the image payload threshold', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 20,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'only-shot' } }],
+        },
+        { role: 'model', parts: [{ text: 'seen' }] },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'response' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'continue' },
+        'prompt-id-image-ref-below-threshold',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const contents = vi.mocked(mockContentGenerator.generateContentStream)
+        .mock.calls[0]?.[0].contents as Content[];
+      const serialized = JSON.stringify(contents);
+      expect(serialized).toMatch(/Image #[a-f0-9]{12}/);
+      expect(serialized.match(/"data":"only-shot"/g)).toHaveLength(1);
+    });
+
+    it('resolves remembered image ids and forgets them on clear', () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'resumed-shot' },
+      };
+      const stored = imagePartToStoredPayload(imagePart);
+      const refHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `[Image #${stored.id}: image/png, ${stored.bytes} bytes]`,
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'seen' }] },
+      ];
+      chat.rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+      chat.setHistory(refHistory);
+
+      expect(
+        JSON.stringify(
+          chat.resolveImageReferences(`inspect Image #${stored.id}`),
+        ),
+      ).toContain('"data":"resumed-shot"');
+
+      chat.clearHistory();
+      chat.setHistory(refHistory);
+      expect(chat.resolveImageReferences(`inspect Image #${stored.id}`)).toBe(
+        `inspect Image #${stored.id}`,
+      );
+    });
+
+    it('sends only explicitly selected images below the payload threshold', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 3,
+        imagePayloadThreshold: 20,
+      });
+      const images = ['shot-a', 'shot-b', 'shot-c'].map((data) => ({
+        inlineData: { mimeType: 'image/png', data },
+      }));
+      const ids = images.map((image) => imagePartToStoredPayload(image).id);
+      const history: Content[] = [
+        { role: 'user', parts: [images[0]] },
+        { role: 'model', parts: [{ text: 'seen 0' }] },
+        { role: 'user', parts: [images[1]] },
+        { role: 'model', parts: [{ text: 'seen 1' }] },
+        {
+          role: 'user',
+          parts: [
+            { text: `Recent image restored: Image #${ids[2]}` },
+            images[2],
+          ],
+        },
+      ];
+      chat.setHistory(history);
+      chat.rememberImagePayloads(history);
+      const resolved = chat.resolveImageReferences(
+        `compare Image #${ids[0]} with Image #${ids[2]}`,
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'response' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: resolved },
+        'prompt-id-multi-image-focus',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const contents = vi.mocked(mockContentGenerator.generateContentStream)
+        .mock.calls[0]?.[0].contents as Content[];
+      const serialized = JSON.stringify(contents);
+      expect(serialized.match(/"data":"shot-a"/g)).toHaveLength(1);
+      expect(serialized).not.toContain('"data":"shot-b"');
+      expect(serialized.match(/"data":"shot-c"/g)).toHaveLength(1);
     });
 
     it('reattaches stored image markers on later below-threshold requests', async () => {
@@ -16679,6 +16796,41 @@ describe('LlmChat', async () => {
       expect(chat.getHistory()).toHaveLength(3);
       expect(chat.getHistory()[0]).toEqual(userMsg('summary'));
       expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('drops image payloads removed by compression', async () => {
+      mockCompressionService('compressed');
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'discarded-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      chat.rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+
+      await chat.tryCompress('p-image', 'm1');
+
+      expect(chat.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
+    });
+
+    it('drops image payloads removed by fast compression', () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'discarded-fast-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      chat.rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'answer' }],
+        },
+      ]);
+
+      chat.compressFast();
+
+      expect(chat.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
     });
 
     it('mirrors lastPromptTokenCount to the global telemetry only when wired', async () => {

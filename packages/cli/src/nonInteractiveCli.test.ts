@@ -250,6 +250,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    resolveImageReferences: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -320,6 +321,7 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      resolveImageReferences: vi.fn((parts) => parts),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
@@ -4274,6 +4276,342 @@ describe('runNonInteractive', () => {
       headlessImageParts,
       expect.any(AbortSignal),
       'prompt-vision-route',
+      { type: SendMessageType.UserQuery, modelOverride: selector },
+    );
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'tool response' }],
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      { type: SendMessageType.ToolResult, modelOverride: selector },
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'vision-tool-1' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ runtimeView }),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Routing this image turn to vision-agent'),
+    );
+  });
+
+  it('does not leak a headless image route into a notification drain', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (callback) => {
+        callback?.('Task finished', 'task result', {
+          agentId: 'agent-1',
+          toolUseId: 'agent-tool-1',
+          status: 'completed',
+        });
+      },
+    );
+    const drainToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        callId: 'drain-tool-1',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-drain-isolation',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'drain tool response' }],
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(createStreamFromEvents([drainToolCall]))
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-drain-isolation',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'task result' }],
+      expect.any(AbortSignal),
+      'prompt-drain-isolation/automatic/2',
+      expect.objectContaining({
+        type: SendMessageType.Notification,
+        modelOverride: undefined,
+      }),
+    );
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: 'drain tool response' }],
+      expect.any(AbortSignal),
+      'prompt-drain-isolation/automatic/2',
+      { type: SendMessageType.ToolResult, modelOverride: undefined },
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'drain-tool-1' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ runtimeView: undefined }),
+    );
+  });
+
+  it('converts headless images through a non-agent vision bridge', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge',
+    );
+
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: headlessImageParts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'machine transcription' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Converted 1 image(s)'),
+    );
+  });
+
+  it('resolves a stored image id before applying the headless vision bridge', async () => {
+    setupMetricsMock();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    mockLlmClient.resolveImageReferences.mockReturnValue(headlessImageParts);
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'focused transcription' }],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect Image #abc123abc123',
+      'prompt-stored-image',
+    );
+
+    expect(mockLlmClient.resolveImageReferences).toHaveBeenCalled();
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: headlessImageParts,
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it('emits a stream-json system message for headless vision bridge notices', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-json',
+    );
+
+    const systemMessage = writes
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (message) =>
+          message.type === 'system' && message.subtype === 'vision_bridge',
+      );
+    expect(systemMessage).toMatchObject({
+      subtype: 'vision_bridge',
+      data: { notice: expect.stringContaining('Converted 1 image(s)') },
+    });
+  });
+
+  it('emits a notice when a non-agent vision bridge fails', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockRejectedValue(new Error('bridge unavailable'));
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-failed',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-failed',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Vision bridge failed; proceeding without the image(s).\n',
+    );
+  });
+
+  it('strips headless images when a non-agent vision bridge is skipped', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: false,
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-skipped',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-skipped',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Vision bridge cancelled.'),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('were sent to vision-bridge'),
+    );
+  });
+
+  it('does not select a headless image route after clamping removes the image', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-oversized-image',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(resolveForModel).not.toHaveBeenCalled();
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+      [
+        { text: 'inspect this image' },
+        expect.objectContaining({
+          text: expect.stringContaining('Media omitted'),
+        }),
+      ],
+      expect.any(AbortSignal),
+      'prompt-oversized-image',
+      { type: SendMessageType.UserQuery },
+    );
+  });
+
+  it('fails closed when the headless image route cannot be resolved', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    resolveForModel.mockRejectedValue(new Error('route unavailable'));
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-route-failure',
+      ),
+    ).rejects.toThrow('route unavailable');
+
+    expect(resolveForModel).toHaveBeenCalledWith('vision-agent', {
+      failClosed: true,
+    });
+    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('should process input and write JSON output with stats', async () => {
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Hello World' },
       {
         type: SendMessageType.UserQuery,
         modelOverride: selector,

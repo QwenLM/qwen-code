@@ -1436,9 +1436,11 @@ export const useLlmStream = (
       timestamp: number,
       signal: AbortSignal,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      if (parts === null || !hasImageParts(parts)) {
+      if (parts === null) {
         return { parts, shouldProceed: true };
       }
+      parts = geminiClient.resolveImageReferences(parts);
+      if (!hasImageParts(parts)) return { parts, shouldProceed: true };
       if (modelOverrideRef.current?.endsWith('\0')) {
         return { parts, shouldProceed: true };
       }
@@ -1512,7 +1514,7 @@ export const useLlmStream = (
         ? { parts: textOnly, shouldProceed: true }
         : { parts: null, shouldProceed: false };
     },
-    [addItem, config],
+    [addItem, config, geminiClient],
   );
 
   const prepareQueryForLlm = useCallback(

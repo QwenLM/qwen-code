@@ -115,6 +115,7 @@ import {
   clearCacheSafeParams,
   getCacheSafeParams,
 } from '../agents/forkedAgent.js';
+import { imagePartToStoredPayload } from '../services/image-payload-references.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -949,6 +950,70 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
+    });
+
+    it('restores image payloads from the full resumed transcript', async () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'pre-compact-shot' },
+      };
+      const discardedImagePart = {
+        inlineData: { mimeType: 'image/png', data: 'discarded-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      const discardedImageId = imagePartToStoredPayload(discardedImagePart).id;
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call-screenshot',
+                      name: 'computer_use__get_app_state',
+                      response: { output: 'captured' },
+                      parts: [imagePart, discardedImagePart],
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              type: 'system',
+              subtype: 'chat_compression',
+              systemPayload: {
+                compressedHistory: [
+                  {
+                    role: 'user',
+                    parts: [{ text: `Earlier Image #${imageId}` }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(
+        JSON.stringify(
+          resumedClient.resolveImageReferences(`inspect Image #${imageId}`),
+        ),
+      ).toContain('"data":"pre-compact-shot"');
+      expect(
+        resumedClient.resolveImageReferences(
+          `inspect Image #${discardedImageId}`,
+        ),
+      ).toBe(`inspect Image #${discardedImageId}`);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
@@ -3069,6 +3134,27 @@ describe('Gemini Client (client.ts)', () => {
       expect(JSON.stringify(newHistory)).not.toContain('some old message');
     });
 
+    it('forgets remembered image payloads when resetting chat', async () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'cleared-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      client
+        .getChat()
+        .rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+      expect(
+        JSON.stringify(
+          client.resolveImageReferences(`inspect Image #${imageId}`),
+        ),
+      ).toContain('"data":"cleared-shot"');
+
+      await client.resetChat();
+
+      expect(client.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
+    });
+
     it('clears the FileReadCache so post-reset Reads re-emit content', async () => {
       const cacheClear = mockFileReadCacheClear();
 
@@ -3183,11 +3269,95 @@ describe('Gemini Client (client.ts)', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = {
         setHistory: vi.fn(),
+        reconcileImagePayloads: vi.fn(),
       } as unknown as LlmChat;
 
       client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
 
       expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('setHistory forgets image payloads removed by restore', () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'rewound-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      client
+        .getChat()
+        .rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'restored' }] }]);
+
+      expect(client.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
+    });
+
+    it('setHistory retains payloads still referenced after compaction', () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'compressed-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      client
+        .getChat()
+        .rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+
+      client.setHistory([
+        {
+          role: 'user',
+          parts: [{ text: `Earlier Image #${imageId}` }],
+        },
+      ]);
+
+      expect(
+        JSON.stringify(
+          client.resolveImageReferences(`inspect Image #${imageId}`),
+        ),
+      ).toContain('"data":"compressed-shot"');
+    });
+
+    it('truncateHistory drops removed image payloads but keeps survivors', () => {
+      const keptImage = {
+        inlineData: { mimeType: 'image/png', data: 'kept-shot' },
+      };
+      const removedImage = {
+        inlineData: { mimeType: 'image/png', data: 'removed-shot' },
+      };
+      const keptId = imagePartToStoredPayload(keptImage).id;
+      const removedId = imagePartToStoredPayload(removedImage).id;
+      client.setHistory([
+        { role: 'user', parts: [keptImage] },
+        { role: 'model', parts: [{ text: 'seen' }] },
+        { role: 'user', parts: [removedImage] },
+      ]);
+
+      client.truncateHistory(2);
+
+      expect(
+        JSON.stringify(
+          client.resolveImageReferences(`inspect Image #${keptId}`),
+        ),
+      ).toContain('"data":"kept-shot"');
+      expect(client.resolveImageReferences(`inspect Image #${removedId}`)).toBe(
+        `inspect Image #${removedId}`,
+      );
+    });
+
+    it('stripOrphanedUserEntries drops image payloads from removed turns', () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'orphan-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      client.setHistory([
+        { role: 'model', parts: [{ text: 'done' }] },
+        { role: 'user', parts: [imagePart] },
+      ]);
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(client.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
     });
 
     /**
@@ -3718,10 +3888,12 @@ describe('Gemini Client (client.ts)', () => {
 
       const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
+      const reconcileImagePayloads = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
+        reconcileImagePayloads,
       } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
@@ -3736,6 +3908,9 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(setHistory).toHaveBeenCalled();
+      expect(reconcileImagePayloads).toHaveBeenCalledWith(
+        setHistory.mock.calls[0][0],
+      );
       // The blanket wipe is gone — read-before-write state is preserved.
       expect(clear).not.toHaveBeenCalled();
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
@@ -4751,6 +4926,7 @@ describe('Gemini Client (client.ts)', () => {
         }),
         isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
         getHistory: vi.fn().mockReturnValue([]),
+        copyImagePayloadsTo: vi.fn(),
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
@@ -4795,6 +4971,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
       expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('preserves remembered image payloads across manual compression', async () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'pre-compress-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      const originalChat = client.getChat();
+      originalChat.rememberImagePayloads([
+        { role: 'user', parts: [imagePart] },
+      ]);
+      vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
+        originalChat.setHistory([
+          {
+            role: 'user',
+            parts: [{ text: `Earlier Image #${imageId}` }],
+          },
+        ]);
+        return {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        };
+      });
+
+      await client.tryCompressChat('p4');
+
+      expect(
+        JSON.stringify(
+          client.resolveImageReferences(`inspect Image #${imageId}`),
+        ),
+      ).toContain('"data":"pre-compress-shot"');
     });
 
     it('preserves Compact SessionStart additionalContext on the new chat', async () => {

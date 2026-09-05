@@ -67,6 +67,7 @@ const MockedLlmClientClass = vi.hoisted(() =>
     // _config
     this.startChat = mockStartChat;
     this.sendMessageStream = mockSendMessageStream;
+    this.resolveImageReferences = vi.fn((parts) => parts);
     this.addHistory = vi.fn();
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
@@ -875,6 +876,36 @@ describe('useLlmStream', () => {
       );
       expect(String(visionNotice?.[0]?.text)).not.toContain(
         '[transcribed image]',
+      );
+    });
+
+    it('resolves a stored image id before applying the vision bridge', async () => {
+      enableBridge();
+      const client = mockConfig.getGeminiClient() as any;
+      client.resolveImageReferences = vi
+        .fn()
+        .mockReturnValue([{ text: 'inspect Image #abc123abc123' }, imagePart]);
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[focused transcription]' }],
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('inspect Image #abc123abc123');
+      });
+
+      expect(client.resolveImageReferences).toHaveBeenCalledWith(
+        'inspect Image #abc123abc123',
+      );
+      expect(mockRunVisionBridge).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parts: expect.arrayContaining([imagePart]),
+        }),
       );
     });
 
