@@ -25,6 +25,7 @@ export interface ServeWorkspaceRuntimeStatus {
   runtimeEpoch: number;
   capabilities?: {
     mcp?: ServeWorkspaceRuntimeCapabilityStatus;
+    skills?: ServeWorkspaceRuntimeCapabilityStatus;
   };
 }
 
@@ -140,6 +141,8 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionAgents: 'qwen/status/session/agents',
+  sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
   sessionResources: 'qwen/status/session/resources',
@@ -151,6 +154,7 @@ export const SERVE_STATUS_EXT_METHODS = {
    */
   sessionSavedWorkflow: 'qwen/status/session/saved_workflow',
   sessionTranscript: 'qwen/status/session/transcript',
+  sessionTurnIndex: 'qwen/status/session/turn_index',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -543,6 +547,7 @@ export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
 }
@@ -960,6 +965,37 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+export interface ServeSessionAgentsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  now: number;
+  tasks: ServeSessionAgentTaskStatus[];
+}
+
+export interface ServeAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface ServeSessionAgentTrace {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  nodes: ServeAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
 }
 
 export interface ServeSessionStatsModelMetrics {

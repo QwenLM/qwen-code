@@ -163,12 +163,16 @@ function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
 export function foldLiveEvent(
   prev: readonly LiveHistoryItem[],
   ev: OpenTuiStreamEvent,
-): LiveHistoryItem[] {
+): readonly LiveHistoryItem[] {
   const items = [...prev];
   const last = items[items.length - 1];
 
   switch (ev.type) {
     case 'user': {
+      // Both `addItem` implementations collapse a user item identical to the
+      // one before it, and this is the chokepoint the projected and live
+      // echoes share: two identical steers in a row are one row.
+      if (last?.kind === 'user' && last.text === ev.text) return prev;
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({

@@ -14,7 +14,11 @@
  */
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { ApprovalMode, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  getUnsupportedImageFormatWarning,
+  SendMessageType,
+} from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ToolCallConfirmationDetails,
@@ -25,6 +29,7 @@ import {
   nextApprovalMode,
   resetPromptCountForTesting,
   selectAutoApprovals,
+  STARTUP_CHAT_WAIT_MS,
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -184,10 +189,19 @@ vi.mock('../hooks/atCommandProcessor.js', () => ({
 function createFakeConfig(
   sendMessageStream: (...args: unknown[]) => unknown,
   bridgeModel?: VisionBridgeModelSelection,
+  isInitialized: () => boolean = () => true,
 ) {
   return {
     initialize: vi.fn(async () => {}),
-    getGeminiClient: () => ({ sendMessageStream }),
+    getGeminiClient: () => ({
+      sendMessageStream,
+      isInitialized,
+      // A chat the startup flight has already completed: `setTools()` ran, so
+      // its declarations are in the generation config the send reads.
+      getChat: () => ({
+        getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
+      }),
+    }),
     getSessionId: () => 'session-1',
     getModel: () => 'test-model',
     getMaxSessionTurns: () => 10,
@@ -270,6 +284,185 @@ describe('livePromptEvents', () => {
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
     expect(options).toEqual({ type: SendMessageType.UserQuery });
+  });
+
+  it('waits for the chat an in-flight startup initialization creates', async () => {
+    // The boot-time command-registry load owns the initialize() flight, so the
+    // turn's own call throws "already initialized" and its catch proceeds
+    // while startChat() has not run yet. The real client then throws from
+    // getChat(); the stand-in throws the same way, so the wait is what keeps
+    // the turn alive.
+    let chatReady = false;
+    const sendMessageStream = vi.fn(function* () {
+      if (!chatReady) throw new Error('Chat not initialized');
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream, undefined, () => chatReady),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+    } as unknown as Config;
+    setTimeout(() => {
+      chatReady = true;
+    }, 250);
+
+    await drain(livePromptEvents(config, 'hello'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the first send until the startup chat has tool declarations', async () => {
+    // `startChat()` assigns the chat (client.ts:2261) and only then awaits the
+    // SessionStart hook, the session-start context and `setTools()`. A wait
+    // that releases on chat existence alone sends the first prompt of the
+    // session with no tool declarations at all.
+    let chatExists = false;
+    let tools: unknown[] | undefined;
+    let toolsAtSend: unknown[] | undefined;
+    const sendMessageStream = vi.fn(function* () {
+      toolsAtSend = tools;
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => chatExists,
+        getChat: () => ({ getGenerationConfig: () => ({ tools }) }),
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      chatExists = true;
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The chat exists while the startup flight is still inside setTools().
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sendMessageStream).not.toHaveBeenCalled();
+      tools = [{ functionDeclarations: [] }];
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    // A literal, not the mutable `tools`, so a send that observed no tools
+    // cannot pass by comparing two undefined values.
+    expect(toolsAtSend).toEqual([{ functionDeclarations: [] }]);
+  });
+
+  it('reports the client error once the startup chat wait is spent', async () => {
+    // The bound is what keeps a config that never finishes initializing from
+    // polling forever: the turn falls through to the send and surfaces the
+    // client's own error instead of hanging the prompt.
+    const sendMessageStream = vi.fn(function* () {
+      throw new Error('Chat not initialized');
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+        getChat: () => {
+          throw new Error('Chat not initialized');
+        },
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The wait expires deep inside the virtual-time run, so keep the
+      // rejection handled until the assertion below can claim it.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(STARTUP_CHAT_WAIT_MS + 1_000);
+      await expect(pending).rejects.toThrow('Chat not initialized');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles an Esc pressed during the startup wait without sending', async () => {
+    // Releasing the wait is not enough: a text-only prompt has no abort gate
+    // between the loop and `sendMessageStream`, so falling through would fire
+    // the UserPromptSubmit hooks and push history for a cancelled prompt.
+    const controller = new AbortController();
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    // A startup flight that never creates the chat, so the wait is still
+    // running when the abort lands.
+    const config = createFakeConfig(sendMessageStream, undefined, () => false);
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(
+        livePromptEvents(config, 'hello', controller.signal),
+      );
+      let settled = false;
+      const markSettled = () => {
+        settled = true;
+      };
+      void pending.then(markSettled, markSettled);
+      await vi.advanceTimersByTimeAsync(500);
+      controller.abort();
+      // Poll ticks, not the budget: the abort must release the wait at once.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(settled).toBe(true);
+      await expect(pending).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('fails the turn when the startup wait expires on a chat with no tools', async () => {
+    // `startChat()` assigns the chat before the SessionStart hook and
+    // `setTools()`, so a flight still inside that gap — or one that died in
+    // it — leaves a chat that is not ready: a send against it declares zero
+    // tools, silently.
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: undefined }) }),
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The wait expires deep inside the virtual-time run, so keep the
+      // rejection handled until the assertion below can claim it.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(STARTUP_CHAT_WAIT_MS + 1_000);
+      await expect(pending).rejects.toThrow(
+        `Timed out after ${STARTUP_CHAT_WAIT_MS}ms`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('uses the ink promptId format and increments promptCount per turn', async () => {
@@ -512,14 +705,19 @@ describe('livePromptEvents', () => {
 
   it('skips steering when the turn is aborted', async () => {
     const drainSteering = vi.fn(() => ['never']);
-    const sendMessageStream = oneToolBatchStream({
+    const controller = new AbortController();
+    const batch = oneToolBatchStream({
       callId: 't1',
       name: 'test_tool',
       args: {},
     });
+    // Esc reaches the generator mid-turn, not before it: the abort lands on
+    // the tool-response boundary, which is where a real cancel arrives.
+    const sendMessageStream = vi.fn(() => {
+      controller.abort();
+      return batch();
+    });
     const config = createFakeConfig(sendMessageStream);
-    const controller = new AbortController();
-    controller.abort();
 
     await drain(
       livePromptEvents(config, 'start', controller.signal, { drainSteering }),
@@ -613,18 +811,21 @@ describe('livePromptEvents', () => {
     const restoreSteering = vi.fn();
     atMocks.hang = () => controller.abort();
 
-    await drain(
+    const events = (await drain(
       livePromptEvents(config, 'start', controller.signal, {
         drainSteering: () => ['read @a.ts', 'then @b.ts'],
         restoreSteering,
       }),
-    );
+    )) as OpenTuiStreamEvent[];
 
     // All-or-nothing: the resolved hop dies with the turn, so every text comes
     // back instead of a half-built message reaching the model.
     expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts', 'then @b.ts']);
     const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
     expect(secondPrompt).toEqual([toolResponse]);
+    // And nothing the restored hop produced reaches the transcript: the echo
+    // belongs to ink's accept step (U-12), which an aborted hop never gets to.
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
   });
 
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {
@@ -672,6 +873,141 @@ describe('livePromptEvents', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // --- U-12: the steer shows up as an unsent user row (ink accept()) -------
+
+  it('echoes each surviving steered text as an unsent user row', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([
+      { type: 'user', text: 'first', sentToModel: false },
+      { type: 'user', text: 'second', sentToModel: false },
+    ]);
+  });
+
+  it('echoes the steer after the resolved read cards, like ink accept()', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [
+        { text: 'look @src/a.ts' },
+        { text: '--- Content from src/a.ts ---\nFILE BODY' },
+      ],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['look @src/a.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // accept() order: the read cards first, then the USER row at grant.
+    const cardIndex = events.findIndex(
+      (e) => e.type === 'tool-end' && e.id === 'client-read-1',
+    );
+    const echoIndex = events.findIndex(
+      (e) => e.type === 'user' && e.text === 'look @src/a.ts',
+    );
+    expect(cardIndex).toBeGreaterThan(-1);
+    expect(echoIndex).toBeGreaterThan(cardIndex);
+    expect(events[echoIndex]).toEqual({
+      type: 'user',
+      text: 'look @src/a.ts',
+      sentToModel: false,
+    });
+  });
+
+  it('renders each steered message with its own cards before its own echo', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [{ text: 'expanded' }],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['one @src/a.ts', 'two @src/b.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // ink accept() runs each message's side effects and then adds its USER row,
+    // so the pairs interleave rather than grouping all cards before all rows.
+    expect(
+      events
+        .filter(
+          (e) =>
+            e.type === 'user' ||
+            (e.type === 'tool-end' && e.id === 'client-read-1'),
+        )
+        .map((e) => (e.type === 'user' ? `echo:${e.text}` : 'card')),
+    ).toEqual(['card', 'echo:one @src/a.ts', 'card', 'echo:two @src/b.ts']);
+  });
+
+  it('does not echo a steer the expander declined', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = { processedQuery: null, shouldProceed: false };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['@declined.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
+  });
+
+  it('echoes a steer whose expansion resolved to no parts', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    // Proceeded, but nothing came back. The echo is deliberately decoupled from
+    // this message's own parts, which over-shows against ink in the all-empty
+    // hop — its caller drops the whole hop (use-llm-stream.ts:3394), so accept()
+    // never runs there. That is the divergence Decision 4 of the batch-9 design
+    // doc records, not a parity claim.
+    atMocks.result = { processedQuery: [], shouldProceed: true };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['@empty.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([
+      { type: 'user', text: '@empty.ts', sentToModel: false },
+    ]);
   });
 
   // --- The prompt-side vision bridge (U-25) --------------------------------
@@ -922,6 +1258,138 @@ describe('livePromptEvents', () => {
     const notice = events.find((e) => e.type === 'info');
     expect(notice?.text).toContain('Vision bridge cancelled.');
     expect(notice?.text).toContain('were sent to qwen3-vl');
+  });
+
+  // --- U-27: unsupported image formats are disclosed on both hops ----------
+
+  it('discloses an unsupported image format once before the first send', async () => {
+    const yielded: OpenTuiStreamEvent[] = [];
+    let disclosedAtSend: boolean | undefined;
+    // Captured in the call body, not in a generator body: the request goes out
+    // when the client is called, and a generator's body would only run at the
+    // first `next()`. A check moved after the send leaves `yielded` empty here.
+    const sendMessageStream = vi.fn(() => {
+      disclosedAtSend = yielded.some(
+        (e) =>
+          e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+      );
+      return (function* () {})();
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+
+    for await (const ev of livePromptEvents(config, [{ text: 'look' }, avif])) {
+      yielded.push(ev);
+    }
+
+    expect(disclosedAtSend).toBe(true);
+    // Exactly one notice, with ink's own text naming the supported set.
+    expect(yielded.filter((e) => e.type === 'info')).toEqual([
+      { type: 'info', text: getUnsupportedImageFormatWarning() },
+    ]);
+    // ink forwards the image anyway; only the disclosure is added.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }, avif]);
+  });
+
+  it('does not disclose an accepted format (png rides through silently)', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, imagePart]),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'info')).toEqual([]);
+  });
+
+  it('discloses an unsupported format carried as fileData', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    const avif = {
+      fileData: { mimeType: 'image/avif', fileUri: 'gs://bucket/shot.avif' },
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, avif]),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'info')).toEqual([
+      { type: 'info', text: getUnsupportedImageFormatWarning() },
+    ]);
+    // ink forwards the part anyway — the disclosure is the only addition.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }, avif]);
+  });
+
+  it('discloses the format warning on the steering hop before the echo', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+    atMocks.result = {
+      processedQuery: [{ text: 'see @shot.avif' }, avif],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['see @shot.avif'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const warnIndex = events.findIndex(
+      (e) => e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+    );
+    const echoIndex = events.findIndex(
+      (e) => e.type === 'user' && e.text === 'see @shot.avif',
+    );
+    expect(warnIndex).toBeGreaterThan(-1);
+    expect(echoIndex).toBeGreaterThan(warnIndex);
+  });
+
+  it('attributes the steering disclosure to the message that carries the image', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+    atMocks.result = {
+      processedQuery: [{ text: 'see @shot.avif' }, avif],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['plain steer', 'see @shot.avif'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const indexOf = (match: (e: OpenTuiStreamEvent) => boolean): number =>
+      events.findIndex(match);
+    const firstEcho = indexOf(
+      (e) => e.type === 'user' && e.text === 'plain steer',
+    );
+    const warn = indexOf(
+      (e) => e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+    );
+    const secondEcho = indexOf(
+      (e) => e.type === 'user' && e.text === 'see @shot.avif',
+    );
+
+    // One warning for the drain, and it sits inside the second message's
+    // window: a check hoisted above the loop lands after both echoes.
+    expect(events.filter((e) => e.type === 'info')).toHaveLength(1);
+    expect(firstEcho).toBeGreaterThan(-1);
+    expect(warn).toBeGreaterThan(firstEcho);
+    expect(secondEcho).toBeGreaterThan(warn);
   });
 
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {

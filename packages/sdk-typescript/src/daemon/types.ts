@@ -1130,6 +1130,8 @@ export interface DaemonSession {
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
+  /** Durable worktree metadata/ownership attestation from the daemon. */
+  worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
 }
@@ -1357,8 +1359,14 @@ export interface DaemonSessionExportResult {
 
 export interface DaemonSessionTranscriptPageOptions {
   cursor?: string;
+  /** Start a forward page containing this persisted navigation turn UUID. */
+  atRecordId?: string;
+  /** Turn-index snapshot required by explicit record anchors. */
+  snapshot?: string;
   /** Start a newest-to-oldest page before this persisted record UUID. */
   beforeRecordId?: string;
+  /** Read pages from newest to oldest. */
+  direction?: 'backward';
   limit?: number;
   clientId?: string;
 }
@@ -1373,6 +1381,36 @@ export interface DaemonSessionTranscriptPage {
   lastUpdated?: string;
   partial?: true;
   replayError?: string;
+  targetRecordId?: string;
+  hasOlder?: boolean;
+}
+
+export interface DaemonSessionTurnIndexPageOptions {
+  snapshot?: string;
+  start?: number;
+  limit?: number;
+  clientId?: string;
+}
+
+export interface DaemonSessionTurnIndexEntry {
+  ordinal: number;
+  turnId: string;
+  kind: 'prompt' | 'realtime' | 'scheduled';
+  promptId?: string;
+  timestamp?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface DaemonSessionTurnIndexPage {
+  v: 1;
+  sessionId: string;
+  snapshot: string;
+  totalTurns: number;
+  start: number;
+  turns: DaemonSessionTurnIndexEntry[];
+  startTime?: string;
+  lastUpdated?: string;
 }
 
 export interface DaemonSubagentSessionResolution {
@@ -1997,6 +2035,7 @@ export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
 }
@@ -2038,6 +2077,12 @@ export interface DaemonWorkspaceRuntimeStatus {
   runtimeEpoch: number;
   capabilities?: {
     mcp?: {
+      state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+      revision: number;
+      runtimeEpoch?: number;
+      error?: { code: string; message: string };
+    };
+    skills?: {
       state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
       revision: number;
       runtimeEpoch?: number;
@@ -2915,6 +2960,37 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
 }
 
+export interface DaemonSessionAgentsStatus {
+  v: 1;
+  sessionId: string;
+  now: number;
+  tasks: DaemonSessionAgentTaskStatus[];
+}
+
+export interface DaemonAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface DaemonAgentTrace {
+  v: 1;
+  sessionId: string;
+  nodes: DaemonAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
+}
+
 export interface DaemonSessionWorkflowTasksStatus {
   v: 1;
   sessionId: string;
@@ -3191,7 +3267,11 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
-export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type DaemonSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface DaemonSkillToggleMutationSkill {
   name: string;
@@ -3263,6 +3343,7 @@ export interface DaemonSkillMutationResult {
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
+  activation?: DaemonSkillToggleActivation;
 }
 
 export interface DaemonSettingDescriptor {
