@@ -4,11 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { containsForbiddenReference } from '../check-no-webui-dependency.js';
 
+const root = fileURLToPath(new URL('../..', import.meta.url));
+const script = fileURLToPath(
+  new URL('../check-no-webui-dependency.js', import.meta.url),
+);
+
 describe('containsForbiddenReference', () => {
+  it('passes against the tracked repository files', () => {
+    expect(
+      execFileSync(process.execPath, [script], { cwd: root, encoding: 'utf8' }),
+    ).toContain('No active @qwen-code/webui dependency references found.');
+  });
+
   it.each([
     ['package import', "import { App } from '@qwen-code/webui';"],
     ['package dependency entry', '"@qwen-code/webui": "workspace:*"'],
