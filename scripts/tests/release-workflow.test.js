@@ -639,6 +639,20 @@ describe('release workflow', () => {
     );
   });
 
+  it('lets an operator retune the static lane timeout without a PR', () => {
+    // The static lane's runtime tracks the reserved host the same way a
+    // shard's does: prettier measured 17s on a quiet hk4 runner (run
+    // 33741188587) and 1348s on a contended one, where the old flat 30
+    // beheaded attempts 1, 3 and 5 with eslint still running and no test
+    // failing anywhere (run 33963757913, #11121).
+    expect(workflow).toContain(
+      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"`,
+    );
+    expect(releaseYaml.jobs.quality_static['timeout-minutes']).toContain(
+      'fromJSON(',
+    );
+  });
+
   it('names which failure this is, and never changes the exit code', () => {
     // A shard that died on Vitest's own worker RPC timing out reads
     // identically to a real break, and this release lost two attempts before
@@ -1433,11 +1447,12 @@ describe('release workflow', () => {
       ),
     ).toEqual({
       prepare: 30,
-      quality_static: 30,
+      // The two bounds an operator can retune without a PR; each default is
+      // pinned by its own test above.
+      quality_static:
+        "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
       quality_build: 45,
       quality_typecheck: 30,
-      // The one bound an operator can retune without a PR; its default is
-      // pinned by its own test above.
       workspace_tests:
         "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}",
       quality_scripts: 30,

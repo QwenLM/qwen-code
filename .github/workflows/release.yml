@@ -337,7 +337,15 @@ jobs:
   quality_static:
     name: 'Quality Checks (Static)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Priced from the reserved host, not the suite, the way workspace_tests
+    # below is: the same two steps measured 17s + 141s on a quiet hk4 runner
+    # (run 33741188587) and 928s + 645s eight hours earlier than the run where
+    # they measured 1348s of prettier with eslint still going when the old flat
+    # 30-minute ceiling landed (run 33941624603, then 33963757913). That cut
+    # down attempts 1, 3 and 5 on three different runners, each with nothing
+    # failing anywhere, which is what opened #11121. The knob is a variable for
+    # the same reason: this number tracks how busy the pool is, not the tree.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
