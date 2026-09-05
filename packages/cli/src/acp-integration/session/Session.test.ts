@@ -517,6 +517,12 @@ describe('Session', () => {
   };
   let mockLlmClient: {
     getChat: ReturnType<typeof vi.fn>;
+    getHistoryTail: ReturnType<typeof vi.fn>;
+    getTrustedUserAnswers: ReturnType<typeof vi.fn>;
+    recordTrustedUserAnswers: ReturnType<typeof vi.fn>;
+    setHistory: ReturnType<typeof vi.fn>;
+    stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+    truncateHistory: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
@@ -745,6 +751,16 @@ describe('Session', () => {
     } as unknown as LlmChat;
     mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
+      getHistoryTail: vi.fn().mockReturnValue([]),
+      getTrustedUserAnswers: vi.fn().mockReturnValue([]),
+      recordTrustedUserAnswers: vi.fn(),
+      setHistory: vi.fn((history: Content[]) => mockChat.setHistory(history)),
+      stripOrphanedUserEntriesFromHistory: vi.fn(() =>
+        mockChat.stripOrphanedUserEntriesFromHistory(),
+      ),
+      truncateHistory: vi.fn((count: number) =>
+        mockChat.truncateHistory(count),
+      ),
       isInitialized: vi.fn().mockReturnValue(true),
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
@@ -30895,6 +30911,139 @@ describe('Session', () => {
         mockSettings,
       );
     }
+
+    const trustedAnswerQuestions = [
+      {
+        question: 'Create the marker?',
+        header: 'Marker',
+        options: [
+          { label: 'Yes', description: 'Create only /tmp/marker.' },
+          { label: 'No', description: 'Do not create it.' },
+        ],
+      },
+    ];
+
+    class AskUserQuestionTool {
+      readonly name = core.ToolNames.ASK_USER_QUESTION;
+      readonly kind = core.Kind.Think;
+      readonly displayName = this.name;
+      readonly description = this.name;
+      readonly canUpdateOutput = false;
+      readonly isOutputMarkdown = true;
+      readonly build = vi.fn().mockReturnValue({
+        params: { questions: trustedAnswerQuestions },
+        execute: vi.fn().mockResolvedValue({
+          llmContent:
+            'User has provided the following answers:\n\n**Marker**: Yes',
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        requiresUserInteraction: vi.fn().mockReturnValue(true),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'ask_user_question',
+          title: 'Please answer the following question(s):',
+          questions: trustedAnswerQuestions,
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        getDescription: vi.fn().mockReturnValue(this.name),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+    }
+
+    function useBuiltinAskUserQuestionTool() {
+      mockToolRegistry.getTool.mockReturnValue(new AskUserQuestionTool());
+    }
+
+    async function runAskUserQuestion(signal = new AbortController().signal) {
+      return (session as unknown as ToolCallInternals).runToolCalls(
+        signal,
+        'prompt-auq',
+        [
+          {
+            id: 'call-auq',
+            name: core.ToolNames.ASK_USER_QUESTION,
+            args: { questions: trustedAnswerQuestions },
+          },
+        ],
+      );
+    }
+
+    it('records an accepted built-in ask_user_question host answer', async () => {
+      useBuiltinAskUserQuestionTool();
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Yes' },
+      });
+
+      await runAskUserQuestion();
+
+      expect(mockLlmClient.recordTrustedUserAnswers).toHaveBeenCalledOnce();
+      expect(mockLlmClient.recordTrustedUserAnswers).toHaveBeenCalledWith(
+        'call-auq',
+        trustedAnswerQuestions,
+        { '0': 'Yes' },
+      );
+    });
+
+    it.each([
+      [
+        'cancelled',
+        async () => {
+          vi.mocked(mockClient.requestPermission).mockResolvedValue({
+            outcome: { outcome: 'cancelled' },
+          });
+          await runAskUserQuestion();
+        },
+      ],
+      [
+        'permission error',
+        async () => {
+          vi.mocked(mockClient.requestPermission).mockRejectedValue(
+            new Error('host unavailable'),
+          );
+          await runAskUserQuestion();
+        },
+      ],
+      [
+        'aborted response',
+        async () => {
+          const controller = new AbortController();
+          vi.mocked(mockClient.requestPermission).mockImplementation(
+            async () => {
+              controller.abort();
+              return {
+                outcome: { outcome: 'selected', optionId: 'proceed_once' },
+                answers: { '0': 'Yes' },
+              };
+            },
+          );
+          await runAskUserQuestion(controller.signal);
+        },
+      ],
+    ])(
+      'does not record a %s ask_user_question response',
+      async (_name, run) => {
+        useBuiltinAskUserQuestionTool();
+        await run();
+        expect(mockLlmClient.recordTrustedUserAnswers).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not trust a same-named shadow ask_user_question tool', async () => {
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          core.ToolNames.ASK_USER_QUESTION,
+          vi.fn().mockResolvedValue({ llmContent: 'shadow result' }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Yes' },
+      });
+
+      await runAskUserQuestion();
+
+      expect(mockLlmClient.recordTrustedUserAnswers).not.toHaveBeenCalled();
+    });
 
     it('blocks standalone worktree actions before building the tool', async () => {
       recreateStandaloneSession();
