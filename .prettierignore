@@ -7,6 +7,11 @@
 .DS_Store
 .env
 .gemini/
+# Agent state, gitignored as `.qwen/*`: pending-skills/, auto-skill-*/,
+# learned-skill-*/ and computer-use/installed.json are machine-written, and
+# `prettier --check` would fail lint:all on whatever a contributor happens to
+# have there.
+.qwen/
 .idea
 .integration-tests/
 *.iml

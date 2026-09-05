@@ -25,29 +25,14 @@
       iOS Safari rubber-band overscroll and the status-bar / home-indicator
       safe areas briefly show the default white canvas. Storage key mirrors
       THEME_STORAGE_KEY in main.tsx.
+
+      Kept on one line: this is a render-blocking inline script in <head>, and
+      the expanded form ships ~600 more bytes on the critical path for no
+      readability the surrounding comment does not already give.
     -->
+    <!-- prettier-ignore -->
     <script>
-      !(function () {
-        try {
-          var k = 'qwen-code-web-shell-theme',
-            p = new URLSearchParams(location.search),
-            t = p.get('theme');
-          if (t !== 'dark' && t !== 'light') {
-            try {
-              t = localStorage.getItem(k);
-            } catch (_) {
-              t = null;
-            }
-          }
-          if (t !== 'dark' && t !== 'light') t = 'dark';
-          document.documentElement.classList.add('theme-' + t);
-          var m = document.querySelector('meta[name=theme-color]');
-          if (m)
-            m.setAttribute('content', t === 'light' ? '#ffffff' : '#0d0d0d');
-        } catch (e) {
-          console.warn('theme-init:', e);
-        }
-      })();
+      !function(){try{var k='qwen-code-web-shell-theme',p=new URLSearchParams(location.search),t=p.get('theme');if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem(k)}catch(_){t=null}}if(t!=='dark'&&t!=='light')t='dark';document.documentElement.classList.add('theme-'+t);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='light'?'#ffffff':'#0d0d0d')}catch(e){console.warn('theme-init:',e)}}();
     </script>
     <!--
       Favicon is inlined as a data: URI rather than a /favicon.svg file because
