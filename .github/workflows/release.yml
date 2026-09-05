@@ -621,7 +621,7 @@ jobs:
                 echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and all ${errors} unhandled error(s) Vitest counted were its own worker RPC timing out. Treated as a pass."
                 exit 0
               fi
-              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, or an unhandled error that was not the transport. The failure stands; rerun the job."
+              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status ${status}, ${errors} counted error(s) vs ${timeouts} transport line(s)); rerun the job."
             else
               echo "::error title=Workspace tests exited ${status} with no failing test::No FAIL line and no transport timeout in the log. Look for a Vitest Unhandled Errors section, or a worker killed before it could report."
             fi
