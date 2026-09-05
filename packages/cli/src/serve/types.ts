@@ -301,7 +301,7 @@ export interface ServeOptions {
     timeoutMs?: number;
   };
   /**
-   * Cross-origin allowlist for browser webui
+   * Cross-origin allowlist for browser clients
    * deployments.
    */
   allowOrigins?: string[];

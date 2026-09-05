@@ -28,6 +28,7 @@ import {
   sanitizeDisplayText,
   sanitizeLogText,
   sanitizePromptText,
+  stripMessagePrefix,
   truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -385,6 +386,8 @@ function isInboundEnvelope(value: unknown): value is Envelope | undefined {
       Array.isArray(envelope.attachments)) &&
     (envelope.metadata === undefined ||
       typeof envelope.metadata === 'string') &&
+    (envelope.bypassMessagePrefix === undefined ||
+      envelope.bypassMessagePrefix === true) &&
     (envelope.alreadyPrefixed === undefined ||
       envelope.alreadyPrefixed === true)
   );
@@ -1442,6 +1445,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? `Review requested: ${displayTitle}`
           : `Issue assigned: ${displayTitle}`,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1461,7 +1465,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
@@ -1469,18 +1473,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.gate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const messagePrefix = this.configuredMessagePrefix();
+    const comments = newComments
+      .flatMap((comment) => {
+        const rawBody = comment.body || '';
+        const body = messagePrefix
+          ? stripMessagePrefix(
+              this.botUsername
+                ? stripBotMention(rawBody, this.botUsername)
+                : rawBody,
+              messagePrefix,
+            )
+          : rawBody.trim();
+        return body === undefined ? [] : [{ comment, body }];
+      })
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1492,6 +1509,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
       displayText: summary,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1499,7 +1517,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });
