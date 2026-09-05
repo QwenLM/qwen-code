@@ -35,7 +35,7 @@ test('unpacked extension has a stable id and the expected least-privilege bridge
     .map((nibble) => String.fromCharCode(97 + nibble))
     .join('');
   assert.equal(extensionId, CHROME_EXTENSION_ID);
-  assert.equal(manifest.minimum_chrome_version, '114');
+  assert.equal(manifest.minimum_chrome_version, '125');
   assert.deepEqual([...manifest.permissions].sort(), [
     'alarms',
     'debugger',
