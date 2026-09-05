@@ -4188,6 +4188,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               },
             ],
             returnDisplay: this.currentDisplay!,
+            ...(fgAbortController.signal.aborted ? { aborted: true } : {}),
           };
         }
         const visibleFinalText =

@@ -232,6 +232,7 @@ describe('ExitPlanModeTool', () => {
     const result = await invocation.execute(controller.signal);
 
     expect(result.error).toBeUndefined();
+    expect(result.aborted).toBe(true);
     expect(result.llmContent).toContain('cancelled');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
@@ -251,6 +252,7 @@ describe('ExitPlanModeTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeUndefined();
+    expect(result.aborted).toBeUndefined();
     expect(result.llmContent).toContain('stale');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
@@ -400,6 +402,7 @@ describe('ExitPlanModeTool', () => {
     );
 
     expect(result.error).toBeUndefined();
+    expect(result.aborted).toBe(true);
     expect(result.llmContent).toContain('cancelled');
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });

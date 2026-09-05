@@ -101,6 +101,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { formatShellExitCode } from '../tools/shell-exit-code.js';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
@@ -3075,6 +3076,33 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('resets the skill-review window so signals do not leak into the next session', async () => {
+      client['toolCallCount'] = 19;
+      client['skillsModifiedInSession'] = true;
+      client['userSteeredSinceReview'] = true;
+      client['experienceSignalsSinceReview'] = {
+        retryArc: true,
+        hasSubstantiveWork: true,
+        failedToolNames: new Set(['run_shell_command']),
+      };
+      client['pendingExperienceOutcomes'].set('call-pre-clear', {
+        toolName: 'edit',
+        outcome: 'failure',
+      });
+
+      await client.resetChat();
+
+      expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      expect(client['toolCallCount']).toBe(0);
+      expect(client['skillsModifiedInSession']).toBe(false);
+      expect(client['userSteeredSinceReview']).toBe(false);
+      expect(client['experienceSignalsSinceReview']).toEqual({
+        retryArc: false,
+        hasSubstantiveWork: false,
+        failedToolNames: new Set(),
+      });
     });
 
     it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
@@ -9535,147 +9563,438 @@ hello
     });
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
-      let mockStreamFn: () => AsyncGenerator<{ type: string; value: string }>;
-      let mockChat: Partial<LlmChat>;
+      let pushCount: number;
+
+      function acceptTurns() {
+        pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation((_model, request) => {
+          // Miniature of GeminiChat's contract: publish the push counter
+          // on the request immediately before pushing it.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
+          return (async function* () {
+            pushCount += 1;
+            yield { type: LlmEventType.Content, value: 'done' };
+          })();
+        });
+      }
+
+      function recordOutcome(
+        callId: string,
+        toolName: string,
+        status: 'success' | 'error' | 'cancelled',
+        executionStatus: 'not_started' | 'success' | 'error' | 'cancelled',
+        response: Record<string, unknown>,
+      ) {
+        client.recordCompletedToolCall(toolName, undefined, {
+          callId,
+          status,
+          executionStatus,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: toolName,
+                response,
+              },
+            },
+          ],
+        });
+      }
+
+      async function sendToolResult(
+        callId: string,
+        toolName: string,
+        response: Record<string, unknown>,
+        type = SendMessageType.ToolResult,
+      ) {
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: toolName,
+                  response,
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-' + callId + '-' + type,
+            { type },
+          ),
+        );
+      }
 
       beforeEach(() => {
         vi.spyOn(client['config'], 'getAutoSkillEnabled').mockReturnValue(true);
-        mockStreamFn = async function* () {
-          yield { type: LlmEventType.Content, value: 'Done' };
-        };
-        mockTurnRunFn.mockReturnValue(mockStreamFn());
-        mockChat = {
+        client['chat'] = {
           addHistory: vi.fn(),
+          getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
           getHistory: vi.fn().mockReturnValue([
             { role: 'user', parts: [{ text: 'hello' }] },
-            { role: 'model', parts: [{ text: 'Done' }] },
+            { role: 'model', parts: [{ text: 'done' }] },
           ]),
-        };
-        client['chat'] = mockChat as LlmChat;
-      });
-
-      it('should call scheduleSkillReview with correct params on UserQuery', async () => {
+        } as unknown as LlmChat;
         mockMemoryManager.scheduleSkillReview.mockReturnValue({
           status: 'skipped',
           skippedReason: 'below_threshold',
         });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'a query' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-query',
-          ),
-        );
-
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
-          expect.objectContaining({
-            projectRoot: '/test/project/root',
-            sessionId: 'test-session-id',
-            config: mockConfig,
-          }),
-        );
-        expect(
-          mockMemoryManager.scheduleSkillReview.mock.calls[0][0],
-        ).not.toHaveProperty('maxTurns');
+        acceptTurns();
       });
 
-      it('should reset toolCallCount and push promise when review is scheduled', async () => {
-        let resolveFn!: (v: unknown) => void;
-        const promise = new Promise<{ metadata?: Record<string, unknown> }>(
-          (r) => {
-            resolveFn = r as (v: unknown) => void;
-          },
+      it.each([
+        ['all true', true],
+        ['all false', false],
+      ] as const)(
+        'passes the complete %s gate state to MemoryManager',
+        async (_name, value) => {
+          client['toolCallCount'] = 7;
+          client['skillsModifiedInSession'] = value;
+          client['userSteeredSinceReview'] = value;
+          client['experienceSignalsSinceReview'] = {
+            retryArc: value,
+            hasSubstantiveWork: value,
+            failedToolNames: new Set(),
+          };
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'review this session' }],
+              new AbortController().signal,
+              'prompt-autoskill-gate',
+            ),
+          );
+
+          expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+            expect.objectContaining({
+              projectRoot: '/test/project/root',
+              sessionId: 'test-session-id',
+              config: mockConfig,
+              toolCallCount: 7,
+              skillsModified: value,
+              enabled: true,
+              experienceSignals: {
+                retryArc: value,
+                userSteer: value,
+                hasSubstantiveWork: value,
+              },
+              confirmBeforePersist: true,
+            }),
+          );
+          const params = mockMemoryManager.scheduleSkillReview.mock.calls[0][0];
+          expect(params).not.toHaveProperty('maxTurns');
+        },
+      );
+
+      it('queues exactly one scheduled review promise when other managed tasks are disabled', async () => {
+        vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(
+          false,
         );
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
           status: 'scheduled',
           taskId: 'task-1',
-          promise,
+          promise: Promise.resolve({
+            metadata: { touchedSkillFiles: ['skill/SKILL.md'] },
+          }),
         });
-
-        // Artificially bump toolCallCount above 0 to verify it resets.
-        client['toolCallCount'] = 5;
 
         await fromAsync(
           client.sendMessageStream(
             [{ text: 'trigger review' }],
             new AbortController().signal,
-            'prompt-id-autoskill-scheduled',
+            'prompt-autoskill-promise',
           ),
         );
 
-        // Counter should have been reset.
+        const pending = client.consumePendingMemoryTaskPromises();
+        expect(pending).toHaveLength(1);
+        await expect(pending[0]).resolves.toBe(1);
+        expect(client.consumePendingMemoryTaskPromises()).toEqual([]);
+      });
+
+      it.each([
+        'below_threshold',
+        'skills_modified_in_session',
+        'disabled',
+        'already_running',
+        'memory_pressure',
+      ] as const)(
+        'clears the skills-modified flag after a %s skip',
+        async (skippedReason) => {
+          mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+            status: 'skipped',
+            skippedReason,
+          });
+          client['skillsModifiedInSession'] = true;
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'check review gate' }],
+              new AbortController().signal,
+              `prompt-autoskill-skip-${skippedReason}`,
+            ),
+          );
+
+          expect(client['skillsModifiedInSession']).toBe(false);
+        },
+      );
+
+      it.each([
+        ['scheduled', { status: 'scheduled', taskId: 'task-1' }],
+        [
+          'already running',
+          {
+            status: 'skipped',
+            skippedReason: 'already_running',
+            taskId: 'task-1',
+          },
+        ],
+      ] as const)(
+        'resets a window when a review is %s',
+        async (_name, result) => {
+          mockMemoryManager.scheduleSkillReview.mockReturnValueOnce(result);
+          client['toolCallCount'] = 7;
+          client['skillsModifiedInSession'] = true;
+          client['userSteeredSinceReview'] = true;
+          client['experienceSignalsSinceReview'] = {
+            retryArc: true,
+            hasSubstantiveWork: true,
+            failedToolNames: new Set(['edit']),
+          };
+          client['pendingExperienceOutcomes'].set('stale-edit', {
+            toolName: 'edit',
+            outcome: 'failure',
+          });
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'trigger review' }],
+              new AbortController().signal,
+              'prompt-autoskill-reset-' + _name,
+            ),
+          );
+
+          expect(client['toolCallCount']).toBe(0);
+          expect(client['skillsModifiedInSession']).toBe(false);
+          expect(client['userSteeredSinceReview']).toBe(false);
+          expect(client['experienceSignalsSinceReview']).toEqual({
+            retryArc: false,
+            hasSubstantiveWork: false,
+            failedToolNames: new Set(),
+          });
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+
+          await sendToolResult('stale-edit', 'edit', {
+            error: 'stale failure',
+          });
+          recordOutcome('fresh-edit', 'edit', 'success', 'success', {
+            output: 'done',
+          });
+          await sendToolResult('fresh-edit', 'edit', { output: 'done' });
+
+          expect(
+            client['experienceSignalsSinceReview'].failedToolNames,
+          ).toEqual(new Set());
+          expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
+        },
+      );
+
+      it.each([SendMessageType.ToolResult, SendMessageType.Teammate])(
+        'records an accepted same-tool failure and recovery for %s',
+        async (type) => {
+          recordOutcome('failed-edit', 'edit', 'error', 'error', {
+            error: 'patch failed',
+          });
+          await sendToolResult(
+            'failed-edit',
+            'edit',
+            { error: 'patch failed' },
+            type,
+          );
+          expect(
+            client['experienceSignalsSinceReview'].failedToolNames,
+          ).toEqual(new Set(['edit']));
+
+          recordOutcome('fixed-edit', 'edit', 'success', 'success', {
+            output: 'done',
+          });
+          await sendToolResult('fixed-edit', 'edit', { output: 'done' }, type);
+
+          expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+        },
+      );
+
+      it('waits for acceptance and consumes a retried ToolResult once', async () => {
+        recordOutcome('retry-edit', 'edit', 'error', 'error', {
+          error: 'patch failed',
+        });
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield {
+              type: LlmEventType.Error,
+              value: new Error('failed before history push'),
+            };
+          })(),
+        );
+
+        await sendToolResult('retry-edit', 'edit', { error: 'patch failed' });
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(),
+        );
+        expect(client['pendingExperienceOutcomes'].has('retry-edit')).toBe(
+          true,
+        );
+
+        acceptTurns();
+        Object.assign(client.getChat(), {
+          getHistoryLength: vi.fn().mockReturnValue(2),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        await sendToolResult(
+          'retry-edit',
+          'edit',
+          { error: 'patch failed' },
+          SendMessageType.Retry,
+        );
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+        expect(client['pendingExperienceOutcomes'].has('retry-edit')).toBe(
+          false,
+        );
+
+        await sendToolResult(
+          'retry-edit',
+          'edit',
+          { output: 'duplicate retry' },
+          SendMessageType.Retry,
+        );
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+      });
+
+      it('records accepted steer input and ignores rejected steer input', async () => {
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'do it differently' }],
+            new AbortController().signal,
+            'prompt-autoskill-steer-accepted',
+            { type: SendMessageType.Steer },
+          ),
+        );
+        expect(client['userSteeredSinceReview']).toBe(true);
+
+        client['userSteeredSinceReview'] = false;
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield {
+              type: LlmEventType.Error,
+              value: new Error('rejected'),
+            };
+          })(),
+        );
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'try another way' }],
+            new AbortController().signal,
+            'prompt-autoskill-steer-rejected',
+            { type: SendMessageType.Steer },
+          ),
+        );
+        expect(client['userSteeredSinceReview']).toBe(false);
+      });
+
+      it('records a steer attached to an accepted ToolResult', async () => {
+        recordOutcome('steered-read', 'read_file', 'success', 'success', {
+          output: 'contents',
+        });
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'steered-read',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-autoskill-attached-steer',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'read the other file' }],
+                accept: vi.fn(),
+                restore: vi.fn(),
+              },
+            },
+          ),
+        );
+
+        expect(client['userSteeredSinceReview']).toBe(true);
+      });
+
+      it('does not count an accepted empty steer carrier as user input', async () => {
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'empty-steer-read',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-autoskill-empty-attached-steer',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: { parts: [], accept, restore },
+            },
+          ),
+        );
+
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+        expect(client['userSteeredSinceReview']).toBe(false);
+      });
+
+      it('clears the window and pending outcomes when the session changes', async () => {
+        client['toolCallCount'] = 5;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['edit']),
+        };
+        client['pendingExperienceOutcomes'].set('old-call', {
+          toolName: 'edit',
+          outcome: 'failure',
+        });
+        vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+
+        await client.initialize();
+
         expect(client['toolCallCount']).toBe(0);
-        // Promise should have been pushed to pendingMemoryTaskPromises.
-        expect(client['pendingMemoryTaskPromises'].length).toBeGreaterThan(0);
-
-        // Resolve promise so there are no dangling promises.
-        resolveFn({ metadata: { touchedSkillFiles: ['skill.md'] } });
-      });
-
-      it('should reset toolCallCount when review is already_running and count exceeds threshold', async () => {
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'already_running',
-          taskId: 'task-inflight',
+        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
         });
-
-        // Simulate counter above threshold.
-        const AUTO_SKILL_THRESHOLD = 20;
-        client['toolCallCount'] = AUTO_SKILL_THRESHOLD + 5;
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'trigger while in-flight' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-inflight',
-          ),
-        );
-
-        // Counter should have been reset to prevent immediate cascade.
-        expect(client['toolCallCount']).toBe(0);
-      });
-
-      it('should always reset skillsModifiedInSession after scheduleSkillReview check', async () => {
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'skills_modified_in_session',
-        });
-
-        client['skillsModifiedInSession'] = true;
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'wrote a skill file' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-modified',
-          ),
-        );
-
-        expect(client['skillsModifiedInSession']).toBe(false);
-      });
-
-      it('should pass confirmBeforePersist from getAutoSkillConfirmEnabled', async () => {
-        vi.spyOn(
-          client['config'],
-          'getAutoSkillConfirmEnabled',
-        ).mockReturnValue(true);
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'a query' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-confirm',
-          ),
-        );
-
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
-          expect.objectContaining({ confirmBeforePersist: true }),
-        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
     });
 
@@ -9729,6 +10048,162 @@ hello
           file_path: '/project/.qwen/skills/my-skill.md',
         });
         expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it('ignores calls that never produced work', () => {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        const args = { path: '/project/.qwen/skills/my-skill/SKILL.md' };
+        client.recordCompletedToolCall('edit', args, {
+          callId: 'denied-edit',
+          status: 'error',
+          executionStatus: 'not_started',
+        });
+        client.recordCompletedToolCall('edit', args, {
+          callId: 'cancelled-edit',
+          status: 'cancelled',
+          executionStatus: 'cancelled',
+        });
+
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['skillsModifiedInSession']).toBe(false);
+        expect(client['recentCompletedToolNames']).toEqual([]);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
+        });
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      });
+
+      it('counts cancellation after completion without staging a retry outcome', () => {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        client.recordCompletedToolCall(
+          'edit',
+          { path: '/project/.qwen/skills/my-skill/SKILL.md' },
+          {
+            callId: 'completed-edit',
+            status: 'cancelled',
+            executionStatus: 'success',
+          },
+        );
+
+        expect(client['toolCallCount']).toBe(1);
+        expect(client['skillsModifiedInSession']).toBe(true);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(),
+        });
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      });
+
+      it('stages reliable outcomes but treats an unknown shell exit as neutral', () => {
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'failed-edit',
+          status: 'error',
+          executionStatus: 'error',
+        });
+        client.recordCompletedToolCall('run_shell_command', undefined, {
+          callId: 'unknown-shell',
+          status: 'success',
+          executionStatus: 'success',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'unknown-shell',
+                name: 'run_shell_command',
+                response: {
+                  output: `${formatShellExitCode(null)}\nSignal: (none)`,
+                },
+              },
+            },
+          ],
+        });
+
+        expect(client['pendingExperienceOutcomes'].get('failed-edit')).toEqual({
+          toolName: 'edit',
+          outcome: 'failure',
+        });
+        expect(client['pendingExperienceOutcomes'].has('unknown-shell')).toBe(
+          false,
+        );
+      });
+
+      it('consumes a late outcome already paired in history', () => {
+        client['chat'] = {
+          getHistoryFunctionResponseIds: vi
+            .fn()
+            .mockReturnValue(new Set(['late-edit'])),
+        } as unknown as LlmChat;
+
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'late-edit',
+          status: 'error',
+          executionStatus: 'error',
+        });
+
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      });
+
+      it('consumes staged outcomes once when addHistory accepts them', async () => {
+        const addHistory = vi.fn();
+        client['chat'] = {
+          addHistory,
+          getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
+        } as unknown as LlmChat;
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'direct-failure',
+          status: 'error',
+          executionStatus: 'error',
+        });
+        const failedContent: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'direct-failure',
+                name: 'edit',
+                response: { error: 'failed' },
+              },
+            },
+          ],
+        };
+
+        await client.addHistory(failedContent);
+        await client.addHistory(failedContent);
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'direct-success',
+          status: 'success',
+          executionStatus: 'success',
+        });
+        await client.addHistory({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'direct-success',
+                name: 'edit',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        });
+
+        expect(addHistory).toHaveBeenCalledTimes(3);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
     });
 
@@ -13482,16 +13957,32 @@ Other open files:
 
       it('restores an attached ToolResult steer when history never accepts it', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        client.getChat().getHistoryFunctionResponseIds = vi
+          .fn()
+          .mockReturnValue(new Set());
         mockTurnRunFn.mockImplementationOnce(() => {
           throw new Error('setup failed before history push');
         });
         const accept = vi.fn();
         const restore = vi.fn();
+        client.recordCompletedToolCall('read_file', undefined, {
+          callId: 'rejected-read',
+          status: 'error',
+          executionStatus: 'error',
+        });
 
         await expect(
           fromAsync(
             client.sendMessageStream(
-              [{ text: 'tool result plus steer' }],
+              [
+                {
+                  functionResponse: {
+                    id: 'rejected-read',
+                    name: 'read_file',
+                    response: { error: 'tool failed' },
+                  },
+                },
+              ],
               new AbortController().signal,
               'prompt-attached-steer-restore',
               {
@@ -13508,6 +13999,13 @@ Other open files:
 
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(),
+        );
+        expect(client['pendingExperienceOutcomes'].has('rejected-read')).toBe(
+          true,
+        );
+        expect(client['userSteeredSinceReview']).toBe(false);
       });
 
       it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {
@@ -13991,89 +14489,105 @@ Other open files:
         await iter.return(undefined as never);
       });
 
-      it('forwards steerInput through the Hook continuation for early settling', async () => {
-        let pushCount = 0;
-        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+      it.each([
+        ['accepted by history', false],
+        ['blocked by UserPromptSubmit', true],
+      ] as const)(
+        'settles Hook-carrier steer correctly when %s',
+        async (_name, blockCarrier) => {
+          let pushCount = 0;
+          let userPromptSubmitCount = 0;
+          client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
 
-        const mockMessageBus = {
-          request: vi
-            .fn()
-            .mockResolvedValueOnce({
-              output: { decision: 'block', reason: 'Keep going' },
-              stopHookCount: 1,
-            })
-            .mockResolvedValue({ output: undefined }),
-          response: vi.fn(),
-        };
-        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
-        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
-          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
-        );
-        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
-          (event: string) => event === 'Stop',
-        );
-        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(4);
+          const mockMessageBus = {
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => {
+                if (request.eventName === 'Stop') {
+                  return {
+                    output: { decision: 'block', reason: 'Keep going' },
+                    stopHookCount: 1,
+                  };
+                }
+                userPromptSubmitCount += 1;
+                return blockCarrier && userPromptSubmitCount > 1
+                  ? {
+                      output: {
+                        decision: 'block',
+                        reason: 'blocked by prompt hook',
+                      },
+                    }
+                  : { output: undefined };
+              }),
+            response: vi.fn(),
+          };
+          vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+          vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+            mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+            (event: string) =>
+              event === 'Stop' ||
+              (blockCarrier && event === 'UserPromptSubmit'),
+          );
+          vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(4);
 
-        let turnCall = 0;
-        mockTurnRunFn.mockImplementation((_model, request) => {
-          turnCall++;
-          // Miniature of GeminiChat's contract: publish the push counter
-          // on the request immediately before pushing it.
-          (request as unknown as Record<PropertyKey, unknown>)[
-            userContentPushSnapshotKey
-          ] = pushCount;
-          pushCount = turnCall;
-          return (async function* () {
-            yield {
-              type: LlmEventType.Content,
-              value: `response ${turnCall}`,
-            };
-          })();
-        });
-
-        const accept = vi.fn();
-        const restore = vi.fn();
-        const getSteerInput = vi
-          .fn<() => Promise<SteerInput | undefined>>()
-          // 1st call: end-of-turn steer (before Stop hook) — no steer pending
-          .mockResolvedValueOnce(undefined)
-          // 2nd call: Hook continuation's takeSteerInput — steer pending
-          .mockResolvedValueOnce({
-            parts: [{ text: 'steer via hook' }],
-            accept,
-            restore,
-          })
-          .mockResolvedValue(undefined);
-
-        const stream = client.sendMessageStream(
-          [{ text: 'initial query' }],
-          new AbortController().signal,
-          'prompt-hook-forward-early',
-          { type: SendMessageType.UserQuery, getSteerInput },
-        );
-
-        const iter = stream[Symbol.asyncIterator]();
-
-        // Consume all events, tracking when accept fires relative to events
-        const events: Array<{ done: boolean; acceptCalls: number }> = [];
-        for (;;) {
-          const result = await iter.next();
-          events.push({
-            done: !!result.done,
-            acceptCalls: accept.mock.calls.length,
+          let turnCall = 0;
+          mockTurnRunFn.mockImplementation((_model, request) => {
+            turnCall += 1;
+            // Miniature of GeminiChat's contract: publish the push counter
+            // on the request immediately before pushing it.
+            (request as unknown as Record<PropertyKey, unknown>)[
+              userContentPushSnapshotKey
+            ] = pushCount;
+            pushCount = turnCall;
+            return (async function* () {
+              yield {
+                type: LlmEventType.Content,
+                value: `response ${turnCall}`,
+              };
+            })();
           });
-          if (result.done) break;
-        }
 
-        // accept must have been called exactly once, and it must have fired
-        // before the stream ended (i.e., during the Hook continuation turn,
-        // not deferred to the finally block after all events were consumed).
-        expect(accept).toHaveBeenCalledOnce();
-        expect(restore).not.toHaveBeenCalled();
-        // The accept call should appear on an event before the last one
-        const acceptEventIndex = events.findIndex((e) => e.acceptCalls > 0);
-        expect(acceptEventIndex).toBeLessThan(events.length - 1);
-      });
+          const accept = vi.fn();
+          const restore = vi.fn();
+          const getSteerInput = vi
+            .fn<() => Promise<SteerInput | undefined>>()
+            .mockResolvedValueOnce(undefined)
+            .mockResolvedValueOnce({
+              parts: [{ text: 'steer via hook' }],
+              accept,
+              restore,
+            })
+            .mockResolvedValue(undefined);
+
+          const stream = client.sendMessageStream(
+            [{ text: 'initial query' }],
+            new AbortController().signal,
+            `prompt-hook-steer-${blockCarrier ? 'blocked' : 'accepted'}`,
+            { type: SendMessageType.UserQuery, getSteerInput },
+          );
+          const iter = stream[Symbol.asyncIterator]();
+          const acceptCallCounts: number[] = [];
+          for (;;) {
+            const result = await iter.next();
+            acceptCallCounts.push(accept.mock.calls.length);
+            if (result.done) break;
+          }
+
+          expect(accept).toHaveBeenCalledTimes(blockCarrier ? 0 : 1);
+          expect(restore).toHaveBeenCalledTimes(blockCarrier ? 1 : 0);
+          expect(client['userSteeredSinceReview']).toBe(!blockCarrier);
+          if (blockCarrier) {
+            expect(mockTurnRunFn).toHaveBeenCalledOnce();
+          } else {
+            const acceptEventIndex = acceptCallCounts.findIndex(
+              (count) => count > 0,
+            );
+            expect(acceptEventIndex).toBeLessThan(acceptCallCounts.length - 1);
+          }
+        },
+      );
     });
 
     describe('attribution snapshot persistence', () => {

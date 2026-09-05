@@ -493,6 +493,10 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
+export type {
+  CompletedToolCallOutcome,
+  ExperienceSignals,
+} from './memory/experience-signals.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)

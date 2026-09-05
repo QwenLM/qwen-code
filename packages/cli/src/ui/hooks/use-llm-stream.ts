@@ -107,6 +107,7 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { toCompletedToolCallOutcome } from '../../utils/completed-tool-call-outcome.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -2209,10 +2210,10 @@ export const useLlmStream = (
       userMessageTimestamp: number,
       submitType: SendMessageType,
     ) => {
-      if (submitType !== SendMessageType.Goal) {
-        lastPromptErroredRef.current = true;
-      } else {
+      if (submitType === SendMessageType.Goal) {
         goalTerminalErrorRef.current = true;
+      } else {
+        lastPromptErroredRef.current = true;
       }
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
@@ -2232,9 +2233,9 @@ export const useLlmStream = (
 
       if (!isShowingAutoRetry) {
         const retryHint =
-          submitType !== SendMessageType.Goal
-            ? t('Press Ctrl+Y to retry')
-            : undefined;
+          submitType === SendMessageType.Goal
+            ? undefined
+            : t('Press Ctrl+Y to retry');
         // Store error with hint as a pending item (not in history).
         // This allows the hint to be removed when the user retries with Ctrl+Y,
         // since pending items are in the dynamic rendering area (not <Static>).
@@ -2630,7 +2631,7 @@ export const useLlmStream = (
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
                 text: '',
                 images: [nextEvent.value],
-                ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
+                ...(assistantOutputStarted ? {} : { timestamp: Date.now() }),
               });
               assistantInlineImageCount++;
             } else {
@@ -2638,7 +2639,7 @@ export const useLlmStream = (
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
                 text: '',
                 omittedImageCount: 1,
-                ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
+                ...(assistantOutputStarted ? {} : { timestamp: Date.now() }),
               });
             }
             assistantOutputStarted = true;
@@ -2868,7 +2869,9 @@ export const useLlmStream = (
               // otherwise handleContentEvent would see a null pending item,
               // create a fresh one, and reset the buffer to just the new chunk,
               // losing the partial text we meant to preserve.
-              if (!event.isContinuation) {
+              if (event.isContinuation) {
+                flushBufferedStreamEvents();
+              } else {
                 discardBufferedStreamEvents();
                 setPendingAssistantItems([]);
                 if (pendingHistoryItemRef.current) {
@@ -2880,8 +2883,6 @@ export const useLlmStream = (
                 llmMessageBuffer = '';
                 assistantOutputStarted = false;
                 assistantInlineImageCount = 0;
-              } else {
-                flushBufferedStreamEvents();
               }
               // Always discard tool call requests from the truncated/failed
               // attempt to prevent duplicate execution after escalation or
@@ -4155,9 +4156,9 @@ export const useLlmStream = (
               lastPromptErroredRef.current = true;
             }
             const retryHint =
-              submitType !== SendMessageType.Goal
-                ? t('Press Ctrl+Y to retry')
-                : undefined;
+              submitType === SendMessageType.Goal
+                ? undefined
+                : t('Press Ctrl+Y to retry');
             // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
               type: 'error' as const,
@@ -4724,6 +4725,7 @@ export const useLlmStream = (
             return false;
           },
         );
+
       // History-based dedup MUST run before the active-stream early-return.
       // If a synthetic `functionResponse` for this callId is already in
       // chat.history (planted on session-load by
@@ -4770,23 +4772,20 @@ export const useLlmStream = (
         // `recordCompletedToolCall` loop below over `llmTools` —
         // filter to the same shape (non-client-initiated) so client
         // tools (which the original loop also skipped) stay skipped.
-        //
-        // Cancelled tools are also skipped: `dedupedTools` includes
-        // anything in a terminal state (success | error | cancelled),
-        // but cancelled means the tool never actually ran end-to-end —
-        // the `allToolsCancelled` branch below would have surfaced
-        // them via `addHistory + reportCancelled` rather than the
-        // completed-call metric, and the metric should match. Without
-        // this filter, a deduped + cancelled tool would inflate
-        // `toolCallCount` for a call that never produced a result
-        // (and could also flip `skillsModifiedInSession` for a
-        // never-executed skill-write).
+        // No status filter here: cancelled calls without a settled
+        // `executionStatus` are dropped by `didToolCallProduceWork`
+        // inside `recordCompletedToolCall`, while cancellations that
+        // settled first still count (matching the main loop).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
+            toCompletedToolCallOutcome(
+              tc.request.callId,
+              tc.status,
+              tc.response,
+            ),
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
@@ -4939,12 +4938,15 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
-          llmClient?.recordCompletedToolCall(
-            toolCall.request.name,
-            toolCall.request.args as Record<string, unknown>,
-          );
-        }
+        llmClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+          toCompletedToolCallOutcome(
+            toolCall.request.callId,
+            toolCall.status,
+            toolCall.response,
+          ),
+        );
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {
@@ -5194,6 +5196,11 @@ export const useLlmStream = (
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
+          toCompletedToolCallOutcome(
+            toolCall.request.callId,
+            toolCall.status,
+            toolCall.response,
+          ),
         );
       }
 

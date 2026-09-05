@@ -99,6 +99,7 @@ import {
 } from './nonInteractive/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
+import { toCompletedToolCallOutcome } from './utils/completed-tool-call-outcome.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -2006,6 +2007,12 @@ export async function runNonInteractive(
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
+              toCompletedToolCallOutcome(
+                requestInfo.callId,
+                statusByResponse.get(toolResponse) ??
+                  (toolResponse.error ? 'error' : 'success'),
+                toolResponse,
+              ),
             );
 
           // Capture model override from skill tool results.

@@ -2573,9 +2573,77 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
       'testTool',
       { arg1: 'value1' },
+      {
+        callId: 'tool-1',
+        status: 'success',
+        executionStatus: 'success',
+        errorType: undefined,
+        responseParts: toolResponse,
+      },
     );
     // Verify consumePendingMemoryTaskPromises is called at the end of the session.
     expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+  });
+
+  it('preserves scheduler cancellation with a settled success outcome', async () => {
+    setupMetricsMock();
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        callId: 'cancelled-tool',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-cancelled-tool',
+      },
+    };
+    const responseParts: Part[] = [{ text: 'Tool completed' }];
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        const response: ToolCallResponseInfo = {
+          callId: 'cancelled-tool',
+          responseParts,
+          executionStatus: 'success',
+        };
+        await options.onAllToolCallsComplete?.([
+          { status: 'cancelled', response },
+        ]);
+        return response;
+      },
+    );
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Final answer' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-cancelled-tool',
+    );
+
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      'testTool',
+      { arg1: 'value1' },
+      {
+        callId: 'cancelled-tool',
+        status: 'cancelled',
+        executionStatus: 'success',
+        errorType: undefined,
+        responseParts,
+      },
+    );
   });
 
   it('uses a tool-selected full-turn model for the next request', async () => {
@@ -6432,6 +6500,16 @@ describe('runNonInteractive', () => {
     );
     expect(toolResultBlock?.tool_use_id).toBe('tool-error');
     expect(toolResultBlock?.is_error).toBe(true);
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      'errorTool',
+      {},
+      expect.objectContaining({
+        callId: 'tool-error',
+        status: 'error',
+        errorType: ToolErrorType.EXECUTION_FAILED,
+      }),
+    );
     expect(writes.join('')).not.toContain('executionStatus');
     expect(writes.join('')).not.toContain('execution_status');
   });
@@ -7269,6 +7347,12 @@ describe('runNonInteractive', () => {
       )?.message?.content?.[0]?.content;
       expect(leadingContent).toMatch(/Skipped:/);
       expect(leadingContent).not.toMatch(/Re-issue this call/);
+      const leadingBlock = (
+        leadingToolResult as {
+          message?: { content?: Array<{ is_error?: boolean }> };
+        }
+      ).message?.content?.[0];
+      expect(leadingBlock?.is_error).toBe(false);
     });
 
     it('tries multiple structured_output calls in the same turn until one succeeds', async () => {

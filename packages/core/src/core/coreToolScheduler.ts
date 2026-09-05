@@ -5177,11 +5177,22 @@ export class CoreToolScheduler {
             ? ToolErrorType.MCP_TOOL_ERROR
             : ToolErrorType.UNKNOWN))
         : undefined;
-      executionStatus = aborted
-        ? 'cancelled'
-        : toolResult.error
-          ? 'error'
+      const settledExecutionStatus: ToolExecutionStatus = toolResult.error
+        ? 'error'
+        : 'success';
+      // A cooperative tool (e.g. shell) observes the abort, kills its
+      // work mid-execution, and still resolves error-free. That is a
+      // cancellation DURING execution — record 'cancelled', not the
+      // settled status, so the experience gate does not count it as
+      // completed work. Abort-unaware tools keep the settled status:
+      // their work finished before the abort landed.
+      const cancelledSettleStatus: ToolExecutionStatus = toolResult.error
+        ? 'error'
+        : toolResult.aborted
+          ? 'cancelled'
           : 'success';
+      executionStatus =
+        aborted || toolResult.aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
       if (execSpan) {
         const completedExecSpan = execSpan;
@@ -5202,8 +5213,10 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        // `execute()` returned a result here, so the tool's work did finish.
-        let cancelMessage = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        // Cooperative interruptions can resolve without completing the work.
+        let cancelMessage = toolResult.aborted
+          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -5236,7 +5249,7 @@ export class CoreToolScheduler {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
           cancelMessage,
-          executionStatus,
+          cancelledSettleStatus,
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
         );
