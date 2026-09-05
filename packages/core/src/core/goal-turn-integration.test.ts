@@ -57,6 +57,7 @@ describe('Goal turn evidence propagation', () => {
       expect.any(Object),
       'goal-prompt',
       permit,
+      undefined,
     );
     const toolRequest = events.find(
       (event) => event.type === LlmEventType.ToolCallRequest,

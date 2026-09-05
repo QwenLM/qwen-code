@@ -1237,6 +1237,8 @@ describe('LlmClient Goal admission', () => {
     expect(recorder.recordUserMessage).toHaveBeenCalledWith(
       [{ text: 'user correction' }],
       permit,
+      undefined,
+      'real-user-key',
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(turnMocks.constructors[0]?.[2]).toEqual(permit);

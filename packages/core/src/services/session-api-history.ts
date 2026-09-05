@@ -10,6 +10,56 @@ import type {
   ChatRecord,
 } from './chatRecordingService.js';
 
+const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
+
+type IdentifiedContent = Content & {
+  [API_HISTORY_PROMPT_ID]?: string;
+};
+
+export function markApiHistoryPrompt(
+  content: Content,
+  promptId: unknown,
+): void {
+  if (typeof promptId === 'string' && promptId.length > 0) {
+    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
+  }
+}
+
+export function getApiHistoryPromptId(content: Content): string | undefined {
+  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
+}
+
+/**
+ * Locates the single API history entry at or after `startIndex` marked with
+ * `promptId`.
+ *
+ * Returns -1 when no entry carries the identity **and** when more than one
+ * does. Identities are minted per entrance (`sessionId########<n>`) and their
+ * counters restart independently, so a duplicate is possible; callers treat
+ * both cases the same way — the identity does not resolve, so fall back to
+ * whatever mapping was used before identities existed rather than guess
+ * between two candidates.
+ *
+ * Entries before `startIndex` are excluded from the scan entirely. Rewind
+ * callers pass the startup-context/compressed-prefix length there: marks
+ * inside the compressed prefix belong to absorbed turns (restored from the
+ * compression record's `promptIds`), and resolving one would truncate at the
+ * prefix, silently dropping the summary and every real turn.
+ */
+export function findApiHistoryPromptIndex(
+  history: readonly Content[],
+  promptId: string,
+  startIndex = 0,
+): number {
+  let match = -1;
+  for (let index = startIndex; index < history.length; index++) {
+    if (getApiHistoryPromptId(history[index]!) !== promptId) continue;
+    if (match !== -1) return -1;
+    match = index;
+  }
+  return match;
+}
+
 export interface BuildApiHistoryOptions {
   /**
    * Whether to strip thought parts from the history.
@@ -59,6 +109,9 @@ function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
   if (!record.message || record.subtype === 'realtime_message') return;
 
   const message = copyContentForApiHistory(record.message);
+  if (record.type === 'user' && !record.subtype) {
+    markApiHistoryPrompt(message, record.promptId);
+  }
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (previous?.role === 'user') {
@@ -80,7 +133,11 @@ export class SessionApiHistoryAccumulator {
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
       this.history = Array.isArray(payload.compressedHistory)
-        ? payload.compressedHistory.map(copyContentForApiHistory)
+        ? payload.compressedHistory.map((content, index) => {
+            const copy = copyContentForApiHistory(content);
+            markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            return copy;
+          })
         : [];
       return;
     }

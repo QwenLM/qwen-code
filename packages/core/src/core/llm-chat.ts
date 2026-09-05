@@ -138,6 +138,7 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 
 export { InvalidStreamError };
 
@@ -453,6 +454,8 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Internal identity for the user prompt added to model history. */
+  promptId?: string;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -2995,6 +2998,7 @@ export class LlmChat {
         ] = this.userContentPushCount;
       }
       // Add user content to history ONCE before any attempts.
+      markApiHistoryPrompt(userContent, options?.promptId);
       this.history.push(userContent);
       currentUserContent = userContent;
       userContentAdded = true;

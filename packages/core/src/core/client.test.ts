@@ -145,6 +145,7 @@ vi.mock('node:fs', () => {
 
 // --- Mocks ---
 const mockTurnRunFn = vi.fn();
+const mockTurnConstructorFn = vi.fn();
 
 vi.mock('./turn', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
@@ -154,8 +155,8 @@ vi.mock('./turn', async (importOriginal) => {
     // The run method is a property that holds our mock function
     run = mockTurnRunFn;
 
-    constructor() {
-      // The constructor can be empty or do some mock setup
+    constructor(...args: unknown[]) {
+      mockTurnConstructorFn(...args);
     }
   }
   // Export the mock class as 'Turn'
@@ -11368,6 +11369,46 @@ Other open files:
         ).toHaveBeenCalledOnce();
       });
 
+      it('leaves the retried turn unmarked while a user prompt owns its identity', async () => {
+        // Only a first-party user prompt claims an identity in model
+        // history. A retry re-enters unmarked and rewind maps it
+        // positionally, which is what it did before identities existed —
+        // guessing an identity for it from the stripped orphan's content
+        // would be the same content-shape inference this change removes.
+        const mockChat: Partial<LlmChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as LlmChat;
+
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: 'content', value: 'response' };
+          })(),
+        );
+
+        for (const [type, expectedIdentity] of [
+          [SendMessageType.UserQuery, 'session########4'],
+          [SendMessageType.Retry, undefined],
+        ] as const) {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'my prompt' }],
+              new AbortController().signal,
+              'session########4',
+              { type },
+            ),
+          );
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
+            expectedIdentity,
+          );
+        }
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = {
           role: 'user',
@@ -12623,6 +12664,7 @@ Other open files:
             displayText: 'raw @file prompt',
             hookContext: '&lt;hook-only context&gt;',
           },
+          'prompt-hook-display-text',
         );
         expect(mockMemoryManager.recall).toHaveBeenCalledWith(
           '/test/project/root',
@@ -12729,6 +12771,7 @@ Other open files:
             displayText: 'my prompt',
             hookContext: 'extra hook context',
           },
+          'prompt-hook-context-tag',
         );
       });
 

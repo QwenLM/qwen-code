@@ -10,6 +10,7 @@ import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
   CompressionStatus,
+  markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -83,6 +84,29 @@ function compressionItem(
 // ---------------------------------------------------------------------------
 
 describe('computeApiTruncationIndex', () => {
+  it('uses prompt identity when content shape cannot align the histories', () => {
+    const placeholder = '[Old inline media cleared: image/png]';
+    const target = userItem(3, 'target') as HistoryItem & {
+      promptId: string;
+    };
+    target.promptId = 'prompt-3';
+    const targetContent = userContent('target');
+    markApiHistoryPrompt(targetContent, target.promptId);
+
+    expect(
+      computeApiTruncationIndex(
+        [userItem(1, placeholder), llmItem(2), target, llmItem(4)],
+        target.id,
+        [
+          userContent(placeholder),
+          modelContent('response 1'),
+          targetContent,
+          modelContent('response 2'),
+        ],
+      ),
+    ).toBe(2);
+  });
+
   it('returns 0 for empty API history', () => {
     const ui: HistoryItem[] = [userItem(1)];
     const api: Content[] = [];
@@ -368,6 +392,127 @@ describe('computeApiTruncationIndex', () => {
         modelContent('Got it. Thanks for the additional context!'),
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
+
+    it('still fails loud when a post-prefix survivor re-minted the first turn id', () => {
+      // Entrances mint `sessionId########<n>` from counters that restart
+      // independently, so two headless runs against one session write twins
+      // sharing an id. If marker-less compression absorbs the first twin's
+      // entry while the second survives (still marked with the shared id),
+      // the identity shortcut must not resolve the absorbed first turn onto
+      // the surviving twin — the entrance-3 refusal above must win (R25-1).
+      const firstTurn = userItem(1, 'pre 1') as HistoryItem & {
+        promptId: string;
+      };
+      firstTurn.promptId = 'session########1';
+      const twinTurn = userItem(3, 'pre 2') as HistoryItem & {
+        promptId: string;
+      };
+      twinTurn.promptId = 'session########1';
+      const ui: HistoryItem[] = [firstTurn, llmItem(2), twinTurn, llmItem(4)];
+      const survivingTwin = userContent('pre 2');
+      markApiHistoryPrompt(survivingTwin, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        survivingTwin,
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+      // The surviving twin itself still maps (identity resolves it exactly
+      // where the positional walk cannot reach post-compression).
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('fails loud when a non-first-turn target was absorbed and its twin re-minted the id', () => {
+      // R26-1: the R25-1 hazard for non-first turns. A's own entry was
+      // absorbed by marker-less compression (no UI marker, so
+      // compressionIndex === -1 while the API history carries the prefix);
+      // a later entrance re-minted the same id onto B, whose entry survives
+      // post-prefix as the UNIQUE match for that id. The identity shortcut
+      // must not resolve the absorbed A onto B's twin entry — rewinding
+      // would truncate at B's boundary and silently keep the prompt+response
+      // the UI deleted, where the positional walk refuses loudly (-1).
+      const absorbedTurn = userItem(3, 'run 2, prompt 1') as HistoryItem & {
+        promptId: string;
+      };
+      absorbedTurn.promptId = 'session########1';
+      const twinTurn = userItem(5, 'run 3, prompt 2') as HistoryItem & {
+        promptId: string;
+      };
+      twinTurn.promptId = 'session########1';
+      const ui: HistoryItem[] = [
+        userItem(1, 'run 1, prompt 1'),
+        llmItem(2),
+        absorbedTurn,
+        llmItem(4),
+        twinTurn,
+        llmItem(6),
+      ];
+      const survivingTwin = userContent('run 3, prompt 2');
+      markApiHistoryPrompt(survivingTwin, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        survivingTwin,
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+      // The surviving twin itself still maps: no later turn claims its id,
+      // so the unique post-prefix match is its own entry (guard must not
+      // over-refuse this case).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(3);
+    });
+
+    it('fails loud when the only identity match sits inside the compressed prefix', () => {
+      // recordChatCompression persists promptIds for absorbed turns, so on
+      // resume the compressed prefix entries themselves carry identity marks.
+      // If the target turn's own API entry is unmarked while an entry INSIDE
+      // the prefix shares its id, the identity lookup must not resolve below
+      // the prefix: truncating at the prefix entry would silently drop the
+      // summary and every real turn where the positional walk refuses (-1).
+      const target = userItem(3, 'pre 2') as HistoryItem & {
+        promptId: string;
+      };
+      target.promptId = 'session########1';
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        llmItem(2),
+        target,
+        llmItem(4),
+      ];
+      const prefixSummary = userContent(
+        '<state_snapshot>summary\n\nResume the prior task...',
+      );
+      markApiHistoryPrompt(prefixSummary, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        prefixSummary,
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('pre 2'),
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+
+      // The bound must not over-refuse: when the target's own post-prefix
+      // entry carries the shared id, it resolves exactly even though the
+      // prefix also carries a mark with that id.
+      const markedSurvivor = userContent('pre 2');
+      markApiHistoryPrompt(markedSurvivor, 'session########1');
+      expect(
+        computeApiTruncationIndex(ui, 3, [
+          startupEntry(),
+          prefixSummary,
+          modelContent('Got it. Thanks for the additional context!'),
+          markedSurvivor,
+          modelContent('response 2'),
+        ]),
+      ).toBe(3);
     });
   });
 
@@ -797,6 +942,503 @@ describe('computeApiTruncationIndex', () => {
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
     });
+  });
+});
+
+describe('positional fallback when identity does not resolve', () => {
+  // `promptId` is minted as `sessionId########<counter>` by several
+  // entrances whose counters restart independently, so an identity can be
+  // missing from model history or present twice. Neither is allowed to turn
+  // into a refusal: the mapping falls back to the positional walk, which is
+  // exactly what shipped before identities existed.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('resolves unmarked turns positionally once later sends are marked', () => {
+    // A retried turn re-enters model history unmarked while its UI item
+    // keeps the original id; the next ordinary prompt is marked again.
+    const freshContent = userContent('fresh prompt');
+    markApiHistoryPrompt(freshContent, 'session########3');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'earlier one', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'earlier two', 'session########2'),
+      llmItem(4),
+      userItemWithPromptId(5, 'fresh prompt', 'session########3'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('earlier one'), // unmarked
+      modelContent('response 1'),
+      userContent('earlier two'), // unmarked
+      modelContent('response 2'),
+      freshContent, // marked
+      modelContent('response 3'),
+    ];
+
+    // Rewinding to the first unmarked turn keeps nothing.
+    expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+    // Rewinding to the second unmarked turn truncates before its entry.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    // Rewinding to the marked turn still resolves through identity.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('falls back positionally instead of refusing on a duplicated identity', () => {
+    // Two entrances re-minted the same id. Before identities existed this
+    // session rewound positionally; failing closed here would be a
+    // regression against that behavior, so the duplicate is simply ignored.
+    const first = userContent('one');
+    const second = userContent('two');
+    markApiHistoryPrompt(first, 'dup-id');
+    markApiHistoryPrompt(second, 'dup-id');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'one', 'dup-id'),
+      llmItem(2),
+    ];
+    const api: Content[] = [
+      first,
+      modelContent('r1'),
+      second,
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+  });
+
+  it('falls back positionally when the target identity reaches no entry', () => {
+    const markedOther = userContent('claimed by another id');
+    markApiHistoryPrompt(markedOther, 'other-id');
+
+    // First-turn branch.
+    const uiFirst: HistoryItem[] = [
+      userItemWithPromptId(1, 'lost mark', 'lost-id'),
+      llmItem(2),
+    ];
+    expect(
+      computeApiTruncationIndex(uiFirst, 1, [markedOther, modelContent('r')]),
+    ).toBe(0);
+
+    // Walk branch.
+    const uiMid: HistoryItem[] = [
+      userItemWithPromptId(1, 'a', 'id-a'),
+      llmItem(2),
+      userItemWithPromptId(3, 'b', 'id-b'),
+      llmItem(4),
+    ];
+    expect(
+      computeApiTruncationIndex(uiMid, 3, [
+        userContent('a'),
+        modelContent('r1'),
+        markedOther,
+        modelContent('r2'),
+      ]),
+    ).toBe(2);
+  });
+
+  it('maps file-key-only restored turns positionally despite a twin match', () => {
+    // /restore keeps `promptId` on restored items (the file-history rewind
+    // key) but flags it file-key-only: the checkpoint's `clientHistory`
+    // cannot carry the Symbol marks, so the id must never resolve. Here a
+    // later prompt re-mints `session########1` and its marked entry is the
+    // only match for the restored turn's id; resolving it would keep model
+    // entries the UI deleted (R24-1).
+    const freshContent = userContent('fresh prompt');
+    markApiHistoryPrompt(freshContent, 'session########1');
+    const restored = userItemWithPromptId(
+      3,
+      'restored turn',
+      'session########1',
+    ) as HistoryItem & { promptId: string; promptIdFileKeyOnly?: boolean };
+    restored.promptIdFileKeyOnly = true;
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'restored first', 'session########0'),
+      llmItem(2),
+      restored,
+      llmItem(4),
+      userItemWithPromptId(5, 'fresh prompt', 'session########3'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('restored first'), // unmarked: restored from JSON
+      modelContent('response 1'),
+      userContent('restored turn'), // unmarked: restored from JSON
+      modelContent('response 2'),
+      freshContent, // marked with the SAME id as the restored turn
+      modelContent('response 3'),
+    ];
+
+    // Positional outcome: one real user turn precedes the restored turn.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    // The fresh turn still resolves through identity.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('maps an unmarked non-first target positionally when an earlier twin holds the mark (R27-1)', () => {
+    // Two entrances re-minted the same id, so both P and Q carry it in the
+    // UI. Retrying Q re-pushes Q's own entry UNMARKED while P's entry keeps
+    // the mark. Rewinding to Q must map positionally onto Q's own boundary,
+    // not resolve onto P's marked twin entry. No compressed prefix is
+    // involved and the twin is EARLIER, so neither conjunct of the R26-1
+    // `ambiguousTwinPrefix` gate fires; only the resolution-site whitelist
+    // (skip identity whenever another real turn claims the target's id)
+    // catches it. Positional answer is 2; the shortcut returns 0 today.
+    const pEntry = userContent('p');
+    markApiHistoryPrompt(pEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'p', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'q', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      pEntry, // twin P's entry, still marked with the shared id
+      modelContent('r1'),
+      userContent('q'), // Q's own entry, re-pushed unmarked by the retry
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+});
+
+describe('round-28 ownership gate: companion shapes of the R27-1 whitelist', () => {
+  // The round-27 fix whitelisted the identity lookup by scanning the UI
+  // history for twin claimants and preferring the positional walk. The
+  // round-28 review showed that cascade still resolved a target onto a
+  // boundary that is not its own whenever the positional walk could not land
+  // (or landed late) while an impostor entry wore the target's promptId.
+  // The structural close is an ownership gate: an identity match is trusted
+  // only when the matched entry's user text equals the target's text (the
+  // target's own entry); every impostor carries a different prompt. Each of
+  // these tests is RED against the round-27 whitelist and GREEN under the
+  // ownership gate, while the R27-1 positional pin above stays green.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('refuses (-1) when the target entry never landed but an earlier twin keeps the mark', () => {
+    // Entrance 1: the target's own entry never reached model history (a
+    // setup-error rollback or the oversized-prompt rescue throwing before the
+    // push) while an earlier twin's entry keeps the shared mark. The
+    // positional walk cannot land (one prompt short), and the unique marked
+    // match is the TWIN's entry. The whitelist fallback returned the twin's
+    // boundary; the pre-identity code refused loudly (-1). Ownership gate:
+    // the twin's text differs from the target's, so the match is unowned ->
+    // positional -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'twin prompt', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'target prompt', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      twinEntry, // twin's entry, marked, present
+      modelContent('r1'),
+      // target's own entry never landed
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when a placeholder collision desyncs the walk and an earlier twin keeps the mark', () => {
+    // Entrance 2: a genuine prompt whose entire text equals a generated
+    // microcompaction placeholder is counted by the UI but excluded from the
+    // API prompt count, so the positional walk falls one short and cannot
+    // land. The earlier twin keeps the mark; the whitelist fallback returned
+    // the twin's boundary. Ownership gate: the twin's text differs -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const collidingEntry = userContent(PLACEHOLDER); // excluded from the walk
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, PLACEHOLDER, 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      collidingEntry, // counted by the UI, excluded by the API walk
+      twinEntry, // twin's entry, marked
+      modelContent('r1'),
+      // target's own entry never landed
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when an absorbed turn desyncs the walk and the target entry is present-but-unmarked', () => {
+    // Entrance 3: an absorbed turn (its API entry removed without a UI
+    // marker) leaves the positional walk one short, while the target's own
+    // entry is present but UNMARKED and an earlier twin keeps the mark. The
+    // whitelist fallback's "surviving twin" premise is falsified and it
+    // returned the twin's boundary. Ownership gate: the twin's text differs
+    // -> positional -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      twinEntry, // twin's entry, marked
+      modelContent('r1'),
+      userContent('target prompt'), // target's own entry, present but UNMARKED
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('prefers the ownership-proven identity over a positional walk that lands one turn late', () => {
+    // Entrance 4: an absorbed turn desyncs the positional walk so it lands
+    // one turn LATE (keeping the deleted turn's prompt+response in model
+    // context), while the target's own entry is marked and ownership-proven
+    // at the exact boundary. The whitelist preferred positional (late).
+    // Ownership gate: identity is owned -> exact index.
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'), // twin, unmarked entry
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+      userItem(7, 'later turn'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      userContent('twin prompt'), // twin's entry, UNMARKED
+      targetEntry, // target's own entry, marked
+      modelContent('r1'),
+      userContent('later turn'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
+  });
+
+  it('resolves an ownership-proven identity despite a file-key-only restored item sharing the id', () => {
+    // Entrance 6: a promptIdFileKeyOnly restored item shares the target's
+    // promptId but can never own a marked entry. The whitelist claimant scan
+    // counted it as a twin and demoted the unambiguous identity resolution
+    // onto a positional walk that lands late. The ownership gate ignores UI
+    // claimants: the target's own marked entry is ownership-proven -> exact
+    // index.
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const restored = userItemWithPromptId(
+      1,
+      'restored turn',
+      'session########1',
+    ) as HistoryItem & { promptId: string; promptIdFileKeyOnly?: boolean };
+    restored.promptIdFileKeyOnly = true;
+    const ui: HistoryItem[] = [
+      restored,
+      llmItem(2),
+      userItemWithPromptId(3, 'absorbed turn', 'session########0'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+      userItem(7, 'later turn'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      userContent('restored turn'), // unmarked: restored from JSON
+      // absorbed turn's entry removed (desyncs the walk)
+      targetEntry, // target's own entry, marked
+      modelContent('r1'),
+      userContent('later turn'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
+  });
+});
+
+describe('round-29: same-text twins defeat the text ownership proof', () => {
+  // The round-28 ownership gate proves an identity match by comparing the
+  // matched entry's user text against the target's text, on the premise
+  // that every impostor carries a DIFFERENT prompt. Cron/duplicate
+  // re-sends and re-minted twins re-send the SAME prompt text, so an
+  // impostor's entry passes the text proof and the resolution lands on a
+  // boundary that is not the target's own. The gate must demote to the
+  // positional walk whenever the text proof is not unique to the target.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('maps a same-text twin positionally when its entry re-pushed unmarked (R27-1 same-text)', () => {
+    // Same shape as the R27-1 pin above, but P and Q share one prompt text
+    // in addition to the id. P's entry keeps the mark; the retry re-pushes
+    // Q's own entry unmarked. The text proof passes on P's entry (same
+    // text), so the shortcut resolves Q onto P's boundary 0 — silently
+    // dropping P's prompt+response from model context while the UI still
+    // shows P — where the positional walk lands correctly at 2.
+    const pEntry = userContent('run tests');
+    markApiHistoryPrompt(pEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'run tests', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      pEntry, // twin P's entry, still marked with the shared id
+      modelContent('r1'),
+      userContent('run tests'), // Q's own entry, re-pushed unmarked
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('refuses (-1) a same-text absorbed target instead of resolving onto the surviving twin (R26-1 same-text)', () => {
+    // Same state as the R26-1 pin above, but the absorbed turn and its
+    // re-minted twin share one prompt text. The surviving twin's entry is
+    // the unique post-prefix match and its text equals the absorbed
+    // target's text, so the text proof passes and the shortcut resolves
+    // the absorbed target onto the twin's boundary 3 — keeping the
+    // prompt+response the UI deleted — where the positional walk refuses
+    // loudly (-1).
+    const absorbedTurn = userItemWithPromptId(
+      3,
+      'run tests',
+      'session########1',
+    );
+    const twinTurn = userItemWithPromptId(5, 'run tests', 'session########1');
+    const ui: HistoryItem[] = [
+      userItem(1, 'run 1, prompt 1'),
+      llmItem(2),
+      absorbedTurn,
+      llmItem(4),
+      twinTurn,
+      llmItem(6),
+    ];
+    const survivingTwin = userContent('run tests');
+    markApiHistoryPrompt(survivingTwin, 'session########1');
+    const api: Content[] = [
+      startupEntry(),
+      userContent('<state_snapshot>summary\n\nResume the prior task...'),
+      modelContent('Got it. Thanks for the additional context!'),
+      survivingTwin,
+      modelContent('response 2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    // The same-text surviving twin demotes too: the absorbed turn claims
+    // its id with its text, so the proof is not unique and the desynced
+    // positional walk cannot land — a loud refusal, never a silent
+    // resolution, until per-entry provenance exists.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+});
+
+describe('round-30: the proof cannot distinguish the target from a same-text impostor', () => {
+  // Round-29 demotes the text proof whenever the same text is in play
+  // twice, but the gate still accepts a same-text impostor whenever the
+  // proof cannot distinguish the target from it: a claimant-less re-send
+  // (the claimant scan only sees UI items) and a placeholder-collision
+  // re-mint (the text proof certifies the cleared-media entry itself) each
+  // pass both uniqueness conjuncts with exactly one same-text entry in
+  // play. The backstop is a demotion to the positional walk whenever the
+  // proof cannot establish ownership, never a seventh gate condition.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('demotes a claimant-less same-text impostor to the positional boundary', () => {
+    // Probe 1: the target's own entry never landed, and a re-send wearing
+    // the target's promptId+text landed later with NO UI entry. Both
+    // uniqueness conjuncts pass — the claimant scan only sees UI items and
+    // the same-text count sees exactly one entry, the impostor itself — so
+    // the gate resolves onto the impostor's boundary 4, silently keeping
+    // the prompt+response of the turn the UI deleted (entry at index 2).
+    // The positional walk is in sync and lands on the correct boundary 2.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r1'),
+      userContent('deleted turn prompt'), // UI deleted the turn; its entry survived
+      modelContent('r2'),
+      impostor, // claimant-less re-send wearing the target's id+text
+      modelContent('r3'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('refuses (-1) when a placeholder-shaped prompt re-mints a cleared-media mark', () => {
+    // Probe 2: a cleared-media placeholder entry keeps its mark through
+    // microcompaction, and a genuine prompt whose ENTIRE text equals the
+    // placeholder shape re-mints the same id with its own entry absent.
+    // The text proof passes (identical text — the documented exact-match
+    // collision) and both uniqueness conjuncts pass, so the gate resolves
+    // onto the placeholder entry at 0 and silently truncates everything
+    // after it, where the pre-identity positional walk refuses loudly
+    // (-1): the placeholder is excluded from the count and no later
+    // counted prompt exists.
+    const firstEntry = userContent('hello');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const clearedMedia = userContent(PLACEHOLDER); // media-only entry, cleared; mark survived
+    markApiHistoryPrompt(clearedMedia, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      clearedMedia,
+      modelContent('r1'),
+      // the target's own entry never landed
+      userContent('later prompt'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
   });
 });
 

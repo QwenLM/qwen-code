@@ -23,7 +23,7 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
 import {
   deserializeSnapshots,
@@ -41,6 +41,8 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { CompressionStatus } from '../core/turn.js';
+import { markApiHistoryPrompt } from './session-api-history.js';
 
 function branchTestRecord(
   uuid: string,
@@ -189,7 +191,12 @@ describe('ChatRecordingService', () => {
   describe('recordUserMessage', () => {
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
-      chatRecordingService.recordUserMessage(userParts);
+      chatRecordingService.recordUserMessage(
+        userParts,
+        undefined,
+        undefined,
+        'prompt-1',
+      );
       await chatRecordingService.flush();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
@@ -205,6 +212,28 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.promptId).toBe('prompt-1');
+    });
+
+    it('preserves prompt identities in compression checkpoints', async () => {
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'prompt' }],
+      };
+      markApiHistoryPrompt(content, 'prompt-1');
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [content],
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
 
     it('preserves model-bound parts and records clean display text', async () => {

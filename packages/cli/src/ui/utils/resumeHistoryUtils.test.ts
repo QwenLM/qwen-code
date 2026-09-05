@@ -394,13 +394,21 @@ describe('resumeHistoryUtils', () => {
     it('prefers recorded displayText over the augmented parts', () => {
       const items = buildUserItems({
         type: 'user',
+        promptId: 'prompt-1',
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
         systemPayload: {
           displayText: 'my prompt',
           hookContext: 'injected hook context',
         },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          promptId: 'prompt-1',
+        },
+      ]);
     });
 
     it('does not fall back to hidden text when displayText is empty', () => {
