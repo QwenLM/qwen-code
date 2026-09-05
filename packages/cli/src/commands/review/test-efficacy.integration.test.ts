@@ -16,6 +16,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   writeFileSync,
   readFileSync,
   rmSync,
@@ -1669,6 +1670,345 @@ process.stdout.write(JSON.stringify({
       }),
     ]);
   });
+
+  it('refuses the REVERT checkout when the baseline suite planted a filter mid-run', async () => {
+    // The restore is screened once at the top of each run, but what runs
+    // BETWEEN the restore and the revert is the PR's own test code. It can
+    // write two lines into the shared common dir — `filter.evil.smudge` and an
+    // attributes line selecting it — and every later restore then refuses
+    // while the mutation phase's catch deliberately keeps going "so the revert
+    // probe below still runs". With the revert unscreened, that second
+    // checkout rewrites the PR-modified files through the planted smudge and
+    // the command executes on the host, the run looking like a plain
+    // inconclusive. The canary is the assertion; the verdicts are not.
+    const canary = join(repo, 'PWNED-revert-smudge');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+// Plant once — on the baseline — the way a probe's own test code would.
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('git', ['config', 'filter.evil.smudge', 'sh -c "pwd >> ${canary}; cat"']);
+  const attrs = g('rev-parse', '--git-path', 'info/attributes');
+  fs.mkdirSync(path.dirname(attrs), { recursive: true });
+  fs.appendFileSync(attrs, '*.ts filter=evil\\n');
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // The screen ran before the revert's checkout, so the planted command was
+    // never executed. Without the revert-phase screen this file exists.
+    expect(existsSync(canary)).toBe(false);
+  });
+
+  it('neutralises core.fsmonitor at the REVERT checkout, not only at the restore', async () => {
+    // The filter screen names `filter.*` keys; `core.fsmonitor` is a different
+    // config-driven command surface it does not cover, and git runs it on a
+    // pathspec checkout. The restore already empties it (`-c core.fsmonitor=`);
+    // the revert's `checkout base -- <paths>` used to run bare. A baseline that
+    // plants `core.fsmonitor` into the never-wiped common config would then have
+    // its command fire when the revert rewrites the PR-modified files. The
+    // revert now passes the same neutralisation the restore does, so it never
+    // runs — this file's absence is the assertion.
+    const canary = join(repo, 'PWNED-revert-fsmonitor');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+// Plant once — on the baseline — the way a probe's own test code would. No
+// filter and no attributes: fsmonitor is not attribute-gated, so this slips
+// past the filter screen entirely and only the checkout's own -c can stop it.
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('git', ['config', 'core.fsmonitor', 'sh -c "touch ${canary}; :"']);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
+  it('refuses the REVERT when the baseline planted an unparseable config', async () => {
+    // The keys-found branch has a witness; the `stopped` branch did not. A
+    // plant that makes the screen STOP — here an unparseable `config.worktree`
+    // — must refuse the revert just as a found key does, because a screen that
+    // could not finish did not clear anything. The plant lands mid-run, after
+    // the restore's own screen has already passed.
+    const canary = join(repo, 'PWNED-revert-stopped');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  // The filter that would fire, plus the attributes selecting it...
+  execFileSync('git', ['config', 'filter.evil.smudge', 'sh -c "pwd >> ${canary}; cat"']);
+  const attrs = g('rev-parse', '--git-path', 'info/attributes');
+  fs.mkdirSync(path.dirname(attrs), { recursive: true });
+  fs.appendFileSync(attrs, '*.ts filter=evil\\n');
+  // ...and an unparseable candidate, so the screen STOPS before it can
+  // enumerate that filter. A stop must refuse exactly as a key would.
+  const gitDir = g('rev-parse', '--git-dir');
+  fs.writeFileSync(path.join(gitDir, 'config.worktree'), '[filter "x"\\n\\tsmudge = cat\\n');
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
+  it('runs no planted post-checkout hook during the revert', async () => {
+    // `CHECKOUT_INERT` carries two neutralisations and only fsmonitor was
+    // pinned. A pathspec checkout DOES fire an executable `post-checkout`
+    // hook, and the hook needs no config of its own — so it is a surface the
+    // filter screen cannot see, closed only by the flag.
+    const canary = join(repo, 'PWNED-post-checkout');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  // The fixture redirects hooks to this directory, so the plant goes there.
+  const hooks = execFileSync('git', ['config', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+  fs.mkdirSync(hooks, { recursive: true });
+  const hook = path.join(hooks, 'post-checkout');
+  fs.writeFileSync(hook, '#!/bin/sh\\necho fired >> ${canary}\\n');
+  fs.chmodSync(hook, 0o755);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
+  // POSIX-only: the relink is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses the REVERT when the root is swapped after its escape check',
+    async () => {
+      // The revert takes its root verdict above the classification loop and
+      // used to act on it after the loop AND the filter screen — both
+      // attacker-sized. The relink target here is the SHARED review worktree,
+      // which is the scenario that matters: it holds `base`, so without the
+      // re-check `checkout base -- <paths>` SUCCEEDS there and rewrites the
+      // reviewer's PR-modified files back to the merge base.
+      //
+      // Deterministic rather than raced: `cat-file` is unique to the
+      // classification loop, so the shim arms there (with `modified` computed
+      // against the real probe tree) and swaps on the next config read — the
+      // revert's own screen — landing exactly in the window.
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-revshim-'));
+      const savedPath = process.env['PATH'];
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      try {
+        const { wt, base } = scaffoldModifiedPr();
+        const probe = `${wt}-probe`;
+        const prFile = join(wt, 'packages/lib/src/f.ts');
+        const prContent = readFileSync(prFile, 'utf8');
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *cat-file*) touch ${shimDir}/armed ;;
+  *--file*)
+    if [ -e ${shimDir}/armed ] && [ ! -e ${shimDir}/done ] && [ -d ${probe} ]; then
+      touch ${shimDir}/done
+      mv ${probe} ${probe}.real && ln -s ${wt} ${probe}
+    fi
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        await runHandler({
+          report: join(repo, 'report.json'),
+          worktree: wt,
+          base,
+          out: join(repo, 'out.json'),
+        });
+
+        // The damage assertion: the shared worktree still holds the PR's
+        // version, not the merge base's.
+        expect(readFileSync(prFile, 'utf8')).toBe(prContent);
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only: the swap is a `mv` pair driven from the fake runner.
+  it.skipIf(process.platform === 'win32')(
+    'refuses after a swap that happened OUTSIDE any restore',
+    async () => {
+      // Capturing the identity at the top of each restore answers "did the
+      // tree change during THIS restore" — which a planter waits out. It swaps
+      // the root while the PROBE SUITE runs (minutes), and the next restore
+      // then captures the swapped tree's identity as its own baseline and
+      // agrees with itself all the way through. The anchor has to be the
+      // moment the pipeline made the tree, before any PR code ran.
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-anchorvictim-'));
+      let probe = '';
+      try {
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
+          cwd: victim,
+        });
+        execFileSync('git', ['add', '-A'], { cwd: victim });
+        execFileSync(
+          'git',
+          ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'v'],
+          { cwd: victim },
+        );
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const { wt, base } = scaffoldModifiedPr();
+        probe = `${wt}-probe`;
+        // The fake runner IS the PR's test code: it swaps the root from
+        // inside a probe run, between restores.
+        writeFileSync(
+          vitestScript(),
+          `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const stamp = '${probe}.swapped';
+if (!fs.existsSync(stamp) && fs.existsSync('${probe}')) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('sh', ['-c', 'mv ${probe} ${probe}.gone && mv ${victim} ${probe}']);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+        );
+
+        await runHandler({
+          report: join(repo, 'report.json'),
+          worktree: wt,
+          base,
+          out: join(repo, 'out.json'),
+        });
+
+        // The refusal is the assertion. A damage assertion would be wrong
+        // here for a reason worth recording: the run's own CLEANUP
+        // (`discardWorktree`) removes whatever stands at the probe path when
+        // the command ends, so the swapped-in tree is emptied by teardown
+        // regardless of whether the restore and revert refused. That is a
+        // separate site with the same shape, and this anchor does not cover it.
+        const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+        const details = JSON.stringify(out.probed ?? []);
+        expect(details).toContain('stopped being its own root');
+      } finally {
+        if (probe) rmSync(`${probe}.gone`, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the

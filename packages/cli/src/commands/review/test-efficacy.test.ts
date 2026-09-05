@@ -32,13 +32,18 @@ import {
   runOneMutant,
   runOneHunkProbe,
   committedSymlinkProbes,
+  gitfileMarker,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { MAX_SCREEN_KEYS, sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
+  statSync,
+  realpathSync,
   writeFileSync,
+  appendFileSync,
   symlinkSync,
   existsSync,
   readFileSync,
@@ -561,6 +566,572 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       expect(r.detail).toContain('no .git');
       expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to run through a repo-LOCAL content filter, and only a local one', () => {
+    // The restore rewrites every tracked file in this tree, and a checkout
+    // EXECUTES `filter.<name>.smudge` whenever it does — the same surface
+    // `scratch-tree` refuses to reset through, run twice per probe run one
+    // directory over with no screen at all.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      // The attributes line is half the plant and belongs in the fixture: a
+      // filter git never SELECTS for a tracked path executes nothing, so
+      // without this the restore is harmless with or without the screen and
+      // the test would stay green if a later edit moved the screen below the
+      // checkout. With it, the canary below pins the ORDER, not just the
+      // message.
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      // OUTSIDE the probe tree, but inside a fixture this test removes: the
+      // restore's second spawn is `clean -ffdx`, which deletes an untracked
+      // canary written into the tree and would hide the very ordering bug the
+      // canary exists to catch. Nothing is left on the runner either way.
+      const canary = join(canaryDir, 'PWNED-smudge');
+      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${canary}`], {
+        cwd: dir,
+      });
+      // A checkout runs the smudge only on files it actually REWRITES, and it
+      // rewrites nothing when the tree already matches HEAD. A dirty file is
+      // what a probe run leaves behind and what the restore exists to undo, so
+      // it is also the condition under which the canary can fire at all.
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      // The refusal has to come BEFORE the checkout, not merely instead of a
+      // verdict: this is the assertion that goes red if the screen moves down.
+      expect(existsSync(canary)).toBe(false);
+
+      // ...and a filter in the user's GLOBAL config is their own contract, the
+      // way it is for any git command they run. `git lfs install` writes one
+      // there, so refusing on it would put every contributor with git-lfs into
+      // permanent refusal — the failure mode a blanket rule reproduces.
+      execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], {
+        cwd: dir,
+      });
+      execFileSync(
+        'git',
+        ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],
+        { cwd: dir },
+      );
+
+      // It gets all the way to the runner, which this bare fixture does not
+      // have — the throw is from `findVitestBin`, and that IS the observation:
+      // the restore did not refuse, so the phase proceeded.
+      let afterDetail: string;
+      try {
+        afterDetail = runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ).detail;
+      } catch (e) {
+        afterDetail = e instanceof Error ? e.message : String(e);
+      }
+
+      expect(afterDetail).not.toContain('filter.lfs.clean');
+      expect(afterDetail).not.toContain('content filter');
+      // The local `evil` filter is gone, so nothing selected by the committed
+      // attributes line remains to execute either.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still sees a filter whose value is padded huge — `--name-only` never prints the value', () => {
+    // The screened file is attacker-writable, and a `smudge` value padded past
+    // `spawnSync`'s DEFAULT 1 MiB buffer would kill git with ENOBUFS if the
+    // enumeration printed values — the screen would skip the one file that
+    // defines the filter and report the repository clean. `--name-only` prints
+    // only the KEY, so the padded value never reaches stdout: the key is found
+    // and the refusal fires with no raised buffer at all. Remove `--name-only`
+    // and this goes red (the 1.2 MiB value overflows the default buffer and the
+    // detail no longer names the key), which is what pins the flag.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-bigvalue-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      const canary = join(canaryDir, 'PWNED-bigvalue');
+      // git takes the LAST value; the first is only there to push the
+      // enumeration's output past the default buffer.
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
+          `\tsmudge = touch ${canary}\n`,
+      );
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a config candidate it cannot read — not "clean"', () => {
+    // git reports an unreadable `--file` with exit 1 and a warning on stderr —
+    // the same status as "no key matched" — so a screen that asks git and reads
+    // the exit code calls a config it never read clean. The candidate here is
+    // `config.worktree`, which git honors once `extensions.worktreeConfig` is
+    // on; a directory in its place is a candidate the screen cannot check.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-unreadable-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      mkdirSync(join(dir, '.git', 'config.worktree'));
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not be read to the end');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says the enumeration was capped when more keys were planted than shown', () => {
+    // The cap exists so an attacker-written key list cannot become the whole
+    // refusal string; the count exists so the message does not send a user to
+    // remove the keys it named and leave the rest standing.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-capmsg-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      let cfg = '';
+      for (let i = 0; i < MAX_SCREEN_KEYS + 1; i++) {
+        cfg += `[filter "evil${i}"]\n\tsmudge = cat\n`;
+      }
+      appendFileSync(join(dir, '.git', 'config'), cfg);
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('capped enumeration');
+      expect(r.detail).toContain(
+        `${MAX_SCREEN_KEYS} shown of ${MAX_SCREEN_KEYS + 1}`,
+      );
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('flattens control characters in the filter key it names', () => {
+    // A config subsection name legally carries control and format characters,
+    // and `--get-regexp` prints them verbatim. These detail strings reach the
+    // agent-facing report through JSON.stringify, which escapes Cc but NOT Cf
+    // (bidi overrides), Zl/Zp, or backticks — so the flattening has to happen
+    // here, through the same helper scratch-tree already uses.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-inert-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // ESC (Cc) and a right-to-left override (Cf) inside the subsection name.
+      execFileSync(
+        'git',
+        ['config', 'filter.ev\u001bil\u202eX.smudge', 'cat'],
+        { cwd: dir },
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.ev il X.smudge');
+      expect(r.detail).not.toContain('\u001b');
+      expect(r.detail).not.toContain('\u202e');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // POSIX-only: the relink is a symlink swap driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the tree stops being its own root mid-screen',
+    () => {
+      // The root verdict is taken at the top of the restore; the filter screen
+      // runs between it and the destructive spawns, and an attacker can
+      // stretch that walk. A planter that swaps the root for a symlink to the
+      // SHARED tree inside the window would send `checkout --force` and
+      // `clean -ffdx` there — tracked files rewritten, untracked and ignored
+      // ones deleted. Driven deterministically here: a `git` shim performs the
+      // swap on the screen's first config read, so the relink lands exactly in
+      // the window rather than by racing.
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-relink-'));
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-victim-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-relinkshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+        asCheckout(dir);
+        writeFileSync(join(dir, 'a.ts'), 'dirtied\n');
+        // The tree the relink points at is a real checkout, so without the
+        // re-check the spawns SUCCEED there rather than failing on "not a git
+        // repository" — `clean -ffdx` eats the untracked file, which is what
+        // makes this a damage witness and not just a diagnostics one.
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        asCheckout(victim);
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        // On the first `config --file` read, swap the root for a symlink.
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh\ncase "$*" in\n  *--file*)\n    if [ ! -e ${shimDir}/done ]; then\n      touch ${shimDir}/done\n      rm -rf ${dir}.real && mv ${dir} ${dir}.real && ln -s ${victim} ${dir}\n    fi\n    ;;\nesac\nexec ${realGit} "$@"\n`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        // Wrapped, because without the re-check the run does not merely
+        // return a wrong verdict — it throws further along, after the damage.
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            dir,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // The damage assertion FIRST: this is the one that fails when the
+        // re-check is removed, and it fails because `clean -ffdx` really did
+        // run in the shared tree.
+        expect(existsSync(join(victim, 'PRECIOUS'))).toBe(true);
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(`${dir}.real`, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('gives a gitfile and a directory markers that cannot collide', () => {
+    // The file's own bytes and the word for "it was a directory" must not
+    // share one string space. If they do, a gitfile whose literal content is
+    // the directory token compares EQUAL to a directory swapped in for it —
+    // capture-1 reads the planted text, capture-2 finds a real directory, and
+    // the pre-spawn re-check passes over the swap.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-marker-'));
+    try {
+      const asFile = join(dir, 'as-file');
+      const asDir = join(dir, 'as-dir');
+      // Every token this function can emit, written as file CONTENT.
+      mkdirSync(asDir);
+      const dirMarker = gitfileMarker(asDir);
+      for (const token of [dirMarker, 'dir', 'other', 'oversized:9']) {
+        writeFileSync(asFile, token);
+        expect(gitfileMarker(asFile)).not.toBe(dirMarker);
+      }
+      // And two gitfiles differing only in bytes a utf8 decode would fold
+      // together must still differ: git resolves the raw bytes.
+      writeFileSync(asFile, Buffer.from([0xff, 0xfe]));
+      const a = gitfileMarker(asFile);
+      writeFileSync(asFile, Buffer.from([0xfe, 0xff]));
+      expect(gitfileMarker(asFile)).not.toBe(a);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // POSIX-only: the swap is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the root is swapped BETWEEN the checkout and the clean',
+    () => {
+      // One re-ask before the first spawn is not enough: the gap to the second
+      // is a whole `checkout --force`, which scales with the tracked-file
+      // count. `clean -ffdx` re-resolves its cwd when it starts, so a swap
+      // landing in that gap sends the DELETE into the swapped-in tree while
+      // the checkout, holding an fd on the original, finishes harmlessly.
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-midspawn-'));
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-mvictim-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-msshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+        asCheckout(dir);
+        writeFileSync(join(dir, 'a.ts'), 'dirtied\n');
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        asCheckout(victim);
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        // Swap AFTER the checkout has been issued, i.e. when the clean is next.
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *checkout\\ --force*)
+    ${realGit} "$@"
+    rc=$?
+    if [ ! -e ${shimDir}/done ]; then
+      touch ${shimDir}/done
+      mv ${dir} ${dir}.gone && mv ${victim} ${dir}
+    fi
+    exit $rc
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            dir,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // Damage first: the swapped-in tree keeps its untracked file, which is
+        // what `clean -ffdx` would have eaten.
+        expect(existsSync(join(dir, 'PRECIOUS'))).toBe(true);
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(`${dir}.gone`, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only: the swap is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the root is RENAMED away mid-screen, not just relinked',
+    () => {
+      // A path is not an identity. `mv <probe> <probe>.gone` followed by
+      // `mv <victim> <probe>` leaves the path and its realpath untouched while
+      // the directory underneath is somebody else's — so a check built on
+      // realpath alone passes and the spawns run in the swapped tree. The
+      // sibling relink test does not cover this: it swaps in a SYMLINK, which
+      // the lstat arm catches.
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-rename-'));
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-rvictim-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-renshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+        asCheckout(dir);
+        writeFileSync(join(dir, 'a.ts'), 'dirtied\n');
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        asCheckout(victim);
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *--file*)
+    if [ ! -e ${shimDir}/done ]; then
+      touch ${shimDir}/done
+      mv ${dir} ${dir}.gone && mv ${victim} ${dir}
+    fi
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            dir,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // Damage first: the swapped-in tree keeps its untracked file.
+        expect(existsSync(join(dir, 'PRECIOUS'))).toBe(true);
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(`${dir}.gone`, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only: the rewrite is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the .git gitfile is repointed mid-screen',
+    () => {
+      // The probe tree is a linked worktree, so `.git` is a FILE naming the
+      // repository every spawn below resolves through. Repoint it during the
+      // screen walk and the root never moves — path, inode and realpath all
+      // agree — while `checkout --force HEAD -- .` resolves HEAD in the
+      // attacker's repository and materialises its content here.
+      // realpath'd: the linked-worktree path walks its ancestors for symlinks,
+      // and on macOS `/var` is one — an unrelated refusal that would mask this
+      // test's own.
+      const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-gitfile-')));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-gfshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        // A real repository with a linked worktree, so `.git` is a gitfile.
+        const main = join(base, 'main');
+        mkdirSync(main);
+        writeFileSync(join(main, 'a.ts'), 'gone.clear();\n');
+        asCheckout(main);
+        const probe = join(base, 'probe');
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-q', '--detach', probe, 'HEAD'],
+          { cwd: main },
+        );
+        writeFileSync(join(probe, 'a.ts'), 'dirtied\n');
+        expect(statSync(join(probe, '.git')).isFile()).toBe(true);
+
+        // The attacker's repository, whose HEAD carries different content.
+        const atk = join(base, 'atk');
+        mkdirSync(atk);
+        writeFileSync(join(atk, 'a.ts'), 'ATTACKER CONTENT\n');
+        asCheckout(atk);
+
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *--file*)
+    if [ ! -e ${shimDir}/done ]; then
+      touch ${shimDir}/done
+      printf 'gitdir: %s\\n' "${atk}/.git" > ${probe}/.git
+    fi
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            probe,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // Damage first: the probe tree never took the attacker's content.
+        expect(readFileSync(join(probe, 'a.ts'), 'utf8')).not.toContain(
+          'ATTACKER CONTENT',
+        );
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses when git cannot PARSE a candidate config — not "clean"', () => {
+    // The readability gate above answers "can this process open it"; this is
+    // the other half — a file that opens fine and that git then dies on. A
+    // malformed section header exits 128 (not the 1 that means "no key
+    // matched"), so a screen that only distinguished 0 from non-0 would skip
+    // the file and report the repository clean on a config it never read.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-malformed-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // Unclosed section header — a regular, readable file git refuses to parse.
+      writeFileSync(
+        join(dir, '.git', 'config.worktree'),
+        '[filter "evil"\n\tsmudge = cat\n',
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not be read to the end');
+    } finally {
+      isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
     }
   });

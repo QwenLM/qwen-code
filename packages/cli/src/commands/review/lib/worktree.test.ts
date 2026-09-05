@@ -32,9 +32,15 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  MAX_SCREEN_CANDIDATES,
+  MAX_SCREEN_CONFIG_BYTES,
+  MAX_SCREEN_KEYS,
+  carriesReplacementChar,
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   sanitizedGitEnv,
+  screenStopDetail,
   worktreeCreateFailureDetail,
   worktreeResidue,
 } from './worktree.js';
@@ -1883,5 +1889,550 @@ describe('worktreeCreateFailureDetail', () => {
     expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
+  });
+});
+
+describe('localFilterCommands', () => {
+  let dir: string;
+  let isolation: { dispose: () => void };
+
+  const initRepo = (d: string) => {
+    execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
+      cwd: d,
+    });
+  };
+
+  beforeEach(() => {
+    isolation = isolateHostGitConfig();
+    dir = mkdtempSync(join(tmpdir(), 'qwen-screen-'));
+    initRepo(dir);
+  });
+
+  afterEach(() => {
+    try {
+      chmodSync(join(dir, '.git', 'worktrees'), 0o755);
+    } catch {
+      // Not every case creates it; rmSync below is the cleanup either way.
+    }
+    isolation.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('finds a repo-local filter and reports the total', () => {
+    execFileSync('git', ['config', 'filter.evil.smudge', 'cat'], { cwd: dir });
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual(['filter.evil.smudge']);
+    expect(screen.total).toBe(1);
+    expect(screen.unreadable).toBeNull();
+  });
+
+  it("never reports the user's global keys through an include", () => {
+    // The screen does not follow includes at all — a declared limit, see the
+    // spawn's comment. This pins the half of it that MUST hold: an
+    // `include.path` naming the user's own global config never drags their
+    // `filter.lfs.*` into a repo-local refusal. `git lfs install` writes that
+    // key, so following the edge would put every contributor with git-lfs into
+    // permanent refusal — the failure this screen is scoped to avoid.
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-userconf-'));
+    try {
+      const userConfig = join(outside, 'gitconfig');
+      writeFileSync(
+        userConfig,
+        '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n',
+      );
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        `[include]\n\tpath = ${userConfig}\n`,
+      );
+
+      const screen = localFilterCommands(dir);
+
+      expect(screen.keys).toEqual([]);
+      expect(screen.stopped).toBeNull();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('never reports global keys through a `~` include either', () => {
+    // Same rule through the tilde form: `[include] path = ~/.gitconfig` is the
+    // one-line write a probe can make into the never-wiped common config, and
+    // `sanitizedGitEnv()` keeps HOME so it would expand to the reviewing
+    // user's real config.
+    const home = process.env['HOME'];
+    expect(home).toBeTruthy();
+    writeFileSync(
+      join(home as string, '.gitconfig'),
+      '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n',
+    );
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      '[include]\n\tpath = ~/.gitconfig\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual([]);
+    expect(screen.stopped).toBeNull();
+  });
+
+  it('matches a filter key whose subsection carries an invalid UTF-8 byte', () => {
+    // `--get-regexp` is POSIX matching and locale-sensitive: under a UTF-8
+    // locale a key holding an invalid byte never matches, so git exits 1 and
+    // that reads as the ordinary "no key matched". The checkout resolves
+    // filter keys by exact name, which no locale affects — so the screen would
+    // certify clean over a filter the checkout runs.
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      Buffer.concat([
+        Buffer.from('[filter "'),
+        Buffer.from([0xff]),
+        Buffer.from('"]\n\tsmudge = cat\n'),
+      ]),
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.total).toBe(1);
+    expect(screen.keys[0]).toMatch(/^filter\..*\.smudge$/);
+  });
+
+  it('refuses when an admin entry name did not survive the decode', () => {
+    // Entry names are the third attacker-influenced source of candidate bytes,
+    // after the two rev-parse answers. An invalid byte in the name comes back
+    // from `readdirSync` as U+FFFD, `join` re-encodes it, `existsSync` is then
+    // false, and the loop would skip a `config.worktree` that really exists
+    // and really defines a filter — the clean verdict authorising the
+    // checkout that runs it.
+    //
+    // The fixture uses a real U+FFFD in the name rather than an invalid byte:
+    // it is what the guard actually tests for, and unlike an invalid byte it
+    // can be created on every platform (macOS rejects those with EILSEQ).
+    mkdirSync(join(dir, '.git', 'worktrees', 'w\uFFFDx'), { recursive: true });
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.stopped).toBe('unreadable');
+    expect(screen.unreadable).toBe(join(dir, '.git', 'worktrees'));
+  });
+
+  it('refuses a candidate too large to parse in reasonable time', () => {
+    // Capping the COUNT of candidates without capping their SIZE leaves the
+    // same denial of service one file over: git parses config linearly and the
+    // spawn is synchronous, so one huge candidate stalls a screen that runs
+    // once per mutant. The bound is far above any real config and above the
+    // padded-VALUE plant a sibling test exercises — that one is about what
+    // reaches stdout, this is about what git has to read.
+    const big = Buffer.alloc(MAX_SCREEN_CONFIG_BYTES + 1, 0x20);
+    writeFileSync(join(dir, '.git', 'config.worktree'), big);
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.stopped).toBe('unreadable');
+    expect(screen.unreadable).toBe(join(dir, '.git', 'config.worktree'));
+  });
+
+  it('stops walking candidates once a stop is decided', () => {
+    // Nothing after the first stop can change the verdict — every caller gates
+    // on `stopped` before it looks at `keys` — so the remaining candidates are
+    // spawns an attacker chose for us.
+    mkdirSync(join(dir, '.git', 'worktrees'), { recursive: true });
+    // An unreadable entry name refuses immediately; the fillers after it must
+    // never be read.
+    mkdirSync(join(dir, '.git', 'worktrees', 'a\uFFFDb'), { recursive: true });
+    for (let i = 0; i < 5; i++) {
+      mkdirSync(join(dir, '.git', 'worktrees', `f${i}`), { recursive: true });
+      writeFileSync(
+        join(dir, '.git', 'worktrees', `f${i}`, 'config.worktree'),
+        '[filter "later"]\n\tsmudge = cat\n',
+      );
+    }
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.stopped).toBe('unreadable');
+    // The filters in the entries after the stop were never enumerated.
+    expect(screen.keys).toEqual([]);
+    expect(screen.total).toBe(0);
+  });
+
+  it('treats a transcoded rev-parse answer as unmeasured', () => {
+    // `encoding: 'utf8'` turns an invalid byte in the repository path into
+    // U+FFFD, so every candidate built from the answer names a file that does
+    // not exist, the admin readdir hits ENOENT — the branch treated as the
+    // ordinary "no linked worktrees" case — and the screen would answer clean
+    // over whatever the real path holds. Unmeasured is not clean; the residue
+    // walker in this file fails the same shape closed.
+    //
+    // Pinned at this level deliberately. The end-to-end fixture cannot be
+    // built from Node: a path carrying an invalid byte does not survive
+    // `Buffer`→`string`, and `cwd` accepts only a string, so the repository
+    // cannot be created and then addressed from a test. (Attempting it is how
+    // this test got written the first time — the round-trip re-encoded 0xFF as
+    // 0xC3 0xBF and git failed with ENOENT on a path that did not exist.)
+    expect(carriesReplacementChar('/tmp/plain/path')).toBe(false);
+    expect(carriesReplacementChar('')).toBe(false);
+    expect(carriesReplacementChar('/tmp/n\uFFFDd/repo')).toBe(true);
+    expect(carriesReplacementChar('\uFFFD')).toBe(true);
+  });
+
+  // POSIX-only: `mkfifo` does not exist on Windows. The bound it pins is
+  // platform-independent; only this way of provoking a block is not.
+  it.skipIf(process.platform === 'win32')(
+    'refuses rather than hanging when an include names a FIFO',
+    () => {
+      // git follows includes at startup, so the very first `rev-parse` blocks on
+      // a FIFO nobody writes to — and `spawnSync` blocks the event loop, so no
+      // JS timer can interrupt it. The bound has to be on the spawn, and a
+      // killed discovery must not read as "not a usable repository".
+      const fifo = join(dir, '.git', 'evil.fifo');
+      execFileSync('mkfifo', [fifo]);
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        `[include]\n\tpath = ${fifo}\n`,
+      );
+
+      const started = Date.now();
+      const screen = localFilterCommands(dir);
+      const elapsed = Date.now() - started;
+
+      expect(screen.stopped).toBe('unreadable');
+      // One spawn timeout, not two. A null `commonDir` already decides the
+      // refusal above, so re-running discovery for `gitDir` only doubles the
+      // synchronous block: 40s measured, most of vitest's fixed 60s worker RPC
+      // budget, which on the Linux lane exits an all-green suite red.
+      expect(elapsed).toBeLessThan(30_000);
+    },
+    60_000,
+  );
+
+  it('caps the reported keys and keeps the pre-cap total', () => {
+    // The keys come from an attacker-writable file that cleanup never wipes;
+    // an unbounded list is its own denial-of-service in the refusal message.
+    let cfg = '';
+    for (let i = 0; i < MAX_SCREEN_KEYS + 5; i++) {
+      cfg += `[filter "evil${i}"]\n\tsmudge = cat\n`;
+    }
+    appendFileSync(join(dir, '.git', 'config'), cfg);
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toHaveLength(MAX_SCREEN_KEYS);
+    expect(screen.total).toBe(MAX_SCREEN_KEYS + 5);
+    // Still names a real planted key — a cap that reported none would be a
+    // refusal nobody can act on.
+    expect(screen.keys[0]).toMatch(/^filter\.evil\d+\.smudge$/);
+  });
+
+  // POSIX-only: the shim is a `#!/bin/sh` script found through `which`, and
+  // neither works on Windows. The ORDER it pins is platform-independent, so
+  // skipping there loses the witness, not the behaviour.
+  it.skipIf(process.platform === 'win32')(
+    'reads `<common>/config` LAST, after the amplifiable admin set',
+    () => {
+      // Order is load-bearing, not cosmetic. The checkout this screen authorises
+      // reads merged config at its start, so the gap between the screen's read
+      // of a file and that checkout is a window a plant can land in. The
+      // admin-dir set is attacker-amplifiable — filler entries cost spawns and
+      // stretch the walk — so reading the common config first would put the
+      // likeliest plant target at the START of a window the plant itself can
+      // widen. Pinned through a `git` shim on PATH, which is deterministic;
+      // racing it would not be.
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-shim-'));
+      const log = join(shimDir, 'calls.log');
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec ${realGit} "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'git'), 0o755);
+      for (const e of ['w1', 'w2']) {
+        mkdirSync(join(dir, '.git', 'worktrees', e), { recursive: true });
+        writeFileSync(join(dir, '.git', 'worktrees', e, 'config.worktree'), '');
+      }
+      writeFileSync(join(dir, '.git', 'config.worktree'), '');
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        localFilterCommands(dir);
+
+        const reads = readFileSync(log, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('--file'))
+          .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
+        const own = join(dir, '.git', 'config.worktree');
+        const commonCfg = join(dir, '.git', 'config');
+        // The file the checkout honours is dead last...
+        expect(reads[reads.length - 1]).toBe(own);
+        // ...with the common config immediately before it, and the paddable
+        // admin entries before both.
+        expect(reads[reads.length - 2]).toBe(commonCfg);
+        expect(
+          reads.indexOf(join(dir, '.git', 'worktrees', 'w1', 'config.worktree')),
+        ).toBeLessThan(reads.indexOf(commonCfg));
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only, same shim mechanism as the sibling above.
+  it.skipIf(process.platform === 'win32')(
+    'reads a CROSS-tree checkout target last, not the screened tree\'s own',
+    () => {
+      // `scratch-tree` screens the review worktree while authorising a
+      // checkout in the scratch tree, and that tree's entry — not the screened
+      // tree's own config — is what has to be read last.
+      //
+      // The entry is found by asking which admin `gitdir` points BACK at the
+      // tree, never by its basename: `git worktree add` registers `<name>1`
+      // when `<name>` is taken, so a basename derivation would hold back a
+      // decoy and read the honoured file mid-walk. The fixture builds exactly
+      // that collision — a bare `scratchy` entry, with the real registration
+      // at `scratchy1`.
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-xshim-'));
+      const log = join(shimDir, 'calls.log');
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec ${realGit} "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'git'), 0o755);
+      const scratch = join(dirname(dir), 'scratchy');
+      for (const e of ['other', 'scratchy', 'scratchy1']) {
+        mkdirSync(join(dir, '.git', 'worktrees', e), { recursive: true });
+        writeFileSync(join(dir, '.git', 'worktrees', e, 'config.worktree'), '');
+      }
+      // The decoy claims nothing; the real registration points back at it.
+      writeFileSync(
+        join(dir, '.git', 'worktrees', 'scratchy1', 'gitdir'),
+        `${join(scratch, '.git')}\n`,
+      );
+      writeFileSync(join(dir, '.git', 'config.worktree'), '');
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        localFilterCommands(dir, scratch);
+
+        const reads = readFileSync(log, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('--file'))
+          .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
+        // The NUMBERED entry — the one whose gitdir claims the tree — is last,
+        // not the same-basename decoy.
+        expect(reads[reads.length - 1]).toBe(
+          join(dir, '.git', 'worktrees', 'scratchy1', 'config.worktree'),
+        );
+        // The decoy was still screened, just not held back.
+        expect(reads).toContain(
+          join(dir, '.git', 'worktrees', 'scratchy', 'config.worktree'),
+        );
+        // And the screened tree's own config is still read (R17-5): dropping
+        // it turned a refusal into an executed plant for a main checkout.
+        expect(reads).toContain(join(dir, '.git', 'config.worktree'));
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("refuses past the candidate cap instead of walking a plant's filler", () => {
+    // Each entry costs one synchronous `git config` spawn, on every screen
+    // call — once per mutant. Skipping past the bound would let filler hide a
+    // real filter behind it, so the screen refuses.
+    for (let i = 0; i <= MAX_SCREEN_CANDIDATES; i++) {
+      mkdirSync(join(dir, '.git', 'worktrees', `filler-${i}`), {
+        recursive: true,
+      });
+    }
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.unreadable).toBe(join(dir, '.git', 'worktrees'));
+    expect(screen.keys).toEqual([]);
+    // Read fine, just too many — a different remedy from an unreadable file.
+    expect(screen.stopped).toBe('over-cap');
+  });
+
+  // POSIX DAC bits only: Windows does not restrict listing through chmod, and
+  // root bypasses the mode entirely — the fixture would be red on both rather
+  // than pinning anything. Same guard as the other permission-bit fixture in
+  // this file.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses when the worktrees admin dir cannot be read',
+    () => {
+      // git opens each `worktrees/<e>/config.worktree` by direct path — the
+      // search bit alone suffices — so a readdir that fails with EACCES means
+      // the screen never saw candidates git will still honour. Swallowing that
+      // as "no linked worktrees" answers clean on a config it did not read.
+      const admin = join(dir, '.git', 'worktrees');
+      mkdirSync(admin, { recursive: true });
+      chmodSync(admin, 0o111);
+
+      const screen = localFilterCommands(dir);
+
+      expect(screen.unreadable).toBe(admin);
+      // The two refusal causes must stay distinguishable: this one is a file
+      // to fix, the over-cap one is a directory to prune.
+      expect(screen.stopped).toBe('unreadable');
+    },
+  );
+
+  it('names a key whose subsection carries whitespace, intact', () => {
+    // A config subsection name may legally hold spaces, and `--get-regexp`
+    // prints `key value` on one line — so splitting on whitespace named
+    // `filter.evil` for a planted `filter.evil name.smudge`. The refusal then
+    // prescribed an unset that exits 5 while the plant stood, and two distinct
+    // keys sharing a truncated prefix collapsed into one, understating `total`.
+    execFileSync('git', ['config', 'filter.evil name.smudge', 'CMD'], {
+      cwd: dir,
+    });
+    execFileSync('git', ['config', 'filter.evil other.smudge', 'CMD2'], {
+      cwd: dir,
+    });
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys.sort()).toEqual([
+      'filter.evil name.smudge',
+      'filter.evil other.smudge',
+    ]);
+    expect(screen.total).toBe(2);
+  });
+
+  it('sees a filter through a repo path that carries a newline', () => {
+    // The screened trees are linked worktrees inheriting the user's repo path.
+    // A combined `rev-parse --git-common-dir --git-dir` answer splits into four
+    // records under such a path instead of two, every candidate resolves to
+    // nothing, the admin readdir hits ENOENT — the branch treated as ordinary —
+    // and the screen answers clean over a live plant.
+    const base = mkdtempSync(join(tmpdir(), 'qwen-nl-'));
+    try {
+      const holder = join(base, 'nl\ndir');
+      mkdirSync(holder, { recursive: true });
+      const main = join(holder, 'main');
+      mkdirSync(main);
+      initRepo(main);
+      writeFileSync(join(main, 'a.ts'), 'x\n');
+      execFileSync('git', ['add', '-A'], { cwd: main });
+      execFileSync(
+        'git',
+        ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'i'],
+        { cwd: main },
+      );
+      execFileSync('git', ['config', 'filter.evil.smudge', 'cat'], {
+        cwd: main,
+      });
+      const linked = join(holder, 'wt');
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', linked, 'HEAD'],
+        { cwd: main },
+      );
+
+      const screen = localFilterCommands(linked);
+
+      expect(screen.keys).toEqual(['filter.evil.smudge']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('stays clean on a repo with no linked worktrees at all', () => {
+    // ENOENT on the admin dir is the ordinary case and must NOT refuse.
+    expect(existsSync(join(dir, '.git', 'worktrees'))).toBe(false);
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen).toEqual({
+      keys: [],
+      total: 0,
+      unreadable: null,
+      stopped: null,
+    });
+  });
+
+  it('refuses a candidate git cannot parse', () => {
+    // Opens fine, and git then dies on it with exit 128 — not the exit 1 that
+    // means "no key matched".
+    writeFileSync(
+      join(dir, '.git', 'config.worktree'),
+      '[filter "evil"\n\tsmudge = cat\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.unreadable).toBe(join(dir, '.git', 'config.worktree'));
+  });
+
+  it('does NOT see a filter one include-hop away — a declared limit', () => {
+    // `git config --file` does not expand includes and this screen does not
+    // walk them either, so a filter behind an include is invisible here while
+    // the checkout, reading merged config, would run it. That gap is real and
+    // deliberate: both ways of closing it were tried and both were worse (the
+    // spawn's comment records why), and #10441 carries the design that closes
+    // it properly. This test exists so the limit is visible rather than
+    // assumed — if a later change starts following includes, it goes red and
+    // whoever wrote it has to decide deliberately.
+    writeFileSync(
+      join(dir, '.git', 'evil.inc'),
+      '[filter "evil"]\n\tsmudge = cat\n',
+    );
+    appendFileSync(
+      join(dir, '.git', 'config'),
+      '[include]\n\tpath = evil.inc\n',
+    );
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.keys).toEqual([]);
+    expect(screen.stopped).toBeNull();
+  });
+});
+
+describe('screenStopDetail', () => {
+  // The two refusal causes call for OPPOSITE remedies, so they must not share a
+  // sentence — an unreadable candidate is a file to fix or remove, while an
+  // over-cap admin directory was read perfectly well and "remove that file"
+  // there would deregister every legitimate linked worktree. Each arm is pinned
+  // directly: the producer's classification is tested elsewhere, but the
+  // rendered remedy a reader acts on is only here.
+  it('names the prune remedy for an over-cap directory, not a file to remove', () => {
+    const detail = screenStopDetail({
+      keys: [],
+      total: 0,
+      unreadable: '/repo/.git/worktrees',
+      stopped: 'over-cap',
+    });
+
+    expect(detail).toContain('git worktree prune');
+    expect(detail).toContain('registered under');
+    expect(detail).toContain(String(MAX_SCREEN_CANDIDATES));
+    expect(detail).toContain('/repo/.git/worktrees');
+    // Must NOT tell the reader the directory could not be read — it was.
+    expect(detail).not.toContain('could not be read to the end');
+  });
+
+  it('names the unreadable file plainly, without the prune remedy', () => {
+    const detail = screenStopDetail({
+      keys: [],
+      total: 0,
+      unreadable: '/repo/.git/config.worktree',
+      stopped: 'unreadable',
+    });
+
+    expect(detail).toContain('/repo/.git/config.worktree');
+    expect(detail).toContain('could not be read to the end');
+    expect(detail).not.toContain('git worktree prune');
   });
 });
