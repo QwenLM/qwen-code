@@ -25,9 +25,7 @@ const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
     'utf8',
   ),
 );
-const documentAssetBaseUrl =
-  'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code';
-const documentRendererUrl = `${documentAssetBaseUrl}/v${exportTranscriptRendererPackageVersion}/export-transcript-document.js`;
+const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererPackageVersion}/export-transcript-document.js`;
 const rendererVersionPlaceholder = '__QWEN_RENDERER_BUILD_ID__';
 
 const documentBuildResult = await build({
@@ -74,6 +72,9 @@ const documentJs = documentJsBundle.text.replaceAll(
   rendererVersionPlaceholder,
   exportTranscriptRendererVersion,
 );
+const documentRendererIntegrity = `sha384-${createHash('sha384')
+  .update(documentJs)
+  .digest('base64')}`;
 
 const faviconSvg = await readFile(join(srcDir, 'favicon.svg'), 'utf8');
 const faviconData = encodeURIComponent(faviconSvg.trim());
@@ -87,12 +88,13 @@ const documentTemplate = await readFile(
 const documentHtmlOutput = documentTemplate
   .replace('__DOCUMENT_INLINE_CSS__', () => documentCssBundle.text.trim())
   .replace('__DOCUMENT_RENDERER_URL__', () => documentRendererUrl)
+  .replace('__DOCUMENT_RENDERER_INTEGRITY__', () => documentRendererIntegrity)
   .replace('__FAVICON_DATA__', () => faviconData);
 
 // A dropped or renamed .replace() above would otherwise still exit 0 and
 // ship a template that throws at view time.
 const documentResidualPlaceholder =
-  /__(DOCUMENT_INLINE_CSS|DOCUMENT_RENDERER_URL|FAVICON_DATA)__/.exec(
+  /__(DOCUMENT_INLINE_CSS|DOCUMENT_RENDERER_URL|DOCUMENT_RENDERER_INTEGRITY|FAVICON_DATA)__/.exec(
     documentHtmlOutput,
   );
 if (documentResidualPlaceholder) {

@@ -21,7 +21,7 @@ import {
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
-const RENDERER_URL = `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
+const RENDERER_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const MAX_DOCUMENT_DURATION_MS = 60_000;
@@ -294,6 +294,7 @@ async function installNetworkAndCspProbe(page: Page): Promise<{
       await route.fulfill({
         body: rendererAsset,
         contentType: 'text/javascript',
+        headers: { 'access-control-allow-origin': '*' },
       });
       return;
     }
@@ -414,7 +415,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     visit(schema);
   });
 
-  it('opens, searches, copies, and prints the maximum document with its pinned OSS runtime', async () => {
+  it('opens, searches, copies, and prints the maximum document with its pinned npm runtime', async () => {
     const exportDocument = createMaximumDocument();
     const serialized = JSON.stringify(exportDocument);
     const html = renderExportTranscriptDocumentToHtml(exportDocument);
@@ -620,13 +621,13 @@ describe('ExportTranscriptDocument browser gate', () => {
     }
   });
 
-  it('fails closed when the OSS renderer is unavailable or fails to execute', async () => {
+  it('fails closed when the CDN renderer is unavailable or fails integrity', async () => {
     const document = createExportTranscriptDocumentV1(
-      [record('oss-error', null, 'user', 'OSS error probe')],
+      [record('cdn-error', null, 'user', 'CDN error probe')],
       {
         startTime: '2026-08-16T00:00:00.000Z',
         metadata: {
-          sessionId: 'oss-error',
+          sessionId: 'cdn-error',
           startTime: '2026-08-16T00:00:00.000Z',
           exportTime: EXPORTED_AT,
           cwd: '/workspace/project',
@@ -645,6 +646,7 @@ describe('ExportTranscriptDocument browser gate', () => {
           await route.fulfill({
             body: rendererBody,
             contentType: 'text/javascript',
+            headers: { 'access-control-allow-origin': '*' },
           });
         } else {
           await route.abort('blockedbyclient');
@@ -663,7 +665,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     }
   });
 
-  it('runs the real HTML export entry point with its pinned OSS runtime', async () => {
+  it('runs the real HTML export entry point with its pinned npm runtime', async () => {
     const records = [
       {
         ...record(

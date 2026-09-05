@@ -1241,7 +1241,6 @@ jobs:
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
-            packages/web-templates/src/export-html/dist/export-transcript-document.js \
             dist/standalone/qwen-code-* \
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \

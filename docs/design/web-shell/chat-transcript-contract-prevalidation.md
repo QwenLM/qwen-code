@@ -578,7 +578,7 @@ document mode 必须：
 ### 10.9 CSP 与登记网络
 
 HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范围和运行时远程解析。
-只有已将 renderer asset 发布到项目 OSS 的 CLI 版本才能打开导出；两次发布之间的 source build 按设计 fail closed。
+只有已将 renderer asset 发布到 npm 的 CLI 版本才能打开导出；两次发布之间的 source build 按设计 fail closed。
 
 最低安全要求：
 
@@ -587,7 +587,7 @@ HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范�
 - `base-uri 'none'`、`form-action 'none'`；
 - images 只允许批准的 `data:` 或明确登记的同包资源；
 - script/style 使用 nonce/hash 或等价静态策略；若现有 React 需要 style attribute，只允许 `style-src-attr` 的最小例外，DTO 不接受 style 字段；
-- renderer（包含 React runtime）只允许从项目 OSS 的精确版本 URL 加载；打开本地 HTML 后不得产生其他未登记 subrequest；
+- renderer（包含 React runtime）只允许从 unpkg 的精确 npm 版本 URL 加载，并校验最终发布字节的 SRI；打开本地 HTML 后不得产生其他未登记 subrequest；
 - 浏览器测试拦截打开、展开、Markdown/Mermaid、主题和打印期间的全部请求；任何未登记请求或 CSP violation 立即失败。
 
 ### 10.10 失败、完整性与 canary

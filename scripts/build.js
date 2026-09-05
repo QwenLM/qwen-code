@@ -34,7 +34,7 @@ if (!existsSync(join(root, 'node_modules'))) {
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
 // --cli-only: skip packages not needed by the CLI bundle. Web Shell still
-// builds because the HTML export publishes its document renderer to OSS.
+// builds because the HTML export publishes its document renderer with npm.
 const cliOnly = process.argv.includes('--cli-only');
 
 // Build in dependency order:

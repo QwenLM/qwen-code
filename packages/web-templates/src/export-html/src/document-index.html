@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'nonce-__EXPORT_NONCE__' https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/; style-src-elem 'nonce-__EXPORT_NONCE__'; style-src-attr 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; font-src data:; base-uri 'none'; form-action 'none'"
+      content="default-src 'none'; script-src 'nonce-__EXPORT_NONCE__'; style-src-elem 'nonce-__EXPORT_NONCE__'; style-src-attr 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; font-src data:; base-uri 'none'; form-action 'none'"
     />
     <link
       rel="icon"
@@ -60,6 +60,8 @@
     <script
       nonce="__EXPORT_NONCE__"
       id="transcript-renderer"
+      integrity="__DOCUMENT_RENDERER_INTEGRITY__"
+      crossorigin="anonymous"
       src="__DOCUMENT_RENDERER_URL__"
     ></script>
   </body>

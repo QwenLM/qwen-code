@@ -72,8 +72,6 @@ jobs:
 
           mkdir -p dist/standalone
           gh release download "${RELEASE_TAG}" --dir dist/standalone --pattern '*.tar.gz' --pattern '*.zip' --pattern 'SHA256SUMS'
-          mkdir -p dist/export-html
-          gh release download "${RELEASE_TAG}" --dir dist/export-html --pattern 'export-transcript-document.js'
 
       - name: 'Verify Downloaded Release Assets'
         env:
@@ -156,8 +154,7 @@ jobs:
             --bucket "${ALIYUN_OSS_BUCKET}" \
             --config "${RUNNER_TEMP}/.ossutilconfig" \
             --prefix "releases/qwen-code/${RELEASE_TAG}" \
-            "${release_assets[@]}" \
-            dist/export-html/export-transcript-document.js
+            "${release_assets[@]}"
 
       - name: 'Verify Aliyun OSS Release Assets'
         env:
@@ -172,13 +169,6 @@ jobs:
             PREVIEW_ARGS="--include-opentui-preview"
           fi
           npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}" ${PREVIEW_ARGS}
-          renderer_tmp="$(mktemp)"
-          trap 'rm -f "${renderer_tmp}"' EXIT
-          curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}/export-transcript-document.js" -o "${renderer_tmp}"
-          cmp -s dist/export-html/export-transcript-document.js "${renderer_tmp}" || {
-            echo "::error::Aliyun HTML export renderer does not match the GitHub release asset"
-            exit 1
-          }
 
       - name: 'Sync Hosted Installation Assets to Aliyun OSS'
         if: |-

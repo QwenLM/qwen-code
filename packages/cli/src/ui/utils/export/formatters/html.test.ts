@@ -56,16 +56,16 @@ describe('HTML export formatter', () => {
     expect(html).toContain('id="transcript-document"');
     expect(html).toContain('Hello from the document exporter.');
     expect(html).toContain("connect-src 'none'");
-    expect(html).toMatch(
-      /script-src 'nonce-[^']+' https:\/\/qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com\/releases\/qwen-code\//,
-    );
+    expect(html).toMatch(/script-src 'nonce-[^']+';/);
     expect(html).toContain(
-      `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
+      `https://unpkg.com/@qwen-code/qwen-code@${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
     );
     expect(EXPORT_TRANSCRIPT_RENDERER_VERSION).toMatch(
       /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+[a-f0-9]{16}$/,
     );
-    expect(html).not.toContain('cdn.jsdelivr.net');
+    expect(html).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
+    expect(html).toContain('crossorigin="anonymous"');
+    expect(html).not.toContain('qwen-code-assets.oss-cn-hangzhou.aliyuncs.com');
     expect(html).not.toContain('type="importmap"');
     expect(html).not.toContain('type="module"');
     expect(html.length).toBeLessThan(500_000);
