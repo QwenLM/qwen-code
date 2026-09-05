@@ -339,29 +339,43 @@ export function recordLedgerAnchoredPage(
   return { ...ledger, spans };
 }
 
-/** The lowest ordinal a page is known to cover, when the index knows any. */
-function pageOrdinal(
+/** The ordinal range a page is known to cover, when the index knows any of it. */
+function pageOrdinalBounds(
   entry: TranscriptPageLedgerEntry,
   ordinalByRecordId: ReadonlyMap<string, number>,
-): number | undefined {
+): { lowest: number; highest: number } | undefined {
   let lowest: number | undefined;
+  let highest: number | undefined;
   for (const recordId of entry.turnIds) {
     const ordinal = ordinalByRecordId.get(recordId);
     if (ordinal === undefined) continue;
     if (lowest === undefined || ordinal < lowest) lowest = ordinal;
+    if (highest === undefined || ordinal > highest) highest = ordinal;
   }
-  return lowest;
+  if (lowest === undefined || highest === undefined) return undefined;
+  return { lowest, highest };
 }
 
 /**
  * The span index a page landing at `targetOrdinal` belongs in: the first span
- * covering a newer ordinal, or `spans.length` when the target is newer than
- * everything retained, so the page lands just before the live tail.
+ * covering that ordinal or a newer one, or `spans.length` when the target is
+ * newer than everything retained, so the page lands just before the live tail.
  *
  * Order comes from the caller-supplied ordinal lookup because record ids are not
- * themselves ordered. A page the index cannot place at all makes the window's
- * order unknown, so this reports undefined rather than guessing a position that
- * could interleave two ranges that were never adjacent.
+ * themselves ordered. Two cases report undefined instead of guessing a position,
+ * because a wrong one interleaves ranges that were never adjacent:
+ *
+ * - no retained page carries an ordinal the index knows, so nothing can be
+ *   ordered against — and a sparse, evictable index makes that ordinary rather
+ *   than evidence the incoming page is the newest thing in the session;
+ * - the target falls strictly inside a retained page's known range. An anchored
+ *   read expands backward off its target, so the page it returns can carry
+ *   records older than the target while that retained page already holds records
+ *   on both sides of it, and no position for the newcomer avoids claiming an
+ *   adjacency nobody verified.
+ *
+ * A target equal to a page's lowest ordinal is not inside it: the newcomer can
+ * only carry records older than that one, so it belongs in front.
  */
 export function ledgerInsertIndexForOrdinal(
   ledger: TranscriptPageLedger,
@@ -370,9 +384,10 @@ export function ledgerInsertIndexForOrdinal(
 ): number | undefined {
   for (const [index, span] of ledger.spans.entries()) {
     if (span.kind === 'gap') continue;
-    const ordinal = pageOrdinal(span.entry, ordinalByRecordId);
-    if (ordinal === undefined) return undefined;
-    if (ordinal > targetOrdinal) return index;
+    const bounds = pageOrdinalBounds(span.entry, ordinalByRecordId);
+    if (bounds === undefined) return undefined;
+    if (targetOrdinal <= bounds.lowest) return index;
+    if (targetOrdinal <= bounds.highest) return undefined;
   }
   return ledger.spans.length;
 }

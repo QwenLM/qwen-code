@@ -18477,6 +18477,123 @@ describe('DaemonSessionProvider', () => {
       });
       expect(result).toEqual({ ok: false, reason: 'unavailable' });
     });
+
+    it('focuses a turn already in the window rather than refusing it as unorderable', async () => {
+      // The target's ordinal sits strictly inside the retained page's range, so
+      // the ledger has no provable position for anything landing there. But every
+      // record the read returns is already displayed, so there is nothing to
+      // place and the jump is a focus. Deciding placement before admission would
+      // have refused a jump to a turn the user can already see.
+      const session = createMockSession({
+        sessionId: 'session-turn-index-focus',
+        replaySnapshot: {
+          compactedReplay: [
+            anchoredPageEvent('record-0', 'first turn'),
+            anchoredPageEvent('record-1', 'second turn'),
+          ],
+          liveJournal: [],
+        },
+        events: createIdleEvents(),
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [anchoredPageEvent('record-1', 'second turn')],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'record-1',
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      let blocks: ReturnType<typeof useDaemonTranscriptBlocks> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+        sessionId: session.sessionId,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      const before = blocks?.length;
+
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = index?.openTurnAt('record-1');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: true, targetRecordId: 'record-1' });
+      // Focusing must not duplicate the turn already on screen.
+      expect(blocks?.length).toBe(before);
+    });
+
+    it('leaves the index alone when a superseded jump fails on a stale snapshot', async () => {
+      // The success path checks the jump generation before committing anything,
+      // but the 409 handler checked only session identity — so a jump nobody was
+      // waiting for any more could wipe the healthy index a newer jump had just
+      // been issued against, dropping every cached older page and forcing a
+      // re-seed because of a failure that belongs to a dead request.
+      const session = pushSession('session-turn-index-superseded');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      const stale = createDeferred<never>();
+      sdkMocks.getSessionTranscriptPage
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValue({
+          v: 1,
+          sessionId: session.sessionId,
+          events: [anchoredPageEvent('record-1', 'newer jump')],
+          hasMore: false,
+          hasOlder: false,
+          targetRecordId: 'record-1',
+        });
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      const seeded = getIndex();
+      expect(seeded?.status).toBe('ready');
+
+      let staleResult: { ok: boolean; reason?: string } | undefined;
+      let newerResult: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const first = getIndex()?.openTurnAt('record-0');
+        // Supersede the first jump before it settles.
+        const second = getIndex()?.openTurnAt('record-1');
+        await flushPromises();
+        newerResult = await second;
+        stale.reject(
+          new DaemonHttpError(
+            409,
+            { code: 'transcript_snapshot_unavailable' },
+            'snapshot unavailable',
+          ),
+        );
+        await flushPromises();
+        staleResult = await first;
+      });
+      expect(newerResult).toEqual({ ok: true, targetRecordId: 'record-1' });
+      // The dead request still reports its own reason to whoever held it.
+      expect(staleResult).toEqual({ ok: false, reason: 'snapshot_gone' });
+      // But it must not have invalidated anything: no re-seed, index intact.
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+      expect(getIndex()).toMatchObject({
+        status: 'ready',
+        snapshot: seeded?.snapshot,
+        totalTurns: seeded?.totalTurns,
+      });
+    });
   });
 });
 

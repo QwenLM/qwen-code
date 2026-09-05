@@ -617,6 +617,45 @@ describe('anchored page placement', () => {
     expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 90)).toBe(4);
   });
 
+  it('places a page in front of the one whose lowest ordinal it matches', () => {
+    const ordinals = new Map([
+      ['ro1', 10],
+      ['rn1', 40],
+    ]);
+    // Matching a page's lowest ordinal is not being inside it: an anchored read
+    // expands backward off its target, so the newcomer can only carry records
+    // older than that one, and those belong in front.
+    const ledger = anchoredWindow();
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 10)).toBe(1);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 40)).toBe(3);
+  });
+
+  it('refuses to place a page whose target falls inside a retained page', () => {
+    // The retained page holds records on both sides of the target while the
+    // anchored read returns records older than it, so no position for the
+    // newcomer avoids claiming an adjacency nobody verified.
+    const wide = [
+      block('w1', { sourceRecordIds: ['rw1'] }),
+      block('w2', { sourceRecordIds: ['rw2'] }),
+      block('w3', { sourceRecordIds: ['rw3'] }),
+    ];
+    const ledger = recordLedgerLoadPage(
+      createTranscriptPageLedger('s1'),
+      entry('wide', wide),
+      false,
+    );
+    const ordinals = new Map([
+      ['rw1', 10],
+      ['rw2', 11],
+      ['rw3', 12],
+    ]);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 11)).toBeUndefined();
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 12)).toBeUndefined();
+    // Both ends of the range are outside it.
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 10)).toBe(0);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 13)).toBe(1);
+  });
+
   it('refuses to place a page when a retained page has no known ordinal', () => {
     const ledger = recordLedgerLoadPage(
       createTranscriptPageLedger('s1'),

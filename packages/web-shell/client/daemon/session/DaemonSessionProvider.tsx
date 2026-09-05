@@ -4916,18 +4916,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           turnOrdinalMap(turnIndexRef.current),
           target.entry.ordinal,
         );
-        if (insertAt === undefined) {
-          // Nothing resident in the ledger carries an ordinal, so this page has
-          // no provable position. The index is sparse and evictable by design,
-          // so "not resident" is ordinary and is not evidence of "newest":
-          // appending would assert an order the client cannot justify.
-          return { ok: false, reason: 'unavailable' };
-        }
         // Whether this is a head landing is the block offset, not the span
         // index. The canonical ledger for a bounded restore is `[gap, page]`,
         // so a page older than everything retained lands at span 1 while still
         // becoming the window's oldest content.
-        const insertOffset = ledgerBlockOffset(ledger, insertAt);
+        const insertOffset =
+          insertAt === undefined ? 0 : ledgerBlockOffset(ledger, insertAt);
         const admission = materializeTranscriptHistory(
           preCommit,
           uiEvents,
@@ -4936,14 +4930,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // the window's OLDEST block, which is its neighbour only on a head
           // landing. Anywhere else the two are unrelated blocks, and running the
           // rule would drop a distinct older prompt that merely repeats the
-          // echo's text — orphaning its assistant reply.
-          { boundaryEchoDedup: insertOffset === 0 },
+          // echo's text — orphaning its assistant reply. With no provable
+          // position the page is refused below anyway, so the rule stays off
+          // rather than dropping a block on a position we cannot justify.
+          { boundaryEchoDedup: insertAt !== undefined && insertOffset === 0 },
         );
         if (!admission.admitted) {
           return {
             ok: false,
             reason: admission.impossible ? 'window_impossible' : 'window_full',
           };
+        }
+        if (admission.materialization.blocks.length === 0) {
+          // Every record the page carries is already displayed, so the turn is
+          // already in the window and only needs focusing. Decided before the
+          // placement refusal below because this is the one case where an
+          // unprovable position is harmless — there is nothing to place, and
+          // refusing here would break jumping to a turn already on screen.
+          return { ok: true, targetRecordId: focusRecordId };
+        }
+        if (insertAt === undefined) {
+          // Nothing resident in the ledger can order this page: either no
+          // retained page carries an ordinal the index knows, or the target sits
+          // strictly inside a retained page's range while the anchored read
+          // expands backward off it. The index is sparse and evictable by
+          // design, so neither is evidence of "newest", and appending would
+          // assert an order the client cannot justify.
+          return { ok: false, reason: 'unavailable' };
         }
         store.reset(
           applyTranscriptHistoryAt(
@@ -5033,12 +5046,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }
         return { ok: true, targetRecordId: focusRecordId };
       } catch (error) {
+        // A superseded jump must not mutate shared index state. Its snapshot is
+        // not the one the current index vends — a newer jump, a tail refresh, a
+        // rewind or an owner change moved it on — so invalidating here would
+        // discard a healthy index because of a failure that belongs to a request
+        // nobody is waiting for any more. The success path checks all three of
+        // these before committing anything; the error path has to as well.
+        const stillCurrent =
+          sessionRef.current === session &&
+          generation === openTurnGenerationRef.current &&
+          turnIndexEpochRef.current === epoch;
         const code = getDaemonErrorCode(error);
         if (code === 'transcript_snapshot_unavailable') {
           // The chain moved underneath the snapshot. Dropping it lands the
           // store on `idle`, which is the seeding effect's trigger, so the
           // index refetches its tail and the next jump anchors to a live one.
-          if (sessionRef.current === session) {
+          if (stillCurrent) {
             turnIndexAttemptRef.current = 0;
             commitTurnIndex(invalidateTurnIndexSnapshot(turnIndexRef.current));
           }
