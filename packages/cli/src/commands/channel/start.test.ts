@@ -37,6 +37,8 @@ const mockWriteServiceInfo = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLineSafe = vi.hoisted(() => vi.fn());
+const mockIgnoreBrokenPipe = vi.hoisted(() => vi.fn());
 const mockFindCliEntryPath = vi.hoisted(() => vi.fn());
 const mockParseChannelConfig = vi.hoisted(() => vi.fn());
 const mockGetPlugin = vi.hoisted(() => vi.fn());
@@ -141,8 +143,10 @@ vi.mock('./pidfile.js', () => ({
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe: mockIgnoreBrokenPipe,
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
+  writeStdoutLineSafe: mockWriteStdoutLineSafe,
 }));
 
 vi.mock('./config-utils.js', () => ({
@@ -334,6 +338,10 @@ describe('startCommand.handler', () => {
       releaseDrain();
       await closing;
 
+      expect(mockIgnoreBrokenPipe).toHaveBeenCalledOnce();
+      expect(mockWriteStdoutLineSafe).toHaveBeenCalledWith(
+        '\n[Channel] Shutting down...',
+      );
       expect(mockWriteServiceInfo).not.toHaveBeenCalled();
       expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
       expect(mockBridgeStop).toHaveBeenCalledOnce();
@@ -465,6 +473,16 @@ describe('startCommand.handler', () => {
       releaseSecondDrain();
       await closing;
 
+      expect(mockIgnoreBrokenPipe).toHaveBeenCalledOnce();
+      expect(mockWriteStdoutLineSafe).toHaveBeenCalledWith(
+        '\n[Channel] Shutting down...',
+      );
+      expect(mockWriteStdoutLineSafe).toHaveBeenCalledWith(
+        '[Channel] "first" disconnected.',
+      );
+      expect(mockWriteStdoutLineSafe).toHaveBeenCalledWith(
+        '[Channel] "second" disconnected.',
+      );
       expect(mockWriteServiceInfo).not.toHaveBeenCalled();
       expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
       expect(mockBridgeStop).toHaveBeenCalledOnce();

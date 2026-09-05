@@ -1,6 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
+  CHANNEL_WORKER_KILL_GRACE_MS,
+  CHANNEL_WORKER_STOP_GRACE_MS,
+} from '@qwen-code/acp-bridge/channelControlTimeouts';
+import {
   addChannelMemoryEntries,
   clearChannelMemory,
   getChannelMemoryRevision,
@@ -68,7 +72,11 @@ import {
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
@@ -107,6 +115,30 @@ const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
   'session_worktree_persistence_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
+const WORKER_CHANNEL_DISCONNECT_DRAIN_MS =
+  CHANNEL_WORKER_STOP_GRACE_MS - CHANNEL_WORKER_KILL_GRACE_MS;
+
+async function disconnectWorkerChannels(
+  channels: Iterable<ChannelBase>,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      disconnectChannels(channels),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          writeStderrLineSafe(
+            `[Channel] disconnect drain exceeded ${WORKER_CHANNEL_DISCONNECT_DRAIN_MS}ms; continuing worker shutdown.`,
+          );
+          resolve();
+        }, WORKER_CHANNEL_DISCONNECT_DRAIN_MS);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -806,7 +838,7 @@ export async function runChannelDaemonWorker(
       },
       async close() {
         scheduler?.stop();
-        await disconnectChannels(channels.values());
+        await disconnectWorkerChannels(channels.values());
         try {
           bridge.stop();
         } finally {
@@ -816,7 +848,7 @@ export async function runChannelDaemonWorker(
     };
   } catch (err) {
     scheduler?.stop();
-    await disconnectChannels(channels.values());
+    await disconnectWorkerChannels(channels.values());
     try {
       bridge.stop();
     } catch {

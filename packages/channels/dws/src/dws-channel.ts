@@ -1653,7 +1653,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         const envelope = this.createImEnvelope(source, message);
         if (
           this.groupGate.check(envelope, { createPairingRequest: false })
-            .reason === 'mention_required'
+            .reason === 'mention_required' &&
+          !this.queuedMessages.has(key) &&
+          !this.cursor.processedMessages.includes(key) &&
+          !this.hasPendingMessage(key)
         ) {
           this.recordPendingGroupHistory(envelope);
         }
@@ -2323,6 +2326,21 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       const key = messageKey(pending.message);
       if (this.queuedMessages.has(key)) continue;
       if (this.shouldFilterImMessage(pending.source, pending.message)) {
+        if (
+          pending.source.kind === 'group' ||
+          pending.source.kind === 'group-all'
+        ) {
+          const envelope = this.createImEnvelope(
+            pending.source,
+            pending.message,
+          );
+          if (
+            this.groupGate.check(envelope, { createPairingRequest: false })
+              .reason === 'mention_required'
+          ) {
+            this.recordPendingGroupHistory(envelope);
+          }
+        }
         this.removePersistedPendingMessageForSource(key, pending.source);
         continue;
       }

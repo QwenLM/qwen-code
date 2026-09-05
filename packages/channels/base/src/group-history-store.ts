@@ -76,6 +76,12 @@ export class GroupHistoryStore {
     const state = loaded.entries;
     const limits = loaded.limits;
     const current = state.get(key) ?? [];
+    if (
+      entry.messageId !== undefined &&
+      current.some((item) => item.messageId === entry.messageId)
+    ) {
+      return;
+    }
     current.push(entry);
     if (current.length > normalizedLimit) {
       current.splice(0, current.length - normalizedLimit);
@@ -165,6 +171,12 @@ export class GroupHistoryStore {
       }
 
       const current = state.get(record.key) ?? [];
+      if (
+        record.entry.messageId !== undefined &&
+        current.some((item) => item.messageId === record.entry.messageId)
+      ) {
+        continue;
+      }
       current.push(record.entry);
       if (current.length > record.limit) {
         current.splice(0, current.length - record.limit);

@@ -1155,6 +1155,7 @@ describe('DwsChannel', () => {
 
       expect(replacementSubscription?.stop).toHaveBeenCalledOnce();
       expect(groupSubscriptionCalls).toBe(2);
+      expect(channel.inboundAttempts).toBe(0);
       expect(channel.pendingMessageIds().slice(-3)).toEqual([
         'replacement-startup-first',
         'replacement-startup-second',
@@ -2352,6 +2353,15 @@ describe('DwsChannel', () => {
       ),
     );
     await client.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'ambient-shadowed',
+        'ambient chatter in the shadowed group',
+        { conversationId: 'conversation-shadowed' },
+      ),
+    );
+    await client.emit(
       0,
       message(
         'user_im_message_receive_at',
@@ -2361,9 +2371,56 @@ describe('DwsChannel', () => {
       ),
     );
 
-    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).toContain(
-      'ambient chatter in the shadowed group',
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt.match(/ambient chatter in the shadowed group/g)).toHaveLength(
+      1,
     );
+  });
+
+  it('does not add an @ message twin to its own group history', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ groupHistoryLimit: 5 }),
+      'filtered-group-twins-dws',
+      { groupHistoryPath: join(qwenHome, 'group-history.json') },
+    );
+    const ambientFirst = message(
+      'user_im_message_receive_group_all',
+      'ambient-first-twin',
+      'ambient first twin text',
+    );
+
+    await client.emit(1, ambientFirst);
+    await client.emit(0, {
+      ...ambientFirst,
+      type: 'user_im_message_receive_at',
+    });
+
+    const mentionFirst = message(
+      'user_im_message_receive_at',
+      'mention-first-twin',
+      'mention first twin text',
+    );
+    await client.emit(0, mentionFirst);
+    await client.emit(1, {
+      ...mentionFirst,
+      type: 'user_im_message_receive_group_all',
+    });
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'next-mention',
+        'next mention text',
+      ),
+    );
+
+    const firstPrompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    const nextPrompt = String(vi.mocked(bridge.prompt).mock.calls[2]?.[1]);
+    expect(firstPrompt.match(/ambient first twin text/g)).toHaveLength(1);
+    expect(nextPrompt).not.toContain('ambient first twin text');
+    expect(nextPrompt).not.toContain('mention first twin text');
   });
 
   it('rejects full-capacity admission without waiting', async () => {
@@ -2636,6 +2693,9 @@ describe('DwsChannel', () => {
           ),
         ),
       );
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({ messageId: 'live-after-save-failure' }),
+      ]);
     } finally {
       stderr.mockRestore();
     }
@@ -6853,6 +6913,50 @@ describe('DwsChannel', () => {
         messageId: 'ambient-retry',
       }),
     ]);
+  });
+
+  it('preserves a pending ambient message when replay now requires mention', async () => {
+    const name = 'pending-filtered-group-history-dws';
+    const firstClient = new FakeDwsClient();
+    const first = await readyChannel(
+      firstClient,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+      name,
+    );
+    first.inboundError = new Error('agent unavailable');
+
+    await expect(
+      firstClient.emit(
+        1,
+        message(
+          'user_im_message_receive_group_all',
+          'ambient-filtered-on-replay',
+          'preserve this pending ambient message',
+        ),
+      ),
+    ).rejects.toThrow('agent unavailable');
+    first.disconnect();
+
+    const restartedClient = new FakeDwsClient();
+    const { channel: restarted, bridge } = await readyPolicyChannel(
+      restartedClient,
+      makeConfig({ groupHistoryLimit: 5 }),
+      name,
+      { groupHistoryPath: join(qwenHome, 'group-history.json') },
+    );
+    await restarted.poll();
+    await restartedClient.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'mention-after-filtered-replay',
+        'summarize the conversation',
+      ),
+    );
+
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).toContain(
+      'preserve this pending ambient message',
+    );
   });
 
   it('caps retries for a persistently failing ambient group message', async () => {

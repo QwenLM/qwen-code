@@ -11,7 +11,12 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   AcpBridge,
   ChannelLoopScheduler,
@@ -400,7 +405,8 @@ async function startSingle(
     }
     shuttingDown = true;
     shutdownTask = (async () => {
-      writeStdoutLine('\n[Channel] Shutting down...');
+      ignoreBrokenPipe();
+      writeStdoutLineSafe('\n[Channel] Shutting down...');
       scheduler?.stop();
       await disconnectChannels([channel]);
       bridge.stop();
@@ -560,11 +566,12 @@ async function startAll(
     }
     shuttingDown = true;
     shutdownTask = (async () => {
-      writeStdoutLine('\n[Channel] Shutting down...');
+      ignoreBrokenPipe();
+      writeStdoutLineSafe('\n[Channel] Shutting down...');
       scheduler?.stop();
       await disconnectChannels(channels.values());
       for (const name of channels.keys()) {
-        writeStdoutLine(`[Channel] "${name}" disconnected.`);
+        writeStdoutLineSafe(`[Channel] "${name}" disconnected.`);
       }
       bridge.stop();
       router.clearAll();
