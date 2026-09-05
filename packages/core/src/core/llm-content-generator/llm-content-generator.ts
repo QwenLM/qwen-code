@@ -13,6 +13,7 @@ import type {
   ThinkingLevel,
   Content,
   Part,
+  HttpOptions,
 } from '@google/genai';
 import { GoogleGenAI } from '@google/genai';
 import type {
@@ -26,6 +27,8 @@ import {
   reportLlmResponse,
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
+import type { Config } from '../../config/config.js';
+import { buildSessionIdHeaders } from '../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -60,7 +63,9 @@ function observeLlmStream(
  */
 export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
+  private readonly clientBaseUrl?: string;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
+  private readonly cliConfig?: Config;
   // Latch so the effort-clamp warning fires once per generator lifetime
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
@@ -69,9 +74,10 @@ export class LlmContentGenerator implements ContentGenerator {
     options: {
       apiKey?: string;
       vertexai?: boolean;
-      httpOptions?: { headers: Record<string, string> };
+      httpOptions?: HttpOptions;
     },
     contentGeneratorConfig?: ContentGeneratorConfig,
+    cliConfig?: Config,
   ) {
     const customHeaders = contentGeneratorConfig?.customHeaders;
     const finalOptions = customHeaders
@@ -93,7 +99,24 @@ export class LlmContentGenerator implements ContentGenerator {
       : options;
 
     this.googleGenAI = new GoogleGenAI(finalOptions);
+    this.clientBaseUrl = finalOptions.httpOptions?.baseUrl;
     this.contentGeneratorConfig = contentGeneratorConfig;
+    this.cliConfig = cliConfig;
+  }
+
+  private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
+    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
+    if (!this.cliConfig || !destination) return httpOptions;
+
+    const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);
+    if (Object.keys(sessionHeaders).length === 0) return httpOptions;
+    return {
+      ...httpOptions,
+      headers: {
+        ...httpOptions?.headers,
+        ...sessionHeaders,
+      },
+    };
   }
 
   private buildGenerateContentConfig(
@@ -101,6 +124,7 @@ export class LlmContentGenerator implements ContentGenerator {
   ): GenerateContentConfig {
     const configSamplingParams = this.contentGeneratorConfig?.samplingParams;
     const requestConfig = request.config || {};
+    const httpOptions = this.buildHttpOptions(requestConfig.httpOptions);
 
     // Helper function to get parameter value with priority: config > request > default
     const getParameterValue = <T>(
@@ -117,6 +141,7 @@ export class LlmContentGenerator implements ContentGenerator {
 
     return {
       ...requestConfig,
+      ...(httpOptions ? { httpOptions } : {}),
       temperature: getParameterValue<number>(
         configSamplingParams?.temperature,
         'temperature',
@@ -367,6 +392,10 @@ export class LlmContentGenerator implements ContentGenerator {
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    return this.googleGenAI.models.embedContent(request);
+    const httpOptions = this.buildHttpOptions(request.config?.httpOptions);
+    return this.googleGenAI.models.embedContent({
+      ...request,
+      ...(httpOptions ? { config: { ...request.config, httpOptions } } : {}),
+    });
   }
 }

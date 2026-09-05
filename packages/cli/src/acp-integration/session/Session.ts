@@ -35,6 +35,7 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
+  AutoModeFallbackConfirmation,
   GoalRecord,
   GoalRuntime,
   GoalSnapshotV2,
@@ -112,10 +113,12 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getOutputStyleTurnReminder,
+  getOptInToolNotFoundMessage,
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
-  getStartupContextLength,
   isSystemReminderContent,
+  findApiRewindCutPoint,
+  countApiUserPrompts,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -132,16 +135,17 @@ import {
   getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
-  decorateClassifierUnavailableConfirmation,
+  decorateAutoModeFallbackConfirmation,
   evaluateAutoMode,
+  getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
+  prepareAutoModeFallback,
   isApproveOutcome,
   isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
   formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
-  shouldFallback,
   shouldClassifyAllShellForAutoMode,
   finalizeToolResponses,
   shouldForceAutoModeReviewForAllow,
@@ -488,6 +492,23 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
     remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
   );
 }
+
+/**
+ * ACP rewind's binding of the shared user-prompt classifier
+ * (`isApiUserPrompt` in core). The two deltas from the TUI binding are
+ * deliberate:
+ *
+ * - The todo-stop-guard's synthetic continuation prompts are injected as user
+ *   entries but are not turns a client can rewind to, so they must not
+ *   consume an ordinal.
+ * - Microcompaction media-clear placeholders stay COUNTED here, unlike the
+ *   TUI binding. ACP rewind maps against per-prompt file-history snapshots,
+ *   which ARE created for media-only prompts, so a cleared entry still owns
+ *   an ordinal on this surface.
+ */
+const ACP_API_USER_PROMPT_OPTIONS = {
+  excludeTextPart: isTodoStopGuardPromptText,
+};
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
@@ -2175,10 +2196,25 @@ export class Session implements SessionContext {
       ? STANDALONE_SLASH_COMMAND_POLICY
       : undefined;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
-    const todoStopGuardEnabled =
-      this.settings.merged.experimental?.todoStopGuard === true &&
+    const todoStopGuardConfigured =
+      this.settings.merged.experimental?.todoStopGuard === true;
+    const todoStopGuardModeAllowed =
+      todoStopGuardConfigured &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    const todoWriteEnabled =
+      this.settings.merged.tools?.todoWrite?.enabled === true;
+    const todoStopGuardEnabled =
+      todoStopGuardConfigured && todoStopGuardModeAllowed && todoWriteEnabled;
+    if (
+      todoStopGuardConfigured &&
+      todoStopGuardModeAllowed &&
+      !todoWriteEnabled
+    ) {
+      debugLogger.warn(
+        'experimental.todoStopGuard requires tools.todoWrite.enabled; the Todo Stop Guard is disabled.',
+      );
+    }
     // Capture the settings-derived gate value ONCE instead of tracking the
     // live settings view: this session's LoadedSettings is reloaded from
     // disk behind the session's back (e.g. `reloadSkillSettings` during a
@@ -4333,19 +4369,10 @@ export class Session implements SessionContext {
   }
 
   getRewindableUserTurnCount(): number {
-    const apiHistory = this.captureHistorySnapshot();
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-    let count = 0;
-
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (this.#isUserTextContent(apiHistory[i]!)) {
-        count += 1;
-      }
-    }
-
-    return count;
+    return countApiUserPrompts(
+      this.captureHistorySnapshot(),
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
   }
 
   restoreHistory(history: Content[]): void {
@@ -4365,63 +4392,11 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = getStartupContextLength(apiHistory, {
-      includeCompressed: true,
-    });
-
-    if (targetTurnIndex === 0) {
-      return startIndex;
-    }
-
-    let realUserPromptCount = 0;
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (!this.#isUserTextContent(apiHistory[i]!)) {
-        continue;
-      }
-
-      if (realUserPromptCount === targetTurnIndex) {
-        return i;
-      }
-
-      realUserPromptCount += 1;
-    }
-
-    return -1;
-  }
-
-  #isUserTextContent(content: Content): boolean {
-    if (content.role !== 'user') return false;
-    if (!content.parts || content.parts.length === 0) return false;
-
-    const hasFunctionResponse = content.parts.some(
-      (part) => 'functionResponse' in part,
+    return findApiRewindCutPoint(
+      apiHistory,
+      targetTurnIndex,
+      ACP_API_USER_PROMPT_OPTIONS,
     );
-    if (hasFunctionResponse) return false;
-
-    // Exclude pure <system-reminder> entries (the startup prelude and the
-    // mid-history MCP added-tool reminders). They are structural, not real
-    // user prompts; counting them would shift the rewind truncation index and
-    // silently drop a real turn. A genuine user turn that merely has a
-    // per-turn reminder prepended still has a non-reminder prompt part, so it
-    // is NOT excluded.
-    if (isSystemReminderContent(content)) return false;
-
-    if (
-      content.parts.some(
-        (part) => 'text' in part && isTodoStopGuardPromptText(part.text),
-      )
-    ) {
-      return false;
-    }
-
-    // Deliberate twin divergence: the TUI twin (isUserTextContent in
-    // packages/cli/src/ui/utils/historyMapping.ts) excludes microcompaction
-    // media-clear placeholders ('[Old inline media cleared: ...]') from the
-    // rewind prompt count because a cleared media-only entry never produced
-    // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
-    // maps against per-prompt file-history snapshots, which ARE created for
-    // media-only prompts. Do not mirror that exclusion into this twin.
-    return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -11627,8 +11602,15 @@ export class Session implements SessionContext {
     const tool = toolRegistry.getTool(toolName);
 
     if (!tool) {
+      const optInToolMessage = await getOptInToolNotFoundMessage(
+        this.config,
+        toolName,
+        (canonicalName) => Boolean(toolRegistry.getTool(canonicalName)),
+      );
       return earlyErrorResponse(
-        new Error(`Tool "${toolName}" not found in registry.`),
+        new Error(
+          optInToolMessage ?? `Tool "${toolName}" not found in registry.`,
+        ),
         toolName,
         {
           status: 'error',
@@ -11962,12 +11944,20 @@ export class Session implements SessionContext {
             !forceAutoReviewForAllow &&
             !planShellRequiresConfirmation;
           if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            const actionFingerprint = getAutoModeActionFingerprint(
+              policyToolName,
+              toolParams,
+              this.config.getCwd(),
+            );
             this.config.setAutoModeDenialState(
-              recordAllow(this.config.getAutoModeDenialState()),
+              recordAllow(
+                this.config.getAutoModeDenialState(),
+                actionFingerprint,
+              ),
             );
           }
           let wasAutoModeManualFallback = false;
-          let autoModeFallbackMessage: string | undefined;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
 
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
@@ -11979,8 +11969,15 @@ export class Session implements SessionContext {
             !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, policyToolName)
           ) {
-            const denialState = this.config.getAutoModeDenialState();
-            const fallback = shouldFallback(denialState);
+            const actionFingerprint = getAutoModeActionFingerprint(
+              policyToolName,
+              toolParams,
+              this.config.getCwd(),
+            );
+            const { denialState, fallback } = prepareAutoModeFallback(
+              this.config,
+              actionFingerprint,
+            );
             // `buildClassifierContents` retains only the most recent
             // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
             // exactly that tail rather than triggering a `structuredClone`
@@ -12014,6 +12011,7 @@ export class Session implements SessionContext {
               decision,
               this.config,
               denialState,
+              actionFingerprint,
             );
             await fireSessionPermissionDeniedForAutoMode(
               this.config,
@@ -12055,10 +12053,15 @@ export class Session implements SessionContext {
                   outcome.reason === 'external_write';
 
                 if (
-                  outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write'
+                  outcome.message &&
+                  (outcome.reason === 'classifier_unavailable' ||
+                    outcome.reason === 'external_write' ||
+                    isDenialFallbackReason(outcome.reason))
                 ) {
-                  autoModeFallbackMessage = outcome.message;
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                 }
 
                 if (wasAutoModeManualFallback) {
@@ -12163,10 +12166,11 @@ export class Session implements SessionContext {
               return confirmationDetailsCancellation;
             }
 
-            if (autoModeFallbackMessage) {
-              confirmationDetails = decorateClassifierUnavailableConfirmation(
+            if (autoModeFallback && confirmationDetails) {
+              confirmationDetails = decorateAutoModeFallbackConfirmation(
                 confirmationDetails,
-                autoModeFallbackMessage,
+                autoModeFallback.reason,
+                autoModeFallback.message,
               );
             }
 
