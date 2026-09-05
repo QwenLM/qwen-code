@@ -206,6 +206,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
+ 'workspace_skills_config_runtime',
  'workspace_providers', 'workspace_acp_preheat', 'workspace_acp_status',
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
@@ -254,7 +255,30 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
 
-`workspace_runtime` advertises `GET /workspace/runtime/status`, `POST /workspace/runtime/ensure`, and their `/workspaces/:workspace/runtime/...` equivalents. `ensure` accepts no capability selection: it starts or reuses the selected trusted workspace's ACP runtime and returns its lifecycle state and monotonic runtime epoch. The primary routes are owned only by the primary runtime; qualified routes resolve only the selected registered runtime and never fall back. A successful ensure renews the runtime's ten-minute keepalive window. Status is read-only and never starts the child. Concurrent ensures share one physical startup. Startup in progress or failure returns retryable `503 runtime_still_starting` or `503 runtime_initialization_failed`. The capability is advertised only when all active runtime bridges provide the authoritative lifecycle snapshot; a selected legacy injected bridge returns `501 workspace_runtime_not_supported` instead of a guessed state or epoch.
+`workspace_runtime` advertises `GET /workspace/runtime/status`, `POST /workspace/runtime/ensure`, and their `/workspaces/:workspace/runtime/...` equivalents. `ensure` accepts no capability selection: it starts or reuses the selected trusted workspace's ACP runtime and returns its lifecycle state and monotonic runtime epoch. The primary routes are owned only by the primary runtime; qualified routes resolve only the selected registered runtime and never fall back. A successful ensure renews the runtime's ten-minute keepalive window. Status is read-only and never starts the child. Concurrent ensures share one physical startup. Startup in progress or failure returns retryable `503 runtime_still_starting` or `503 runtime_initialization_failed`. Capability preparation may continue after the ensure observation budget expires; in that case ensure still returns the live runtime with a non-ready capability state for status polling. The capability is advertised only when all active runtime bridges provide the authoritative lifecycle snapshot; a selected legacy injected bridge returns `501 workspace_runtime_not_supported` instead of a guessed state or epoch.
+
+Runtime status and ensure responses use this shape:
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/work/project",
+  "state": "active",
+  "runtimeLive": true,
+  "runtimeEpoch": 4,
+  "capabilities": {
+    "skills": {
+      "state": "ready",
+      "revision": 2,
+      "runtimeEpoch": 4
+    }
+  }
+}
+```
+
+`capabilities.skills.state` is `not_started`, `starting`, `ready`, `stale`, or `error`; failures include `{code, message}` in `capabilities.skills.error`. A Skills catalog is current only when the top-level and capability `runtimeEpoch` values match. `revision` orders Skills preparation within one runtime epoch and must not be compared across epochs.
+
+`workspace_skills_config_runtime` advertises the split Skills reads and configuration mutations under `/workspace/{config,runtime}/skills` and `/workspaces/:workspace/{config,runtime}/skills`. The Web Shell uses these routes for Skills management and, while composing a new session, to populate slash commands from config immediately before replacing them with a matching-epoch runtime catalog. When the feature is absent, clients must keep using the legacy Skills routes and must not call runtime ensure solely for Skills.
 
 `session_load` and `session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. `unstable_session_resume` is still advertised as a deprecated alias for compatibility with SDKs that shipped while the underlying ACP method was named `connection.unstable_resumeSession`; new clients should gate on `session_resume`.
 
@@ -561,6 +585,7 @@ operator diagnostic snapshot documented below.
 | `workspace_runtime_removal`         | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `native_directory_picker`           | the daemon host can open a native OS directory picker (`osascript` on macOS, PowerShell on Windows, `zenity` on a Linux host with a display). Headless hosts omit the tag so clients hide the Browse affordance instead of surfacing a guaranteed picker failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_runtime`                 | every active workspace bridge provides an authoritative runtime lifecycle snapshot; mixed or legacy injected bridges omit the tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `workspace_skills_config_runtime`   | every active workspace supports authoritative runtime lifecycle and the split config/runtime Skills routes used by Skills management and the new-session composer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `workspace_local_open`              | the daemon host can open a workspace directory in the host's OS file manager (`open` on macOS, `explorer.exe` on Windows, `xdg-open` on a Linux host with a display). Headless hosts omit the tag so clients hide the Open-locally affordance instead of surfacing a guaranteed launch failure. The opened path is always the resolved registered workspace cwd, via `POST /workspaces/:workspace/open`; the route accepts an optional JSON body `{ "target": "terminal" }` (absent/other = folder) and answers `{ kind: 'workspace-local-open', opened: true, target }` with `target` set to `folder` or `terminal`.                                                                                                                                                                       |
 | `workspace_local_terminal`          | the daemon host can open a terminal window in a workspace directory (`open -a Terminal` on macOS, `wt.exe` with `cmd.exe` fallback on Windows, `gnome-terminal`/`konsole`/`xterm` on a Linux host with a display). Headless hosts omit the tag so clients hide the Open-in-terminal affordance instead of surfacing a guaranteed launch failure. Served by `POST /workspaces/:workspace/open` with body `{ "target": "terminal" }`.                                                                                                                                                                                                                                                                                                                                                         |
 | `workspace_qualified_acp`           | ACP HTTP and multi-workspace runtimes are active, so the plural ACP endpoint can select a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -2985,6 +3010,39 @@ Errors:
 - `400 {code: 'invalid_enabled_flag'}` — `enabled` missing or non-boolean.
 
 SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originatorClientId?}`.
+
+#### Split Skills config and runtime routes
+
+Capability tag: `workspace_skills_config_runtime`.
+
+`GET /workspace/config/skills` reads the daemon-local global configuration owner. `GET /workspaces/:workspace/config/skills` reads the exact registered workspace configuration and does not require a live or trusted runtime. Both return the normal Skills status shape without a required `runtimeEpoch`:
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/work/project",
+  "initialized": true,
+  "skills": []
+}
+```
+
+`GET /workspace/runtime/skills` and `GET /workspaces/:workspace/runtime/skills` read the selected trusted runtime without starting it. A live catalog includes the runtime generation that produced it:
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/work/project",
+  "initialized": true,
+  "runtimeEpoch": 4,
+  "skills": []
+}
+```
+
+Global installation and deletion use `POST /workspace/config/skills/install` and `DELETE /workspace/config/skills/:name?scope=global`. Workspace installation, deletion, and enablement use `POST /workspaces/:workspace/config/skills/install`, `DELETE /workspaces/:workspace/config/skills/:name?scope=workspace`, and `POST /workspaces/:workspace/config/skills/:name/enable`. Config writes commit durable state before scheduling runtime reconciliation. Their `activation` is `deferred` when no current runtime can be updated and `reconciling` when an update has been queued; a no-op toggle preserves the facade's activation instead of claiming that a runtime refresh occurred.
+
+Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated.
+
+The singular mutation owner rejects workspace scope with `400 workspace_scope_requires_qualified_workspace`; qualified mutations reject global scope with `400 global_scope_requires_singular_owner`. Qualified writes require a trusted workspace. A legacy injected bridge returns `501 workspace_runtime_not_supported` for qualified config writes that require runtime coordination. Unknown, removed, transitioning, and draining workspaces follow the standard qualified-workspace errors and never fall back to primary.
 
 #### `POST /workspace/skills/:name/enable`
 

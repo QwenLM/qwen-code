@@ -24,6 +24,7 @@ import {
 import type { ReasoningEffort } from '../../reasoning-effort.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -321,6 +322,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(runtimeOptions?.fetch, this.cliConfig),
     });
   }
 

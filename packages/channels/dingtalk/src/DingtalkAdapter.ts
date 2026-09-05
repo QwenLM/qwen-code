@@ -2641,13 +2641,14 @@ export class DingtalkChannel extends ChannelBase {
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
     placeholder?: string;
+    syntheticText: boolean;
   } {
     const msgtype = data.msgtype || 'text';
 
     if (msgtype === 'richText') {
       const richText = data.content?.richText;
       if (!Array.isArray(richText)) {
-        return { text: '', downloadCodes: [] };
+        return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
       const codes: string[] = [];
@@ -2663,6 +2664,7 @@ export class DingtalkChannel extends ChannelBase {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
+        syntheticText: text.trim().length === 0 && codes.length > 0,
       };
     }
 
@@ -2672,6 +2674,7 @@ export class DingtalkChannel extends ChannelBase {
         text: '(image)',
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
+        syntheticText: Boolean(code),
       };
     }
 
@@ -2685,17 +2688,23 @@ export class DingtalkChannel extends ChannelBase {
         mediaType: this.mediaTypeFromMsgType(msgtype),
         fileName,
         placeholder,
+        syntheticText: Boolean(code),
       };
     }
 
     if (msgtype === 'audio') {
       const code = data.content?.downloadCode;
       const recognition = data.content?.recognition;
+      // A transcript is the user's own words, so it stays gated on the
+      // configured prefix -- the same call WeCom makes for its voice
+      // branch. An untranscribed note carries only the `(audio)`
+      // placeholder and runs as synthetic media instead.
       return {
         text: recognition || '(audio)',
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: recognition ? undefined : '(audio)',
+        syntheticText: !recognition && Boolean(code),
       };
     }
 
@@ -2706,6 +2715,7 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: '(video)',
+        syntheticText: Boolean(code),
       };
     }
 
@@ -2717,11 +2727,16 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: text || '(chat record)',
         downloadCodes: [],
+        syntheticText: !text,
       };
     }
 
     // Default: text message
-    return { text: data.text?.content?.trim() || '', downloadCodes: [] };
+    return {
+      text: data.text?.content?.trim() || '',
+      downloadCodes: [],
+      syntheticText: false,
+    };
   }
 
   /**
@@ -2962,6 +2977,7 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: messageText,
+        ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,

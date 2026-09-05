@@ -316,6 +316,11 @@ restart the daemon:
 {
   "experimental": {
     "todoStopGuard": true
+  },
+  "tools": {
+    "todoWrite": {
+      "enabled": true
+    }
   }
 }
 ```
@@ -335,8 +340,10 @@ coalesced per task until the chain yields.
 
 The option defaults to `false`, requires restart, and is forced off in safe
 mode, bare mode, and Approval `plan` mode. It is in-memory only: loading Todo
-state from disk or restarting the daemon does not arm it. A new ordinary prompt
-must successfully run its own top-level `todo_write`; retry/continue and live
+state from disk or restarting the daemon does not arm it. Set
+`tools.todoWrite.enabled` in settings.json and restart Qwen Code, then a new
+ordinary prompt must successfully run its own top-level `todo_write`;
+retry/continue and live
 client reattach keep the current in-memory work chain. Successfully changing
 the session working directory clears it so an old Todo cannot resume in a new
 workspace.
