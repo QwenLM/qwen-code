@@ -7,6 +7,7 @@
 import type React from 'react';
 import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
+import wrapAnsi from 'wrap-ansi';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -99,6 +100,33 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   // Hide "? for shortcuts" when a custom status line is active (it already
   // occupies the footer, so the hint is redundant). Matches upstream behavior.
   const suppressHint = statusLineLines.length > 0;
+  // Budget on wrapped visual rows, not logical lines: a single logical
+  // status line can soft-wrap to more than one rendered row (the idle box
+  // below renders with wrap="wrap" clipped at maxHeight={MAX_STATUS_LINES}),
+  // so counting logical lines alone under-counts the armed height and the
+  // footer still loses a row when the exit warning arms -- the exact bug
+  // this PR exists to fix, just for a status line that wraps.
+  const statusRowCount =
+    statusLineLines.length > 0
+      ? Math.min(
+          MAX_STATUS_LINES,
+          statusLineLines.reduce(
+            (rows, line) =>
+              rows +
+              wrapAnsi(
+                line,
+                Math.max(1, statusLineWidth ?? terminalWidth - 4),
+                { trim: false, hard: true },
+              ).split('\n').length,
+            0,
+          ),
+        )
+      : 0;
+  const exitWarningText = uiState.ctrlCPressedOnce
+    ? t('Press Ctrl+C again to exit.')
+    : uiState.ctrlDPressedOnce
+      ? t('Press Ctrl+D again to exit.')
+      : null;
 
   // MCP init progress lives in this row (not a standalone component above the
   // input) so the live area's height is constant in the default case, avoiding
@@ -109,53 +137,56 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   // `configInitMessage` is placed ahead of `showAutoAcceptIndicator` so users
   // launched with YOLO / auto-accept-edits still see the ~1s startup progress;
   // the approval-mode indicator takes over as soon as init finishes.
-  const leftBottomContent = uiState.ctrlCPressedOnce ? (
-    <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
-  ) : uiState.ctrlDPressedOnce ? (
-    <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
-  ) : uiState.showEscapePrompt ? (
-    <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
-  ) : pasteProgress.active ? (
-    <PasteProgressBar progress={pasteProgress} />
-  ) : uiState.rewindEscPending ? (
-    <Text color={theme.text.secondary}>
-      {t('Press Esc again to rewind conversation.')}
-    </Text>
-  ) : vimEnabled && vimMode === 'INSERT' ? (
-    <Text color={theme.text.secondary}>-- INSERT --</Text>
-  ) : vimEnabled && vimMode === 'NORMAL' ? (
-    <Text color={theme.text.secondary}>-- NORMAL --</Text>
-  ) : uiState.shellModeActive ? (
-    <ShellModeIndicator />
-  ) : configInitMessage ? (
-    <Text color={theme.text.secondary}>
-      <Spinner /> {configInitMessage}
-    </Text>
-  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
-    <Text color={theme.text.secondary}>
-      <Spinner /> {t('IDE connecting... context may be unavailable')}
-    </Text>
-  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
-    <Text color={theme.status.warning}>
-      {t('IDE connection unavailable: {{message}}', {
-        message: uiState.startupIdeConnectionStatus.message,
-      })}
-    </Text>
-  ) : uiState.streamingState === StreamingState.Responding ? (
-    <Text color={theme.text.secondary}>
-      {t('Enter to steer · Ctrl+Q to queue')}
-      {showAutoAcceptIndicator !== undefined && (
-        <>
-          {' · '}
-          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-        </>
-      )}
-    </Text>
-  ) : showAutoAcceptIndicator !== undefined ? (
-    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : suppressHint ? null : (
-    <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
-  );
+  // When a status line is present, the Ctrl+C/D warning overrides it in
+  // place (same row budget) so the live region does not change height.
+  // Unmounting those rows used to shrink the footer, Ink full-cleared at
+  // stdout.rows, and the startup banner scrolled off the viewport.
+  const leftBottomContent =
+    exitWarningText && statusRowCount === 0 ? (
+      <Text color={theme.status.warning}>{exitWarningText}</Text>
+    ) : uiState.showEscapePrompt ? (
+      <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+    ) : pasteProgress.active ? (
+      <PasteProgressBar progress={pasteProgress} />
+    ) : uiState.rewindEscPending ? (
+      <Text color={theme.text.secondary}>
+        {t('Press Esc again to rewind conversation.')}
+      </Text>
+    ) : vimEnabled && vimMode === 'INSERT' ? (
+      <Text color={theme.text.secondary}>-- INSERT --</Text>
+    ) : vimEnabled && vimMode === 'NORMAL' ? (
+      <Text color={theme.text.secondary}>-- NORMAL --</Text>
+    ) : uiState.shellModeActive ? (
+      <ShellModeIndicator />
+    ) : configInitMessage ? (
+      <Text color={theme.text.secondary}>
+        <Spinner /> {configInitMessage}
+      </Text>
+    ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+      <Text color={theme.text.secondary}>
+        <Spinner /> {t('IDE connecting... context may be unavailable')}
+      </Text>
+    ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+      <Text color={theme.status.warning}>
+        {t('IDE connection unavailable: {{message}}', {
+          message: uiState.startupIdeConnectionStatus.message,
+        })}
+      </Text>
+    ) : uiState.streamingState === StreamingState.Responding ? (
+      <Text color={theme.text.secondary}>
+        {t('Enter to steer · Ctrl+Q to queue')}
+        {showAutoAcceptIndicator !== undefined && (
+          <>
+            {' · '}
+            <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+          </>
+        )}
+      </Text>
+    ) : showAutoAcceptIndicator !== undefined ? (
+      <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+    ) : suppressHint ? null : (
+      <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
+    );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
   if (sandboxInfo) {
@@ -228,15 +259,17 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
         flexShrink={isNarrow ? 0 : 1}
         minWidth={0}
       >
-        {statusLineLines.length > 0 &&
-          !uiState.ctrlCPressedOnce &&
-          !uiState.ctrlDPressedOnce && (
-            <Box
-              flexDirection="column"
-              maxHeight={MAX_STATUS_LINES}
-              overflow="hidden"
-              width="100%"
-            >
+        {statusRowCount > 0 && (
+          <Box
+            flexDirection="column"
+            height={exitWarningText ? statusRowCount : undefined}
+            maxHeight={MAX_STATUS_LINES}
+            overflow="hidden"
+            width="100%"
+          >
+            {exitWarningText ? (
+              <Text color={theme.status.warning}>{exitWarningText}</Text>
+            ) : (
               <Text
                 color={
                   respectUserColors
@@ -250,8 +283,9 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
               >
                 {statusLineLines.join('\n')}
               </Text>
-            </Box>
-          )}
+            )}
+          </Box>
+        )}
         {/* Built-in worktree indicator. Shown by default whenever a
             worktree is active so the user always has a UI affordance,
             even when a custom statusline is configured — their script

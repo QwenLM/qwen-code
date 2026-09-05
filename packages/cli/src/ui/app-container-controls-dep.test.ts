@@ -58,6 +58,12 @@ describe('AppContainer controls-height measurement wiring', () => {
     expect(deps).toContain('stickyTodosLayoutKey');
     // The fix: dropping this entry re-introduces the non-VP overflow flicker.
     expect(deps).toContain('liveAgentPanelLayoutKey');
+    // Ctrl+C/D and Esc prompts change footer rows (status-line override).
+    // Missing these lets MainContent keep the pre-prompt height for a frame
+    // and overflow the terminal — Ink then full-clears at stdout.rows.
+    expect(deps).toContain('ctrlCPressedOnce');
+    expect(deps).toContain('ctrlDPressedOnce');
+    expect(deps).toContain('showEscapePrompt');
   });
 
   it('computes liveAgentPanelLayoutKey from the live agent roster', () => {
