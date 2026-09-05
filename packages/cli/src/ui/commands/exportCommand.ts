@@ -32,7 +32,10 @@ import { t } from '../../i18n/index.js';
 type ExportFormat = {
   extension: string;
   displayName: string;
-  format: (sessionData: ExportSessionData) => string;
+  format: (
+    sessionData: ExportSessionData,
+    records?: readonly unknown[],
+  ) => string;
 };
 
 const EXPORT_DIR_OUT_OF_CWD =
@@ -317,7 +320,10 @@ async function exportSessionAction(
       config,
     );
 
-    const content = exportFormat.format(normalizedData);
+    const content = exportFormat.format(
+      normalizedData,
+      exportFormat.extension === 'html' ? conversation.messages : undefined,
+    );
 
     if (target.outputDirKind === 'custom') {
       try {

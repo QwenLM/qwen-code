@@ -30,12 +30,14 @@ import type {
   WebShellComposerTagIconMap,
 } from '../../customization';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
+import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import {
   getComposerTagDisplay,
   getComposerTagLabel,
   getComposerTagValue,
 } from '../../hooks/useComposerCore';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
@@ -43,6 +45,7 @@ import styles from './UserMessage.module.css';
 interface UserMessageImage {
   data: string;
   mimeType: string;
+  attachmentId?: string;
 }
 
 interface UserMessageFile {
@@ -63,7 +66,7 @@ interface UserMessageProps {
   onRetrySend?: () => void;
   onEdit?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
-  onImagePreview?: (src: string, alt?: string) => void;
+  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
 }
 
@@ -226,6 +229,7 @@ export const UserMessage = memo(function UserMessage({
   onAttachmentPreview,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -370,6 +374,12 @@ export const UserMessage = memo(function UserMessage({
                           onImagePreview(
                             src,
                             t('user.uploadedImage', { index: index + 1 }),
+                            img.attachmentId
+                              ? {
+                                  kind: 'attachment',
+                                  attachmentId: img.attachmentId,
+                                }
+                              : undefined,
                           )
                       : undefined
                   }
@@ -431,14 +441,14 @@ export const UserMessage = memo(function UserMessage({
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !expanded
+                heightOverflowing && !documentMode && !expanded
                   ? styles.chatContentCollapsed
                   : ''
               }`}
             >
               {renderedContent}
             </div>
-            {heightOverflowing && (
+            {heightOverflowing && !documentMode && (
               <button
                 type="button"
                 className={styles.toggleButton}

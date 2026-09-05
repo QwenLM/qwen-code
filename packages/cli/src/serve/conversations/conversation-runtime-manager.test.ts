@@ -28,8 +28,9 @@ const root = {
   inodeVerifiable: true,
 };
 
-function createBridge() {
+function createBridge(mandatoryLeaseAttested = true) {
   return {
+    mandatoryLeaseAttested,
     preheat: vi.fn(async () => undefined),
     setLiveScreenContextCaptureHandler: vi.fn(),
     setLiveTaskToolRequestHandler: vi.fn(),
@@ -452,6 +453,66 @@ describe('ConversationRuntimeManager', () => {
       retryable: false,
     });
     expect(publishRuntime).not.toHaveBeenCalled();
+  });
+
+  it('rejects and does not publish a candidate missing the mandatory-lease attestation', async () => {
+    const candidate = createOwnedRuntime(createBridge(false));
+    const registry = createRegistry();
+    const publishRuntime = vi.fn(
+      async (_cwd: string, validate: (runtime: WorkspaceRuntime) => void) => {
+        await validate(candidate);
+        throw new Error('unreachable: validation must reject the candidate');
+      },
+    );
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(publishRuntime).toHaveBeenCalledOnce();
+    expect(
+      registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot),
+    ).toBeUndefined();
+  });
+
+  it('terminally quarantines a registered runtime missing the mandatory-lease attestation', async () => {
+    const candidate = createOwnedRuntime(createBridge(false));
+    const registry = createRegistry(candidate);
+    const quarantineRuntime = vi.fn(async () => undefined);
+    const onTerminalQuarantine = vi.fn();
+    const publishRuntime = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(quarantineRuntime).toHaveBeenCalledWith(
+      candidate,
+      'missing_mandatory_lease_attestation',
+    );
+    expect(publishRuntime).not.toHaveBeenCalled();
+    // The static contract violation keeps its non-retryable classification on
+    // every later access instead of degrading to retryable
+    // `conversation_runtime_unavailable`.
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(() => manager.assertCurrent(candidate)).toThrowError(
+      expect.objectContaining({ code: 'conversation_root_compromised' }),
+    );
   });
 
   it.each(['draining', 'blocked'] as const)(

@@ -135,6 +135,66 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     });
   });
 
+  it('echoes an idle submit once as a user row', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('plain prompt');
+    });
+
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toMatchObject([{ kind: 'user', text: 'plain prompt' }]);
+  });
+
+  it('adds no user row for a submit whose invocation was already echoed', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      // A skill command: the transcript already holds the row projected from
+      // the recorded `/skill-name …` invocation; the expanded prompt is
+      // generated text the user never typed (ink skips its USER item too).
+      result.current.submit('expanded skill prompt', undefined, {
+        invocationEchoed: true,
+      });
+    });
+
+    expect(result.current.items.filter((item) => item.kind === 'user')).toEqual(
+      [],
+    );
+    // Suppression covers the echo only — the turn still sends its prompt.
+    expect(live.turns[0]?.prompt).toBe('expanded skill prompt');
+  });
+
+  it('keeps the transcript seam callbacks stable across turn state', () => {
+    const { result, rerender } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const applyEvent = result.current.applyEvent;
+    const resetTranscript = result.current.resetTranscript;
+
+    // The app shell memoizes its host on these identities, so a dependency on
+    // anything that moves during a turn rebuilds the host on every render.
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    rerender();
+    act(() => {
+      applyEvent({ type: 'info', text: 'a notice' });
+    });
+    rerender();
+
+    expect(result.current.items.some((item) => item.kind === 'user')).toBe(
+      true,
+    );
+    expect(result.current.applyEvent).toBe(applyEvent);
+    expect(result.current.resetTranscript).toBe(resetTranscript);
+  });
+
   it('replays queued mid-turn text as the next turn, raw and with provenance', async () => {
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),

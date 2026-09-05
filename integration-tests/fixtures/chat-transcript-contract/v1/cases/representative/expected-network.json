@@ -1,0 +1,10 @@
+{
+  "unexpectedRequests": 0,
+  "cspViolations": 0,
+  "allowedImageSources": [
+    "data:image/png",
+    "data:image/jpeg",
+    "data:image/gif",
+    "data:image/webp"
+  ]
+}
