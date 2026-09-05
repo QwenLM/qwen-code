@@ -1250,8 +1250,18 @@ describe('DaemonClient', () => {
           runtimeLive: true,
           runtimeEpoch: 2,
         };
-        const { fetch: restFetch, calls } = recordingFetch(() =>
-          jsonResponse(200, runtimeStatus),
+        const skillsStatus = {
+          v: 1 as const,
+          workspaceCwd: '/work/secondary',
+          initialized: true,
+          runtimeEpoch: 2,
+          skills: [],
+        };
+        const { fetch: restFetch, calls } = recordingFetch((request) =>
+          jsonResponse(
+            200,
+            request.url.includes('/skills') ? skillsStatus : runtimeStatus,
+          ),
         );
         const transportFetch = vi.fn(async () =>
           jsonResponse(404, { error: 'ACP transport route not found' }),
@@ -1280,6 +1290,18 @@ describe('DaemonClient', () => {
         );
         await expect(workspace.ensureRuntime()).resolves.toEqual(runtimeStatus);
         await expect(workspace.runtimeStatus()).resolves.toEqual(runtimeStatus);
+        await expect(client.workspaceConfigSkills()).resolves.toEqual(
+          skillsStatus,
+        );
+        await expect(client.workspaceRuntimeSkills()).resolves.toEqual(
+          skillsStatus,
+        );
+        await expect(workspace.workspaceConfigSkills()).resolves.toEqual(
+          skillsStatus,
+        );
+        await expect(workspace.workspaceRuntimeSkills()).resolves.toEqual(
+          skillsStatus,
+        );
 
         expect(calls.map((call) => [call.method, call.url])).toEqual([
           ['POST', 'http://daemon/workspace/runtime/ensure'],
@@ -1291,6 +1313,13 @@ describe('DaemonClient', () => {
           [
             'GET',
             'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/status',
+          ],
+          ['GET', 'http://daemon/workspace/config/skills'],
+          ['GET', 'http://daemon/workspace/runtime/skills'],
+          ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/config/skills'],
+          [
+            'GET',
+            'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/skills',
           ],
         ]);
         expect(
@@ -6208,6 +6237,53 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace Skill management', () => {
+    it('routes config mutations to their singular or qualified owner', async () => {
+      const response = { skillName: 'demo-skill', activation: 'reconciling' };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceByCwd('/tmp/work space');
+      const globalRequest = {
+        name: 'demo-skill',
+        scope: 'global' as const,
+        source: { type: 'folder' as const, path: '/tmp/demo-skill' },
+      };
+      const workspaceRequest = {
+        ...globalRequest,
+        scope: 'workspace' as const,
+      };
+
+      await client.installWorkspaceConfigSkill(globalRequest);
+      await client.deleteWorkspaceConfigSkill('demo-skill', 'global');
+      await workspace.installWorkspaceConfigSkill(workspaceRequest);
+      await workspace.deleteWorkspaceConfigSkill('demo-skill', 'workspace');
+      await workspace.setWorkspaceConfigSkillEnabled('demo-skill', false, {
+        clientId: 'client-1',
+      });
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['POST', 'http://daemon/workspace/config/skills/install'],
+        [
+          'DELETE',
+          'http://daemon/workspace/config/skills/demo-skill?scope=global',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/config/skills/install',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/config/skills/demo-skill?scope=workspace',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/config/skills/demo-skill/enable',
+        ],
+      ]);
+      expect(calls.at(-1)?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('uploads a Skill package', async () => {
       const response = {
         skillName: 'demo-skill',
