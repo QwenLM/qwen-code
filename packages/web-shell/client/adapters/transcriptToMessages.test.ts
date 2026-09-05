@@ -4861,3 +4861,93 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentB!.subContent).toBeUndefined();
   });
 });
+
+describe('Persisted identity on rendered messages', () => {
+  it('carries sourceRecordIds and promptId from the source block', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock('user-1', 'user', 'hello', 1, false, {
+          sourceRecordIds: ['record-user-1'],
+          promptId: 'prompt-1',
+        }),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages[0]).toMatchObject({
+      role: 'user',
+      sourceRecordIds: ['record-user-1'],
+      promptId: 'prompt-1',
+    });
+  });
+
+  it('unions the record ids of every block folded into one message', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock('a1', 'assistant', 'part one', 1, false, {
+          sourceRecordIds: ['r1', 'r2'],
+          promptId: 'prompt-1',
+        }),
+        textBlock('a2', 'assistant', ' part two', 2, false, {
+          sourceRecordIds: ['r2', 'r3'],
+        }),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'part one part two',
+      sourceBlockIds: ['a1', 'a2'],
+      // Transcript order, deduplicated — the shared r2 appears once.
+      sourceRecordIds: ['r1', 'r2', 'r3'],
+      promptId: 'prompt-1',
+    });
+  });
+
+  it('stamps a tool group from the blocks folded into its tools', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          ...toolBlock('t1', 'call-1', 'completed', 1),
+          sourceRecordIds: ['r-tool'],
+          promptId: 'prompt-2',
+        },
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      sourceRecordIds: ['r-tool'],
+      promptId: 'prompt-2',
+    });
+  });
+
+  it('leaves both fields off a message whose blocks carry no identity', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [textBlock('user-1', 'user', 'hello', 1)],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages[0]).not.toHaveProperty('sourceRecordIds');
+    expect(messages[0]).not.toHaveProperty('promptId');
+  });
+
+  it('stays off the identity-stripping path', () => {
+    // The events-to-messages caller does not ask for source identity, so it
+    // keeps getting exactly what it got before: no client-local block ids and
+    // no persisted ones either.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'hello', 1, false, {
+        sourceRecordIds: ['record-user-1'],
+        promptId: 'prompt-1',
+      }),
+    ]);
+
+    expect(messages[0]).not.toHaveProperty('sourceBlockIds');
+    expect(messages[0]).not.toHaveProperty('sourceRecordIds');
+    expect(messages[0]).not.toHaveProperty('promptId');
+  });
+});
