@@ -249,14 +249,21 @@ describe('no-core-utils-upward-import', () => {
   });
 
   it('keeps exact export keys ahead of the wildcard', () => {
-    // `goalWire` maps to goals/goal-wire.ts, which the wildcard would resolve
-    // to a file that does not exist. Exact keys must win.
+    // The fixture must be a specifier whose two resolutions disagree, or this
+    // test cannot see the regression it names: the rule verdicts by directory
+    // layer and never checks file existence. `transcriptRecords` maps exactly
+    // to utils/transcript-records.js (inside utils/ — allowed), while the
+    // `./*` wildcard would resolve it to a `transcriptRecords` path outside
+    // utils/ (a violation). Dropping the exact-key branch of
+    // resolveExportTarget flips the expectation from 0 to 1; a fixture like
+    // `goalWire` — whose exact and wildcard resolutions both land outside
+    // utils/ — reports 1 either way and would stay green on the mutant.
     expect(
       runRule(
-        "import { X } from '@qwen-code/qwen-code-core/goalWire';",
+        "import { X } from '@qwen-code/qwen-code-core/transcriptRecords';",
         'packages/core/src/utils/foo.ts',
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
   });
 
   it('allows a sibling utils module reached through the wildcard', () => {
