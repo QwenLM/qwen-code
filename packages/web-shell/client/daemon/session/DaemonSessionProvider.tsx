@@ -1077,6 +1077,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     const state = turnIndexRef.current;
     if (state.status === 'disabled' || state.status === 'unsupported') return;
     turnIndexAttemptRef.current = 0;
+    // An anchored read in flight is bound to a snapshot this rewind just
+    // invalidated, and neither of its post-await guards would catch it: the
+    // session object survives a rewind and the jump generation is otherwise
+    // bumped only by another jump. Left alone it would splice the rewound-away
+    // turn back into the post-rewind window and report success.
+    openTurnGenerationRef.current += 1;
     commitTurnIndex(invalidateTurnIndexSnapshot(state));
   }, [commitTurnIndex]);
   const store = useMemo(
@@ -1489,6 +1495,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           clientId: session.clientId,
         });
         if (sessionRef.current !== session) return;
+        // Session identity is not enough: a fill does not take the in-flight
+        // guard, so it can still be pending when a rewind or a 409 invalidates
+        // the index, or when a re-seed adopts a newer snapshot. Admitting then
+        // would mix ordinals frozen by different snapshots, or flip an `idle`
+        // store to `ready` with no snapshot at all — which parks it, since the
+        // planners bail on an undefined snapshot and the seeding effect only
+        // runs on `idle`.
+        if (turnIndexRef.current.snapshot !== snapshot) return;
         const admitted = admitTurnIndexPage(
           turnIndexRef.current,
           page,
