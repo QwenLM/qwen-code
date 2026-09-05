@@ -69,6 +69,15 @@ const ciCleanSteps = Object.entries(ciYaml.jobs)
     run: job.steps.find((s) => s.name === 'Clean stale .qwen before checkout')
       ?.run,
   }));
+const classifyPrSteps = ciYaml.jobs.classify_pr.steps;
+const trustedClassifierGuardIndex = classifyPrSteps.findIndex(
+  (s) => s.name === 'Verify trusted classifier checkout is clean',
+);
+const trustedClassifierGuardStep =
+  classifyPrSteps[trustedClassifierGuardIndex]?.run;
+const trustedClassifierCheckoutIndex = classifyPrSteps.findIndex((s) =>
+  String(s.uses ?? '').includes('actions/checkout'),
+);
 const reviewYaml = parse(
   readFileSync('.github/workflows/qwen-code-pr-review.yml', 'utf8'),
 );
@@ -322,6 +331,33 @@ const linkExists = (path) => {
 };
 
 describe('review worktree cleanup steps', () => {
+  it('fails closed if the trusted classifier residue survives cleanup', () => {
+    const cleanupIndex = classifyPrSteps.findIndex(
+      (s) => s.name === 'Clean stale .qwen before checkout',
+    );
+    expect(trustedClassifierGuardIndex).toBeGreaterThan(cleanupIndex);
+    expect(trustedClassifierGuardIndex).toBeLessThan(
+      trustedClassifierCheckoutIndex,
+    );
+
+    const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+    const workspace = join(root, 'workspace');
+    mkdirSync(join(workspace, 'trusted-ci-classifier'), { recursive: true });
+    try {
+      const result = spawnSync('bash', ['-c', trustedClassifierGuardStep], {
+        cwd: workspace,
+        env: { ...process.env, GITHUB_WORKSPACE: workspace },
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(
+        'trusted-ci-classifier survived cleanup; refusing to reuse it',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
     expect(ciCleanSteps.map(({ id }) => id)).toEqual(
       expect.arrayContaining([

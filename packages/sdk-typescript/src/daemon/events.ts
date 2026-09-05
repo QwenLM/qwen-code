@@ -298,6 +298,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
@@ -2656,7 +2657,10 @@ function isSessionMetadataUpdatedData(
   if (
     !isRecord(value) ||
     !isNonEmptyString(value['sessionId']) ||
-    !isOptionalStringOrNull(value['displayName'])
+    !isOptionalStringOrNull(value['displayName']) ||
+    (value['titleSource'] !== undefined &&
+      value['titleSource'] !== 'manual' &&
+      value['titleSource'] !== 'auto')
   ) {
     return false;
   }

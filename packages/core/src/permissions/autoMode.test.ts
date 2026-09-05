@@ -11,13 +11,16 @@ import path from 'node:path';
 import {
   SAFE_TOOL_ALLOWLIST,
   applyAutoModeDecision,
+  decorateAutoModeFallbackConfirmation,
   decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   formatClassifierBlockMessage,
   formatClassifierUnavailableFallbackMessage,
+  getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
   isAutoModeProtectedWritePath,
   isInSafeToolAllowlist,
+  prepareAutoModeFallback,
   shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
   shouldClassifyAllShellForAutoMode,
@@ -1218,6 +1221,72 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     });
   });
 
+  it('routes the block that reaches the consecutive limit to manual approval', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: true,
+        reason: 'unsafe command',
+        unavailable: false,
+        stage: 'fast',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      {
+        consecutiveBlock: 2,
+        consecutiveUnavailable: 0,
+        totalBlock: 2,
+        totalUnavailable: 0,
+      },
+      'blocked-action',
+    );
+
+    expect(result).toMatchObject({
+      kind: 'fallback',
+      reason: 'consecutive_block',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 3,
+      consecutiveUnavailable: 0,
+      totalBlock: 3,
+      totalUnavailable: 0,
+    });
+  });
+
+  it('routes the block that reaches the total limit to manual approval', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: true,
+        reason: 'unsafe command',
+        unavailable: false,
+        stage: 'fast',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      {
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 19,
+        totalUnavailable: 0,
+      },
+      'blocked-action',
+    );
+
+    expect(result).toMatchObject({
+      kind: 'fallback',
+      reason: 'total_denial',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 1,
+      consecutiveUnavailable: 0,
+      totalBlock: 20,
+      totalUnavailable: 0,
+    });
+  });
+
   it('routes classifier infrastructure failures to manual approval', () => {
     const setAutoModeDenialState = vi.fn();
     const result = applyAutoModeDecision(
@@ -1283,8 +1352,46 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       denialState,
     );
 
-    expect(result).toEqual({ kind: 'fallback', reason: 'consecutive_block' });
+    expect(result).toMatchObject({
+      kind: 'fallback',
+      reason: 'consecutive_block',
+    });
     expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('consumes a matching retry token when a threshold fallback takes precedence', () => {
+    const setAutoModeDenialState = vi.fn();
+    const actionFingerprint = 'same-action';
+    const result = applyAutoModeDecision(
+      { via: 'fallback', reason: 'consecutive_block' },
+      { setAutoModeDenialState } as unknown as Config,
+      {
+        ...denialState,
+        consecutiveBlock: 3,
+        pendingManualRetryFingerprint: actionFingerprint,
+      },
+      actionFingerprint,
+    );
+
+    expect(result).toMatchObject({
+      kind: 'fallback',
+      reason: 'consecutive_block',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      ...denialState,
+      consecutiveBlock: 3,
+    });
+  });
+});
+
+describe('getAutoModeActionFingerprint', () => {
+  it('matches canonical args only within the same working directory', () => {
+    expect(getAutoModeActionFingerprint('shell', { b: 2, a: 1 }, '/repo')).toBe(
+      getAutoModeActionFingerprint('shell', { a: 1, b: 2 }, '/repo'),
+    );
+    expect(getAutoModeActionFingerprint('shell', { a: 1 }, '/repo')).not.toBe(
+      getAutoModeActionFingerprint('shell', { a: 1 }, '/other'),
+    );
   });
 });
 
@@ -1309,7 +1416,7 @@ describe('formatClassifierBlockMessage', () => {
         unavailable: false,
       }),
     ).toBe(
-      'Blocked by auto mode policy: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+      'Blocked by auto mode policy: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
   });
 });
@@ -1335,7 +1442,7 @@ describe('classifier unavailable confirmation', () => {
   });
 
   it('decorates the confirmation and suppresses persistent approval', () => {
-    const confirmation = decorateClassifierUnavailableConfirmation(
+    const confirmation = decorateAutoModeFallbackConfirmation(
       {
         type: 'exec',
         title: 'Run command',
@@ -1343,6 +1450,7 @@ describe('classifier unavailable confirmation', () => {
         rootCommand: 'touch',
         onConfirm: vi.fn(),
       },
+      'classifier_unavailable',
       'Classifier unavailable.',
     );
 
@@ -1353,6 +1461,22 @@ describe('classifier unavailable confirmation', () => {
         message: 'Classifier unavailable.',
       },
     });
+  });
+
+  it('keeps the classifier-unavailable decorator compatible', () => {
+    const confirmation = decorateClassifierUnavailableConfirmation(
+      {
+        type: 'info',
+        title: 'Run tool',
+        prompt: 'Run?',
+        onConfirm: vi.fn(),
+      },
+      'Classifier unavailable.',
+    );
+
+    expect(confirmation.autoModeFallback?.reason).toBe(
+      'classifier_unavailable',
+    );
   });
 });
 
@@ -1368,7 +1492,7 @@ describe('PermissionDenied hook gating', () => {
     durationMs: 20,
   };
 
-  it('fires only for classifier blocks that produce a blocked outcome', () => {
+  it('fires for classifier policy blocks, including threshold fallbacks', () => {
     expect(
       shouldFirePermissionDeniedForAutoMode(classifierBlock, {
         kind: 'blocked',
@@ -1393,6 +1517,37 @@ describe('PermissionDenied hook gating', () => {
           message: 'Classifier unavailable.',
         },
       ),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'fallback',
+        reason: 'consecutive_block',
+        message: 'Review manually.',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'fallback',
+        reason: 'total_denial',
+        message: 'Review manually.',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'fallback',
+        reason: 'classifier_blocked_retry',
+        message: 'Review manually.',
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'fallback',
+        reason: 'safety_check',
+      }),
     ).toBe(false);
 
     expect(
@@ -1600,6 +1755,50 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     expect(decision.via).not.toBe('blocked:destructive-command');
   });
 
+  it('preserves an armed retry when the destructive guard preempts it', async () => {
+    const actionFingerprint = getAutoModeActionFingerprint(
+      ToolNames.SHELL,
+      { command: 'git reset --hard' },
+      cwd,
+    );
+    let denialState = {
+      consecutiveBlock: 1,
+      consecutiveUnavailable: 0,
+      totalBlock: 1,
+      totalUnavailable: 0,
+      pendingManualRetryFingerprint: actionFingerprint,
+    };
+    const config = {
+      ...baseConfig,
+      getAutoModeDenialState: () => denialState,
+      setAutoModeDenialState: (next: typeof denialState) => {
+        denialState = next;
+      },
+    } as unknown as Config;
+    const prepared = prepareAutoModeFallback(config, actionFingerprint);
+
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
+      pmForcedAsk: false,
+      toolParams: { command: 'git reset --hard' },
+      messages: [{ role: 'user', parts: [{ text: 'fix the bug' }] }],
+      config,
+      signal: new AbortController().signal,
+      skipClassifierReason: prepared.fallback.fallback
+        ? prepared.fallback.reason
+        : undefined,
+    });
+    const outcome = applyAutoModeDecision(
+      decision,
+      config,
+      prepared.denialState,
+      actionFingerprint,
+    );
+
+    expect(outcome.kind).toBe('blocked');
+    expect(denialState.pendingManualRetryFingerprint).toBe(actionFingerprint);
+  });
+
   it('does not block non-shell tools', async () => {
     const decision = await evaluateAutoMode({
       ctx: { toolName: ToolNames.READ_FILE, filePath: '/any/file.txt' },
@@ -1647,6 +1846,10 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     if (result.kind === 'blocked') {
       expect(result.errorMessage).toContain('Blocked destructive git command');
       expect(result.errorMessage).toContain('Do not try to complete');
+      expect(result.errorMessage).not.toContain('retry the same tool call');
+      expect(result.errorMessage).toContain(
+        'ask the user for explicit approval',
+      );
     }
     expect(setAutoModeDenialState).toHaveBeenCalled();
   });

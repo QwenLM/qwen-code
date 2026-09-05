@@ -252,8 +252,13 @@ safe to run before its owners exist, and the activation batch inherits them:
   vitest suite green; the default (ink) path byte-for-byte unchanged — the
   batches landed so far touch zero reachable ink code paths because nothing
   outside `src/ui/opentui/` imports them. The activation batch additionally
-  smoke-tests the flag under Bun (boot, dialog, live turn, exit drain); the
-  build/CI batch runs the OpenTUI e2e leg green on CI.
+  smoke-tests the flag under Bun (boot, dialog, live turn, exit drain). The
+  build/CI batch wired the renderer matrix into the existing e2e legs and
+  added the tui-parity gate; its own OpenTUI interactive e2e leg ran on
+  `main`, reported four real gaps (approval-mode indicator never drawn,
+  `@file` expansion absent, `submitted_prompt` dropped, and a slash command
+  submitted mid-turn racing the open stream instead of waiting for idle),
+  came out of CI until they closed, and is back in #10831 now that they have.
 - **1:1 parity audits** — screen-by-screen comparison against ink, plus a
   reverse audit pass, with surviving differences landing as tracked gaps
   (G-series) rather than silent drift.

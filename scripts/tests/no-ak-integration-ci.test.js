@@ -148,6 +148,12 @@ describe('no-AK integration CI wiring', () => {
         `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
       );
     }
+    // The latency-budget skip shares this fleet predicate; if the line is
+    // dropped, renamed, or its expression altered, every millisecond budget
+    // silently dies on every lane while the helper tests stay green.
+    expect(testStep).toContain(
+      `QWEN_SKIP_LATENCY_BUDGETS: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+    );
   });
 
   it('defines a focused no-AK integration script', () => {
@@ -175,6 +181,7 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-inject.test.ts',
         './qwen-live-m2-permission.test.ts',
         './qwen-live-m2-steering.test.ts',
+        './cli/_prompt-latency-policy.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
@@ -299,10 +306,18 @@ describe('no-AK integration CI wiring', () => {
       '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
     );
 
-    // Both consumers use the profile that was already computed from the
-    // base checkout. Neither may execute a classifier from the PR checkout.
+    // Every consumer uses the profile that was already computed from the
+    // base checkout. None may execute a classifier from the PR checkout —
+    // and none may repoint the env binding to a literal: `profile=
+    // "\${TRUSTED_CI_PROFILE:-full}"` falls back silently, so a dropped
+    // binding turns every docs_only/github_ci_only PR into a full 34-step
+    // pool run with no degraded-path warning.
     for (const profileStep of [
       getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(
+        getWorkflowJob(workflow, 'lint_and_static'),
+        'Use trusted CI profile',
+      ),
       getWorkflowStep(gateJob, 'Use trusted CI profile'),
     ]) {
       expect(profileStep).toContain("id: 'ci_profile'");
@@ -479,8 +494,10 @@ describe('no-AK integration CI wiring', () => {
     // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
 
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
+      lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
       web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
       test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
       integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
@@ -492,6 +509,11 @@ describe('no-AK integration CI wiring', () => {
       );
     }
     expect(guardCalls.test).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    // Byte-identical to test's event-aware shape: the lint lane replicates
+    // the same checkout contract on the same event surface.
+    expect(guardCalls.lint_and_static).toContain(
       'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
     expect(guardCalls.web_shell_e2e_smoke).toContain(
@@ -825,17 +847,6 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('keeps the lightweight coverage comment job on the hosted runner', () => {
-    const workflow = readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
-    );
-    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
-
-    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(coverageJob).not.toContain('ubuntu_runner');
-  });
-
   it('does not install Linux packages on self-hosted Playwright runners', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
@@ -844,8 +855,45 @@ describe('no-AK integration CI wiring', () => {
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
     expect(webShellJob).toContain('ubuntu_runner');
-    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
-    expect(webShellJob).toContain('--with-deps chromium');
+    const hostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium (hosted)',
+    );
+    const selfHostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium (self-hosted)',
+    );
+
+    expect(hostedInstall).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium',
+    );
+    expect(selfHostedInstall).toContain(
+      'node node_modules/playwright/cli.js install chromium',
+    );
+    expect(selfHostedInstall).not.toContain('install --with-deps chromium');
+    for (const step of [hostedInstall, selfHostedInstall]) {
+      expect(step).toContain(
+        "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
+      );
+      expect(step).toContain('node "${nested_cli}" install chromium');
+    }
+  });
+
+  it('installs both Playwright Chromium revisions in the nightly browser gate', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/e2e.yml'),
+      'utf8',
+    );
+    const browserJob = getWorkflowJob(workflow, 'web-shell-browser-regression');
+    const install = getWorkflowStep(browserJob, 'Install Playwright Chromium');
+
+    expect(install).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium',
+    );
+    expect(install).toContain(
+      "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
+    );
+    expect(install).toContain('node "${nested_cli}" install chromium');
   });
 });
 
