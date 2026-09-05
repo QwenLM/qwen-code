@@ -98,7 +98,7 @@ flowchart TB
     end
 
     subgraph adapters["Adapters"]
-        WUIP["web-shell/client/daemon/<br/>DaemonSessionProvider.tsx"]
+        WUIP["web-shell/client/daemon/session/<br/>DaemonSessionProvider.tsx"]
         TUIA["cli/src/ui/daemon/<br/>daemon-tui-adapter.ts"]
         CHB["channels/base/<br/>DaemonChannelBridge.ts"]
         DT["channels/dingtalk"]
