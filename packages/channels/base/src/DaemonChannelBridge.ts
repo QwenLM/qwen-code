@@ -510,6 +510,12 @@ export class DaemonChannelBridge
       await this.rejectStaleSession(session);
     }
     this.attachSession(session, bindingToken);
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
     return session.sessionId;
   }
 
