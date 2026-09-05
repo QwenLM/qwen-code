@@ -1149,6 +1149,140 @@ function escapeRegex(s: string): string {
 
 const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+// NAME=value split where the value may be empty and may contain any
+// characters, including spaces produced by resolved quotes.
+const ENV_ASSIGNMENT_PARTS_REGEX = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/;
+
+/**
+ * Environment variables whose values — even fully static ones — are
+ * interpreted by the target runtime or loader and can change what the
+ * command actually executes or loads. `NODE_OPTIONS=--require=/tmp/poc.cjs
+ * npm --version` must not normalize to `npm --version` and silently match a
+ * saved `Bash(npm --version)` allow rule while Node still honors the
+ * preload (#10197). Deliberately a small, high-confidence set: unknown
+ * variables keep the #2846 behavior (static assignments are still stripped).
+ */
+const UNSTRIPPABLE_ENV_VARS = new Set([
+  // Node: code and module injection
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  // Dynamic linkers / loaders
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'DYLD_FRAMEWORK_PATH',
+  // Interpreter startup files / option injection
+  'PYTHONSTARTUP',
+  'PYTHONHOME',
+  'BASH_ENV',
+  'ENV',
+  'KSH_ENV',
+  'RUBYOPT',
+  'PERL5OPT',
+]);
+
+/**
+ * Prefix families of {@link UNSTRIPPABLE_ENV_VARS}: `GIT_CONFIG_GLOBAL`,
+ * `NPM_CONFIG_USERCONFIG`, … all point a well-known tool at attacker-chosen
+ * config or code.
+ */
+const UNSTRIPPABLE_ENV_VAR_PREFIXES = ['GIT_CONFIG', 'NPM_CONFIG'];
+
+/**
+ * A leading assignment is stripped only when its value is a pure literal:
+ * alphanumerics plus a small set of path/separator characters. Anything else
+ * (backticks, `$`, glob characters, command separators, quotes, escapes)
+ * means the value carries shell expansion or execution semantics, so the
+ * assignment must stay in place and keep the invocation from matching a
+ * saved allow rule (#10192).
+ */
+const STATIC_ENV_VALUE_REGEX = /^[A-Za-z0-9_@%+=:,./ -]*$/;
+
+/**
+ * Materialize `$VAR` / `${VAR}` references with characters that can never
+ * pass {@link STATIC_ENV_VALUE_REGEX}. shell-quote drops unknown variable
+ * references entirely, so without this `X=${IFS}payload` would parse as the
+ * harmless-looking `X=payload`.
+ */
+function materializeEnvReference(name: string): string {
+  return `$\0${name}\0`;
+}
+
+function isUnstrippableEnvVar(name: string): boolean {
+  // Uppercase-normalized: Windows resolves environment variables
+  // case-insensitively, so `node_options=` must be treated as NODE_OPTIONS.
+  const upper = name.toUpperCase();
+  return (
+    UNSTRIPPABLE_ENV_VARS.has(upper) ||
+    UNSTRIPPABLE_ENV_VAR_PREFIXES.some((prefix) => upper.startsWith(prefix))
+  );
+}
+
+/**
+ * Whether a single parsed shell word is a `NAME=value` assignment whose value
+ * is a plain literal attached to a variable without runtime/loader semantics
+ * — the only kind that is safe to strip before matching permission rules.
+ */
+function isStrippableStaticAssignment(token: string): boolean {
+  const parts = ENV_ASSIGNMENT_PARTS_REGEX.exec(token);
+  if (!parts) {
+    return false;
+  }
+  const [, name, value] = parts;
+  if (isUnstrippableEnvVar(name)) {
+    return false;
+  }
+  return STATIC_ENV_VALUE_REGEX.test(value);
+}
+
+/** Outcome of inspecting a command's leading assignment prefix. */
+type LeadingAssignmentCheck = 'none' | 'static' | 'unsafe';
+
+/**
+ * Inspect the leading `NAME=value …` prefix with variable references
+ * materialized (see {@link materializeEnvReference}), so expansion hidden in
+ * a value cannot masquerade as a static assignment.
+ *
+ * `unsafe` covers every form that must keep the command from matching a
+ * concrete allow rule: values with substitution/expansion characters
+ * (`` X=`touch /tmp/poc` ``, `X=$(…)`, `X=${IFS}…`), runtime-loader
+ * variables (`NODE_OPTIONS=… npm --version`), glob tokens, and operators
+ * mixed into the prefix (`X=a;cmd`). See #10192 / #10197.
+ */
+function checkLeadingAssignments(command: string): LeadingAssignmentCheck {
+  let tokens;
+  try {
+    tokens = parse(command, materializeEnvReference);
+  } catch {
+    return 'unsafe';
+  }
+
+  let sawAssignment = false;
+  for (const token of tokens) {
+    if (typeof token !== 'string') {
+      if (!('op' in token) || typeof token.op !== 'string') {
+        // Glob/comment-like tokens are dropped by the normalization pass in
+        // stripLeadingVariableAssignments, so a prefix containing one can
+        // never be verified.
+        return 'unsafe';
+      }
+      // Operators are preserved verbatim by the normalization pass; before
+      // the first assignment they simply mean "no env prefix".
+      return sawAssignment ? 'unsafe' : 'none';
+    }
+    if (!ENV_ASSIGNMENT_REGEX.test(token)) {
+      // First plain command word — the prefix ended cleanly.
+      return sawAssignment ? 'static' : 'none';
+    }
+    sawAssignment = true;
+    if (!isStrippableStaticAssignment(token)) {
+      return 'unsafe';
+    }
+  }
+  return sawAssignment ? 'static' : 'none';
+}
+
 function stripLeadingVariableAssignments(command: string): string {
   const trimmed = command.trim();
   if (!trimmed) {
@@ -1156,6 +1290,14 @@ function stripLeadingVariableAssignments(command: string): string {
   }
 
   try {
+    if (checkLeadingAssignments(trimmed) === 'unsafe') {
+      // The leading assignments carry execution or expansion semantics that
+      // rule matching must not silently discard (#10192, #10197). Keep the
+      // command intact so it cannot hit a concrete allow rule and resolves
+      // to `ask` instead of `allow`.
+      return trimmed;
+    }
+
     const tokens: string[] = [];
 
     for (const token of parse(trimmed)) {
