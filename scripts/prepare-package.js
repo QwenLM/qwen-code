@@ -78,6 +78,7 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'export-transcript-document.js'),
   ];
 
   if (!fs.existsSync(distDir)) {
@@ -328,6 +329,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'examples',
       'bundled',
       'web-shell',
+      'export-transcript-document.js',
       // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
       // web-tree-sitter wasm, native render library) are intentionally NOT
       // published in the npm package — a multi-megabyte tree dominated by the
