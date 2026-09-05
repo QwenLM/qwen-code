@@ -48,6 +48,7 @@ const BLOCKER_KEY: Record<NonNullable<LocalFilesBlocker>, string> = {
   'insecure-context': 'localFiles.blocker.insecureContext',
   'cross-origin-frame': 'localFiles.blocker.crossOriginFrame',
   'unsupported-browser': 'localFiles.blocker.unsupportedBrowser',
+  'workspace-ineligible': 'localFiles.blocker.workspaceIneligible',
 };
 
 const BUSY: readonly LocalFilesPhase[] = [
@@ -179,15 +180,24 @@ interface LocalFilesControlProps {
 }
 
 /**
- * Resolve the mount a session's bridge must dial, with the same rules voice
- * uses (primary → legacy `/acp`, untrusted or live → no bridge).
+ * Resolve how a session's bridge must dial, with the same rules voice uses
+ * for the eligible cases (primary → legacy `/acp`, trusted secondary →
+ * workspace-qualified route). Unlike voice, this surface also needs an
+ * explicit "no bridge" outcome: an untrusted or live workspace must withhold
+ * the entry instead of collapsing onto the primary mount, and `undefined` is
+ * reserved for "cannot tell yet" (capabilities snapshot pending).
  */
-export function resolveLocalFilesWorkspaceSelector(options: {
+export type LocalFilesWorkspaceRoute =
+  | { kind: 'legacy' }
+  | { kind: 'qualified'; selector: AcpWorkspaceSelector }
+  | { kind: 'none' };
+
+export function resolveLocalFilesWorkspaceRoute(options: {
   capabilities: DaemonCapabilities | undefined;
   workspaces?: readonly DaemonWorkspaceCapability[];
   workspaceCwd: string | undefined;
   sessionId: string | undefined;
-}): AcpWorkspaceSelector | undefined {
+}): LocalFilesWorkspaceRoute | undefined {
   const target = resolveVoiceWorkspaceTarget({
     capabilities: options.capabilities,
     ...(options.workspaces === undefined
@@ -196,7 +206,22 @@ export function resolveLocalFilesWorkspaceSelector(options: {
     intendedCwd: options.workspaceCwd,
     sessionId: options.sessionId,
   });
-  return target?.route === 'workspace-qualified' ? target.selector : undefined;
+  if (target !== undefined) {
+    return target.route === 'workspace-qualified'
+      ? { kind: 'qualified', selector: target.selector }
+      : { kind: 'legacy' };
+  }
+  const list = options.workspaces ?? options.capabilities?.workspaces;
+  if (list === undefined) return undefined;
+  if (options.workspaceCwd === undefined) return { kind: 'none' };
+  const matches = list.filter((entry) => entry.cwd === options.workspaceCwd);
+  if (matches.length > 1) return { kind: 'none' };
+  const entry = matches[0];
+  if (entry === undefined) return undefined;
+  if (entry.kind === 'live' || entry.trusted === false) {
+    return { kind: 'none' };
+  }
+  return undefined;
 }
 
 /**
@@ -247,11 +272,11 @@ export function LocalFilesControl({
   const [open, setOpen] = useState(false);
 
   // The bare /acp socket lands on the primary mount, where a secondary
-  // runtime's session cannot register; resolve the workspace-qualified route
-  // with the same rules voice uses (primary → legacy, untrusted → no bridge).
-  const workspaceSelector = useMemo(
+  // runtime's session cannot register; and an untrusted or live workspace
+  // must withhold the bridge entirely instead of collapsing onto that mount.
+  const route = useMemo(
     () =>
-      resolveLocalFilesWorkspaceSelector({
+      resolveLocalFilesWorkspaceRoute({
         capabilities,
         workspaces,
         workspaceCwd: workspaceCwd ?? undefined,
@@ -259,6 +284,10 @@ export function LocalFilesControl({
       }),
     [capabilities, workspaces, workspaceCwd, sessionId],
   );
+  const workspaceSelector =
+    route?.kind === 'qualified' ? route.selector : undefined;
+  const withheldBlocker =
+    route?.kind === 'none' ? ('workspace-ineligible' as const) : undefined;
 
   const rewarm = useCallback(
     () =>
@@ -276,6 +305,7 @@ export function LocalFilesControl({
     token,
     rewarm,
     workspaceSelector,
+    withheldBlocker,
   });
 
   const active =

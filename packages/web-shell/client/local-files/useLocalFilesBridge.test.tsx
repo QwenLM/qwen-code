@@ -11,7 +11,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LocalFilesWindowLike } from './capabilities.js';
 import type { DirectoryHandleStore } from './directory-handle-store.js';
-import type { WebSocketHandlers, WebSocketLike } from './bridge-client.js';
+import type {
+  LockManagerLike,
+  WebSocketHandlers,
+  WebSocketLike,
+} from './bridge-client.js';
 import {
   useLocalFilesBridge,
   type UseLocalFilesBridgeOptions,
@@ -139,7 +143,7 @@ function render(options: UseLocalFilesBridgeOptions): Harness {
         sockets.push(socket);
         return socket;
       },
-      locks: null,
+      locks: current.locks === undefined ? null : current.locks,
     });
     return null;
   }
@@ -483,6 +487,9 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     expect(h.sockets).toHaveLength(1);
     expect(h.get().status.phase).toBe('needs-gesture');
+    // The lapsed session's bridge must be stopped: close is the daemon's
+    // server-removal signal, so a leaked socket keeps a live registration.
+    expect(h.sockets[0]!.closeCount).toBe(1);
     h.unmount();
   });
 
@@ -509,6 +516,57 @@ describe('useLocalFilesBridge restore', () => {
     expect(h.sockets).toHaveLength(1);
     expect(h.get().status.phase).toBe('idle');
     h.unmount();
+  });
+
+  it('does not revive a peer-disconnected grant on session switch', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const lock = { held: false };
+    const locks: LockManagerLike = {
+      request: async (_name, options, callback) => {
+        if (lock.held && options.ifAvailable) return undefined;
+        lock.held = true;
+        try {
+          await callback({});
+        } finally {
+          lock.held = false;
+        }
+      },
+    };
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      // The lock-retry loop would otherwise wait real 100ms delays.
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // Tab B restores the same grant and parks behind tab A's lock.
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+    expect(hB.sockets).toHaveLength(0);
+
+    // Tab A disconnects: the store is cleared with no signal reaching B.
+    await act(async () => {
+      hA.get().disconnect();
+    });
+    await hB.flush();
+
+    // B's rebind must consult the store: the grant is gone, so no bridge.
+    hB.rerender({ ...common, sessionId: 'session-C' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.sockets).toHaveLength(0);
+    expect(hB.get().status.phase).toBe('idle');
+    hA.unmount();
+    hB.unmount();
   });
 
   it('does not start a bridge from an ungranted handle on session switch', async () => {

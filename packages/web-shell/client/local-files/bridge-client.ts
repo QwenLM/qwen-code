@@ -222,6 +222,13 @@ export class LocalFilesBridge {
   private reconnectAttempts = 0;
   private initializeTimer: ReturnType<typeof setTimeout> | undefined;
   private registerTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Single-flight for retryRegister: the timeout timer, a late
+   * `register_failed` and a `rate_limited` shed can each spawn a continuation
+   * while one is parked in rewarm; without this guard both send a register
+   * and one logical failure consumes two of the six attempts.
+   */
+  private registerRetryInFlight = false;
   /** Resolves the run loop so the cross-tab lock is released. */
   private releaseRun: (() => void) | undefined;
 
@@ -414,35 +421,40 @@ export class LocalFilesBridge {
   }
 
   private async retryRegister(reason: string): Promise<void> {
-    if (this.stopped) return;
-    const socketAtEntry = this.socket;
-    const max =
-      this.options.maxRegisterAttempts ?? DEFAULTS.maxRegisterAttempts;
-    if (this.registerAttempts >= max) {
-      this.setState({
-        phase: 'failed',
-        code: 'register_failed',
-        message: `${reason} after ${this.registerAttempts} attempt(s)`,
-      });
-      this.teardown();
-      return;
-    }
-    // The usual cause is a cold or reaped ACP child; re-warm before retrying
-    // instead of hammering a daemon that cannot answer yet.
+    if (this.stopped || this.registerRetryInFlight) return;
+    this.registerRetryInFlight = true;
     try {
-      await this.options.rewarm?.();
-    } catch {
-      // A failed re-warm is not fatal: the retry may still find a live child.
+      const socketAtEntry = this.socket;
+      const max =
+        this.options.maxRegisterAttempts ?? DEFAULTS.maxRegisterAttempts;
+      if (this.registerAttempts >= max) {
+        this.setState({
+          phase: 'failed',
+          code: 'register_failed',
+          message: `${reason} after ${this.registerAttempts} attempt(s)`,
+        });
+        this.teardown();
+        return;
+      }
+      // The usual cause is a cold or reaped ACP child; re-warm before retrying
+      // instead of hammering a daemon that cannot answer yet.
+      try {
+        await this.options.rewarm?.();
+      } catch {
+        // A failed re-warm is not fatal: the retry may still find a live child.
+      }
+      if (this.stopped) return;
+      // The ack can arrive while the re-warm is in flight; registering again
+      // would be answered already_registered and fail the bridge terminally.
+      if (this.state.phase === 'connected') return;
+      // The socket that started this continuation is gone (dropped during the
+      // re-warm): the replacement must answer initialize before it may
+      // register, so abandon this continuation instead of jumping its queue.
+      if (this.socket !== socketAtEntry) return;
+      this.sendRegister();
+    } finally {
+      this.registerRetryInFlight = false;
     }
-    if (this.stopped) return;
-    // The ack can arrive while the re-warm is in flight; registering again
-    // would be answered already_registered and fail the bridge terminally.
-    if (this.state.phase === 'connected') return;
-    // The socket that started this continuation is gone (dropped during the
-    // re-warm): the replacement must answer initialize before it may
-    // register, so abandon this continuation instead of jumping its queue.
-    if (this.socket !== socketAtEntry) return;
-    this.sendRegister();
   }
 
   private async onMessage(data: unknown): Promise<void> {

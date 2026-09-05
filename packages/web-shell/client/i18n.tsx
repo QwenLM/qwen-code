@@ -1427,6 +1427,8 @@ const EN: Messages = {
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
+  'localFiles.blocker.workspaceIneligible':
+    "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -4923,6 +4925,8 @@ const ZH: Messages = {
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
+  'localFiles.blocker.workspaceIneligible':
+    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',

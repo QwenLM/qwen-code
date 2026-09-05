@@ -18,6 +18,8 @@ export type LocalFilesBlocker =
   | 'unsupported-browser'
   | 'insecure-context'
   | 'cross-origin-frame'
+  /** The session's workspace cannot host a bridge (untrusted or live). */
+  | 'workspace-ineligible'
   | null;
 
 export interface LocalFilesCapability {

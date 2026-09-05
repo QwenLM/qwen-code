@@ -145,12 +145,17 @@ function isFileEntry(entry: unknown): entry is LocalFileHandleLike {
  * `invalid_path` for anything that could escape it or that the API cannot
  * address: absolute paths, drive letters, backslashes, `..`, empty segments,
  * and control characters.
+ *
+ * Resolution is verbatim (no whole-input trim): `list()` and `search()` echo
+ * entry names as-is, and a name with leading or trailing whitespace is legal
+ * on POSIX — trimming here would resolve ` draft.md` to `draft.md` and let a
+ * read-modify-write cycle clobber the wrong file.
  */
 export function splitRelativePath(path: unknown): string[] {
   if (typeof path !== 'string') {
     throw new LocalDirectoryError('invalid_path', '`path` must be a string.');
   }
-  const trimmed = path.trim();
+  const trimmed = path;
   if (trimmed === '' || trimmed === '.') return [];
   if (trimmed.includes('\\')) {
     throw new LocalDirectoryError(
@@ -397,7 +402,17 @@ export class LocalDirectory {
         '`content` must be a string.',
       );
     }
-    const bytes = new TextEncoder().encode(content).length;
+    const encoded = new TextEncoder().encode(content);
+    // TextEncoder silently replaces unpaired surrogates with U+FFFD: the file
+    // would receive different bytes than requested while the tool reports a
+    // successful write. Reject exactly what the read side refuses to decode.
+    if (new TextDecoder('utf-8', { fatal: true }).decode(encoded) !== content) {
+      throw new LocalDirectoryError(
+        'invalid_path',
+        `${path} content contains unpaired surrogates; it cannot be written as UTF-8 text.`,
+      );
+    }
+    const bytes = encoded.length;
     if (bytes > this.limits.maxWriteBytes) {
       throw new LocalDirectoryError(
         'too_large',

@@ -77,8 +77,15 @@ export interface UseLocalFilesBridgeOptions {
   locks?: LockManagerLike | null;
   store?: DirectoryHandleStore | null;
   win?: LocalFilesWindowLike;
+  /** Test seam for the bridge's backoff delays. */
+  delay?: (ms: number) => Promise<void>;
   /** The session's workspace when not the primary one; see the bridge. */
   workspaceSelector?: AcpWorkspaceSelector;
+  /**
+   * Deployment-level blocker the browser probe cannot see (the session's
+   * workspace is untrusted or live): withholds the bridge entirely.
+   */
+  withheldBlocker?: LocalFilesBlocker;
 }
 
 function defaultStore(): DirectoryHandleStore | null {
@@ -144,7 +151,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- per-mount seam, not a stale copy
     [],
   );
-  const capability = useMemo(() => detectLocalFilesCapability(win), [win]);
+  const capability = useMemo(() => {
+    const detected = detectLocalFilesCapability(win);
+    // A withheld session workspace (untrusted/live) is a deployment-level
+    // blocker the browser probe cannot see; injecting it here routes every
+    // downstream guard (restore, connect, status) through one path.
+    return options.withheldBlocker === undefined
+      ? detected
+      : { ...detected, blocker: options.withheldBlocker };
+  }, [win, options.withheldBlocker]);
 
   const [status, setStatus] = useState<LocalFilesStatus>(() =>
     capability.blocker !== null
@@ -202,6 +217,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         ...(current.workspaceSelector === undefined
           ? {}
           : { workspaceSelector: current.workspaceSelector }),
+        ...(current.delay === undefined ? {} : { delay: current.delay }),
         onState: (state) => {
           setStatus(phaseFromBridge(state, handle.name));
         },
@@ -254,16 +270,33 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   useEffect(() => {
     const handle = handleRef.current;
     if (handle === undefined) return;
-    // Re-query before re-registering: a grant revoked after the original
-    // connect would otherwise re-register a bridge whose every tool call the
-    // browser rejects. An effect cannot supply activation, so never request.
+    // Rebind preconditions, in order: the store must still hold the grant (a
+    // peer tab's disconnect clears it with no signal reaching this tab, and
+    // the browser permission outlives the store), and the permission must
+    // still be granted (a revocation after the original connect would
+    // otherwise re-register tools whose every call the browser rejects).
+    // An effect cannot supply activation, so never request.
     let cancelled = false;
     const generation = generationRef.current;
-    void ensureReadwritePermission(handle).then((permission) => {
-      // A disconnect that landed while the query was in flight must win:
+    const rebind = async () => {
+      if (store) {
+        const persisted = await store.load();
+        if (cancelled || generationRef.current !== generation) return;
+        if (!persisted) {
+          handleRef.current = undefined;
+          stopBridge();
+          setStatus(IDLE);
+          return;
+        }
+      }
+      const permission = await ensureReadwritePermission(handle);
+      // A disconnect that landed while these awaits were in flight must win:
       // without this the continuation would resurrect the bridge behind it.
       if (cancelled || generationRef.current !== generation) return;
       if (permission.state !== 'granted') {
+        // Stop the previous session's bridge first: stop() emits 'stopped'
+        // (mapped to idle), so the needs-gesture status must come after it.
+        stopBridge();
         setStatus({
           phase: 'needs-gesture',
           blocker: null,
@@ -272,11 +305,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         return;
       }
       startBridge(handle);
-    });
+    };
+    void rebind();
     return () => {
       cancelled = true;
     };
-  }, [sessionId, selectorKey, startBridge]);
+  }, [sessionId, selectorKey, startBridge, stopBridge, store]);
 
   useEffect(
     () => () => {
@@ -299,6 +333,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     const generation = generationRef.current;
     const stale = () => generationRef.current !== generation;
     try {
+      // A peer tab's disconnect clears the store without signaling this tab:
+      // an in-memory handle the store no longer holds must not reconnect.
+      if (store && handleRef.current) {
+        const persisted = await store.load();
+        if (stale()) return;
+        if (!persisted) handleRef.current = undefined;
+      }
       // A stored handle only needs its permission back, not a new picker run.
       const stored = handleRef.current ?? (await store?.load());
       if (stale()) return;

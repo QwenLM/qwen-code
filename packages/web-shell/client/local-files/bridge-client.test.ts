@@ -744,6 +744,46 @@ describe('LocalFilesBridge reconnection', () => {
     await h.running;
   });
 
+  it('keeps a single retry continuation in flight per logical failure', async () => {
+    let resolveRewarm: (() => void) | undefined;
+    let rewarmCalls = 0;
+    const h = harness({
+      registerTimeoutMs: 0,
+      rewarm: () => {
+        rewarmCalls += 1;
+        return new Promise<void>((resolve) => {
+          resolveRewarm = resolve;
+        });
+      },
+    });
+    await flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    await flush();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await flush();
+    expect(socket.framesOfType('mcp_register')).toHaveLength(1);
+    // The timeout fires and parks the first continuation in rewarm; a late
+    // register_failed for attempt 1 must not spawn a second concurrent one.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    socket.emit({
+      type: 'mcp_error',
+      code: 'register_failed',
+      message: 'late failure',
+    });
+    await flush();
+    expect(rewarmCalls).toBe(1);
+    resolveRewarm!();
+    await flush();
+    expect(socket.framesOfType('mcp_register')).toHaveLength(2);
+    h.bridge.stop();
+    await h.running;
+  });
+
   it('treats already_registered as benign and waits out the in-flight add', async () => {
     const h = harness();
     await flush();

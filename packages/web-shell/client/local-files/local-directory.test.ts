@@ -154,7 +154,12 @@ describe('splitRelativePath', () => {
     expect(splitRelativePath('.')).toEqual([]);
     expect(splitRelativePath('src/main.ts')).toEqual(['src', 'main.ts']);
     expect(splitRelativePath('./src//main.ts')).toEqual(['src', 'main.ts']);
-    expect(splitRelativePath('  src/main.ts  ')).toEqual(['src', 'main.ts']);
+    // Verbatim: list()/search() echo names as-is, and whitespace-padded names
+    // are legal on POSIX — trimming would resolve one name to another file.
+    expect(splitRelativePath('  src/main.ts  ')).toEqual([
+      '  src',
+      'main.ts  ',
+    ]);
   });
 
   it.each([
@@ -375,6 +380,28 @@ describe('LocalDirectory.write', () => {
     await expect(
       new LocalDirectory(tree()).write('src', 'x'),
     ).rejects.toMatchObject({ code: 'not_a_file' });
+  });
+
+  it('refuses content with unpaired surrogates instead of committing mojibake', async () => {
+    const root = tree();
+    const lone = String.fromCharCode(0xd800);
+    await expect(
+      new LocalDirectory(root).write('out.txt', `a${lone}b`),
+    ).rejects.toMatchObject({ code: 'invalid_path' });
+    expect(root.files.has('out.txt')).toBe(false);
+  });
+
+  it('round-trips whitespace-padded names verbatim', async () => {
+    const root = new FakeDir('root');
+    root.withFile('notes.txt', 'A');
+    root.withFile(' notes.txt', 'B');
+    const dir = new LocalDirectory(root);
+    // A trimmed resolver would return the wrong file's content here and let a
+    // read-modify-write cycle clobber `notes.txt`.
+    expect((await dir.read(' notes.txt')).content).toBe('B');
+    await dir.write(' notes.txt', 'B2');
+    expect(root.files.get('notes.txt')?.file.content).toBe('A');
+    expect(root.files.get(' notes.txt')?.file.content).toBe('B2');
   });
 
   it('creates intermediate directories', async () => {

@@ -15,7 +15,7 @@ import type {
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   createLocalFilesRewarm,
-  resolveLocalFilesWorkspaceSelector,
+  resolveLocalFilesWorkspaceRoute,
 } from './LocalFilesControl';
 
 const primary = {
@@ -41,7 +41,7 @@ const capabilities = {
   workspaces: [primary],
 } as unknown as DaemonCapabilities;
 
-describe('resolveLocalFilesWorkspaceSelector', () => {
+describe('resolveLocalFilesWorkspaceRoute', () => {
   it('resolves a locked workspace only from the merged list', () => {
     const base = {
       capabilities,
@@ -50,21 +50,88 @@ describe('resolveLocalFilesWorkspaceSelector', () => {
     };
     // The bare snapshot lacks the locked entry: both sibling voice call sites
     // pass the merged list for exactly this reason.
-    expect(resolveLocalFilesWorkspaceSelector(base)).toBeUndefined();
+    expect(resolveLocalFilesWorkspaceRoute(base)).toBeUndefined();
     expect(
-      resolveLocalFilesWorkspaceSelector({
+      resolveLocalFilesWorkspaceRoute({
         ...base,
         workspaces: [primary, locked],
       }),
-    ).toEqual({ kind: 'id', value: 'locked-ws' });
+    ).toEqual({
+      kind: 'qualified',
+      selector: { kind: 'id', value: 'locked-ws' },
+    });
   });
 
   it('keeps the legacy route for the primary workspace', () => {
     expect(
-      resolveLocalFilesWorkspaceSelector({
+      resolveLocalFilesWorkspaceRoute({
         capabilities,
         workspaces: [primary, locked],
         workspaceCwd: '/primary',
+        sessionId: 'session-1',
+      }),
+    ).toEqual({ kind: 'legacy' });
+  });
+
+  it('withholds the bridge for untrusted, live and ambiguous workspaces', () => {
+    const untrusted = {
+      ...locked,
+      id: 'untrusted-ws',
+      cwd: '/untrusted',
+      trusted: false,
+    } as unknown as DaemonWorkspaceCapability;
+    const live = {
+      ...locked,
+      id: 'live-ws',
+      cwd: '/live',
+      kind: 'live',
+    } as unknown as DaemonWorkspaceCapability;
+    const base = { capabilities, sessionId: 'session-1' };
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        ...base,
+        workspaces: [primary, untrusted],
+        workspaceCwd: '/untrusted',
+      }),
+    ).toEqual({ kind: 'none' });
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        ...base,
+        workspaces: [primary, live],
+        workspaceCwd: '/live',
+      }),
+    ).toEqual({ kind: 'none' });
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        ...base,
+        workspaces: [primary, locked, { ...locked }],
+        workspaceCwd: '/locked',
+      }),
+    ).toEqual({ kind: 'none' });
+    // A session with no workspace cwd against a known registry cannot be
+    // mapped to any eligible workspace either.
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        ...base,
+        workspaces: [primary],
+        workspaceCwd: undefined,
+      }),
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('stays undecided while the capabilities snapshot is pending', () => {
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        capabilities: undefined,
+        workspaceCwd: '/primary',
+        sessionId: 'session-1',
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        capabilities,
+        workspaces: [primary],
+        workspaceCwd: '/not-in-snapshot-yet',
         sessionId: 'session-1',
       }),
     ).toBeUndefined();
