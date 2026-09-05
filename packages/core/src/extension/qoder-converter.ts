@@ -10,13 +10,22 @@ import type { MCPServerConfig } from '../config/config.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import {
   buildQwenExtensionFromPlugin,
-  normalizeClaudeMcpServer,
-  resolvePluginRelativeFile,
+  normalizeMcpServers,
+  assertMcpServersContainer,
   type ClaudePluginConfig,
 } from './claude-converter.js';
-import { realPathWithin } from './gemini-converter.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import {
+  isRegularFile,
+  readExtensionManifest,
+  readExtraJsonFile,
+  resolvePluginRelativeFile,
+  type ExtraJsonNullReason,
+} from './path-confinement.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('QODER_CONVERTER');
 
 export const QODER_PLUGIN_MANIFEST = '.qoder-plugin/plugin.json';
 
@@ -26,54 +35,17 @@ type QoderPluginConfig = Omit<ClaudePluginConfig, 'version'> & {
   contextFileName?: string | string[];
 };
 
-function normalizeMcpServers(
-  servers: Record<string, MCPServerConfig>,
-  configPath: string,
-): Record<string, MCPServerConfig> {
-  return Object.fromEntries(
-    Object.entries(servers).map(([name, server]) => {
-      if (
-        typeof server !== 'object' ||
-        server === null ||
-        Array.isArray(server)
-      ) {
-        throw new Error(
-          `Invalid Qoder MCP configuration at ${configPath}: server entries must be JSON objects`,
-        );
-      }
-      return [name, normalizeClaudeMcpServer(server)];
-    }),
-  );
-}
-
 function loadQoderConfig(extensionDir: string): QoderPluginConfig {
-  const configPath = path.join(extensionDir, QODER_PLUGIN_MANIFEST);
-  if (!fs.existsSync(configPath)) {
-    throw new Error(`Qoder plugin configuration not found at ${configPath}`);
-  }
-  if (!realPathWithin(configPath, extensionDir)) {
+  // readExtensionManifest throws on a symlink escape, unparseable body, or
+  // non-object body; returns null when absent.
+  const manifest = readExtensionManifest(extensionDir, QODER_PLUGIN_MANIFEST);
+  if (!manifest) {
     throw new Error(
-      `Qoder plugin configuration at ${configPath} resolves through a symlink outside the plugin`,
+      `Qoder plugin configuration not found at ${path.join(extensionDir, QODER_PLUGIN_MANIFEST)}`,
     );
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  } catch (error) {
-    throw new Error(
-      stripAnsiAndControl(
-        `Invalid Qoder plugin configuration at ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
-      ),
-    );
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error(
-      `Invalid Qoder plugin configuration at ${configPath}: expected a JSON object`,
-    );
-  }
-
-  const config = parsed as QoderPluginConfig;
+  const config = manifest as QoderPluginConfig;
   if (typeof config.name !== 'string' || config.name.length === 0) {
     throw new Error('Qoder plugin config must have name field');
   }
@@ -90,35 +62,67 @@ function loadQoderConfig(extensionDir: string): QoderPluginConfig {
   };
 }
 
+// Maps a readExtraJsonFile rejection to the throw message an author of
+// an explicit mcpServers reference will see.
+function explicitMcpFailureMessage(
+  reason: ExtraJsonNullReason,
+  safePath: string,
+  cause?: unknown,
+): string {
+  switch (reason) {
+    case 'missing':
+      return `Invalid Qoder MCP configuration at ${safePath}: file does not exist`;
+    case 'directory':
+      return `Invalid Qoder MCP configuration at ${safePath}: path is a directory, not a file`;
+    case 'parse-error':
+      return `Invalid Qoder MCP configuration at ${safePath}: JSON parse failed (${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))})`;
+    case 'non-object-body':
+      return `Invalid Qoder MCP configuration at ${safePath}: top-level body is not a JSON object`;
+    case 'absolute-symlink-escape':
+      return `Invalid Qoder MCP configuration at ${safePath}: absolute path resolves through a symlink outside the extension`;
+    case 'absolute-outside':
+      return `Invalid Qoder MCP configuration at ${safePath}: absolute path is outside the extension directory`;
+    case 'confinement-threw':
+      return `Invalid Qoder MCP configuration at ${safePath}: ${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))}`;
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
+  }
+}
+
 function loadMcpServersFile(
   extensionDir: string,
   relativePath: string,
   requireWrapper: boolean,
 ): Record<string, MCPServerConfig> | undefined {
-  const mcpPath = resolvePluginRelativeFile(extensionDir, relativePath);
-  if (!mcpPath || !fs.existsSync(mcpPath)) {
+  // requireWrapper=false → author's explicit reference; a defective file
+  // throws a precise error naming the actual failure mode.
+  // requireWrapper=true → auto-detected `.mcp.json` fallback; tolerated.
+  const parsed = readExtraJsonFile(
+    extensionDir,
+    relativePath,
+    false,
+    requireWrapper
+      ? null
+      : (_reason, ctx) => {
+          throw new Error(
+            explicitMcpFailureMessage(
+              _reason,
+              ctx.safeFileRef,
+              ctx.cause,
+            ),
+          );
+        },
+  );
+  if (!parsed) {
     return undefined;
   }
-  const safeMcpPath = stripAnsiAndControl(mcpPath);
+  const safeMcpPath = stripAnsiAndControl(relativePath);
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
-  } catch (error) {
-    throw new Error(
-      stripAnsiAndControl(
-        `Invalid Qoder MCP configuration at ${safeMcpPath}: ${error instanceof Error ? error.message : String(error)}`,
-      ),
-    );
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error(
-      `Invalid Qoder MCP configuration at ${safeMcpPath}: expected a JSON object`,
-    );
-  }
   const hasWrapper = Object.prototype.hasOwnProperty.call(parsed, 'mcpServers');
   const servers = hasWrapper
-    ? (parsed as { mcpServers?: unknown }).mcpServers
+    ? parsed['mcpServers']
     : requireWrapper
       ? undefined
       : parsed;
@@ -127,30 +131,35 @@ function loadMcpServersFile(
     servers === null ||
     Array.isArray(servers)
   ) {
-    throw new Error(
+    // Mode-agnostic warn-and-skip: both auto-detected `.mcp.json` and
+    // explicit references with a defective wrapper (top-level server
+    // map, scalar, array) install with zero servers and surface a
+    // debug-only warn. Matches the sibling claude converter's
+    // convertClaudePluginStandalone convention.
+    debugLogger.warn(
       `Invalid Qoder MCP configuration at ${safeMcpPath}: expected an "mcpServers" object`,
     );
+    return undefined;
   }
 
-  return normalizeMcpServers(
-    servers as Record<string, MCPServerConfig>,
-    safeMcpPath,
-  );
+  return normalizeMcpServers(servers as Record<string, unknown>, safeMcpPath);
 }
 
 function resolveMcpServers(
   extensionDir: string,
   configured: QoderPluginConfig['mcpServers'],
+  pluginName: string,
 ): Record<string, MCPServerConfig> | undefined {
   if (typeof configured === 'string') {
     return loadMcpServersFile(extensionDir, configured, false);
   }
   if (configured !== undefined && configured !== null) {
-    if (typeof configured !== 'object' || Array.isArray(configured)) {
-      throw new Error('Qoder plugin mcpServers must be an object or file path');
-    }
     return normalizeMcpServers(
-      configured,
+      assertMcpServersContainer(
+        configured,
+        'Invalid MCP configuration: mcpServers must be an object',
+        pluginName,
+      ) as Record<string, unknown>,
       path.join(extensionDir, QODER_PLUGIN_MANIFEST),
     );
   }
@@ -170,12 +179,7 @@ function resolveContextFiles(
   const seen = new Set<string>();
   const addContextFile = (relativePath: string, prepend = false): void => {
     const resolved = resolvePluginRelativeFile(extensionDir, relativePath);
-    if (!resolved) return;
-    try {
-      if (!fs.statSync(resolved).isFile()) return;
-    } catch {
-      return;
-    }
+    if (!resolved || !isRegularFile(resolved)) return;
     const normalized = path.relative(path.resolve(extensionDir), resolved);
     if (normalized && !seen.has(normalized)) {
       seen.add(normalized);
@@ -198,7 +202,11 @@ export async function convertQoderPlugin(
   extensionDir: string,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   const config = loadQoderConfig(extensionDir);
-  config.mcpServers = resolveMcpServers(extensionDir, config.mcpServers);
+  config.mcpServers = resolveMcpServers(
+    extensionDir,
+    config.mcpServers,
+    config.name,
+  );
   const converted = await buildQwenExtensionFromPlugin(
     extensionDir,
     config as ClaudePluginConfig,

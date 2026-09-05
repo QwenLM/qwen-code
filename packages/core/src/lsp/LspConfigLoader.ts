@@ -12,6 +12,8 @@ import {
   type JsonValue,
 } from '../extension/variables.js';
 import type { Extension } from '../extension/extensionManager.js';
+import { readExtraJsonFile } from '../extension/path-confinement.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import type {
   LspInitializationOptions,
   LspServerConfig,
@@ -84,33 +86,18 @@ export class LspConfigLoader {
 
       const originBase = `extension ${extension.name}`;
       if (typeof lspServers === 'string') {
-        const configPath = this.resolveExtensionConfigPath(
-          extension.path,
+        // Link trust is OUT-OF-BAND — derived from extension.trustedLinkSource
+        // (set by loadExtension from the store snapshot or install flow), not
+        // the extension's own installMetadata which a hand-placed payload could
+        // forge.
+        const trustSymlinks = extension.trustedLinkSource !== undefined;
+        this.loadExtensionStringLspConfig(
           lspServers,
+          extension,
+          originBase,
+          configs,
+          trustSymlinks,
         );
-        if (!fs.existsSync(configPath)) {
-          debugLogger.warn(
-            `LSP config not found for ${originBase}: ${configPath}`,
-          );
-          continue;
-        }
-
-        try {
-          const configContent = fs.readFileSync(configPath, 'utf-8');
-          const data = JSON.parse(configContent) as JsonValue;
-          const hydrated = this.hydrateExtensionLspConfig(data, extension.path);
-          configs.push(
-            ...this.parseConfigSource(
-              hydrated,
-              `${originBase} (${configPath})`,
-            ),
-          );
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to load extension LSP config from ${configPath}:`,
-            error,
-          );
-        }
       } else if (this.isRecord(lspServers)) {
         const hydrated = this.hydrateExtensionLspConfig(
           lspServers as JsonValue,
@@ -121,12 +108,83 @@ export class LspConfigLoader {
         );
       } else {
         debugLogger.warn(
-          `LSP config for ${originBase} must be an object or a JSON file path.`,
+          `LSP config for ${stripAnsiAndControl(originBase)} must be an object or a JSON file path.`,
         );
       }
     }
 
     return configs;
+  }
+
+  /**
+   * Load a string `lspServers` value (a JSON file path relative to the
+   * extension). readExtraJsonFile confines and reads it; a declared-but-missing
+   * file is a packaging defect, so warn instead of going silent.
+   */
+  private loadExtensionStringLspConfig(
+    lspServers: string,
+    extension: Extension,
+    originBase: string,
+    configs: LspServerConfig[],
+    trustSymlinks: boolean,
+  ): void {
+    const data = readExtraJsonFile(
+      extension.path,
+      lspServers,
+      trustSymlinks,
+      (reason, ctx) => {
+        const lspConfigPath = path.isAbsolute(lspServers)
+          ? lspServers
+          : path.join(extension.path, lspServers);
+        const safePath = stripAnsiAndControl(lspConfigPath);
+        let detail: string;
+        switch (reason) {
+          case 'missing':
+            detail = 'not found';
+            break;
+          case 'parse-error':
+            detail = 'failed to parse';
+            break;
+          case 'directory':
+            detail = 'is a directory, not a regular file';
+            break;
+          case 'non-object-body':
+            detail = 'is not a JSON object';
+            break;
+          case 'absolute-symlink-escape':
+          case 'absolute-outside':
+          case 'confinement-threw':
+            detail = 'rejected: path escapes the extension directory';
+            break;
+          default:
+            detail = 'rejected';
+        }
+        const causeDetail =
+          reason === 'parse-error' && ctx.cause !== undefined
+            ? ` (${stripAnsiAndControl(
+                ctx.cause instanceof Error
+                  ? ctx.cause.message
+                  : String(ctx.cause),
+              )})`
+            : '';
+        debugLogger.warn(
+          `LSP config ${detail} for ${stripAnsiAndControl(originBase)}: ${safePath}${causeDetail}`,
+        );
+      },
+    );
+    if (!data) {
+      return;
+    }
+    const hydrated = this.hydrateExtensionLspConfig(
+      data as JsonValue,
+      extension.path,
+    );
+    configs.push(
+      ...this.parseConfigSource(
+        hydrated,
+        `${originBase} (${stripAnsiAndControl(lspServers)})`,
+      ),
+    );
   }
 
   /**
@@ -259,15 +317,6 @@ export class LspConfigLoader {
     return { ok: true, configs };
   }
 
-  private resolveExtensionConfigPath(
-    extensionPath: string,
-    configPath: string,
-  ): string {
-    return path.isAbsolute(configPath)
-      ? path.resolve(configPath)
-      : path.resolve(extensionPath, configPath);
-  }
-
   private hydrateExtensionLspConfig(
     source: JsonValue,
     extensionPath: string,
@@ -324,14 +373,14 @@ export class LspConfigLoader {
 
     if (transport === 'stdio' && !command) {
       debugLogger.warn(
-        `LSP config error in ${origin}: ${name} missing command`,
+        `LSP config error in ${stripAnsiAndControl(origin)}: ${stripAnsiAndControl(name)} missing command`,
       );
       return null;
     }
 
     if (transport !== 'stdio' && !socket) {
       debugLogger.warn(
-        `LSP config error in ${origin}: ${name} missing socket info`,
+        `LSP config error in ${stripAnsiAndControl(origin)}: ${stripAnsiAndControl(name)} missing socket info`,
       );
       return null;
     }
@@ -509,7 +558,7 @@ export class LspConfigLoader {
     }
 
     debugLogger.warn(
-      `LSP workspaceFolder must be within ${this.workspaceRoot}; using workspace root instead.`,
+      `LSP workspaceFolder must be within ${stripAnsiAndControl(this.workspaceRoot)}; using workspace root instead.`,
     );
     return this.workspaceRoot;
   }

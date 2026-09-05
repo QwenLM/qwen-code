@@ -19,28 +19,29 @@ import type {
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
+import { copyDirectory } from './gemini-converter.js';
 import {
-  copyDirectory,
-  isPathWithin,
+  isRegularFile,
   realPathWithin,
-} from './gemini-converter.js';
+  readExtensionManifest,
+  readExtraJsonFile,
+  resolvePathWithin,
+  resolvePluginRelativeFile,
+} from './path-confinement.js';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
-import { substituteHookVariables } from './variables.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
-/**
- * Strips terminal escape/control sequences from untrusted values before they
- * are interpolated into error messages. Conversion errors here propagate to the
- * TUI install status area, so a hostile plugin `source`/`path` could otherwise
- * smuggle ANSI/OSC sequences to the terminal during a failed install. Aliases
- * the shared `stripAnsiAndControl` so the rule stays in one place.
- */
+/** Alias for `stripAnsiAndControl` so call sites read as error-context. */
 const sanitizeForError = stripAnsiAndControl;
 
 export interface ClaudePluginConfig {
@@ -370,17 +371,49 @@ export function normalizeClaudeMcpServer(
 }
 
 /**
- * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * Maps a set of MCP server entries to Qwen's MCPServerConfig shape, rejecting a
+ * non-object entry with a precise error instead of a bare deref TypeError.
+ * Shared across the Claude/Qoder/Gemini converters so unrelated manifests get
+ * the same server-entry validation. `configPath` names the source for errors.
  * @see normalizeClaudeMcpServer for the per-server transport mapping.
  */
-function normalizeClaudeMcpServers(
-  servers: Record<string, MCPServerConfig>,
+export function normalizeMcpServers(
+  servers: Record<string, unknown>,
+  configPath: string,
 ): Record<string, MCPServerConfig> {
-  const normalized: Record<string, MCPServerConfig> = {};
+  // Object.create(null) so a server literally named `__proto__` becomes a real
+  // entry instead of mutating the result's prototype (a plain `{}` + assignment
+  // would silently drop it).
+  const normalized: Record<string, MCPServerConfig> = Object.create(null);
   for (const [name, raw] of Object.entries(servers)) {
-    normalized[name] = normalizeClaudeMcpServer(raw);
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new Error(
+        `Invalid MCP configuration at ${sanitizeForError(configPath)}: server entries must be JSON objects`,
+      );
+    }
+    normalized[name] = normalizeClaudeMcpServer(raw as MCPServerConfig);
   }
   return normalized;
+}
+
+/**
+ * Validates the top-level mcpServers field is an object container (not
+ * array / null / scalar) and returns it narrowed for normalizeMcpServers.
+ */
+export function assertMcpServersContainer(
+  value: unknown,
+  errorMessage: string,
+  serverName?: string,
+): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      serverName
+        ? `Invalid MCP server "${stripAnsiAndControl(serverName)}": ${errorMessage}`
+        : errorMessage,
+    );
+  }
+  return value as Record<string, unknown>;
 }
 
 /**
@@ -405,16 +438,26 @@ export function convertClaudeToQwenConfig(
         `[Claude Converter] MCP servers path not yet supported: ${claudeConfig.mcpServers}`,
       );
     } else {
-      mcpServers = normalizeClaudeMcpServers(claudeConfig.mcpServers);
+      const servers = assertMcpServersContainer(
+        claudeConfig.mcpServers,
+        'Invalid MCP configuration: mcpServers must be an object',
+        claudeConfig.name,
+      );
+      if (servers) {
+        mcpServers = normalizeMcpServers(
+          servers,
+          stripAnsiAndControl(claudeConfig.name),
+        );
+      }
     }
   }
 
   // Parse hooks
-  let hooks: { [K in HookEventName]?: HookDefinition[] } | undefined;
+  let hooks: ExtensionConfig['hooks'] | undefined;
   if (claudeConfig.hooks) {
     if (typeof claudeConfig.hooks === 'string') {
-      // If it's a string, it's a file path, we handle it later in the conversion process
-      // hooks will be loaded from file path in the convertClaudePluginPackage function
+      // Keep the string path; the hook file is loaded at runtime (see loadExtension).
+      hooks = claudeConfig.hooks;
     } else {
       // Assume it's already in the correct format
       hooks = claudeConfig.hooks as { [K in HookEventName]?: HookDefinition[] };
@@ -459,32 +502,33 @@ export async function convertClaudePluginPackage(
   externalContent: boolean;
 }> {
   signal?.throwIfAborted();
-  // Step 1: Load marketplace.json
-  const marketplaceJsonPath = path.join(
+  // Step 1: Load marketplace.json. readExtensionManifest throws on a symlink
+  // escape or unparseable body, and returns null when absent.
+  const marketplaceConfig = readExtensionManifest(
     extensionDir,
-    '.claude-plugin',
-    'marketplace.json',
-  );
-  if (!fs.existsSync(marketplaceJsonPath)) {
+    '.claude-plugin/marketplace.json',
+  ) as ClaudeMarketplaceConfig | null;
+  if (!marketplaceConfig) {
     throw new Error(
-      `Marketplace configuration not found at ${marketplaceJsonPath}`,
-    );
-  }
-  // The manifest itself can be a symlink in an untrusted clone; refuse to read
-  // it when it resolves outside the plugin (would leak a JSON-shaped host file).
-  if (!realPathWithin(marketplaceJsonPath, extensionDir)) {
-    throw new Error(
-      `Marketplace configuration at ${marketplaceJsonPath} resolves through a symlink outside the plugin`,
+      `Marketplace configuration not found at ${path.join(extensionDir, '.claude-plugin', 'marketplace.json')}`,
     );
   }
 
-  const marketplaceContent = fs.readFileSync(marketplaceJsonPath, 'utf-8');
-  const marketplaceConfig: ClaudeMarketplaceConfig =
-    JSON.parse(marketplaceContent);
-
-  // Find the target plugin in marketplace
+  // Find the target plugin in marketplace. Validate the `plugins` shape
+  // with the same predicate `isClaudePluginConfig` uses for the
+  // classifier — without it, a single null entry in the array
+  // (`[null, {name, source}]`) dereferences `null.name` and throws
+  // an opaque TypeError instead of the precise "not found" error.
+  if (!Array.isArray(marketplaceConfig.plugins)) {
+    throw new Error(
+      `Invalid marketplace.json at ${path.join(extensionDir, '.claude-plugin', 'marketplace.json')}: 'plugins' must be an array`,
+    );
+  }
   const marketplacePlugin = marketplaceConfig.plugins.find(
-    (p) => p.name === pluginName,
+    (p) =>
+      typeof p === 'object' &&
+      p !== null &&
+      (p as { name?: string }).name === pluginName,
   );
   if (!marketplacePlugin) {
     throw new Error(`Plugin ${pluginName} not found in marketplace.json`);
@@ -505,6 +549,16 @@ export async function convertClaudePluginPackage(
     signal,
   );
 
+  // When the source resolves to the marketplace dir itself (source "."), the
+  // pluginDir was created but never used — remove the empty directory.
+  if (pluginSource !== pluginDir) {
+    try {
+      await fs.promises.rmdir(pluginDir);
+    } catch {
+      // Non-empty or already removed; leave it alone.
+    }
+  }
+
   if (!fs.existsSync(pluginSource)) {
     throw new Error(`Plugin source directory not found: ${pluginSource}`);
   }
@@ -518,8 +572,11 @@ export async function convertClaudePluginPackage(
     '.claude-plugin',
     'plugin.json',
   );
+  const safePluginJsonPath = sanitizeForError(pluginJsonPath);
   if (strict && !fs.existsSync(pluginJsonPath)) {
-    throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
+    throw new Error(
+      `Strict mode requires plugin.json at ${safePluginJsonPath}`,
+    );
   }
   // Treat a symlinked plugin.json (pointing outside the source) as absent
   // rather than reading an arbitrary host file into the merged config.
@@ -527,22 +584,52 @@ export async function convertClaudePluginPackage(
     fs.existsSync(pluginJsonPath) &&
     realPathWithin(pluginJsonPath, pluginSource);
   if (pluginJsonSafe) {
-    const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
-    const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
-    mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
+    // readExtensionManifest throws on a symlink escape or unparseable
+    // body (including a parseable-but-non-object body — `null`,
+    // array, scalar). The existsSync/realPathWithin above already
+    // confined symlink escapes, so the remaining throw kinds here are
+    // parse-error and non-object-body. For non-strict plugins the
+    // merge base tolerated these by overlaying the marketplace entry
+    // via mergeClaudeConfigs; restore that contract.
+    let pluginConfig: Record<string, unknown> | null = null;
+    try {
+      pluginConfig = readExtensionManifest(
+        pluginSource,
+        '.claude-plugin/plugin.json',
+      );
+    } catch (err) {
+      if (strict) {
+        throw err;
+      }
+      const reason = sanitizeForError(
+        err instanceof Error ? err.message : String(err),
+      );
+      debugLogger.warn(
+        `Falling back to marketplace entry for ${safePluginJsonPath}: ${reason}`,
+      );
+    }
+    if (pluginConfig) {
+      mergedConfig = mergeClaudeConfigs(
+        marketplacePlugin,
+        pluginConfig as unknown as ClaudePluginConfig,
+      );
+    } else {
+      mergedConfig = marketplacePlugin as ClaudePluginConfig;
+    }
   } else {
-    // `existsSync` follows symlinks, so the strict check at line 500 passes
-    // when plugin.json is a symlink to an existing host file — but the file is
-    // not trusted (`realPathWithin` rejected it). Strict mode must fail here
-    // rather than silently fall back to the marketplace entry.
+    // `existsSync` follows symlinks, so the strict check earlier in this
+    // function passes when plugin.json is a symlink to an existing host file
+    // — but the file is not trusted (`realPathWithin` rejected it). Strict
+    // mode must fail here rather than silently fall back to the marketplace
+    // entry.
     if (strict) {
       throw new Error(
-        `Strict mode requires a trusted plugin.json at ${pluginJsonPath}`,
+        `Strict mode requires a trusted plugin.json at ${safePluginJsonPath}`,
       );
     }
     if (fs.existsSync(pluginJsonPath)) {
       debugLogger.warn(
-        `Ignoring plugin.json at ${pluginJsonPath}; it resolves through a symlink outside the plugin.`,
+        `Ignoring plugin.json at ${safePluginJsonPath}; it resolves through a symlink outside the plugin.`,
       );
     }
     mergedConfig = marketplacePlugin as ClaudePluginConfig;
@@ -552,45 +639,15 @@ export async function convertClaudePluginPackage(
     pluginSource,
     mergedConfig,
   );
+  // Remove root plugin.json if the converted tree still resolves as an
+  // Agent-Plugins package — it would shadow the Claude manifest at install.
+  if (getAgentPluginSchemaStatus(converted.convertedDir) !== 'unrelated') {
+    await fs.promises.rm(
+      path.join(converted.convertedDir, AGENT_PLUGIN_MANIFEST),
+      { force: true },
+    );
+  }
   return { ...converted, externalContent };
-}
-
-/**
- * Resolves a plugin-relative file reference, refusing absolute paths or any
- * path that escapes `pluginSource`. Plugin configs come from untrusted sources
- * (arbitrary git repos / marketplaces), so an absolute or `../`-laden value
- * could otherwise make the converter read sensitive files outside the plugin.
- * Returns the confined absolute path, or null when the reference is unsafe.
- */
-export function resolvePluginRelativeFile(
-  pluginSource: string,
-  relativePath: string,
-): string | null {
-  if (path.isAbsolute(relativePath)) {
-    debugLogger.warn(
-      `Ignoring absolute path "${relativePath}" in plugin config; only paths inside the plugin are allowed.`,
-    );
-    return null;
-  }
-  const resolved = path.resolve(pluginSource, relativePath);
-  const base = path.resolve(pluginSource);
-  if (!isPathWithin(resolved, base)) {
-    debugLogger.warn(
-      `Ignoring path "${relativePath}" in plugin config; it escapes the plugin directory.`,
-    );
-    return null;
-  }
-  // The lexical check above is purely string-based; a symlink whose name stays
-  // inside the plugin can still point its target outside it (e.g.
-  // `skills/leak.txt -> ~/.ssh/id_rsa`). Downstream reads/copies follow
-  // symlinks, so re-verify the real path when the target exists.
-  if (fs.existsSync(resolved) && !realPathWithin(resolved, pluginSource)) {
-    debugLogger.warn(
-      `Ignoring path "${relativePath}" in plugin config; it resolves through a symlink outside the plugin directory.`,
-    );
-    return null;
-  }
-  return resolved;
 }
 
 /**
@@ -603,25 +660,39 @@ export async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
-  // Resolve MCP servers from a JSON file path if needed.
+  // Resolve MCP servers from a JSON file path if needed. A subsidiary file:
+  // missing/unparseable/escaping values are tolerated (warn inside
+  // readExtraJsonFile) rather than failing the extension. readExtraJsonFile
+  // confines the path (absolute within the plugin, or relative with ../ and
+  // symlink checks) the same way across converters.
   if (mergedConfig.mcpServers && typeof mergedConfig.mcpServers === 'string') {
-    const mcpServersPath = resolvePluginRelativeFile(
-      pluginSource,
-      mergedConfig.mcpServers,
-    );
+    const mcp = readExtraJsonFile(pluginSource, mergedConfig.mcpServers);
+    if (mcp) {
+      mergedConfig.mcpServers = mcp as Record<string, MCPServerConfig>;
+    } else {
+      // Drop the reference so the downstream "MCP servers path not yet
+      // supported" message in convertClaudeToQwenConfig doesn't mislead.
+      debugLogger.warn(
+        `Referenced MCP servers file "${sanitizeForError(mergedConfig.mcpServers)}" could not be read; dropping.`,
+      );
+      delete mergedConfig.mcpServers;
+    }
+  }
 
-    if (mcpServersPath && fs.existsSync(mcpServersPath)) {
-      try {
-        const mcpContent = fs.readFileSync(mcpServersPath, 'utf-8');
-        mergedConfig.mcpServers = JSON.parse(mcpContent) as Record<
-          string,
-          MCPServerConfig
-        >;
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to parse MCP servers file ${mcpServersPath}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+  // Confine a hooks string path to the plugin the same way as mcpServers, so
+  // an absolute or `../`-laden value can't point at a file outside it. A
+  // directory-valued reference (an easy authoring slip) must also be dropped –
+  // it can never load and would shadow a co-shipped default hooks/hooks.json.
+  if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+    const resolvedHooks = resolvePluginRelativeFile(
+      pluginSource,
+      mergedConfig.hooks,
+    );
+    if (!resolvedHooks || !isRegularFile(resolvedHooks)) {
+      debugLogger.warn(
+        `Dropping hooks path "${sanitizeForError(mergedConfig.hooks)}" that is not a usable regular file inside the plugin; the hooks reference is ignored and a co-shipped hooks/hooks.json (if present) loads instead.`,
+      );
+      delete mergedConfig.hooks;
     }
   }
 
@@ -662,35 +733,18 @@ export async function buildQwenExtensionFromPlugin(
       }
     }
 
-    // Handle hooks from a file path if needed.
+    // A hooks string path was confined earlier, but the resource collection
+    // above may have removed the file it points at (e.g. a hooks file inside
+    // a skills/ folder that was selectively re-collected). Drop it when the
+    // referenced file no longer ships, so the installed extension doesn't
+    // advertise hooks that can never load.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
-      const hooksPath = resolvePluginRelativeFile(
-        pluginSource,
-        mergedConfig.hooks,
-      );
-
-      if (hooksPath && fs.existsSync(hooksPath)) {
-        try {
-          const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
-          const parsedHooks = JSON.parse(hooksContent);
-
-          let hooksData;
-          if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
-            hooksData = parsedHooks.hooks as {
-              [K in HookEventName]?: HookDefinition[];
-            };
-          } else {
-            hooksData = parsedHooks as {
-              [K in HookEventName]?: HookDefinition[];
-            };
-          }
-
-          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+      const hooksFilePath = path.join(tmpDir, mergedConfig.hooks);
+      if (!isRegularFile(hooksFilePath)) {
+        debugLogger.warn(
+          `Dropping hooks path "${sanitizeForError(mergedConfig.hooks)}" whose file was removed or is not a regular file during resource collection; the hooks reference is ignored and a co-shipped hooks/hooks.json (if present) loads instead.`,
+        );
+        delete mergedConfig.hooks;
       }
     }
 
@@ -731,78 +785,55 @@ export async function buildQwenExtensionFromPlugin(
 export async function convertClaudePluginStandalone(
   extensionDir: string,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
-  const pluginJsonPath = path.join(
+  // readExtensionManifest throws on a symlink escape, unparseable body, or
+  // non-object body; returns null when absent.
+  const parsedConfig = readExtensionManifest(
     extensionDir,
-    '.claude-plugin',
-    'plugin.json',
+    '.claude-plugin/plugin.json',
   );
-  if (!fs.existsSync(pluginJsonPath)) {
-    throw new Error(`Plugin configuration not found at ${pluginJsonPath}`);
-  }
-  // The manifest may be a symlink in an untrusted clone; refuse to follow it
-  // outside the package (would read an arbitrary JSON-shaped host file).
-  if (!realPathWithin(pluginJsonPath, extensionDir)) {
+  if (!parsedConfig) {
     throw new Error(
-      `Plugin configuration at ${pluginJsonPath} resolves through a symlink outside the plugin`,
+      `Plugin configuration not found at ${path.join(extensionDir, '.claude-plugin', 'plugin.json')}`,
     );
   }
-
-  const parsedConfig: unknown = JSON.parse(
-    fs.readFileSync(pluginJsonPath, 'utf-8'),
-  );
-  // A plugin.json whose body is `null`, an array, or a scalar would otherwise
-  // throw an opaque `Cannot read properties of null` on the deref below. Fail
-  // with a clear message instead (the marketplace path tolerates this via
-  // `mergeClaudeConfigs`, so guard the standalone path to match).
-  if (
-    typeof parsedConfig !== 'object' ||
-    parsedConfig === null ||
-    Array.isArray(parsedConfig)
-  ) {
-    throw new Error(
-      `Invalid plugin configuration at ${pluginJsonPath}: expected a JSON object`,
-    );
-  }
-  const mergedConfig = parsedConfig as ClaudePluginConfig;
+  const mergedConfig = parsedConfig as unknown as ClaudePluginConfig;
 
   if (!mergedConfig.mcpServers) {
-    const mcpJsonPath = path.join(extensionDir, '.mcp.json');
+    // .mcp.json is a subsidiary file: a missing/unparseable/escaping value is
+    // tolerated (warn inside readExtraJsonFile) rather than failing the install.
+    const mcp = readExtraJsonFile(extensionDir, '.mcp.json');
     if (
-      fs.existsSync(mcpJsonPath) &&
-      realPathWithin(mcpJsonPath, extensionDir)
+      mcp?.['mcpServers'] &&
+      typeof mcp['mcpServers'] === 'object' &&
+      !Array.isArray(mcp['mcpServers'])
     ) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
-        if (
-          parsed?.mcpServers &&
-          typeof parsed.mcpServers === 'object' &&
-          !Array.isArray(parsed.mcpServers)
-        ) {
-          mergedConfig.mcpServers = parsed.mcpServers as Record<
-            string,
-            MCPServerConfig
-          >;
-        } else {
-          debugLogger.warn(
-            `.mcp.json at ${mcpJsonPath} has no valid "mcpServers" object; skipping.`,
-          );
-        }
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to parse .mcp.json at ${mcpJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    } else if (fs.existsSync(mcpJsonPath)) {
-      // The file exists but resolves through a symlink outside the plugin.
-      // Mirror the plugin.json skip-warning so a missing-MCP-servers
-      // investigation has a breadcrumb instead of a silent drop.
+      mergedConfig.mcpServers = mcp['mcpServers'] as Record<
+        string,
+        MCPServerConfig
+      >;
+    } else if (mcp) {
+      // Authoring slip: server map at top level instead of under
+      // mcpServers. Debug-only warn so the "no servers imported"
+      // investigation has a trail (matches the qoder converter's
+      // loadMcpServersFile convention for the same typo-wrapper case).
       debugLogger.warn(
-        `Ignoring .mcp.json at ${mcpJsonPath}; it resolves through a symlink outside the plugin.`,
+        `.mcp.json at ${sanitizeForError(path.join(extensionDir, '.mcp.json'))} has no valid "mcpServers" object; skipping.`,
       );
     }
   }
 
-  return buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
+  const result = await buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
+  // Remove root plugin.json if the converted tree still resolves as an
+  // Agent-Plugins package — it would shadow the Claude manifest at install.
+  if (getAgentPluginSchemaStatus(result.convertedDir) !== 'unrelated') {
+    await fs.promises.rm(
+      path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST),
+      {
+        force: true,
+      },
+    );
+  }
+  return result;
 }
 
 /**
@@ -970,54 +1001,72 @@ export function mergeClaudeConfigs(
 }
 
 /**
- * Checks if a config object is in Claude plugin format.
- * @param config Configuration object to check
- * @returns true if config appears to be Claude format
+ * Classifies a directory as a Claude plugin: `'marketplace'` when a plugin
+ * named `pluginName` is listed, `'standalone'` when a valid plugin.json exists,
+ * or `null` when neither applies. An explicitly requested pluginName that is
+ * absent, or a defective plugin.json, throws the precise error.
+ * @param extensionDir The extension directory to check
+ * @param pluginName When provided, checks the marketplace for this plugin;
+ *   otherwise probes for a standalone plugin.
+ * @returns `'marketplace'`, `'standalone'`, or `null` when no Claude plugin.
  */
 export function isClaudePluginConfig(
   extensionDir: string,
-  marketplace: { extensionSource: string; pluginName: string },
-) {
-  const marketplaceConfigFilePath = path.join(
-    extensionDir,
-    '.claude-plugin/marketplace.json',
-  );
-  if (!fs.existsSync(marketplaceConfigFilePath)) {
-    return false;
+  pluginName?: string,
+): 'standalone' | 'marketplace' | null {
+  // pluginName given = user explicitly chose a plugin. Any miss is a hard
+  // error (never fall through to another manifest), so collect every reason
+  // and throw one precise diagnostic.
+  if (pluginName) {
+    const m = readExtensionManifest(
+      extensionDir,
+      '.claude-plugin/marketplace.json',
+    );
+    const reasons: string[] = [];
+    if (
+      m &&
+      Array.isArray(m['plugins']) &&
+      m['plugins'].some(
+        (p) =>
+          typeof p === 'object' &&
+          p !== null &&
+          (p as { name?: string }).name === pluginName,
+      )
+    ) {
+      return 'marketplace';
+    }
+    reasons.push(
+      m
+        ? `marketplace.json does not list "${sanitizeForError(pluginName)}"`
+        : 'marketplace.json is absent',
+    );
+
+    const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');
+    if (p) {
+      const actualName =
+        typeof p['name'] === 'string' ? p['name'] : '(missing "name")';
+      if (actualName === pluginName) {
+        return 'standalone';
+      }
+      reasons.push(
+        `standalone plugin.json is named "${sanitizeForError(actualName)}"`,
+      );
+    } else {
+      reasons.push('standalone plugin.json is absent');
+    }
+    throw new Error(
+      `Plugin "${sanitizeForError(pluginName)}" not found: ${reasons.join('; ')}`,
+    );
   }
-
-  const marketplaceConfigContent = fs.readFileSync(
-    marketplaceConfigFilePath,
-    'utf-8',
-  );
-  const marketplaceConfig = JSON.parse(marketplaceConfigContent);
-
-  if (typeof marketplaceConfig !== 'object' || marketplaceConfig === null) {
-    return false;
+  // No pluginName = probe a single-source standalone plugin.
+  const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');
+  if (p) {
+    if (typeof p['name'] !== 'string') {
+      throw new Error('Invalid .claude-plugin/plugin.json: missing "name"');
+    }
+    return 'standalone';
   }
-
-  const marketplaceConfigObj = marketplaceConfig as Record<string, unknown>;
-
-  // Must have name and owner
-  if (
-    typeof marketplaceConfigObj['name'] !== 'string' ||
-    typeof marketplaceConfigObj['owner'] !== 'object'
-  ) {
-    return false;
-  }
-
-  if (!Array.isArray(marketplaceConfigObj['plugins'])) {
-    return false;
-  }
-
-  const marketplacePluginObj = marketplaceConfigObj['plugins'].find(
-    (plugin: ClaudeMarketplacePluginConfig) =>
-      plugin.name === marketplace.pluginName,
-  );
-
-  if (!marketplacePluginObj) return false;
-
-  return true;
+  return null;
 }
 
 /**
@@ -1063,18 +1112,14 @@ async function resolvePluginSource(
 
     // Relative path within marketplace. Confine it: a manifest source like
     // "../../../../etc/ssh" must not resolve outside the marketplace dir.
-    const pluginRoot = marketplaceDir;
-    const sourcePath = path.join(pluginRoot, source);
-    const resolvedSource = path.resolve(sourcePath);
-    const marketplaceBase = path.resolve(marketplaceDir);
-    if (
-      resolvedSource !== marketplaceBase &&
-      !resolvedSource.startsWith(marketplaceBase + path.sep)
-    ) {
-      throw new Error(
-        `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
-      );
-    }
+    // resolvePathWithin rejects absolute/escaping/symlink-escaping sources.
+    const sourcePath = resolvePathWithin(marketplaceDir, source, (kind) =>
+      kind === 'absolute'
+        ? `Plugin source "${sanitizeForError(source)}" is an absolute path; only paths relative to the marketplace directory are allowed`
+        : kind === 'symlink-escape'
+          ? `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`
+          : `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
+    );
 
     if (!fs.existsSync(sourcePath)) {
       throw new Error(
@@ -1082,17 +1127,24 @@ async function resolvePluginSource(
       );
     }
 
-    // The lexical check is string-only; reject a source that reaches outside
-    // the marketplace dir through a symlink before copying it in.
-    if (!realPathWithin(sourcePath, marketplaceDir)) {
-      throw new Error(
-        `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`,
-      );
+    // If source path equals marketplace dir (source is '.' or ''), or a
+    // subdir whose symlink target IS the marketplace dir, return
+    // marketplaceDir directly to avoid copying a directory into
+    // itself. The lexical containment check alone misses the
+    // symlink-to-root case: `fs.promises.cp` would then crash with a
+    // raw SystemError because the source and the destination resolve to
+    // the same path.
+    const realMarketplaceDir = fs.realpathSync(marketplaceDir);
+    let realSourcePath: string;
+    try {
+      realSourcePath = fs.realpathSync(sourcePath);
+    } catch {
+      realSourcePath = sourcePath;
     }
-
-    // If source path equals marketplace dir (source is '.' or ''),
-    // return marketplaceDir directly to avoid copying to subdirectory of self
-    if (path.resolve(sourcePath) === path.resolve(marketplaceDir)) {
+    if (
+      sourcePath === path.resolve(marketplaceDir) ||
+      realSourcePath === realMarketplaceDir
+    ) {
       return { pluginSource: marketplaceDir, externalContent: false };
     }
 
@@ -1146,31 +1198,42 @@ async function resolvePluginSource(
     await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
-    if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {
+    if (!source.path) {
       throw new Error(
         `Invalid plugin subdirectory "${sanitizeForError(String(source.path))}" for ${sanitizeForError(source.url)}`,
       );
     }
-    const subDir = path.resolve(pluginDir, source.path);
-    const repoRoot = path.resolve(pluginDir);
-    if (!subDir.startsWith(repoRoot + path.sep)) {
+    // resolvePathWithin rejects an absolute path, a value escaping the repo
+    // root, and a subdir that resolves through a symlink outside it.
+    const subDir = resolvePathWithin(pluginDir, source.path, (kind) =>
+      kind === 'absolute'
+        ? `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`
+        : kind === 'symlink-escape'
+          ? `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`
+          : `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
+    );
+    // Reject any value that resolves to the clone root itself, including
+    // the case where the subdir's symlink target IS the root (realpath
+    // collapses to pluginDir even though the lexical name is a subdir).
+    if (subDir === path.resolve(pluginDir)) {
       throw new Error(
-        `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
+        `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`,
+      );
+    }
+    let realSubDir: string;
+    try {
+      realSubDir = fs.realpathSync(subDir);
+    } catch {
+      realSubDir = subDir;
+    }
+    if (realSubDir === fs.realpathSync(pluginDir)) {
+      throw new Error(
+        `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`,
       );
     }
     if (!fs.existsSync(subDir)) {
       throw new Error(
         `Plugin subdirectory "${sanitizeForError(source.path)}" not found in ${sanitizeForError(source.url)} (ref: ${sanitizeForError(source.ref ?? source.sha ?? 'HEAD')})`,
-      );
-    }
-    // The lexical `startsWith` check above is string-only; `cloneFromGit`
-    // checks out symlinks on macOS/Linux, so a hostile repo can commit the
-    // subdir as a symlink whose name stays inside the clone but whose target
-    // escapes it (e.g. `evil -> /etc`). Re-verify the real path before
-    // returning it as the copy source.
-    if (!realPathWithin(subDir, pluginDir)) {
-      throw new Error(
-        `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`,
       );
     }
     return { pluginSource: subDir, externalContent: true };

@@ -146,10 +146,10 @@ export class ExtensionFileWatcher {
     }
     roots.add(this.storeStatePath);
     for (const extension of this.config.getActiveExtensions()) {
-      if (extension.installMetadata?.type === 'link') {
-        const rawSource = extension.installMetadata.source;
-        const source = rawSource ? path.resolve(rawSource) : undefined;
-        if (source && fs.existsSync(source)) {
+      const linkSource = extension.trustedLinkSource;
+      if (linkSource !== undefined) {
+        const source = path.resolve(linkSource);
+        if (fs.existsSync(source)) {
           roots.add(source);
         }
       }
@@ -285,10 +285,10 @@ export class ExtensionFileWatcher {
     changedPath: string,
   ): RefreshAction | false {
     for (const extension of this.config.getActiveExtensions()) {
-      if (extension.installMetadata?.type !== 'link') continue;
-      const rawSource = extension.installMetadata.source;
-      const source = rawSource ? path.resolve(rawSource) : undefined;
-      if (!source || !isSubpath(source, changedPath)) continue;
+      const linkSource = extension.trustedLinkSource;
+      if (linkSource === undefined) continue;
+      const source = path.resolve(linkSource);
+      if (!isSubpath(source, changedPath)) continue;
       const relative = path.relative(source, changedPath);
       const parts = relative.split(path.sep).filter(Boolean);
       return parts.length === 0

@@ -16,13 +16,21 @@ import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
   normalizeClaudeMcpServer,
+  normalizeMcpServers,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
+import type { MCPServerConfig } from '../config/config.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import { copyDirectory } from './gemini-converter.js';
+import { recursivelyHydrateStrings } from './variables.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  AGENT_PLUGIN_SCHEMA,
+} from './agent-plugins-v1/manifest.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -116,6 +124,112 @@ describe('convertClaudeToQwenConfig', () => {
 
     expect(() => convertClaudeToQwenConfig(invalidConfig)).toThrow();
   });
+
+  it('throws a precise error for a non-object MCP server entry', () => {
+    const claudeConfig = {
+      name: 'bad-mcp-plugin',
+      version: '1.0.0',
+      mcpServers: { bad: null } as unknown as Record<string, MCPServerConfig>,
+    } as ClaudePluginConfig;
+
+    expect(() => convertClaudeToQwenConfig(claudeConfig)).toThrow(
+      /server entries must be JSON objects/,
+    );
+  });
+
+  // Pin the top-level mcpServers container-shape guard — array would
+  // otherwise install silently with zero servers.
+  it('throws when top-level mcpServers is an array', () => {
+    const claudeConfig = {
+      name: 'array-mcp-plugin',
+      version: '1.0.0',
+      mcpServers: [] as unknown as Record<string, MCPServerConfig>,
+    } as ClaudePluginConfig;
+
+    expect(() => convertClaudeToQwenConfig(claudeConfig)).toThrow(
+      /Invalid MCP server "array-mcp-plugin": Invalid MCP configuration: mcpServers must be an object/,
+    );
+  });
+
+  it('sanitizes a hostile plugin name carried into the invalid-MCP error', () => {
+    const hostileName = '\u001b[2J\u001b[1;1Hspoofed';
+    const claudeConfig = {
+      name: hostileName,
+      version: '1.0.0',
+      mcpServers: { bad: null } as unknown as Record<string, MCPServerConfig>,
+    } as ClaudePluginConfig;
+
+    let caught: unknown;
+    try {
+      convertClaudeToQwenConfig(claudeConfig);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/Invalid MCP configuration/);
+    // The attacker-controlled name is interpolated as the error's configPath;
+    // raw ESC bytes must not reach the user's terminal.
+    expect((caught as Error).message).not.toContain('\u001b');
+  });
+});
+
+describe('normalizeMcpServers', () => {
+  it('keeps a server literally named __proto__', () => {
+    // JSON.parse produces `__proto__` as an own property (a literal would hit
+    // the prototype setter), matching what a real manifest JSON yields.
+    const servers = JSON.parse(
+      '{"__proto__": {"command": "echo hi"}}',
+    ) as Record<string, unknown>;
+    const result = normalizeMcpServers(servers, 'test-config');
+    // A plain `{}` + assignment would silently drop the entry by mutating the
+    // result's prototype instead of creating a property.
+    expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(
+      true,
+    );
+    expect(result['__proto__']).toEqual({ command: 'echo hi' });
+  });
+
+  // End-to-end pin: the conversion-time `__proto__` preservation (the unit
+  // test above) is necessary but not sufficient. At install time the
+  // manifest is JSON.stringify/parsed round-tripped (preserved as an own
+  // property), then at LOAD time `recursivelyHydrateStrings` rebuilds the
+  // object to substitute `${extensionPath}` placeholders. A plain `{}` +
+  // `newObj[key] = ...` hydration (pre-fix) silently invokes the prototype
+  // setter and drops the entry. Build the object the way loadExtension sees
+  // it (post JSON.parse, pre-hydration) and assert the `__proto__` server
+  // survives hydration.
+  it('keeps a __proto__ MCP server across load-time hydration', () => {
+    // Shape mirrors what loadExtension sees after reading the installed
+    // qwen-extension.json back from disk — `JSON.parse` produces `__proto__`
+    // as an own property (a fresh literal `{}` would hit the prototype
+    // setter and mutate Object.prototype instead).
+    const installed = JSON.parse(
+      '{"name":"x","version":"1","mcpServers":{"__proto__":{"command":"echo hi"}}}',
+    );
+    const hydrated = recursivelyHydrateStrings(installed, {
+      extensionPath: '/test/ext',
+      CLAUDE_PLUGIN_ROOT: '/test/ext',
+      workspacePath: '/test/ws',
+      '/': '/',
+      pathSeparator: '/',
+    }) as { mcpServers: Record<string, unknown> };
+    // The unit test above was insufficient: hydration silently drops the
+    // entry by mutating Object.prototype instead of creating a property.
+    expect(
+      Object.prototype.hasOwnProperty.call(hydrated.mcpServers, '__proto__'),
+    ).toBe(true);
+    expect(hydrated.mcpServers['__proto__']).toEqual({ command: 'echo hi' });
+  });
+
+  // The config path embedded in the per-entry throw is sanitized
+  // so a control-byte-laced origin cannot garble the diagnostic. Mutation:
+  // revert stripAnsiAndControl in normalizeMcpServers → the control byte
+  // reappears in the message.
+  it('sanitizes the config path in the invalid-entry error', () => {
+    expect(() => normalizeMcpServers({ bad: [] }, 'cfg\x1b[31m-red')).toThrow(
+      'Invalid MCP configuration at cfg-red: server entries must be JSON objects',
+    );
+  });
 });
 
 describe('convertClaudeAgentConfig', () => {
@@ -196,18 +310,104 @@ describe('mergeClaudeConfigs', () => {
 });
 
 describe('isClaudePluginConfig', () => {
-  it('should identify Claude plugin directory', () => {
-    const extensionDir = '/tmp/test-extension';
-    const marketplace = {
-      extensionSource: 'https://test.com',
-      pluginName: 'test-plugin',
-    };
+  let testDir: string;
 
-    // This will check if marketplace.json exists and contains the plugin
-    // Note: In real usage, this requires actual file system setup
-    expect(typeof isClaudePluginConfig(extensionDir, marketplace)).toBe(
-      'boolean',
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-plugin-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  const writeManifest = (subpath: string, content: unknown) => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', subpath),
+      JSON.stringify(content),
+      'utf-8',
     );
+  };
+
+  it('classifies a marketplace that lists pluginName', () => {
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'test-plugin', source: './' }],
+    });
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBe('marketplace');
+  });
+
+  it('throws when the marketplace does not list pluginName', () => {
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'other', source: './' }],
+    });
+    expect(() => isClaudePluginConfig(testDir, 'missing')).toThrow(
+      /not found: marketplace\.json does not list "missing"/,
+    );
+  });
+
+  it('falls back to standalone when the marketplace omits pluginName but plugin.json matches', () => {
+    // marketplace.json lists only 'other'; plugin.json is named 'test-plugin'.
+    // An explicit pluginName install must route through the standalone branch.
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'other', source: './' }],
+    });
+    writeManifest('plugin.json', { name: 'test-plugin', version: '1.0.0' });
+
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBe('standalone');
+  });
+
+  it('throws when pluginName is given but no Claude manifest exists', () => {
+    expect(() => isClaudePluginConfig(testDir, 'test-plugin')).toThrow(
+      /Plugin "test-plugin" not found/,
+    );
+  });
+
+  it('throws when the marketplace omits pluginName and plugin.json is named differently', () => {
+    // Marketplace lists only 'other'; plugin.json is named 'third' — neither
+    // matches the explicit install request. The identity guard must throw, or
+    // detectManifest would route the install to the wrong plugin.
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'other', source: './' }],
+    });
+    writeManifest('plugin.json', { name: 'third', version: '1.0.0' });
+
+    expect(() => isClaudePluginConfig(testDir, 'test-plugin')).toThrow(
+      /standalone plugin\.json is named "third"/,
+    );
+  });
+
+  it('classifies a standalone plugin via plugin.json without pluginName', () => {
+    writeManifest('plugin.json', { name: 'test-plugin', version: '1.0.0' });
+    expect(isClaudePluginConfig(testDir)).toBe('standalone');
+  });
+
+  it('throws for a standalone plugin.json lacking a name', () => {
+    writeManifest('plugin.json', { version: '1.0.0' });
+    expect(() => isClaudePluginConfig(testDir)).toThrow(
+      'Invalid .claude-plugin/plugin.json: missing "name"',
+    );
+  });
+
+  it('throws for unparseable manifests', () => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(testDir, '.claude-plugin', 'plugin.json'), '{');
+    expect(() => isClaudePluginConfig(testDir)).toThrow(/Invalid/);
+  });
+
+  it.runIf(process.platform !== 'win32')('throws when a standalone manifest symlinks outside the package', () => {
+    const outside = path.join(
+      path.dirname(testDir),
+      `${path.basename(testDir)}-outside.json`,
+    );
+    fs.writeFileSync(outside, JSON.stringify({ name: 'evil' }), 'utf-8');
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.symlinkSync(
+      outside,
+      path.join(testDir, '.claude-plugin', 'plugin.json'),
+    );
+
+    expect(() => isClaudePluginConfig(testDir)).toThrow(/symlink outside/);
+    fs.rmSync(outside, { force: true });
   });
 });
 
@@ -308,11 +508,16 @@ describe('convertClaudePluginPackage', () => {
     expect(fs.existsSync(path.join(convertedSkillsDir, 'csv'))).toBe(false);
     expect(fs.existsSync(path.join(convertedSkillsDir, 'txt'))).toBe(false);
 
+    // source "." resolves to the marketplace dir itself; no empty scratch dir is left behind
+    expect(
+      fs.readdirSync(pluginSourceDir).filter((f) => f.startsWith('plugin')),
+    ).toEqual([]);
+
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('skips a symlink inside a collected resource folder that escapes the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('skips a symlink inside a collected resource folder that escapes the plugin', async () => {
     const pluginSourceDir = path.join(testDir, 'plugin-symlink');
     const skillDir = path.join(pluginSourceDir, 'skills', 'mine');
     fs.mkdirSync(skillDir, { recursive: true });
@@ -357,7 +562,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('throws when a marketplace source is a symlink resolving outside the marketplace dir', async () => {
+  it.runIf(process.platform !== 'win32')('throws when a marketplace source is a symlink resolving outside the marketplace dir', async () => {
     // A host directory reachable via a symlink whose relative name stays inside
     // the marketplace dir. resolvePluginSource must reject it before copying.
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -392,6 +597,36 @@ describe('convertClaudePluginPackage', () => {
     ).rejects.toThrow(/resolves through a symlink outside the marketplace/);
 
     fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws when a marketplace source is an absolute path', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-abs-source');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'evil',
+          version: '1.0.0',
+          source: path.resolve(path.sep, 'etc'),
+          strict: false,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    await expect(
+      convertClaudePluginPackage(pluginSourceDir, 'evil'),
+    ).rejects.toThrow(
+      /is an absolute path; only paths relative to the marketplace/,
+    );
   });
 
   it('treats uppercase HTTPS marketplace plugin sources as URLs', async () => {
@@ -804,7 +1039,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('should convert hooks from Claude plugin format to Qwen format with variable substitution', async () => {
+  it('should keep the hooks string path unresolved for runtime loading', async () => {
     // Setup: Create a plugin with hooks in Claude format
     const pluginSourceDir = path.join(testDir, 'plugin-with-hooks');
     fs.mkdirSync(pluginSourceDir, { recursive: true });
@@ -868,20 +1103,156 @@ describe('convertClaudePluginPackage', () => {
       'hooks-plugin',
     );
 
-    // Verify: The converted config should contain processed hooks
-    expect(result.config.hooks).toBeDefined();
-    expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
-    // Check that the variable was substituted
-    expect(
-      (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
-        .command,
-    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
+    // Verify: the string hooks path is preserved; the hook file is loaded at
+    // runtime against the installed directory (see loadExtension).
+    expect(result.config.hooks).toBe('./hooks/hooks.json');
+    // The referenced hooks file must be copied into the converted directory so
+    // the runtime loader can find it. Its placeholders must NOT be hydrated
+    // at conversion time — that is the loader's job, and skipping it here
+    // would let the converted file ship with substituted paths that go stale
+    // if the install directory moves.
+    const copiedHooksJson = fs.readFileSync(
+      path.join(result.convertedDir, 'hooks', 'hooks.json'),
+      'utf-8',
+    );
+    expect(copiedHooksJson).toContain('${CLAUDE_PLUGIN_ROOT}');
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
+  it('drops a hooks string path that escapes the plugin', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-escape');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: '../outside/hooks.json', // Resolves outside pluginSourceDir
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    // Place the escape target on disk OUTSIDE pluginSourceDir so the
+    // confinement check has a real file to reject.
+    const outsideDir = path.join(path.dirname(pluginSourceDir), 'outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outsideDir, 'hooks.json'),
+      JSON.stringify({ hooks: 'malicious' }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    // The escaping hooks path is confined away rather than persisted.
+    expect(result.config.hooks).toBeUndefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it('drops a directory-valued hooks string path', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-dir');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    // A directory named "hooks" — an easy authoring slip — must not pass the
+    // conversion-time checks (it can never load and would shadow a default).
+    fs.mkdirSync(path.join(pluginSourceDir, 'hooks'), { recursive: true });
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: './hooks',
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    expect(result.config.hooks).toBeUndefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('drops a hooks string path whose file is removed by selective resource collection', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-removed');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    // A hooks file inside a skills/ folder that selective re-collection drops.
+    const packDir = path.join(pluginSourceDir, 'skills', 'pack');
+    fs.mkdirSync(packDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(packDir, 'hooks.json'),
+      JSON.stringify({ hooks: {} }),
+      'utf-8',
+    );
+    const keptDir = path.join(pluginSourceDir, 'skills', 'kept');
+    fs.mkdirSync(keptDir, { recursive: true });
+    fs.writeFileSync(path.join(keptDir, 'SKILL.md'), '# kept', 'utf-8');
+
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          skills: ['./skills/kept'],
+          hooks: './skills/pack/hooks.json',
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    // The hooks file was dropped with the excluded skills folder, so the
+    // converted config must not advertise a hooks path that can never load.
+    expect(result.config.hooks).toBeUndefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it.runIf(process.platform !== 'win32')('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the marketplace manifest a symlink to a JSON-shaped
     // host file. The converter must refuse to follow it (realPathWithin guard).
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -903,12 +1274,24 @@ describe('convertClaudePluginPackage', () => {
 
     await expect(
       convertClaudePluginPackage(pluginSourceDir, 'evil'),
-    ).rejects.toThrow(/resolves through a symlink outside the plugin/);
+    ).rejects.toThrow(/resolves through a symlink outside the package/);
 
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('throws in strict mode when plugin.json is a symlink escaping the plugin', async () => {
+  it('throws a precise error when marketplace.json is absent', async () => {
+    // readExtensionManifest returns null for a missing manifest; the converter
+    // surfaces a clear not-found error instead of falling through to a
+    // misleading generic failure.
+    const emptyDir = path.join(testDir, 'plugin-no-marketplace');
+    fs.mkdirSync(emptyDir, { recursive: true });
+
+    await expect(convertClaudePluginPackage(emptyDir, 'evil')).rejects.toThrow(
+      /Marketplace configuration not found/,
+    );
+  });
+
+  it.runIf(process.platform !== 'win32')('throws in strict mode when plugin.json is a symlink escaping the plugin', async () => {
     // existsSync follows the symlink so the strict-missing check passes, but the
     // target is untrusted — strict mode must fail instead of silently falling
     // back to the marketplace entry.
@@ -944,7 +1327,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('ignores a symlinked plugin.json (non-strict) and uses the marketplace entry', async () => {
+  it.runIf(process.platform !== 'win32')('ignores a symlinked plugin.json (non-strict) and uses the marketplace entry', async () => {
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
     const secretFile = path.join(secretDir, 'plugin.json');
     fs.writeFileSync(
@@ -1069,6 +1452,31 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
+  it('drops a root agent-plugins plugin.json so it cannot shadow the converted manifest', async () => {
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'shadowed', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'carried-agent-plugin',
+      }),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+
+    expect(
+      fs.existsSync(path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST)),
+    ).toBe(false);
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
   it('throws when there is no .claude-plugin/plugin.json', async () => {
     await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
       /Plugin configuration not found/,
@@ -1106,7 +1514,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('throws when plugin.json is a symlink resolving outside the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('throws when plugin.json is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the manifest itself a symlink to a JSON-shaped host
     // file. The converter must refuse to follow it rather than read the target.
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -1128,7 +1536,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('does not load mcpServers from a relative path that is a symlink escaping the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('does not load mcpServers from a relative path that is a symlink escaping the plugin', async () => {
     // mcpServers is a relative path whose name stays inside the plugin, but the
     // file is a symlink to a host secret. resolvePluginRelativeFile must reject
     // it so the target is never read into the config.
@@ -1163,7 +1571,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
 
-  it('does not copy a symlink whose target escapes the plugin directory', async () => {
+  it.runIf(process.platform !== 'win32')('does not copy a symlink whose target escapes the plugin directory', async () => {
     // git preserves symlinks, so a hostile repo can embed one pointing at a
     // host file. The bulk copy dereferences symlinks; without confinement the
     // target's content would be shipped inside the converted extension.
@@ -1224,7 +1632,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('does not load a .mcp.json that is a symlink escaping the plugin', async () => {
+  it.runIf(process.platform !== 'win32')('does not load a .mcp.json that is a symlink escaping the plugin', async () => {
     // .mcp.json's name stays inside the plugin but it's a symlink to a host
     // file. realPathWithin must reject it so the target servers are never read.
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
@@ -1265,12 +1673,57 @@ describe('convertClaudePluginStandalone', () => {
     fs.writeFileSync(path.join(pluginDir, 'plugin.json'), 'null', 'utf-8');
 
     await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
-      /Invalid plugin configuration/,
+      /expected a JSON object/,
+    );
+  });
+
+  // Non-strict + non-object body used to install via mergeClaudeConfigs
+  // overlay; restore that tolerance. Strict mode still throws (next).
+  it.each(['null', '[1,2]', '5'])(
+    'falls back to the marketplace entry when a non-strict plugin.json body is %s',
+    async (body) => {
+      const pluginDir = path.join(testDir, `non-obj-${body}`);
+      const mpDir = path.join(pluginDir, '.claude-plugin');
+      fs.mkdirSync(mpDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(mpDir, 'marketplace.json'),
+        JSON.stringify({
+          plugins: [{ name: 'p', source: './' }],
+        }),
+        'utf-8',
+      );
+      fs.writeFileSync(path.join(mpDir, 'plugin.json'), body, 'utf-8');
+
+      const result = await convertClaudePluginPackage(pluginDir, 'p');
+      expect(result.convertedDir).toBeDefined();
+      // The marketplace entry must overlay the non-object body — a regression
+      // to an empty config base (no name) would otherwise install an unnamed
+      // extension silently.
+      expect(result.config.name).toBe('p');
+      fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    },
+  );
+
+  it('throws when a strict plugin.json body is non-object', async () => {
+    const pluginDir = path.join(testDir, 'strict-non-obj');
+    const mpDir = path.join(pluginDir, '.claude-plugin');
+    fs.mkdirSync(mpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mpDir, 'marketplace.json'),
+      JSON.stringify({
+        plugins: [{ name: 'p', source: './', strict: true }],
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(path.join(mpDir, 'plugin.json'), 'null', 'utf-8');
+
+    await expect(convertClaudePluginPackage(pluginDir, 'p')).rejects.toThrow(
+      /expected a JSON object/,
     );
   });
 });
 
-describe('performVariableReplacement for Claude extensions', () => {
+describe('plugin package routing and variable replacement', () => {
   let testDir: string;
 
   beforeEach(() => {
@@ -1331,6 +1784,191 @@ describe('performVariableReplacement for Claude extensions', () => {
     expect(result).toContain('.message.parts | map(select(has("text")))');
     expect(result).not.toContain('.message.content');
   });
+
+  // Classifier skips null entries; converter must do the same or
+  // the consume point throws on `p.name`.
+  it('skips null entries in marketplace plugins without dereferencing', async () => {
+    const extDir = path.join(testDir, 'null-entry');
+    const mpDir = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mpDir, 'marketplace.json'),
+      JSON.stringify({
+        plugins: [null, { name: 'x', source: './' }],
+      }),
+      'utf-8',
+    );
+    const result = await convertClaudePluginPackage(extDir, 'x');
+    expect(result.convertedDir).toBeDefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('throws a precise error when marketplace plugins is not an array', async () => {
+    const extDir = path.join(testDir, 'non-array');
+    const mpDir = path.join(extDir, '.claude-plugin');
+    fs.mkdirSync(mpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mpDir, 'marketplace.json'),
+      JSON.stringify({ plugins: 'not-an-array' }),
+      'utf-8',
+    );
+    await expect(convertClaudePluginPackage(extDir, 'x')).rejects.toThrow(
+      /must be an array/i,
+    );
+  });
+
+  // Marketplace source whose symlink target IS the marketplace dir:
+  // realpath collapses to the root and fs.promises.cp then crashes
+  // (source = destination).
+  it.runIf(process.platform !== 'win32')(
+    'a relative source whose symlink target is the marketplace dir returns the marketplace dir without copying',
+    async () => {
+      const extDir = path.join(testDir, 'symlink-to-root-ext');
+      fs.mkdirSync(extDir, { recursive: true });
+      fs.symlinkSync(extDir, path.join(extDir, 'self-link'));
+      fs.mkdirSync(path.join(extDir, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(extDir, '.claude-plugin', 'marketplace.json'),
+        JSON.stringify({
+          plugins: [{ name: 'p', source: './self-link' }],
+        }),
+        'utf-8',
+      );
+      const result = await convertClaudePluginPackage(extDir, 'p');
+      expect(result.convertedDir).toBeDefined();
+      // copyDirectory skips a symlink whose real target is the copied
+      // directory itself — otherwise the conversion never terminates.
+      expect(fs.existsSync(path.join(result.convertedDir, 'self-link'))).toBe(
+        false,
+      );
+      fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'copyDirectory preserves both cycle links and stops the recursion with a stack-scoped guard',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cyc-'));
+      const a = path.join(root, 'a');
+      fs.mkdirSync(path.join(a, 'x'), { recursive: true });
+      fs.mkdirSync(path.join(a, 'b'), { recursive: true });
+      fs.writeFileSync(path.join(a, 'payload.txt'), 'a', 'utf-8');
+      fs.writeFileSync(path.join(a, 'x', 'payload.txt'), 'x', 'utf-8');
+      fs.writeFileSync(path.join(a, 'b', 'payload.txt'), 'b', 'utf-8');
+      // Mutual pair INSIDE the copy root (x/link -> ../b, b/link2 -> ../x): both
+      // targets stay in-root, so the stack-scoped guard terminates the
+      // recursion instead of nesting to PATH_MAX.
+      fs.symlinkSync(path.join(a, 'b'), path.join(a, 'x', 'link'));
+      fs.symlinkSync(path.join(a, 'x'), path.join(a, 'b', 'link2'));
+      const dest = path.join(root, 'dest');
+      try {
+        await copyDirectory(a, dest);
+        // Both real directories copied as link/link2 (each holds target contents);
+        // back-edges skipped by the stack guard, neither copy nests into a cycle.
+        expect(fs.readFileSync(path.join(dest, 'payload.txt'), 'utf-8')).toBe(
+          'a',
+        );
+        expect(
+          fs.readFileSync(path.join(dest, 'x', 'payload.txt'), 'utf-8'),
+        ).toBe('x');
+        expect(
+          fs.readFileSync(path.join(dest, 'b', 'payload.txt'), 'utf-8'),
+        ).toBe('b');
+        const xLink = fs.existsSync(path.join(dest, 'x', 'link'));
+        const bLink = fs.existsSync(path.join(dest, 'b', 'link2'));
+        expect(xLink).toBe(true);
+        expect(bLink).toBe(true);
+        expect(
+          fs.existsSync(path.join(dest, 'x', 'link', 'link2')),
+        ).toBe(false);
+        expect(
+          fs.existsSync(path.join(dest, 'b', 'link2', 'link')),
+        ).toBe(false);
+
+        // A densely interlinked mesh stays legal under a stack-scoped guard
+        // (~e*k! entries), so the copy must abort on the shared budget.
+        const meshRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mesh-'));
+        try {
+          const mesh = path.join(meshRoot, 'a');
+          const dirs: string[] = [];
+          for (let i = 0; i < 6; i++) {
+            const d = path.join(mesh, `d${i}`);
+            fs.mkdirSync(d, { recursive: true });
+            dirs.push(d);
+          }
+          dirs.forEach((from, i) => {
+            dirs.forEach((to, j) => {
+              if (i !== j) fs.symlinkSync(to, path.join(from, `l${j}`));
+            });
+          });
+          await expect(
+            copyDirectory(mesh, path.join(meshRoot, 'dest')),
+          ).rejects.toThrow(/too complex to convert/);
+        } finally {
+          fs.rmSync(meshRoot, { recursive: true, force: true });
+        }
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'copyDirectory copies a shared directory through multiple in-tree symlinks',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-dia-'));
+      const a = path.join(root, 'a');
+      const shared = path.join(a, 'shared');
+      fs.mkdirSync(path.join(a, 'skills', 'one'), { recursive: true });
+      fs.mkdirSync(path.join(a, 'skills', 'two'), { recursive: true });
+      fs.mkdirSync(shared, { recursive: true });
+      fs.writeFileSync(path.join(shared, 'lib.json'), '{}', 'utf-8');
+      // Diamond: two skills alias the same shared dir — a stack-scoped guard
+      // must NOT drop the second copy (a global visited set would).
+      fs.symlinkSync(shared, path.join(a, 'skills', 'one', 'lib'));
+      fs.symlinkSync(shared, path.join(a, 'skills', 'two', 'lib'));
+      const dest = path.join(root, 'dest');
+      try {
+        await copyDirectory(a, dest);
+        expect(
+          fs.existsSync(path.join(dest, 'skills', 'one', 'lib', 'lib.json')),
+        ).toBe(true);
+        expect(
+          fs.existsSync(path.join(dest, 'skills', 'two', 'lib', 'lib.json')),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'copyDirectory with a symlinked root does not duplicate tree levels',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-symroot-'));
+      const realRoot = path.join(root, 'real');
+      fs.mkdirSync(realRoot, { recursive: true });
+      fs.writeFileSync(path.join(realRoot, 'file.txt'), 'x', 'utf-8');
+      fs.symlinkSync(realRoot, path.join(realRoot, 'self-link'));
+      const linkRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'claude-linkroot-'),
+      );
+      fs.rmdirSync(linkRoot);
+      fs.symlinkSync(realRoot, linkRoot);
+      const dest = path.join(root, 'dest');
+      try {
+        await copyDirectory(linkRoot, dest);
+        // The root is itself a symlink: the in-tree self-link must be
+        // caught with resolved-vs-resolved comparison; pre-fix
+        // this nested a duplicated level on macOS /var-tmpdir hosts).
+        expect(fs.readFileSync(path.join(dest, 'file.txt'), 'utf-8')).toBe('x');
+        expect(fs.existsSync(path.join(dest, 'self-link'))).toBe(false);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(linkRoot, { force: true });
+      }
+    },
+  );
 });
 
 describe('convertClaudePluginPackage — git-subdir source', () => {
@@ -1419,6 +2057,18 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
     );
   });
 
+  it('rejects a subdirectory spelling that resolves to the clone root', async () => {
+    vi.mocked(cloneFromGit).mockResolvedValue(undefined as never);
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: './',
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /Invalid plugin subdirectory/,
+    );
+  });
+
   it('rejects a missing subdirectory', async () => {
     vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
       // The clone succeeded but does not contain the requested subdir.
@@ -1435,7 +2085,7 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
     );
   });
 
-  it('rejects a subdirectory that is a symlink escaping the clone', async () => {
+  it.runIf(process.platform !== 'win32')('rejects a subdirectory that is a symlink escaping the clone', async () => {
     const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-secret-'));
     fs.writeFileSync(path.join(secretDir, 'SKILL.md'), 'secret', 'utf-8');
     vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
@@ -1456,6 +2106,28 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
 
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
+
+  // Subdir name lexically inside the clone, but symlink target IS the
+  // clone root. The explicit subDir === path.resolve(pluginDir) check
+  // rejects after the realpath collapses back to the root.
+  it.runIf(process.platform !== 'win32')(
+    'rejects a subdirectory that symlinks to the clone root itself',
+    async () => {
+      vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+        fs.symlinkSync(dir as string, path.join(dir as string, 'self-link'));
+        return 'test-commit';
+      });
+      writeMarketplace({
+        source: 'git-subdir',
+        url: 'https://example.com/repo.git',
+        path: 'self-link',
+      });
+
+      await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+        /Invalid plugin subdirectory/,
+      );
+    },
+  );
 });
 
 describe('convertClaudePluginPackage — string URL source', () => {
