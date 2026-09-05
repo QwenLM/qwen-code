@@ -5035,27 +5035,12 @@ jobs:
         # Evidence hosting is best-effort; the report still posts as text if
         # the client cannot be installed.
         continue-on-error: true
-        env:
-          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
-          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
-        run: |-
-          set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          # Retry, unlike the release syncs: a red run there is simply rerun,
-          # but a CDN blip here costs this PR its evidence images. The
-          # worst-case budget stays inside the 10-minute job cap: 3 attempts
-          # x 120s max-time + 2 x 2s delays ≈ 6.1 minutes (an unreachable
-          # mirror fails the connect-timeout long before that).
-          curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors \
-            --connect-timeout 10 --max-time 120 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
-          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
-          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
-          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
-          [ -n "$ossutil_path" ] || { echo '::error::ossutil binary not found'; exit 1; }
-          chmod +x "$ossutil_path"
-          install -m 0755 "$ossutil_path" "$RUNNER_TEMP/ossutil"
-          "$RUNNER_TEMP/ossutil" >/dev/null
+        uses: './.github/actions/install-ossutil'
+        with:
+          install-dir: '${{ runner.temp }}/ossutil'
+          retry: 'true'
+          connect-timeout: '10'
+          max-time: '120'
 
       - name: 'Configure Aliyun OSS credentials'
         if: "${{ steps.install-ossutil.outcome == 'success' }}"
