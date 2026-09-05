@@ -469,9 +469,11 @@ describe('ExportTranscriptDocument browser gate', () => {
     await expandAll.click();
     expect(await expandAll.isDisabled()).toBe(true);
     await themeToggle.click();
+    // `document-main.tsx` toggles `dark` and `light` on <html> mutually
+    // exclusively, so the attribute is exactly one of them.
     await expect
       .poll(() => page.locator('html').getAttribute('class'))
-      .toMatch(/light/);
+      .toBe('light');
     await expect
       .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
       .toBeGreaterThan(0);
