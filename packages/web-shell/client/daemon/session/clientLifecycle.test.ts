@@ -76,6 +76,19 @@ describe('persistStableClientId', () => {
     expect(getStableClientId(undefined)).toMatch(/^webui_/);
   });
 
+  it('persists under the literal historical key prefix', () => {
+    persistStableClientId('client-a', 'session-a');
+
+    // The exact key string is a compatibility contract with sessions persisted
+    // before the WebUI-to-Web-Shell rename. Renaming the constant must break
+    // this assertion, not silently pass via a shared read/write helper.
+    expect(
+      window.sessionStorage.getItem(
+        'qwen-code-webui-client-id:session:session-a',
+      ),
+    ).toBe('client-a');
+  });
+
   it('ignores missing client ID', () => {
     persistStableClientId(undefined);
     expect(

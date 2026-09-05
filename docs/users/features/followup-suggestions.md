@@ -2,7 +2,7 @@
 
 Qwen Code can predict what you want to type next and show it as placeholder text in the input area. This feature uses an LLM call to analyze the conversation context and generate a natural next step suggestion.
 
-This feature works end-to-end in both the CLI and Web Shell. Generation is automatic and server-side: after each completed turn the daemon emits the suggestion on the session stream (on by default; set `ui.enableFollowupSuggestions` to `false` to opt out), and Web Shell's composer already wires the `useDaemonFollowupSuggestion` hook, so suggestions render and accept with no additional host wiring.
+This feature works end-to-end in both the CLI and Web Shell. Generation is automatic and server-side: after each cleanly completed turn (the daemon's `end_turn` stop reason — not `interrupted`, `max_tokens`, or an error) the daemon emits the suggestion on the session stream (on by default; set `ui.enableFollowupSuggestions` to `false` to opt out), and Web Shell's composer already wires the `useDaemonFollowupSuggestion` hook, so suggestions render and accept with no additional host wiring.
 
 ## How It Works
 
@@ -36,7 +36,7 @@ Suggestions are generated when all of the following conditions are met:
 - The approval mode is not set to `plan`
 - The feature is enabled (on by default — set `ui.enableFollowupSuggestions` to `false` to turn it off)
 
-Suggestions will not appear in non-interactive mode (e.g., headless/SDK mode).
+Suggestions will not appear in the CLI's non-interactive mode (e.g., headless/SDK mode). In the daemon, generation is server-side and unconditional, so a headless or SDK client that cannot render the suggestion should set `ui.enableFollowupSuggestions` to `false` to avoid the per-turn LLM cost.
 
 Suggestions are automatically dismissed when:
 

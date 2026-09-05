@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
+import { pathToFileURL } from 'node:url';
 
 async function loadExportApi() {
   try {
@@ -75,7 +76,7 @@ async function readJsonlObjects(inputPath) {
   return objects;
 }
 
-function looksLikeChatRecord(value) {
+export function looksLikeChatRecord(value) {
   return (
     value !== null &&
     typeof value === 'object' &&
@@ -89,7 +90,7 @@ function looksLikeChatRecord(value) {
   );
 }
 
-function looksLikeExportJsonl(objects) {
+export function looksLikeExportJsonl(objects) {
   const first = objects[0];
   return (
     first !== null &&
@@ -163,7 +164,13 @@ async function main() {
   console.log(`Wrote HTML export to: ${outputPath}`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+const isMain =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
