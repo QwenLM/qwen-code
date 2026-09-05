@@ -62,6 +62,15 @@ describe('worktree reset session transfer', () => {
             .listWorkspaceSessions(WS_A)
             .find((s) => s.sessionId === restored.sessionId)?.hasActivePrompt,
         ).toBe(true);
+        // The daemon status surface is what automation reads session activity
+        // from; no other field on it reveals the parked prompt, so it must not
+        // report the session as idle while the summary reports it active.
+        const statusSnapshotHasActivePrompt = () =>
+          bridge
+            .getDaemonStatusSnapshot()
+            .sessions.find((s) => s.sessionId === restored.sessionId)
+            ?.hasActivePrompt;
+        expect(statusSnapshotHasActivePrompt()).toBe(true);
 
         // Firing the parked prompt and letting it settle returns the summary
         // to quiescent — the parked state, not a sticky flag, drove the report.
@@ -76,6 +85,7 @@ describe('worktree reset session transfer', () => {
           expect(
             bridge.getSessionSummary(restored.sessionId).hasActivePrompt,
           ).toBe(false);
+          expect(statusSnapshotHasActivePrompt()).toBe(false);
         });
       } finally {
         await bridge.shutdown();
@@ -312,6 +322,43 @@ describe('worktree reset session transfer', () => {
           SessionNotFoundError,
         );
         expect(handle.killed).toBe(true);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('detaches a clientId registered twice so the superseded session cannot survive', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const owner = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        // Reconnect shape: the client echoes the minted id, so the second
+        // attach refcounts the existing registration instead of adding a key.
+        // No count-based surface reveals it — clientCount counts keys, and the
+        // attach ledger holds the one recorded attach (a spawn owner seeds 0).
+        const reconnect = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          clientId: owner.clientId,
+        });
+        expect(reconnect.clientId).toBe(owner.clientId);
+        expect(bridge.getSessionSummary(owner.sessionId).clientCount).toBe(1);
+        expect(
+          bridge
+            .getDaemonStatusSnapshot()
+            .sessions.find((s) => s.sessionId === owner.sessionId)?.attachCount,
+        ).toBe(1);
+
+        await bridge.severSessionClients?.(owner.sessionId);
+
+        // One detach per remaining registration: the surviving refcount must
+        // not hold the idle close off, or the superseded session stays live
+        // and promptable after the reset route clears the barrier.
+        expect(bridge.sessionCount).toBe(0);
+        expect(() => bridge.getSessionSummary(owner.sessionId)).toThrow(
+          SessionNotFoundError,
+        );
       } finally {
         await bridge.shutdown();
       }

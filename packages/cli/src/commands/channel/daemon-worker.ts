@@ -162,6 +162,8 @@ interface DaemonSessionClientStaticLike {
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
+  // The reset route registers no client for the caller, so unlike `create`
+  // and `resume` this takes no client id.
   resetWorktree(
     client: DaemonClientLike,
     sessionId: string,
@@ -173,7 +175,6 @@ interface DaemonSessionClientStaticLike {
       sourceType?: string;
       sourceId?: string;
     },
-    clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
 }
 
@@ -246,7 +247,6 @@ export function createDaemonSessionFactory({
         client,
         req.worktreeReset.sessionId,
         daemonReq,
-        clientId,
       );
     }
     if (req.sessionId) {

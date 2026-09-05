@@ -614,7 +614,6 @@ describe('createDaemonSessionFactory', () => {
         sourceType: 'channel',
         sourceId: 'dingtalk-main',
       },
-      'qwen-channel-worker',
     );
     expect(sdk.DaemonSessionClient.createOrAttach).not.toHaveBeenCalled();
     expect(sdk.DaemonSessionClient.resume).not.toHaveBeenCalled();

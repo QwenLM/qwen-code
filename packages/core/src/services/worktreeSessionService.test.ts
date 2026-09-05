@@ -472,6 +472,41 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
+  it('refuses to restore a live worktree whose sidecar names a replacement session', async () => {
+    // A worktree reset moves ownership of the checkout to the replacement
+    // session but leaves the superseded sidecar (and transcript) on disk.
+    // Resuming the old id must not inject the "continue using this path"
+    // notice — that would put a second live writer in the replacement's
+    // worktree.
+    const supersededCwd = path.join(tmpDir, 'superseded-repo');
+    const supersededWorktree = path.join(
+      supersededCwd,
+      '.qwen',
+      'worktrees',
+      'my-feature',
+    );
+    await fs.mkdir(supersededWorktree, { recursive: true });
+    const superseded: WorktreeSession = {
+      ...sample,
+      originalCwd: supersededCwd,
+      worktreePath: supersededWorktree,
+      supersededBy: 'session-replacement',
+    };
+    await writeWorktreeSession(filePath, superseded);
+    const warnings: unknown[] = [];
+
+    const result = await restoreWorktreeContext(filePath, (e) =>
+      warnings.push(e),
+    );
+
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    // Unlike the stale cases, the sidecar survives: its supersede link is the
+    // daemon reset route's redirect and interrupted-transfer evidence.
+    expect(await readWorktreeSession(filePath)).toEqual(superseded);
+    expect(warnings).toHaveLength(1);
+  });
+
   it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {
     // A tampered sidecar pointing at /tmp itself (a real dir) but not
     // under `<originalCwd>/.qwen/worktrees/` must be treated as

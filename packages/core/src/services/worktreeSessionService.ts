@@ -497,6 +497,12 @@ export interface WorktreeRestoreResult {
  *    error (e.g. permission, EIO) — we still attempt cleanup so the next
  *    resume isn't stuck reading the same broken file.
  *
+ * A sidecar carrying `supersededBy` is refused the same way but deliberately
+ * NOT cleared: a worktree reset moved ownership of that checkout to the
+ * replacement session, and the daemon's reset route still reads this sidecar's
+ * `supersededBy` to redirect and to classify an interrupted transfer. Restoring
+ * here would point a live session at a checkout another session owns.
+ *
  * Shared by TUI / headless / ACP entry points so all three behave
  * consistently on `--resume`. Failures are logged via the supplied
  * `onWarn` callback but never thrown — worktree restore is best-effort,
@@ -533,6 +539,21 @@ export async function restoreWorktreeContext(
     } catch (clearErr) {
       onWarn?.(clearErr);
     }
+    return { contextMessage: null, session: null };
+  }
+
+  if (session.supersededBy !== undefined) {
+    // A worktree reset moved ownership of this checkout to
+    // `session.supersededBy`. Refuse the restore — resuming here would direct
+    // a live session into a worktree another session now owns — but leave the
+    // sidecar alone: the daemon's reset route still reads this link to
+    // redirect and to classify an interrupted transfer.
+    onWarn?.(
+      new Error(
+        `worktree session was superseded by ${session.supersededBy}; ` +
+          `not restoring its worktree context.`,
+      ),
+    );
     return { contextMessage: null, session: null };
   }
 

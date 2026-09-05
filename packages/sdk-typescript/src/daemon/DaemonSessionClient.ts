@@ -453,19 +453,23 @@ export class DaemonSessionClient {
 
   /**
    * Transfer a worktree session's checkout ownership to a fresh replacement
-   * session and return a client bound to the replacement. The replacement
-   * is a brand-new conversation; the superseded session keeps its
-   * transcript on the daemon and is never restored again (its restore
-   * surfaces `worktree_session_superseded`). The existing reattach identity
-   * guard applies to the replacement client unchanged.
+   * session and return a client bound to the replacement's identity. The
+   * reset route registers no client for the caller, so that client is not an
+   * attachment: it carries whatever `clientId` the response had — a
+   * daemon-minted one on a fresh transfer, none on an idempotent resume of a
+   * committed one. Load or resume the replacement through the normal restore
+   * surface when a registered attachment is required. The replacement is a
+   * brand-new conversation; the superseded session keeps its transcript on
+   * the daemon and is never restored again (its restore surfaces
+   * `worktree_session_superseded`). The existing reattach identity guard
+   * applies to the replacement client unchanged.
    */
   static async resetWorktree(
     client: DaemonClient,
     sessionId: string,
     req: WorktreeResetSessionRequest = {},
-    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const session = await client.resetWorktreeSession(sessionId, req, clientId);
+    const session = await client.resetWorktreeSession(sessionId, req);
     return new DaemonSessionClient({
       client,
       session,

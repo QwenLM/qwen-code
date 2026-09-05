@@ -17570,8 +17570,16 @@ describe('createServeApp', () => {
         undefined,
         { workspaceRegistry: createWorkspaceRegistry([runtime]) },
       );
+      // The restore pre-reads the sidecar to pick its worktree-ownership lock
+      // key, so the generation must close on the post-load integrity read:
+      // the bridge has registered the cold session by then, which is what
+      // this cleanup path is about.
+      let sidecarReads = 0;
       mockWt.readSidecarStrict = async () => {
-        generationGuard.close();
+        sidecarReads++;
+        if (sidecarReads === 2) {
+          generationGuard.close();
+        }
         return { state: 'missing' };
       };
 
