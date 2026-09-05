@@ -2991,7 +2991,9 @@ export class Config {
   }
 
   /**
-   * Must only be called once, throws if called again.
+   * Must only be called once, throws if called again after the first call
+   * settled. Callers arriving while the first call is still in flight join
+   * that flight instead of throwing.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -2999,6 +3001,14 @@ export class Config {
       throw new Error('Derived Configs cannot be initialized');
     }
     if (this.initialized) {
+      // Joining the in-flight run matters: callers that swallow the old
+      // throw (the OpenTUI submit path, slash-command loading) proceeded on
+      // a config whose chat had not started yet, and the first prompt died
+      // with "Chat not initialized" (#11002).
+      if (!this.initializationSettled) {
+        await this.initializationPromise;
+        return;
+      }
       throw Error('Config was already initialized');
     }
     if (this.shutdownRequested) {
