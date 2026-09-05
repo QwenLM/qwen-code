@@ -1529,6 +1529,14 @@ export class DaemonClient {
     });
   }
 
+  workspaceRuntimeExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return this.jsonRequest(
+      '/workspace/runtime/extensions',
+      'Extensions runtime',
+      { mode: 'rest' },
+    );
+  }
+
   async workspaceAcpPreheat(
     timeoutMs?: number,
   ): Promise<DaemonWorkspaceAcpPreheatResult> {
@@ -7539,6 +7547,15 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       '/extensions',
       'GET /workspaces/:workspace/extensions',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceRuntimeExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceExtensionsStatus>(
+      this.workspaceSelector,
+      '/runtime/extensions',
+      'GET /workspaces/:workspace/runtime/extensions',
       { mode: 'rest' },
     );
   }

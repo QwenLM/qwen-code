@@ -39,7 +39,7 @@ interface MockTask {
   }>;
 }
 
-const { actions } = vi.hoisted(() => ({
+const { actions, optionalWorkspaceState } = vi.hoisted(() => ({
   actions: {
     listScheduledTasks: vi.fn(),
     createScheduledTask: vi.fn(),
@@ -50,9 +50,22 @@ const { actions } = vi.hoisted(() => ({
     loadSkillsStatus: vi.fn(),
     loadMcpStatus: vi.fn(),
   },
+  optionalWorkspaceState: {
+    current: undefined as
+      | undefined
+      | {
+          capabilities: { features: string[] };
+          client: {
+            ensureWorkspaceRuntime: ReturnType<typeof vi.fn>;
+            workspaceRuntimeExtensions: ReturnType<typeof vi.fn>;
+            workspaceByCwd: ReturnType<typeof vi.fn>;
+          };
+        },
+  },
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useOptionalWorkspace: () => optionalWorkspaceState.current,
   useWorkspaceActions: () => actions,
 }));
 
@@ -211,6 +224,7 @@ afterEach(() => {
   root = null;
   container = null;
   portalRoot = null;
+  optionalWorkspaceState.current = undefined;
   vi.clearAllMocks();
 });
 
@@ -1398,6 +1412,38 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       expect.objectContaining({ prompt: 'do secondary work' }),
       'id-other',
     );
+  });
+
+  it('loads extension references from the chosen workspace runtime', async () => {
+    const ensureRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => ({ extensions: [] }));
+    const workspaceByCwd = vi.fn(() => ({
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+    }));
+    optionalWorkspaceState.current = {
+      capabilities: { features: ['workspace_extension_mentions'] },
+      client: {
+        ensureWorkspaceRuntime: vi.fn(),
+        workspaceRuntimeExtensions: vi.fn(),
+        workspaceByCwd,
+      },
+    };
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    click(findButtonContaining('Extensions'));
+    await flush();
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/repo/other');
+    expect(ensureRuntime).toHaveBeenCalledOnce();
+    expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
+    expect(actions.loadExtensionsStatus).not.toHaveBeenCalled();
   });
 
   it('lists and creates tasks in a locked secondary workspace', async () => {

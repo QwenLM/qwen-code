@@ -1577,6 +1577,16 @@ export function useComposerCore(
     const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
     workspaceActionsRef.current = {
       ...workspace.actions,
+      ...(workspace.capabilities?.features.includes(
+        'workspace_extension_mentions',
+      ) === true
+        ? {
+            async loadExtensionsStatus() {
+              await client.ensureRuntime();
+              return client.workspaceRuntimeExtensions();
+            },
+          }
+        : {}),
       async globWorkspace(pattern, options) {
         options?.signal?.throwIfAborted();
         const result = (await client.glob(pattern, {

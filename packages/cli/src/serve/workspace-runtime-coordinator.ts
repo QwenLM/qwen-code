@@ -7,7 +7,9 @@
 import {
   SERVE_CONTROL_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type ServeWorkspaceExtensionsRefreshResult,
   type ServeWorkspaceRuntimeCapabilityStatus,
+  type ServeWorkspaceRuntimeExtensionsCapabilityStatus,
   type ServeWorkspaceRuntimeStatus,
   type ServeWorkspaceSkillsRefreshResult,
 } from '@qwen-code/acp-bridge/status';
@@ -26,6 +28,23 @@ const MCP_POLL_INTERVAL_MS = 250;
 type LifecycleAcpSessionBridge = AcpSessionBridge & {
   getWorkspaceRuntimeLifecycleSnapshot(): BridgeWorkspaceRuntimeLifecycleSnapshot;
 };
+
+export interface WorkspaceExtensionReconciliationResult {
+  state: 'deferred' | 'failed' | 'reconciled';
+  refreshed: number;
+  failed: number;
+  error?: string;
+}
+
+class ExtensionRuntimeRefreshError extends Error {
+  constructor(
+    readonly result: ServeWorkspaceExtensionsRefreshResult,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ExtensionRuntimeRefreshError';
+  }
+}
 
 export class WorkspaceRuntimeStillStartingError extends Error {
   constructor() {
@@ -70,11 +89,24 @@ export class WorkspaceRuntimeCoordinator {
 
   private activeManagementOperations = 0;
 
+  private extensionsRevision = 0;
+
+  private desiredExtensionGeneration = 0;
+
+  private appliedExtensionGeneration = 0;
+
   private skillsRevision = 0;
 
   private mcpRevision = 0;
 
   private mcpConfigRevision = 0;
+
+  private extensionsStatus: ServeWorkspaceRuntimeExtensionsCapabilityStatus = {
+    state: 'not_started',
+    revision: 0,
+    desiredGeneration: 0,
+    appliedGeneration: 0,
+  };
 
   private skillsStatus: ServeWorkspaceRuntimeCapabilityStatus = {
     state: 'not_started',
@@ -87,6 +119,12 @@ export class WorkspaceRuntimeCoordinator {
   };
 
   private skillsReconcileDeferred = false;
+
+  private extensionsReconcileDeferred = false;
+
+  private extensionsTail: Promise<void> = Promise.resolve();
+
+  private extensionsQueuedWork = 0;
 
   private skillsRefreshRetryRevision: number | undefined;
 
@@ -114,6 +152,12 @@ export class WorkspaceRuntimeCoordinator {
   cancelDrain(): void {
     if (this.disposed) return;
     this.draining = false;
+    if (this.extensionsReconcileDeferred) {
+      this.extensionsReconcileDeferred = false;
+      void this.reconcileExtensionGeneration(
+        this.desiredExtensionGeneration,
+      ).catch(() => undefined);
+    }
     if (this.skillsReconcileDeferred) {
       this.skillsReconcileDeferred = false;
       this.scheduleSkillsReconciliation();
@@ -127,6 +171,7 @@ export class WorkspaceRuntimeCoordinator {
   hasActiveWork(): boolean {
     return (
       this.activeManagementOperations > 0 ||
+      this.extensionsQueuedWork > 0 ||
       this.skillsQueuedWork > 0 ||
       this.mcpQueuedWork > 0 ||
       this.bridge.getWorkspaceRuntimeLifecycleSnapshot().activeWork
@@ -140,6 +185,18 @@ export class WorkspaceRuntimeCoordinator {
 
   status(): ServeWorkspaceRuntimeStatus {
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    const extensionsStatus =
+      this.extensionsStatus.runtimeEpoch !== undefined &&
+      (!snapshot.runtimeLive ||
+        this.extensionsStatus.runtimeEpoch !== snapshot.runtimeEpoch)
+        ? {
+            state: 'stale' as const,
+            revision: this.extensionsStatus.revision,
+            runtimeEpoch: this.extensionsStatus.runtimeEpoch,
+            desiredGeneration: this.extensionsStatus.desiredGeneration,
+            appliedGeneration: this.extensionsStatus.appliedGeneration,
+          }
+        : this.extensionsStatus;
     const skillsStatus =
       this.skillsStatus.runtimeEpoch !== undefined &&
       (!snapshot.runtimeLive ||
@@ -166,7 +223,11 @@ export class WorkspaceRuntimeCoordinator {
       state: snapshot.state,
       runtimeLive: snapshot.runtimeLive,
       runtimeEpoch: snapshot.runtimeEpoch,
-      capabilities: { mcp: mcpStatus, skills: skillsStatus },
+      capabilities: {
+        extensions: extensionsStatus,
+        mcp: mcpStatus,
+        skills: skillsStatus,
+      },
     };
   }
 
@@ -186,30 +247,67 @@ export class WorkspaceRuntimeCoordinator {
       throw new WorkspaceRuntimeInitializationError(error);
     }
     this.assertAcceptingWork();
+    const lifecycle = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    if (
+      this.desiredExtensionGeneration === 0 &&
+      this.appliedExtensionGeneration === 0 &&
+      lifecycle.runtimeLive &&
+      this.extensionsStatus.runtimeEpoch !== lifecycle.runtimeEpoch
+    ) {
+      this.extensionsStatus = {
+        state: 'ready',
+        revision: this.extensionsRevision,
+        runtimeEpoch: lifecycle.runtimeEpoch,
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+      };
+    }
     const status = this.status();
     if (!status.runtimeLive) {
       throw new WorkspaceRuntimeInitializationError(
         new Error('ACP preheat completed without a live runtime'),
       );
     }
+    const extensionsReady =
+      status.capabilities?.extensions?.state === 'ready' &&
+      status.capabilities.extensions.runtimeEpoch === status.runtimeEpoch &&
+      status.capabilities.extensions.appliedGeneration ===
+        status.capabilities.extensions.desiredGeneration;
+    if (!extensionsReady) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs > 0) {
+        try {
+          await withTimeout(this.prepareExtensions(), remainingMs);
+        } catch (error) {
+          this.assertAcceptingWork(error);
+        }
+      }
+    }
+    const preparedStatus = this.status();
     const skillsReady =
-      status.capabilities?.skills?.state === 'ready' &&
-      status.capabilities.skills.runtimeEpoch === status.runtimeEpoch;
+      preparedStatus.capabilities?.skills?.state === 'ready' &&
+      preparedStatus.capabilities.skills.runtimeEpoch ===
+        preparedStatus.runtimeEpoch;
     const mcpReady =
-      status.capabilities?.mcp?.state === 'ready' &&
-      status.capabilities.mcp.runtimeEpoch === status.runtimeEpoch;
+      preparedStatus.capabilities?.mcp?.state === 'ready' &&
+      preparedStatus.capabilities.mcp.runtimeEpoch ===
+        preparedStatus.runtimeEpoch;
     if (skillsReady && mcpReady) {
-      return status;
+      return preparedStatus;
     }
     const skillsRevision = this.skillsRevision;
     const mcpRevision = this.mcpRevision;
     const skillsPrep = skillsReady ? Promise.resolve() : this.prepareSkills();
     void skillsPrep.catch((error: unknown) => {
-      this.recordSkillsError(skillsRevision, status.runtimeEpoch, error);
+      this.recordSkillsError(
+        skillsRevision,
+        preparedStatus.runtimeEpoch,
+        error,
+      );
     });
     const mcpPrep = mcpReady ? Promise.resolve() : this.prepareMcp();
     void mcpPrep.catch((error: unknown) => {
-      this.recordMcpError(mcpRevision, status.runtimeEpoch, error);
+      this.recordMcpError(mcpRevision, preparedStatus.runtimeEpoch, error);
     });
     const remainingMs = deadline - Date.now();
     if (remainingMs > 0) {
@@ -225,7 +323,9 @@ export class WorkspaceRuntimeCoordinator {
     const finalStatus = this.status();
     if (!finalStatus.runtimeLive) {
       throw new WorkspaceRuntimeInitializationError(
-        new Error('Workspace runtime stopped during Skills/MCP preparation'),
+        new Error(
+          'Workspace runtime stopped during Extensions/Skills/MCP preparation',
+        ),
       );
     }
     return finalStatus;
@@ -239,6 +339,75 @@ export class WorkspaceRuntimeCoordinator {
     } finally {
       this.activeManagementOperations -= 1;
     }
+  }
+
+  observeExtensionGeneration(generation: number): void {
+    if (generation === this.desiredExtensionGeneration) return;
+    this.desiredExtensionGeneration = generation;
+    this.extensionsRevision += 1;
+    this.invalidateDerivedCapabilities();
+    this.extensionsStatus = {
+      state:
+        this.extensionsStatus.runtimeEpoch === undefined
+          ? 'not_started'
+          : 'stale',
+      revision: this.extensionsRevision,
+      desiredGeneration: generation,
+      appliedGeneration: this.appliedExtensionGeneration,
+      ...(this.extensionsStatus.runtimeEpoch === undefined
+        ? {}
+        : { runtimeEpoch: this.extensionsStatus.runtimeEpoch }),
+    };
+  }
+
+  async reconcileExtensionGeneration(
+    generation: number,
+  ): Promise<WorkspaceExtensionReconciliationResult> {
+    this.observeExtensionGeneration(generation);
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    if (!snapshot.runtimeLive || this.draining || this.disposed) {
+      this.extensionsReconcileDeferred ||=
+        snapshot.runtimeLive && this.draining;
+      return { state: 'deferred', refreshed: 0, failed: 0 };
+    }
+    const revision = this.extensionsRevision;
+    let result: ServeWorkspaceExtensionsRefreshResult | undefined;
+    try {
+      result = await this.queueExtensionsWork(() =>
+        this.prepareExtensionsRevision(revision, generation),
+      );
+    } catch (error) {
+      if (this.draining && !this.disposed) {
+        this.extensionsReconcileDeferred = true;
+        return { state: 'deferred', refreshed: 0, failed: 0 };
+      }
+      const refresh =
+        error instanceof ExtensionRuntimeRefreshError
+          ? error.result
+          : undefined;
+      return {
+        state: 'failed',
+        refreshed: refresh?.sessionsRefreshed ?? 0,
+        failed:
+          (refresh?.sessionsFailed ?? 0) +
+          (refresh?.sessionsSkipped ?? (refresh ? 0 : 1)),
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (
+      revision === this.extensionsRevision &&
+      generation === this.desiredExtensionGeneration &&
+      this.appliedExtensionGeneration === generation
+    ) {
+      this.scheduleSkillsReconciliation();
+      this.scheduleMcpReconciliation();
+      return {
+        state: 'reconciled',
+        refreshed: result?.sessionsRefreshed ?? 0,
+        failed: 0,
+      };
+    }
+    return { state: 'deferred', refreshed: 0, failed: 0 };
   }
 
   reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
@@ -364,6 +533,124 @@ export class WorkspaceRuntimeCoordinator {
     });
   }
 
+  private prepareExtensions(): Promise<
+    ServeWorkspaceExtensionsRefreshResult | undefined
+  > {
+    const revision = this.extensionsRevision;
+    const generation = this.desiredExtensionGeneration;
+    return this.queueExtensionsWork(() =>
+      this.prepareExtensionsRevision(revision, generation),
+    );
+  }
+
+  private async prepareExtensionsRevision(
+    revision: number,
+    generation: number,
+  ): Promise<ServeWorkspaceExtensionsRefreshResult | undefined> {
+    let snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    if (!snapshot.runtimeLive) {
+      await withTimeout(
+        this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS }),
+        DEFAULT_ENSURE_TIMEOUT_MS,
+      );
+      snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    }
+    const runtimeEpoch = snapshot.runtimeEpoch;
+    if (
+      revision !== this.extensionsRevision ||
+      generation !== this.desiredExtensionGeneration
+    ) {
+      return;
+    }
+    this.extensionsStatus = {
+      state: 'starting',
+      revision,
+      runtimeEpoch,
+      desiredGeneration: generation,
+      appliedGeneration: this.appliedExtensionGeneration,
+    };
+    try {
+      const result =
+        await this.bridge.invokeWorkspaceCommand<ServeWorkspaceExtensionsRefreshResult>(
+          SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+          { cwd: this.runtime.workspaceCwd },
+        );
+      if (
+        result.configsFailed > 0 ||
+        result.sessionsFailed > 0 ||
+        (result.sessionsSkipped ?? 0) > 0
+      ) {
+        const details = [
+          ...(result.configErrors ?? []),
+          ...(result.sessionErrors ?? []).map((entry) => entry.error),
+        ];
+        throw new ExtensionRuntimeRefreshError(
+          result,
+          `Extension runtime refresh failed${
+            details[0] ? `: ${details[0]}` : ''
+          }`,
+        );
+      }
+      const catalog =
+        await this.runtime.workspaceService.getWorkspaceExtensionsStatus({
+          route: 'workspace runtime Extension preparation',
+          workspaceCwd: this.runtime.workspaceCwd,
+        });
+      const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+      if (
+        revision !== this.extensionsRevision ||
+        generation !== this.desiredExtensionGeneration
+      ) {
+        return;
+      }
+      if (catalog.errors?.length) {
+        throw new Error(
+          catalog.errors[0]?.error ??
+            'Extension runtime did not return a live snapshot',
+        );
+      }
+      if (
+        this.draining ||
+        !current.runtimeLive ||
+        current.runtimeEpoch !== runtimeEpoch
+      ) {
+        if (
+          this.draining &&
+          !this.disposed &&
+          current.runtimeLive &&
+          current.runtimeEpoch === runtimeEpoch
+        ) {
+          this.extensionsReconcileDeferred = true;
+        }
+        this.extensionsStatus = {
+          state: 'stale',
+          revision,
+          runtimeEpoch,
+          desiredGeneration: generation,
+          appliedGeneration: this.appliedExtensionGeneration,
+        };
+        return;
+      }
+      if (catalog.runtimeEpoch !== runtimeEpoch || !catalog.initialized) {
+        throw new Error(
+          'Extension runtime returned a stale or uninitialized catalog',
+        );
+      }
+      this.appliedExtensionGeneration = generation;
+      this.extensionsStatus = {
+        state: 'ready',
+        revision,
+        runtimeEpoch,
+        desiredGeneration: generation,
+        appliedGeneration: generation,
+      };
+      return result;
+    } catch (error) {
+      this.recordExtensionsError(revision, runtimeEpoch, error);
+      throw error;
+    }
+  }
+
   private async refreshSkillsRevision(revision: number): Promise<void> {
     const result =
       await this.bridge.invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
@@ -468,6 +755,24 @@ export class WorkspaceRuntimeCoordinator {
         this.skillsQueuedWork -= 1;
       });
     this.skillsTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private queueExtensionsWork<T>(run: () => Promise<T>): Promise<T> {
+    this.extensionsQueuedWork += 1;
+    const operation = this.extensionsTail
+      .catch(() => undefined)
+      .then(async () => {
+        this.assertAcceptingWork();
+        return await run();
+      })
+      .finally(() => {
+        this.extensionsQueuedWork -= 1;
+      });
+    this.extensionsTail = operation.then(
       () => undefined,
       () => undefined,
     );
@@ -640,6 +945,65 @@ export class WorkspaceRuntimeCoordinator {
       runtimeEpoch,
       error: {
         code: 'skills_prepare_failed',
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+
+  private invalidateDerivedCapabilities(): void {
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    this.skillsRevision += 1;
+    this.mcpRevision += 1;
+    this.mcpConfigRevision += 1;
+    this.skillsStatus = {
+      state:
+        this.skillsStatus.runtimeEpoch === undefined ? 'not_started' : 'stale',
+      revision: this.skillsRevision,
+      ...(this.skillsStatus.runtimeEpoch === undefined
+        ? {}
+        : { runtimeEpoch: this.skillsStatus.runtimeEpoch }),
+    };
+    this.mcpStatus = {
+      state:
+        this.mcpStatus.runtimeEpoch === undefined ? 'not_started' : 'stale',
+      revision: this.mcpRevision,
+      ...(this.mcpStatus.runtimeEpoch === undefined
+        ? {}
+        : { runtimeEpoch: this.mcpStatus.runtimeEpoch }),
+    };
+    this.skillsReconcileDeferred ||= snapshot.runtimeLive && this.draining;
+    this.mcpReconcileDeferred ||= snapshot.runtimeLive && this.draining;
+  }
+
+  private recordExtensionsError(
+    revision: number,
+    runtimeEpoch: number,
+    error: unknown,
+  ): void {
+    const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    if (revision !== this.extensionsRevision) return;
+    if (
+      this.draining ||
+      !current.runtimeLive ||
+      current.runtimeEpoch !== runtimeEpoch
+    ) {
+      this.extensionsStatus = {
+        state: 'stale',
+        revision,
+        runtimeEpoch,
+        desiredGeneration: this.desiredExtensionGeneration,
+        appliedGeneration: this.appliedExtensionGeneration,
+      };
+      return;
+    }
+    this.extensionsStatus = {
+      state: 'error',
+      revision,
+      runtimeEpoch,
+      desiredGeneration: this.desiredExtensionGeneration,
+      appliedGeneration: this.appliedExtensionGeneration,
+      error: {
+        code: 'extensions_prepare_failed',
         message: error instanceof Error ? error.message : String(error),
       },
     };

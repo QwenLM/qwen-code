@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
+import type {
+  ServeWorkspaceExtensionsRefreshResult,
+  ServeWorkspaceExtensionsStatus,
+  ServeWorkspaceSkillsStatus,
+} from '@qwen-code/acp-bridge/status';
 import {
   WorkspaceDrainingError,
   type AcpSessionBridge,
@@ -36,12 +40,14 @@ function makeRuntime() {
       activeWork: false,
     };
   });
-  const invokeWorkspaceCommand = vi.fn(async () => ({
-    sessionsRefreshed: 0,
-    sessionsFailed: 0,
-    configsRefreshed: 1,
-    configsFailed: 0,
-  }));
+  const invokeWorkspaceCommand = vi.fn(
+    async (): Promise<ServeWorkspaceExtensionsRefreshResult> => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    }),
+  );
   const initializeWorkspaceMcp = vi.fn(async () => ({ accepted: true }));
   const reloadWorkspaceMcp = vi.fn(async () => ({ accepted: true }));
   const getWorkspaceSkillsRuntimeStatus = vi.fn(
@@ -51,6 +57,15 @@ function makeRuntime() {
       initialized: true,
       runtimeEpoch: snapshot.runtimeEpoch,
       skills: [],
+    }),
+  );
+  const getWorkspaceExtensionsStatus = vi.fn(
+    async (): Promise<ServeWorkspaceExtensionsStatus> => ({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      runtimeEpoch: snapshot.runtimeEpoch,
+      extensions: [],
     }),
   );
   const getWorkspaceMcpStatus = vi.fn(
@@ -86,6 +101,7 @@ function makeRuntime() {
     bridge,
     workspaceService: {
       getWorkspaceSkillsRuntimeStatus,
+      getWorkspaceExtensionsStatus,
       invalidateWorkspaceSkillsStatus,
       getWorkspaceMcpStatus,
     },
@@ -96,6 +112,7 @@ function makeRuntime() {
     preheat,
     invokeWorkspaceCommand,
     getWorkspaceSkillsRuntimeStatus,
+    getWorkspaceExtensionsStatus,
     invalidateWorkspaceSkillsStatus,
     getWorkspaceMcpStatus,
     initializeWorkspaceMcp,
@@ -125,6 +142,13 @@ describe('WorkspaceRuntimeCoordinator', () => {
       runtimeLive: true,
       runtimeEpoch: 1,
       capabilities: {
+        extensions: {
+          state: 'ready',
+          revision: 0,
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+        },
         skills: { state: 'ready', revision: 0, runtimeEpoch: 1 },
         mcp: { state: 'ready', revision: 0, runtimeEpoch: 1 },
       },
@@ -134,6 +158,177 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
     expect(harness.bridge.sessionCount).toBe(0);
     expect(harness.invalidateWorkspaceSkillsStatus).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles an Extension generation without a session', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'reconciled',
+      refreshed: 0,
+      failed: 0,
+    });
+
+    expect(coordinator.status().capabilities?.extensions).toEqual({
+      state: 'ready',
+      revision: 1,
+      runtimeEpoch: 3,
+      desiredGeneration: 7,
+      appliedGeneration: 7,
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/extensions/reconcile',
+      { cwd: '/workspace' },
+    );
+
+    await coordinator.reconcileExtensionGeneration(6);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      desiredGeneration: 6,
+      appliedGeneration: 6,
+    });
+  });
+
+  it('defers an Extension generation until the runtime is ensured', async () => {
+    const harness = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(4)).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+    });
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: {
+        extensions: {
+          state: 'ready',
+          desiredGeneration: 4,
+          appliedGeneration: 4,
+          runtimeEpoch: 1,
+        },
+      },
+    });
+  });
+
+  it('defers an Extension generation when the runtime epoch changes', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockImplementationOnce(async () => {
+      harness.setSnapshot({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 4,
+      });
+      return {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 3,
+        extensions: [],
+      };
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+    });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      desiredGeneration: 7,
+      appliedGeneration: 0,
+    });
+  });
+
+  it('fails reconciliation when the live Extension catalog is uninitialized', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'failed',
+      refreshed: 0,
+      failed: 1,
+      error: 'Extension runtime returned a stale or uninitialized catalog',
+    });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      desiredGeneration: 7,
+      appliedGeneration: 0,
+    });
+  });
+
+  it('replays Extension reconciliation interrupted by draining', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    let release!: () => void;
+    harness.invokeWorkspaceCommand.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 1,
+              configsFailed: 0,
+            });
+        }),
+    );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    const reconciliation = coordinator.reconcileExtensionGeneration(7);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+    coordinator.beginDrain();
+    release();
+    await expect(reconciliation).resolves.toMatchObject({ state: 'deferred' });
+    coordinator.cancelDrain();
+
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      }),
+    );
+    expect(harness.getWorkspaceExtensionsStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues preparing Skills and MCP after an Extension refresh fails', async () => {
+    const harness = makeRuntime();
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      sessionsSkipped: 1,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    coordinator.observeExtensionGeneration(2);
+
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: {
+        extensions: {
+          state: 'error',
+          desiredGeneration: 2,
+          appliedGeneration: 0,
+          error: { message: expect.stringContaining('broken extension') },
+        },
+        skills: { state: 'ready' },
+        mcp: { state: 'ready' },
+      },
+    });
+    expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalled();
+    expect(harness.getWorkspaceMcpStatus).toHaveBeenCalled();
   });
 
   it('reconciles a live Skills runtime in revision order', async () => {

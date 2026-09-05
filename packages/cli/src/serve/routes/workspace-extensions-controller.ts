@@ -31,6 +31,7 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import {
   createFifoTaskQueue,
   type FifoTaskQueue,
@@ -225,7 +226,9 @@ export interface ExtensionsController {
     isWorkspaceTrusted?: boolean,
     interactions?: ExtensionInteractionHandlers,
   ): ExtensionManager;
-  buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
+  buildLocalExtensionsStatus(
+    extensionManager?: ExtensionManager,
+  ): Promise<ServeWorkspaceExtensionsStatus>;
   refreshExtensionsForAllSessions(): Promise<{
     refreshed: number;
     failed: number;
@@ -709,15 +712,44 @@ export function createExtensionsController(
                   try {
                     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
                     try {
+                      const coordinator =
+                        getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+                      if (coordinator) {
+                        // A generation is certified only by the full runtime
+                        // refresh; skillsOnly remains a legacy optimization.
+                        const reconciliation =
+                          await coordinator.reconcileExtensionGeneration(
+                            committedGeneration!,
+                          );
+                        const result = {
+                          refreshed: reconciliation.refreshed,
+                          failed: reconciliation.failed,
+                        };
+                        runtime.bridge.broadcastExtensionsChanged({
+                          ...bridgeMutationEvent(event),
+                          ...result,
+                          ...(reconciliation.error
+                            ? { error: reconciliation.error }
+                            : {}),
+                        });
+                        return {
+                          status: 'fulfilled' as const,
+                          result,
+                          reconciled: reconciliation.state === 'reconciled',
+                          reconciliationError: reconciliation.error,
+                          elapsedMs: Date.now() - startedAt,
+                        };
+                      }
+                      const result =
+                        await runtime.bridge.refreshExtensionsForAllSessions(
+                          bridgeMutationEvent(event),
+                          ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
+                        );
                       return {
                         status: 'fulfilled' as const,
-                        result:
-                          await runtime.bridge.refreshExtensionsForAllSessions(
-                            bridgeMutationEvent(event),
-                            ...(options.skillsOnly
-                              ? [{ skillsOnly: true }]
-                              : []),
-                          ),
+                        result,
+                        reconciled: result.failed === 0,
+                        reconciliationError: undefined,
                         elapsedMs: Date.now() - startedAt,
                       };
                     } finally {
@@ -744,13 +776,22 @@ export function createExtensionsController(
             if (settled.status === 'fulfilled') {
               refreshed += settled.result.refreshed;
               failed += settled.result.failed;
-              if (settled.result.failed > 0) {
+              if (settled.reconciliationError) {
+                warnings.push({
+                  workspaceId: runtime.workspaceId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  error: sanitizeDaemonMessage(
+                    settled.reconciliationError,
+                  ).slice(0, 500),
+                });
+              } else if (settled.result.failed > 0) {
                 warnings.push({
                   workspaceId: runtime.workspaceId,
                   workspaceCwd: runtime.workspaceCwd,
                   error: `${settled.result.failed} session refresh(es) failed`,
                 });
-              } else {
+              }
+              if (settled.reconciled) {
                 options.onRuntimeReconciled?.(runtime, committedGeneration);
               }
             } else {
@@ -1007,105 +1048,105 @@ export function createExtensionsController(
     })();
   };
 
-  const buildLocalExtensionsStatus =
-    async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const locale = resolveExtensionLocale(boundWorkspace);
-      const now = Date.now();
-      if (
-        extensionsStatusCache?.locale === locale &&
-        extensionsStatusCache.expiresAt > now
-      ) {
-        return extensionsStatusCache.value;
-      }
-      const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
-      const entries: ServeExtensionEntry[] = extensionManager
-        .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            ...(ext.config.description
-              ? { description: ext.config.description }
+  const buildLocalExtensionsStatus = async (
+    currentManager?: ExtensionManager,
+  ): Promise<ServeWorkspaceExtensionsStatus> => {
+    const locale = resolveExtensionLocale(boundWorkspace);
+    const now = Date.now();
+    if (
+      !currentManager &&
+      extensionsStatusCache?.locale === locale &&
+      extensionsStatusCache.expiresAt > now
+    ) {
+      return extensionsStatusCache.value;
+    }
+    const extensionManager = currentManager ?? createExtensionManager();
+    if (!currentManager) await extensionManager.refreshCache();
+    const entries: ServeExtensionEntry[] = extensionManager
+      .getLoadedExtensions()
+      .map((ext): ServeExtensionEntry => {
+        const capabilities: ServeExtensionCapabilities = {
+          mcpServerCount: ext.mcpServers
+            ? Object.keys(ext.mcpServers).length
+            : 0,
+          skillCount: ext.skills?.length ?? 0,
+          agentCount: ext.agents?.length ?? 0,
+          hookCount: ext.hooks
+            ? Object.values(ext.hooks).reduce(
+                (sum, defs) => sum + (defs?.length ?? 0),
+                0,
+              )
+            : 0,
+          commandCount: ext.commands?.length ?? 0,
+          contextFileCount: ext.contextFiles.length,
+          channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
+          hasSettings: (ext.settings?.length ?? 0) > 0,
+        };
+        return {
+          kind: 'extension',
+          id: ext.id,
+          name: ext.name,
+          ...(ext.displayName ? { displayName: ext.displayName } : {}),
+          ...(ext.config.description
+            ? { description: ext.config.description }
+            : {}),
+          version: ext.version,
+          isActive: ext.isActive,
+          path: ext.path,
+          ...(ext.installMetadata?.source &&
+          ext.installMetadata.type !== 'snapshot'
+            ? {
+                source: redactExtensionDisplaySource(
+                  ext.installMetadata.source,
+                ),
+              }
+            : {}),
+          ...(ext.installMetadata?.type
+            ? { installType: ext.installMetadata.type }
+            : {}),
+          ...(ext.installMetadata?.originSource
+            ? { originSource: ext.installMetadata.originSource }
+            : {}),
+          ...(ext.installMetadata?.ref ? { ref: ext.installMetadata.ref } : {}),
+          ...(ext.installMetadata?.autoUpdate !== undefined
+            ? { autoUpdate: ext.installMetadata.autoUpdate }
+            : {}),
+          ...(ext.installMetadata?.type === 'snapshot'
+            ? { credentialPersistence: 'one_time' as const }
+            : ext.installMetadata?.credentialPersistence === 'stored'
+              ? { credentialPersistence: 'stored' as const }
               : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source &&
-            ext.installMetadata.type !== 'snapshot'
-              ? {
-                  source: redactExtensionDisplaySource(
-                    ext.installMetadata.source,
-                  ),
-                }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            ...(ext.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : ext.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
-            updateState:
-              ext.installMetadata?.type === 'snapshot'
-                ? 'not updatable'
-                : ext.installMetadata
-                  ? 'unknown'
-                  : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
-      const status = {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        extensions: entries,
-      };
-      extensionsStatusCache = {
-        locale,
-        expiresAt: Date.now() + 2_000,
-        value: status,
-      };
-      return status;
+          updateState:
+            ext.installMetadata?.type === 'snapshot'
+              ? 'not updatable'
+              : ext.installMetadata
+                ? 'unknown'
+                : 'not updatable',
+          capabilities,
+          details: {
+            mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+            commands: ext.commands ?? [],
+            skills: ext.skills?.map((skill) => skill.name) ?? [],
+            agents: ext.agents?.map((agent) => agent.name) ?? [],
+            contextFiles: ext.contextFiles,
+            settings:
+              ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+          },
+        };
+      });
+    const status = {
+      v: STATUS_SCHEMA_VERSION,
+      workspaceCwd: boundWorkspace,
+      initialized: true,
+      extensions: entries,
     };
+    extensionsStatusCache = {
+      locale,
+      expiresAt: Date.now() + 2_000,
+      value: status,
+    };
+    return status;
+  };
 
   return {
     boundWorkspace,

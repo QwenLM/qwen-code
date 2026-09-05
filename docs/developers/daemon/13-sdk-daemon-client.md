@@ -185,6 +185,8 @@ const workspaceHandle = await client
 const operation = await client.waitForExtensionOperation(workspaceHandle);
 ```
 
+For live Extension details, pre-flight `workspace_extensions_config_runtime`, call `ensureRuntime()`, then read `workspaceRuntimeExtensions()`. Merge that catalog with `extensionCatalog()` and `workspaceExtensions()` only when the runtime status Extension capability is ready, both runtime epochs match, and desired/applied generations are equal.
+
 The terminal operation result contains ordered `results`. Targets do not need to be installed when setting `enabled` or `disabled`: the daemon stores a name declaration and preserves that activation policy when an Extension with that name is installed later. All changed targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override but does not create a declaration for an unknown name; an all-unknown clear succeeds as a no-op without reconciliation. Singular activation methods remain installed-only.
 
 For workspace-internal Extension Skill switches, preflight `extension_state` and use the resource-grouped REST methods. These do not write Skill settings or activate a disabled parent Extension:

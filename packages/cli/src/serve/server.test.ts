@@ -752,7 +752,12 @@ const EXPECTED_REGISTERED_FEATURES = [
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
     if (feature === 'workspace_skills') {
-      return [feature, 'workspace_skills_config_runtime'];
+      return [
+        feature,
+        'workspace_skills_config_runtime',
+        'workspace_extensions_config_runtime',
+        'workspace_extension_mentions',
+      ];
     }
     if (feature === 'session_artifacts') {
       return [feature, 'session_artifacts_persistence'];
@@ -3636,7 +3641,9 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime'
+          feature === 'workspace_skills_config_runtime' ||
+          feature === 'workspace_extensions_config_runtime' ||
+          feature === 'workspace_extension_mentions'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);

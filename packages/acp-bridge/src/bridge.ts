@@ -6197,6 +6197,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (
         isRecord(response) &&
         (method === SERVE_STATUS_EXT_METHODS.workspaceSkills ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceExtensions ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources)

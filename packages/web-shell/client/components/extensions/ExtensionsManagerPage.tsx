@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type Ref,
+  type ReactNode,
 } from 'react';
 import {
   AlertCircleIcon,
@@ -23,7 +24,6 @@ import {
 } from 'lucide-react';
 import {
   DaemonHttpError,
-  type DaemonExtensionEntry,
   type DaemonExtensionUpdateState,
   type ExtensionActivationState,
   type ExtensionInteractionResponse,
@@ -39,8 +39,11 @@ import { useI18n } from '../../i18n';
 import { trimDialogLabel } from '../../utils/dialogLabels';
 import styles from './ExtensionsManagerPage.module.css';
 import {
+  extensionSnapshotsCurrent,
   filterExtensions,
+  mergeExtensionCatalog,
   preserveSelectedExtensionName,
+  type ManagedExtensionEntry,
 } from './extensions-manager-logic';
 import { Alert, AlertDescription } from '../ui/alert';
 import {
@@ -129,10 +132,6 @@ function isValidExtensionArchiveFilename(filename: string): boolean {
   });
 }
 
-type ManagedExtensionEntry = DaemonExtensionEntry & {
-  defaultActivation?: ExtensionActivationState;
-  workspaceActivation?: 'inherit' | ExtensionActivationState;
-};
 type T = ReturnType<typeof useI18n>['t'];
 type PendingInteractionState = {
   operationId: string;
@@ -146,9 +145,11 @@ interface ExtensionsManagerPageProps {
   onClose: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
   embedded?: EmbeddedManagerPage;
+  workspaceCwd?: string;
+  workspaceControl?: ReactNode;
 }
 
-function extensionTitle(extension: DaemonExtensionEntry): string {
+function extensionTitle(extension: ManagedExtensionEntry): string {
   return extension.displayName || extension.name;
 }
 
@@ -161,7 +162,7 @@ function extensionIsActive(extension: ManagedExtensionEntry): boolean {
   }
   return extension.defaultActivation
     ? extension.defaultActivation === 'enabled'
-    : extension.isActive;
+    : (extension.isActive ?? false);
 }
 
 function statusLabel(extension: ManagedExtensionEntry, t: T): string {
@@ -433,12 +434,33 @@ export function ExtensionsManagerPage({
   onClose,
   initialFocusRef,
   embedded,
+  workspaceCwd,
+  workspaceControl,
 }: ExtensionsManagerPageProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
   const signals = useWorkspaceEventSignals();
+  const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
+  const splitRuntimeAvailable =
+    workspace.capabilities?.features?.includes(
+      'workspace_extensions_config_runtime',
+    ) === true;
+  const workspaceClient = useMemo(
+    () =>
+      targetWorkspaceCwd
+        ? workspace.client.workspaceByCwd(targetWorkspaceCwd)
+        : undefined,
+    [targetWorkspaceCwd, workspace.client],
+  );
+  const loadRequestRef = useRef(0);
+  const loadRef = useRef<((preserveMessage?: boolean) => Promise<void>) | null>(
+    null,
+  );
+  const runtimeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [extensions, setExtensions] = useState<ManagedExtensionEntry[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -511,74 +533,156 @@ export function ExtensionsManagerPage({
   );
 
   const load = useCallback(
-    (preserveMessage = false) => {
+    async (preserveMessage = false) => {
+      const requestId = ++loadRequestRef.current;
+      if (runtimeRetryTimerRef.current) {
+        clearTimeout(runtimeRetryTimerRef.current);
+        runtimeRetryTimerRef.current = null;
+      }
       setLoading(true);
-      const projection = workspace.workspaceCwd
-        ? workspace.client
-            .workspaceByCwd(workspace.workspaceCwd)
-            .workspaceExtensions()
-            .catch(() => null)
-        : Promise.resolve(null);
-      return Promise.all([actions.loadExtensionsStatus(), projection])
-        .then(([status, activation]) => {
-          const activations = new Map(
-            (activation?.extensions ?? []).map((entry) => [
-              entry.extensionId,
-              entry,
-            ]),
+      const apply = (nextExtensions: ManagedExtensionEntry[]) => {
+        if (requestId !== loadRequestRef.current) return;
+        setExtensions((current) => {
+          const uninstallName = uninstallInFlightNameRef.current;
+          if (
+            !uninstallName ||
+            nextExtensions.some((extension) => extension.name === uninstallName)
+          ) {
+            return nextExtensions;
+          }
+          const uninstallingExtension = current.find(
+            (extension) => extension.name === uninstallName,
           );
-          const nextExtensions = (status.extensions ?? []).map((extension) => {
-            const entry = activations.get(extension.id);
-            return entry
-              ? {
-                  ...extension,
-                  defaultActivation: entry.defaultActivation,
-                  workspaceActivation: entry.workspaceActivation ?? 'inherit',
-                }
-              : extension;
-          });
-          setExtensions((current) => {
-            const uninstallName = uninstallInFlightNameRef.current;
-            if (
-              !uninstallName ||
-              nextExtensions.some(
-                (extension) => extension.name === uninstallName,
-              )
-            ) {
-              return nextExtensions;
-            }
-            const uninstallingExtension = current.find(
-              (extension) => extension.name === uninstallName,
+          return uninstallingExtension
+            ? [...nextExtensions, uninstallingExtension]
+            : nextExtensions;
+        });
+        setSelectedName((name) =>
+          name && uninstallInFlightNameRef.current === name
+            ? name
+            : preserveSelectedExtensionName(name, nextExtensions),
+        );
+      };
+      try {
+        if (splitRuntimeAvailable) {
+          if (!workspaceClient) throw new Error('Workspace is unavailable.');
+          let [catalog, activation] = await Promise.all([
+            workspace.client.extensionCatalog(),
+            workspaceClient.workspaceExtensions().catch(() => null),
+          ]);
+          if (requestId !== loadRequestRef.current) return;
+          apply(
+            mergeExtensionCatalog(
+              catalog.extensions,
+              activation,
+              undefined,
+              undefined,
+              catalog.generation,
+            ),
+          );
+          if (!preserveMessage) {
+            setMessageOwner(null);
+            setMessageTone('info');
+            setMessage(null);
+          }
+          const coordinator = await workspaceClient.ensureRuntime();
+          const runtime = await workspaceClient.workspaceRuntimeExtensions();
+          if (requestId !== loadRequestRef.current) return;
+          if (
+            !extensionSnapshotsCurrent(
+              catalog.generation,
+              activation,
+              runtime,
+              coordinator,
+            )
+          ) {
+            [catalog, activation] = await Promise.all([
+              workspace.client.extensionCatalog(),
+              workspaceClient.workspaceExtensions().catch(() => null),
+            ]);
+            if (requestId !== loadRequestRef.current) return;
+          }
+          apply(
+            mergeExtensionCatalog(
+              catalog.extensions,
+              activation,
+              runtime,
+              coordinator,
+              catalog.generation,
+            ),
+          );
+          const capability = coordinator.capabilities?.extensions;
+          if (capability?.state === 'error') {
+            setMessageOwner(null);
+            setMessageTone('error');
+            setMessage(
+              capability.error?.message ??
+                'Extension runtime preparation failed.',
             );
-            return uninstallingExtension
-              ? [...nextExtensions, uninstallingExtension]
-              : nextExtensions;
-          });
+          } else if (
+            capability?.state === 'starting' ||
+            capability?.state === 'stale'
+          ) {
+            runtimeRetryTimerRef.current = setTimeout(
+              () => void loadRef.current?.(true),
+              2000,
+            );
+          }
+        } else {
+          const projection = workspace.workspaceCwd
+            ? workspace.client
+                .workspaceByCwd(workspace.workspaceCwd)
+                .workspaceExtensions()
+                .catch(() => null)
+            : Promise.resolve(null);
+          const [status, activation] = await Promise.all([
+            actions.loadExtensionsStatus(),
+            projection,
+          ]);
+          apply(
+            mergeExtensionCatalog(
+              status.extensions ?? [],
+              activation,
+              undefined,
+              undefined,
+            ),
+          );
           if (!preserveMessage) {
             setMessageOwner(null);
             setMessageTone(status.errors?.[0] ? 'error' : 'info');
             setMessage(status.errors?.[0]?.error ?? null);
           }
-          setSelectedName((name) =>
-            name && uninstallInFlightNameRef.current === name
-              ? name
-              : preserveSelectedExtensionName(name, nextExtensions),
-          );
-        })
-        .catch((error: unknown) => {
-          if (!preserveMessage) {
-            setMessageOwner(null);
-            setMessageTone('error');
-            setMessage(error instanceof Error ? error.message : String(error));
-          }
-        })
-        .finally(() => setLoading(false));
+        }
+      } catch (error) {
+        if (requestId === loadRequestRef.current && !preserveMessage) {
+          setMessageOwner(null);
+          setMessageTone('error');
+          setMessage(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (requestId === loadRequestRef.current) setLoading(false);
+      }
     },
-    [actions, workspace.client, workspace.workspaceCwd],
+    [
+      actions,
+      splitRuntimeAvailable,
+      workspace.client,
+      workspace.workspaceCwd,
+      workspaceClient,
+    ],
   );
 
   useEffect(() => {
+    loadRef.current = load;
     void load();
+    return () => {
+      loadRef.current = null;
+      loadRequestRef.current += 1;
+      if (runtimeRetryTimerRef.current) {
+        clearTimeout(runtimeRetryTimerRef.current);
+        runtimeRetryTimerRef.current = null;
+      }
+    };
   }, [load]);
 
   useEffect(() => {
@@ -915,8 +1019,22 @@ export function ExtensionsManagerPage({
         ...current,
         [name]: 'checking for updates',
       }));
-      actions
-        .checkExtensionUpdates(connection.clientId)
+      const check = splitRuntimeAvailable
+        ? workspace.client
+            .checkUserExtensionUpdates(connection.clientId)
+            .then((handle) =>
+              workspace.client.waitForExtensionOperation(handle),
+            )
+            .then((operation) => {
+              if (operation.status === 'failed') {
+                throw new Error(
+                  operation.error ?? t('extensions.manage.operationFailed'),
+                );
+              }
+              return { states: operation.result?.states ?? {} };
+            })
+        : actions.checkExtensionUpdates(connection.clientId);
+      check
         .then((result) => {
           setUpdateStates(result.states);
           setMessage(updateLabel(result.states[name], t));
@@ -928,7 +1046,14 @@ export function ExtensionsManagerPage({
         })
         .finally(() => setCheckingName(null));
     },
-    [actions, connection.clientId, selectedName, t],
+    [
+      actions,
+      connection.clientId,
+      selectedName,
+      splitRuntimeAvailable,
+      t,
+      workspace.client,
+    ],
   );
 
   const installExtension = useCallback(() => {
@@ -966,7 +1091,12 @@ export function ExtensionsManagerPage({
             },
             clientId,
           )
-        : actions.installExtension({ source, consent: true }, clientId);
+        : splitRuntimeAvailable
+          ? workspace.client.installUserExtension(
+              { source, consent: true, activation: { scope: 'user' } },
+              clientId,
+            )
+          : actions.installExtension({ source, consent: true }, clientId);
     installingOperation
       .then((result) => {
         setPendingInstall({ operationId: result.operationId, source });
@@ -990,6 +1120,8 @@ export function ExtensionsManagerPage({
     operationsRecovered,
     pendingInstall,
     pendingMutation,
+    splitRuntimeAvailable,
+    workspace.client,
   ]);
 
   const runMutation = useCallback(
@@ -1076,7 +1208,7 @@ export function ExtensionsManagerPage({
         pendingInstall ||
         pendingMutation ||
         checkingName ||
-        !workspace.workspaceCwd
+        !targetWorkspaceCwd
       ) {
         return;
       }
@@ -1103,10 +1235,10 @@ export function ExtensionsManagerPage({
               )
             : activation === 'inherit'
               ? await workspace.client
-                  .workspaceByCwd(workspace.workspaceCwd)
+                  .workspaceByCwd(targetWorkspaceCwd)
                   .clearExtensionActivation(extension.id)
               : await workspace.client
-                  .workspaceByCwd(workspace.workspaceCwd)
+                  .workspaceByCwd(targetWorkspaceCwd)
                   .setExtensionActivation(extension.id, activation);
         const completed =
           await workspace.client.waitForExtensionOperation(result);
@@ -1136,8 +1268,8 @@ export function ExtensionsManagerPage({
       pendingInstall,
       pendingMutation,
       t,
+      targetWorkspaceCwd,
       workspace.client,
-      workspace.workspaceCwd,
     ],
   );
 
@@ -1216,21 +1348,26 @@ export function ExtensionsManagerPage({
   );
   const navigation = embedded ? (
     selectedExtension ? (
-      <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
-        <BreadcrumbList className="h-8 text-sm">
-          <BreadcrumbItem>
-            <BreadcrumbLink asChild>
-              <button type="button" onClick={embedded.onRoot}>
-                {t('extensions.manage.title')}
-              </button>
-            </BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>{extensionTitle(selectedExtension)}</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
+      <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
+        <Breadcrumb className="min-w-0 flex-1">
+          <BreadcrumbList className="h-8 text-sm">
+            <BreadcrumbItem>
+              <BreadcrumbLink asChild>
+                <button type="button" onClick={embedded.onRoot}>
+                  {t('extensions.manage.title')}
+                </button>
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>
+                {extensionTitle(selectedExtension)}
+              </BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+        {workspaceControl}
+      </div>
     ) : null
   ) : (
     standaloneNavigation
@@ -1309,10 +1446,15 @@ export function ExtensionsManagerPage({
                       runMutation(
                         selectedExtension.name,
                         (clientId) =>
-                          actions.updateExtension(
-                            selectedExtension.name,
-                            clientId,
-                          ),
+                          splitRuntimeAvailable
+                            ? workspace.client.updateUserExtension(
+                                selectedExtension.id,
+                                clientId,
+                              )
+                            : actions.updateExtension(
+                                selectedExtension.name,
+                                clientId,
+                              ),
                         {
                           operation: 'update',
                           startMessage: mutationMessage(
@@ -1498,7 +1640,7 @@ export function ExtensionsManagerPage({
                   />
                   <DetailField
                     label={t('extensions.manage.path')}
-                    value={selectedExtension.path}
+                    value={selectedExtension.path ?? '-'}
                   />
                   <DetailField
                     label={t('extensions.manage.updateStatus')}
@@ -1584,7 +1726,12 @@ export function ExtensionsManagerPage({
                     runMutation(
                       uninstallName,
                       (clientId) =>
-                        actions.uninstallExtension(uninstallName, clientId),
+                        splitRuntimeAvailable
+                          ? workspace.client.uninstallUserExtension(
+                              selectedExtension.id,
+                              clientId,
+                            )
+                          : actions.uninstallExtension(uninstallName, clientId),
                       {
                         operation: 'uninstall',
                         startMessage: mutationMessage(

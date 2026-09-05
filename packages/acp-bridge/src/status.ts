@@ -17,6 +17,12 @@ export interface ServeWorkspaceRuntimeCapabilityStatus {
   error?: { code: string; message: string };
 }
 
+export interface ServeWorkspaceRuntimeExtensionsCapabilityStatus
+  extends ServeWorkspaceRuntimeCapabilityStatus {
+  desiredGeneration: number;
+  appliedGeneration: number;
+}
+
 export interface ServeWorkspaceRuntimeStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
@@ -24,6 +30,7 @@ export interface ServeWorkspaceRuntimeStatus {
   runtimeLive: boolean;
   runtimeEpoch: number;
   capabilities?: {
+    extensions?: ServeWorkspaceRuntimeExtensionsCapabilityStatus;
     mcp?: ServeWorkspaceRuntimeCapabilityStatus;
     skills?: ServeWorkspaceRuntimeCapabilityStatus;
   };
@@ -236,6 +243,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/workspace/model-providers/reload',
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
+  workspaceExtensionsReconcile: 'qwen/control/workspace/extensions/reconcile',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
@@ -1435,8 +1443,19 @@ export interface ServeWorkspaceExtensionsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   extensions: ServeExtensionEntry[];
   errors?: ServeStatusCell[];
+}
+
+export interface ServeWorkspaceExtensionsRefreshResult {
+  configsRefreshed: number;
+  configsFailed: number;
+  configErrors?: string[];
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  sessionsSkipped?: number;
+  sessionErrors?: Array<{ sessionId: string; error: string }>;
 }
 
 export function createIdleWorkspaceExtensionsStatus(
