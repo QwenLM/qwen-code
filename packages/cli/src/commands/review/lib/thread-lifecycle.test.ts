@@ -1416,18 +1416,27 @@ describe('stampCarriedId — the write side of the readback', () => {
   });
 
   it('the lone-tag and table-delimiter tests stay linear on long whitespace runs (#9940 review, audit 2)', () => {
-    let t0 = performance.now();
-    stampCarriedId(`**[Critical]**\n<a${' '.repeat(60000)}x`, 'R1-5');
-    expect(performance.now() - t0).toBeLessThan(200);
-    t0 = performance.now();
-    stampCarriedId(`**[Critical]** | a |\n|---${' '.repeat(60000)}x`, 'R1-5');
-    expect(performance.now() - t0).toBeLessThan(200);
-    t0 = performance.now();
-    stampCarriedId(
-      `**[Critical]**${'<!---->\n'.repeat(8000)}the claim`,
-      'R1-5',
+    // The quadratic forms took seconds on these inputs; the bound is loose
+    // enough for a loaded CI runner (a 150 ms bound tripped at 534 ms under
+    // load 50) and the best of two runs discounts JIT warm-up.
+    const bestOfTwo = (body: string): number => {
+      let best = Infinity;
+      for (let i = 0; i < 2; i++) {
+        const t0 = performance.now();
+        stampCarriedId(body, 'R1-5');
+        best = Math.min(best, performance.now() - t0);
+      }
+      return best;
+    };
+    expect(bestOfTwo(`**[Critical]**\n<a${' '.repeat(60000)}x`)).toBeLessThan(
+      2000,
     );
-    expect(performance.now() - t0).toBeLessThan(150);
+    expect(
+      bestOfTwo(`**[Critical]** | a |\n|---${' '.repeat(60000)}x`),
+    ).toBeLessThan(2000);
+    expect(
+      bestOfTwo(`**[Critical]**${'<!---->\n'.repeat(8000)}the claim`),
+    ).toBeLessThan(2000);
   });
 
   it('a marker string quoted inside a separator comment is comment content, not the last marker (#9940 review, audit 2)', () => {
