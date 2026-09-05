@@ -456,6 +456,7 @@ describe('post-merge push lane', () => {
     const FULL_PAYLOAD = [
       'Audit critical runtime dependencies',
       'Check lockfile',
+      'Check retired WebUI dependency',
       'Check desktop workspace isolation',
       'Check TUI dependency direction',
       'Install linters',
