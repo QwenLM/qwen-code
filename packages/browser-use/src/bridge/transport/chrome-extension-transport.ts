@@ -211,10 +211,12 @@ export class ChromeExtensionTransport implements ChromeBridge {
       const message = addressInUse
         ? `Chrome bridge socket is already in use: ${this.socketPath}`
         : 'Could not start the local Chrome bridge';
-      throw new BrowserRuntimeError(
+      const runtimeError = new BrowserRuntimeError(
         busy ? 'BROWSER_USE_BUSY' : 'TRANSPORT_UNAVAILABLE',
         message,
       );
+      runtimeError.cause = error;
+      throw runtimeError;
     }
   }
 
@@ -401,9 +403,12 @@ async function listen(server: Server, socketPath: string): Promise<void> {
   });
 }
 
-function isAddressInUse(error: unknown): boolean {
+export function isAddressInUse(error: unknown): boolean {
   return (
-    error instanceof Error && 'code' in error && error.code === 'EADDRINUSE'
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'EADDRINUSE'
   );
 }
 

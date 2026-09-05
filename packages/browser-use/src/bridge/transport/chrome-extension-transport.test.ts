@@ -8,6 +8,7 @@ import { connect } from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
@@ -15,7 +16,10 @@ import {
   MAX_BRIDGE_FRAME_BYTES,
   defaultChromeBridgeSocketPath,
 } from '../protocol.js';
-import { ChromeExtensionTransport } from './chrome-extension-transport.js';
+import {
+  ChromeExtensionTransport,
+  isAddressInUse,
+} from './chrome-extension-transport.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
 
 const roots: string[] = [];
@@ -29,6 +33,15 @@ afterEach(async () => {
 });
 
 describe('ChromeExtensionTransport', () => {
+  it('recognizes address-in-use errors created in another VM realm', () => {
+    const error = runInNewContext(
+      `Object.assign(new Error('address in use'), { code: 'EADDRINUSE' })`,
+    ) as unknown;
+
+    expect(error instanceof Error).toBe(false);
+    expect(isAddressInUse(error)).toBe(true);
+  });
+
   it('uses an environment-independent Unix socket path', () => {
     if (process.platform === 'win32') return;
     expect(defaultChromeBridgeSocketPath({ TMPDIR: '/tmp/one' })).toBe(
