@@ -345,6 +345,14 @@ jobs:
     # was lost to host load with nothing to fix in the tree. Same knob as
     # workspace_tests: an operator can retune it without a PR, defaults
     # unchanged.
+    # The knob is free text under a name ending in MINUTES: a bare positive
+    # integer, `70` — not `70m`, `1h` or a quoted `'70'`. A value fromJSON
+    # cannot turn into a number makes GitHub refuse to create the job, and the
+    # run blames 'a workflow file issue' instead of the variable; the quality
+    # aggregate still fails closed, so a bad value refuses a release rather
+    # than shipping one. `0` is not 'no limit' either — the string '0' is truthy
+    # in a GitHub `||`, so the knob wins and GitHub then ignores the zero bound
+    # it was handed.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}"
     needs: 'prepare'
     if: |-
@@ -360,6 +368,17 @@ jobs:
       # Shared ECS runners can retain root-owned files from an earlier
       # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
+
+      # A budget the run never states is indistinguishable from a budget
+      # nobody set: a misspelled variable name renders '' and this lane
+      # dies at its default again, with nothing in the log to reconcile
+      # the two.
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_static timeout budget: ${BUDGET} minutes (QWEN_RELEASE_STATIC_TIMEOUT_MINUTES set=${VARIABLE_SET})"
 
       - &checkout_release_validation
         name: 'Checkout'
@@ -409,6 +428,8 @@ jobs:
   quality_build:
     name: 'Quality Checks (Build)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Same operator knob as quality_static, including the value format and
+    # the failure modes its comment names.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
     needs: 'prepare'
     if: |-
@@ -419,6 +440,14 @@ jobs:
 
     steps:
       - *restore_release_workspace
+
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_build timeout budget: ${BUDGET} minutes (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES set=${VARIABLE_SET})"
+
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted

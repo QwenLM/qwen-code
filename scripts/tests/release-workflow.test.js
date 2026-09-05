@@ -652,6 +652,27 @@ describe('release workflow', () => {
     expect(releaseYaml.jobs.quality_build['timeout-minutes']).toBe(
       "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
     );
+    // A budget the run never states is indistinguishable from a budget nobody
+    // set: a misspelled variable name renders '' and the lane dies at its
+    // default again, with nothing in the log to reconcile the two. Each
+    // tunable lane reports the bound it resolved — through the SAME expression
+    // the timeout uses, so the trace cannot drift from what the runner
+    // enforces — and whether the variable reached the job at all.
+    for (const [id, variable] of [
+      ['quality_static', 'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES'],
+      ['quality_build', 'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES'],
+    ]) {
+      const bound = releaseYaml.jobs[id]['timeout-minutes'];
+      const report = releaseYaml.jobs[id].steps.find(
+        (step) => step.env?.BUDGET === bound,
+      );
+      expect(report?.name, id).toBe('Report timeout budget');
+      expect(report.run, id).toContain(`::notice::${id} timeout budget`);
+      expect(report.run, id).toContain(`${variable} set=\${VARIABLE_SET}`);
+      expect(report.env.VARIABLE_SET, id).toBe(
+        `\${{ vars.${variable} != '' }}`,
+      );
+    }
   });
 
   it('names which failure this is, and never changes the exit code', () => {
