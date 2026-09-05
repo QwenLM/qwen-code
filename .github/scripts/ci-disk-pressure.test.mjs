@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -157,6 +158,85 @@ describe('ci.yml disk-pressure evidence', () => {
       step('Upload disk-pressure samples').with.name,
       'artifact names must differ or the second failing job cannot upload',
     );
+
+    // Position is the collector's contract: failure() is evaluated when the
+    // step is reached and never revisited, so a collector parked just after
+    // install has already been passed (and skipped — nothing yet failed) by
+    // the time any lint/static step can die. It must be the job's last step.
+    const names = ciJobs.lint_and_static.steps.map((s) => s.name);
+    assert.equal(
+      names.indexOf('Upload disk-pressure samples'),
+      names.length - 1,
+      'the collector must be the last step of lint_and_static',
+    );
+    assert.ok(
+      names.indexOf('Upload disk-pressure samples') >
+        names.indexOf('Run .github/scripts helper tests'),
+    );
+
+    // The install sampler dies with that step's trap … EXIT, so the 19
+    // substantive steps after it write no samples; the failure-gated dump
+    // is what puts state-at-failure into the artifact. It must APPEND —
+    // a bare > would truncate the install-window samples — must sit
+    // before the collector, and must mirror to the job log, because the
+    // file it appends to is the one whose writability is under
+    // investigation. `tee -a` carries all three; the executed case below
+    // is what proves the mirroring actually survives a failed write.
+    const dump = lintStep('Dump disk state on failure');
+    assert.equal(dump.if, '${{ failure() }}');
+    assert.match(dump.run, /tee -a "\$DISK_SAMPLES"/);
+    assert.doesNotMatch(dump.run, /[^>]> "\$DISK_SAMPLES"/);
+    assert.ok(
+      names.indexOf('Dump disk state on failure') <
+        names.indexOf('Upload disk-pressure samples'),
+    );
+  });
+
+  it('keeps the failure dump in the job log when the samples file is unwritable', () => {
+    // The dump exists to explain an ENOSPC death, so it cannot depend on the
+    // filesystem being writable: redirected straight into the samples file, a
+    // failed write loses the dump and its own diagnostic together and the step
+    // still exits 0, leaving oncall unable to tell "dumped, nothing
+    // interesting" from "could not write". Occupy the target path with a
+    // directory so tee's append fails the way a full disk would.
+    const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
+    mkdirSync(join(root, 'disk-pressure-samples.log'));
+
+    try {
+      const result = spawnSync(
+        'bash',
+        [
+          '-e',
+          '-o',
+          'pipefail',
+          '-c',
+          lintStep('Dump disk state on failure').run,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: { ...process.env, RUNNER_TEMP: root },
+        },
+      );
+
+      assert.equal(result.error, undefined);
+      // `|| true` keeps a failed dump from failing the job it is diagnosing.
+      assert.equal(
+        result.status,
+        0,
+        `signal: ${result.signal}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+      );
+      // The data survives in the job log even though the file write failed.
+      assert.match(result.stdout, /^DISKCONTEXT failure-dump /m);
+      // And tee's reason is not swallowed by the block's own 2>/dev/null,
+      // which redirects the brace group only.
+      assert.ok(
+        result.stderr.length > 0,
+        `tee's write failure reached neither the file nor the log\nstdout: ${result.stdout}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('keeps install failure status while writing the pre-install sample', () => {
