@@ -4712,25 +4712,38 @@ describe('SessionArtifactStore', () => {
     const durableId = created.changes[0]!.artifactId;
 
     failWrites = true;
-    await expect(
-      store.upsertMany(
-        [
-          {
-            title: 'Ephemeral published replacement',
-            storage: 'published',
-            managedId: 'published-replacement',
-            url,
-            retention: 'ephemeral',
-          },
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        store.upsertMany(
+          [
+            {
+              title: 'Ephemeral published replacement',
+              storage: 'published',
+              managedId: 'published-replacement',
+              url,
+              retention: 'ephemeral',
+            },
+          ],
+          { trustedPublisher: true },
+        ),
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: [
+          'artifact durable removal not persisted; live changes rolled back',
         ],
-        { trustedPublisher: true },
-      ),
-    ).resolves.toMatchObject({
-      changes: [],
-      warnings: [
-        'artifact durable removal not persisted; live changes rolled back',
-      ],
-    });
+      });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=upsert_rollback'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('error="disk full"'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
 
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
@@ -5624,17 +5637,30 @@ describe('SessionArtifactStore', () => {
     );
 
     failNext = true;
-    const downgraded = await store.upsertMany([
-      {
-        title: 'Durable',
-        url: 'https://example.com/downgraded',
-        metadata: { phase: 'updated' },
-      },
-    ]);
-    expect(downgraded.changes[0]?.artifact).toMatchObject({
-      retention: 'ephemeral',
-      persistenceWarning: 'persistence_unavailable',
-    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      const downgraded = await store.upsertMany([
+        {
+          title: 'Durable',
+          url: 'https://example.com/downgraded',
+          metadata: { phase: 'updated' },
+        },
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=persist_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('reason="disk full"'),
+      );
+      expect(downgraded.changes[0]?.artifact).toMatchObject({
+        retention: 'ephemeral',
+        persistenceWarning: 'persistence_unavailable',
+      });
+    } finally {
+      stderr.mockRestore();
+    }
 
     await store.remove(created.changes[0]!.artifactId);
 
@@ -5671,13 +5697,26 @@ describe('SessionArtifactStore', () => {
     );
 
     failNext = true;
-    await store.upsertMany([
-      {
-        title: 'Durable',
-        url: 'https://example.com/downgraded-eviction',
-        metadata: { phase: 'updated' },
-      },
-    ]);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await store.upsertMany([
+        {
+          title: 'Durable',
+          url: 'https://example.com/downgraded-eviction',
+          metadata: { phase: 'updated' },
+        },
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=persist_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('reason="disk full"'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
 
     await store.upsertMany(
       [{ title: 'Overflow', url: 'https://example.com/overflow' }],

@@ -108,12 +108,17 @@ describe('imageHandler', () => {
   });
 
   it('returns null when file write throws', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockWriteFile.mockRejectedValueOnce(new Error('disk full'));
     const result = await saveImageToFile(
       'data:image/png;base64,YWJj',
       'image/png',
     );
     expect(result).toBeNull();
+    expect(error).toHaveBeenCalledWith(
+      '[ImageHandler] Failed to save image:',
+      expect.objectContaining({ message: 'disk full' }),
+    );
   });
 
   it('returns saved prompt image metadata for validated attachments', async () => {
