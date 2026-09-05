@@ -107,27 +107,48 @@ jobs:
             # it the update landed there while the pool kept resolving the
             # stale /usr/local/bin/qwen -> /usr/local/lib/node_modules copy.
             #
-            # The two install modes are tried in order, never selected by a
-            # probe. hk-1/hk-2 grant sudo only for the npm install itself
-            # (command-specific sudoers), so the `sudo -n true` probe this
-            # step used to gate on is rejected there while the real install
-            # is allowed: the probe picked the runner-user mode on exactly
-            # the machines that could have installed as root, and that mode
-            # then hit EACCES on the root-owned package dir on all three
-            # attempts, so those two pools could never update. No probe can
-            # be more representative than the command it stands in for, so
-            # run the sudo mode and fall back only when sudo actually
-            # rejects it. The runner-user mode still serves pools with no
-            # passwordless sudo at all, where that user owns the prefix.
+            # hk-1/hk-2 grant sudo only for named command lines, and the
+            # spec they name carries no --prefix:
+            #   /usr/bin/env -u NPM_CONFIG_PREFIX npm install -g
+            #     --registry=https://registry.npmjs.org @qwen-code/qwen-code@*
+            # sudoers matches argv literally, so wedging the pin between -g
+            # and --registry= costs the authorization. The two runs four
+            # minutes apart on the same fleet are the mirror image of each
+            # other: 33754421601 (pinned) failed hk-1 and hk-2 with `sudo: a
+            # password is required` on all three attempts while hk-3/4/5
+            # went green, and 33754034666 (unpinned) was green on hk-1/hk-2
+            # and installed hk-4/hk-5 into that custom Node directory. No
+            # single argv serves both, so the step tries three modes in
+            # order and never selects one by probe:
+            #   1. pinned sudo — hk-3/4/5, whose root prefix needs the pin
+            #   2. spec sudo   — hk-1/hk-2, exactly the authorized argv
+            #   3. runner user — pools with no passwordless sudo at all,
+            #                    where that user owns the prefix
+            # Mode 2 has to stay after mode 1: reversing them sends hk-4/hk-5
+            # the unpinned argv, which sudo allows there and which installs
+            # somewhere the pool never resolves. A probe cannot be more
+            # representative than the command it stands in for either — the
+            # `sudo -n true` gate this step used to carry is rejected on
+            # hk-1/hk-2 while the real install is allowed, so it picked mode
+            # 3 on exactly the machines that could have installed as root,
+            # and that mode then hit EACCES on the root-owned package dir on
+            # all three attempts.
             # Every sudo here is `-n`: a pool without sudo must fail fast
             # into the next mode instead of blocking on a password prompt
             # until `timeout-minutes: 10` kills the step.
             install_qwen() {
               "$@" npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
             }
+            # The argv hk-1/hk-2's sudoers names, unpinned. Any flag added
+            # here costs the authorization and drops those pools to mode 3.
+            install_qwen_named_spec() {
+              "$@" npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
+            }
             for attempt in 1 2 3; do
               sudo -n rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              if install_qwen sudo -n env -u NPM_CONFIG_PREFIX || install_qwen env; then
+              if install_qwen sudo -n env -u NPM_CONFIG_PREFIX ||
+                install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX ||
+                install_qwen env; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then

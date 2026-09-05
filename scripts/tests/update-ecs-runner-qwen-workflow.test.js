@@ -139,20 +139,40 @@ describe('ECS runner qwen update workflow', () => {
       'install_qwen sudo -n env -u NPM_CONFIG_PREFIX',
     );
     // The runner-user fallback has to survive: deleting it strands any pool
-    // with no passwordless sudo at all, and making both modes sudo strands
+    // with no passwordless sudo at all, and making every mode sudo strands
     // it the same way.
-    expect(updateCode).toContain('|| install_qwen env;');
-    // And it has to stay second. Reversing the order sends a runner-user
-    // EACCES attempt at the root-owned prefix on every pool that could have
-    // installed as root, which is the regression this step just came back
-    // from.
-    expect(updateCode.indexOf('install_qwen sudo -n')).toBeLessThan(
-      updateCode.indexOf('install_qwen env'),
+    expect(updateCode).toContain('install_qwen env;');
+    // hk-1/hk-2's sudoers names one exact argv and it carries no --prefix,
+    // so the pinned line can never be the one that installs there. A second
+    // sudo mode running the authorized shape is what keeps those two pools
+    // updatable: run 33754421601 (pinned only) rejected hk-1 and hk-2 with
+    // `sudo: a password is required` on all three attempts while hk-3/4/5
+    // went green.
+    expect(updateCode).toContain(
+      'install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX',
     );
-    // One command line shared by both modes, so the `--prefix` pin cannot
-    // drift between them and one mode cannot lose the registry pin.
+    // Order is the whole fix. Pinned first: on hk-4/hk-5 root's global
+    // prefix is a custom Node directory, so the unpinned argv is *allowed*
+    // there and installs where the pool never resolves. Named spec second,
+    // runner user last: any earlier runner-user attempt is a wasted EACCES
+    // against the root-owned package dir on every pool that could have
+    // installed as root, which is the regression this step came back from.
+    const pinnedAt = updateCode.indexOf('install_qwen sudo -n');
+    const namedSpecAt = updateCode.indexOf('install_qwen_named_spec sudo -n');
+    const runnerAt = updateCode.indexOf('install_qwen env;');
+    expect(pinnedAt).toBeGreaterThan(-1);
+    expect(namedSpecAt).toBeGreaterThan(pinnedAt);
+    expect(runnerAt).toBeGreaterThan(namedSpecAt);
+    // Each install argv appears exactly once: the pin cannot drift between
+    // the two modes that share it, and neither mode can lose the registry
+    // pin or grow a flag the authorized spec does not name.
     expect(
       updateCode.match(/npm install -g --prefix \/usr\/local/g),
+    ).toHaveLength(1);
+    expect(
+      updateCode.match(
+        /npm install -g --registry=https:\/\/registry\.npmjs\.org/g,
+      ),
     ).toHaveLength(1);
     // Same class the Verify step is held to: a bare `sudo` blocks on a
     // password prompt until `timeout-minutes: 10` kills the step, on the
@@ -476,10 +496,21 @@ function runUpdate({
         'case ' + `"${sudoers}"` + ' in',
         '  generic) ;;',
         '  command-specific)',
-        '    if [[ " $* " != *" npm install -g "* ]]; then',
-        '      echo "sudo: a password is required" >&2',
-        '      exit 1',
-        '    fi',
+        '    # Modelled on `sudo -n -l` on a live hk-2 pool member, which names',
+        '    # two exact argv and nothing else. Matching a substring such as',
+        '    # ` npm install -g ` instead would also accept that install with',
+        '    # --prefix wedged between -g and --registry= -- the one argv the',
+        '    # real machines reject (run 33754421601: hk-1/hk-2 `sudo: a',
+        '    # password is required` x3, hk-3/4/5 green) -- so the replay would',
+        "    # keep measuring this stub's assumption rather than the fleet.",
+        '    case " $* " in',
+        "      ' rm -rf /usr/local/lib/node_modules/@qwen-code/.qwen-code-'* | ' env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org @qwen-code/qwen-code@'*)",
+        '        ;;',
+        '      *)',
+        '        echo "sudo: a password is required" >&2',
+        '        exit 1',
+        '        ;;',
+        '    esac',
         '    ;;',
         '  *)',
         '    echo "sudo: a password is required" >&2',
@@ -704,10 +735,24 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // real install is allowed, so a probe-selected mode picks the runner user
     // and every attempt EACCESes against the root-owned package dir — the
     // pool can never update. Trying the real command is what saves it.
+    //
+    // The stub above rejects every argv the real spec does not name, so this
+    // is also the assertion that bites when a flag is wedged into the install
+    // the spec authorizes: with `--prefix /usr/local` back in that argv, sudo
+    // refuses it, the step falls through to the runner user, and all three
+    // attempts EACCES against the root-owned prefix.
     const updated = runUpdate({ sudoers: 'command-specific' });
     expect(updated.status).toBe(0);
     expect(updated.modes).toEqual(['root']);
     expect(updated.stderr).not.toContain('EACCES');
+    // The install that ran is exactly the authorized argv, unpinned and
+    // without the runner user's custom npm prefix. The pinned sudo attempt
+    // is rejected before npm starts, so nothing else is recorded.
+    expect(updated.calls).toContain(
+      'root|NPM_CONFIG_PREFIX=UNSET|install -g --registry=https://registry.npmjs.org @qwen-code/qwen-code@0.22.3',
+    );
+    expect(updated.calls).not.toContain('--prefix');
+    expect(updated.calls.trim().split('\n')).toHaveLength(1);
   });
 
   it('installs as root on a pool with passwordless sudo for anything', () => {
