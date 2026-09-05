@@ -39,6 +39,8 @@ export interface BudgetInput {
   srcDiffLines: number;
   /** Total diff lines, including tests, prose and generated files. */
   diffLines: number;
+  /** Number of changed files represented in the diff plan. */
+  changedFiles: number;
 }
 
 /**
@@ -75,6 +77,14 @@ export interface ReviewBudget {
    * on a diff of any size. The rest earn their turn as there is more to see.
    */
   inlineAngles: number;
+  /**
+   * Candidate count below which low effort owes one deterministic re-pass.
+   *
+   * This is a stopping signal, not a finding quota: a clean diff may still
+   * report nothing after the re-pass. Capping it by the number of changed
+   * files keeps a one-file fix from being pressured to invent four findings.
+   */
+  candidateFloor: number;
   /**
    * Does the low tier's gap sweep run?
    *
@@ -385,6 +395,7 @@ const LINES_PER_ANGLE = 60;
 
 export const MIN_INLINE_ANGLES = 3;
 export const MAX_INLINE_ANGLES = 6;
+export const MAX_CANDIDATE_FLOOR = 4;
 export const VERIFY_SHARD = 8;
 
 /**
@@ -419,6 +430,7 @@ export function reviewBudget(
 ): ReviewBudget {
   const src = sane(input.srcDiffLines);
   const total = sane(input.diffLines);
+  const changedFiles = sane(input.changedFiles);
 
   const effective = effectiveLines(src, total);
 
@@ -431,6 +443,7 @@ export function reviewBudget(
 
   return {
     inlineAngles,
+    candidateFloor: Math.min(changedFiles, MAX_CANDIDATE_FLOOR),
     sweep: effective >= SWEEP_FLOOR,
     // Agent 8 sheds in the huge zone. A specialist is a whole-diff pass on
     // top of the base fan-out, and on a diff too big to finish that extra
