@@ -175,7 +175,7 @@ describe('CreateSubSessionTool', () => {
     const res = await settled;
 
     expect(res.returnDisplay).toBe('Cancelled');
-    expect(res.aborted).toBe(true);
+    expect(res.aborted).toBeUndefined();
     expect(res.llmContent).toMatch(/cancelled/i);
     // The sub-session is NOT cancelled — it has no abort seam — so the tool
     // must say so rather than implying the work was undone.

@@ -166,7 +166,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
         return {
           llmContent: message,
           returnDisplay: 'Cancelled',
-          aborted: true,
+          ...(spawnStarted ? {} : { aborted: true }),
         };
       }
 
