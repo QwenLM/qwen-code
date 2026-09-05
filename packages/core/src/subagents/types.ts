@@ -47,9 +47,12 @@ export type SubagentLevel =
  * Declares that a subagent's turn is executed by an external agent process
  * speaking ACP, rather than by the in-process reasoning loop.
  *
- * Parsed leniently from frontmatter by `parseAgentExecutor`: an unrecognized
- * `kind`, a missing/blank `command`, or a malformed `args` drops the whole
- * field so a bad `executor` block cannot kill the agent definition.
+ * `parseAgentExecutor` validates this strictly: an unrecognized `kind`, a
+ * missing/blank `command`, or a malformed `args` yields `undefined`. The
+ * frontmatter loader then **rejects the whole definition** rather than dropping
+ * the field — a dropped field would leave the definition running in-process,
+ * silently substituting a different agent for the one it asked for. This is a
+ * deliberate divergence from the lenient drop used for `mcpServers` and `hooks`.
  */
 export interface SubagentExecutorSpec {
   /** Executor kind. `acp` is the only supported value today. */

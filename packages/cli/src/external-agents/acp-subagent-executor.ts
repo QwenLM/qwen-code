@@ -43,6 +43,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type { Client } from '@agentclientprotocol/sdk';
 import {
@@ -149,16 +150,58 @@ export function optionKindForOutcome(
   outcome: ToolConfirmationOutcome,
 ): 'allow_once' | 'allow_always' | 'reject_once' {
   switch (outcome) {
+    case ToolConfirmationOutcome.ProceedOnce:
+    case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
+      return 'allow_once';
     case ToolConfirmationOutcome.ProceedAlways:
+    case ToolConfirmationOutcome.ProceedAlwaysServer:
+    case ToolConfirmationOutcome.ProceedAlwaysTool:
     case ToolConfirmationOutcome.ProceedAlwaysProject:
     case ToolConfirmationOutcome.ProceedAlwaysUser:
       return 'allow_always';
-    case ToolConfirmationOutcome.Cancel:
     case ToolConfirmationOutcome.ModifyWithEditor:
+    case ToolConfirmationOutcome.Cancel:
+    case ToolConfirmationOutcome.RestorePrevious:
       return 'reject_once';
-    default:
-      return 'allow_once';
+    default: {
+      // Fail closed. The `never` assignment makes this a compile error the
+      // moment ToolConfirmationOutcome gains a member, so the mapping cannot
+      // silently drift; the runtime branch still denies rather than granting,
+      // because a default of `allow_once` would turn every unmapped outcome —
+      // `RestorePrevious` before it was listed, say — into a permission the
+      // user never gave.
+      const exhaustive: never = outcome;
+      void exhaustive;
+      return 'reject_once';
+    }
   }
+}
+
+/**
+ * Pick the option to answer an external agent's permission request with.
+ *
+ * Returns `undefined` for "answer with a cancelled outcome", which grants
+ * nothing. Extracted from the `respond` callback so the escalation rule is
+ * testable without driving a live ACP connection.
+ *
+ * The rule: use the option whose `kind` matches the user's outcome; when the
+ * agent offered no such kind, **deny** — never fall back to the first offered
+ * option. Approving "proceed once" against an offered set of
+ * `[allow_always, reject_once]` must not answer `allow_always`, which would
+ * silently widen a one-time approval to the whole session.
+ */
+export function selectPermissionOption(
+  options: ReadonlyArray<{ optionId: string; kind: unknown }>,
+  outcome: ToolConfirmationOutcome,
+): string | undefined {
+  if (outcome === ToolConfirmationOutcome.Cancel) return undefined;
+  const wantKind = optionKindForOutcome(outcome);
+  const match = options.find((option) => option.kind === wantKind);
+  if (match) return match.optionId;
+  const deny = options.find((option) =>
+    String(option.kind).startsWith('reject'),
+  );
+  return deny?.optionId;
 }
 
 interface PendingPermission {
@@ -303,8 +346,10 @@ class AcpSubagentExecutor implements SubagentExecutor {
       writeTextFile: async () => {
         throw methodNotFound('fs/write_text_file');
       },
-      extMethod: async () => {
-        throw methodNotFound('extMethod');
+      extMethod: async (method: string) => {
+        // Thread the real method name through: a bare 'extMethod' tells the
+        // agent nothing about which extension it asked for.
+        throw methodNotFound(method);
       },
       extNotification: async () => {},
     } as unknown as Client;
@@ -388,13 +433,22 @@ class AcpSubagentExecutor implements SubagentExecutor {
     this.pendingPermissions.clear();
     if (this.executing) {
       this.terminateMode = AgentTerminateMode.ERROR;
-      this.emitter.emit(AgentEventType.ERROR, {
-        subagentId: this.params.subagentId ?? this.params.name,
-        error:
-          `external agent "${this.params.name}" exited mid-turn ` +
-          `(code ${String(code)}, signal ${String(signal)})`,
-        timestamp: Date.now(),
-      });
+      // `AgentEventType.ERROR` is Node's `'error'` event, and
+      // `AgentEventEmitter` delegates straight to `EventEmitter.emit`, which
+      // throws ERR_UNHANDLED_ERROR when nothing is subscribed. The background,
+      // resume and workflow emitters attach no ERROR listener, so emitting
+      // unguarded would turn a child crash into an uncaught exception raised
+      // from inside this exit handler. The terminateMode assignment above is
+      // what makes the failure visible to the caller; the event is best-effort.
+      if (this.emitter.rawListeners(AgentEventType.ERROR).length > 0) {
+        this.emitter.emit(AgentEventType.ERROR, {
+          subagentId: this.params.subagentId ?? this.params.name,
+          error:
+            `external agent "${this.params.name}" exited mid-turn ` +
+            `(code ${String(code)}, signal ${String(signal)})`,
+          timestamp: Date.now(),
+        });
+      }
     }
   }
 
@@ -745,27 +799,9 @@ class AcpSubagentExecutor implements SubagentExecutor {
         respond: async (outcome: ToolConfirmationOutcome) => {
           const pending = this.pendingPermissions.get(callId);
           this.pendingPermissions.delete(callId);
-          if (outcome === ToolConfirmationOutcome.Cancel) {
-            pending?.resolve(undefined);
-            return;
-          }
-          const wantKind = optionKindForOutcome(outcome);
-          const match = options.find((option) => option.kind === wantKind);
-          if (match) {
-            pending?.resolve(match.optionId);
-            return;
-          }
-          // The wanted kind is not on offer. Never fall back to `options[0]`:
-          // approving "proceed once" against an offered set of
-          // [allow_always, reject_once] would answer allow_always and silently
-          // widen a one-time approval to the whole session. Deny instead — the
-          // same fail-safe posture as `resolvePermissionMode` and
-          // `parseAgentExecutor`. Resolving undefined when no reject option
-          // exists yields a cancelled outcome, which also grants nothing.
-          const deny = options.find((option) =>
-            String(option.kind).startsWith('reject'),
-          );
-          pending?.resolve(deny?.optionId);
+          // The escalation rule lives in `selectPermissionOption` so it can be
+          // tested without driving a live ACP connection.
+          pending?.resolve(selectPermissionOption(options, outcome));
         },
         timestamp: Date.now(),
       } as never);
@@ -787,10 +823,14 @@ class AcpSubagentExecutor implements SubagentExecutor {
   }
 }
 
-function methodNotFound(method: string): Error {
-  return Object.assign(new Error(`method not found: ${method}`), {
-    code: -32601,
-  });
+/**
+ * Must be a real `RequestError`: the SDK's connection only preserves
+ * `RequestError` instances and repackages anything else — including a plain
+ * `Error` with a duck-typed `code` field — as `-32603 Internal error`. Agents
+ * that branch on `-32601` to degrade gracefully would never see it.
+ */
+function methodNotFound(method: string): RequestError {
+  return RequestError.methodNotFound(method);
 }
 
 /**

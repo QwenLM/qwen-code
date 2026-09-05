@@ -10,6 +10,7 @@ import {
   externalModelLabel,
   optionKindForOutcome,
   resolvePermissionMode,
+  selectPermissionOption,
 } from './acp-subagent-executor.js';
 
 describe('resolvePermissionMode', () => {
@@ -115,5 +116,111 @@ describe('externalModelLabel', () => {
     expect(externalModelLabel('C:\\tools\\agent.exe')).toBe(
       'external-acp:agent.exe',
     );
+  });
+});
+
+describe('optionKindForOutcome — polarity (R1-13)', () => {
+  // The switch used to `default: return 'allow_once'`, so every outcome it did
+  // not name became a grant. `RestorePrevious` was the live example: restoring
+  // a prior approval mode is not an approval of this call.
+  it('does not grant for RestorePrevious', () => {
+    expect(optionKindForOutcome(ToolConfirmationOutcome.RestorePrevious)).toBe(
+      'reject_once',
+    );
+  });
+
+  it('maps the deprecated always-variants to allow_always, not allow_once', () => {
+    expect(
+      optionKindForOutcome(ToolConfirmationOutcome.ProceedAlwaysServer),
+    ).toBe('allow_always');
+    expect(
+      optionKindForOutcome(ToolConfirmationOutcome.ProceedAlwaysTool),
+    ).toBe('allow_always');
+  });
+
+  it('grants only for outcomes that explicitly proceed', () => {
+    const granting = new Set([
+      ToolConfirmationOutcome.ProceedOnce,
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+      ToolConfirmationOutcome.ProceedAlways,
+      ToolConfirmationOutcome.ProceedAlwaysServer,
+      ToolConfirmationOutcome.ProceedAlwaysTool,
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+      ToolConfirmationOutcome.ProceedAlwaysUser,
+    ]);
+    for (const outcome of Object.values(ToolConfirmationOutcome)) {
+      const kind = optionKindForOutcome(outcome);
+      if (kind.startsWith('allow')) {
+        expect(granting.has(outcome)).toBe(true);
+      }
+    }
+  });
+});
+
+describe('selectPermissionOption — never escalates (R1-15 / R2-2)', () => {
+  const offered = [
+    { optionId: 'always', kind: 'allow_always' },
+    { optionId: 'no', kind: 'reject_once' },
+  ];
+
+  it('answers with the matching kind when the agent offered it', () => {
+    const full = [
+      { optionId: 'once', kind: 'allow_once' },
+      { optionId: 'always', kind: 'allow_always' },
+      { optionId: 'no', kind: 'reject_once' },
+    ];
+    expect(
+      selectPermissionOption(full, ToolConfirmationOutcome.ProceedOnce),
+    ).toBe('once');
+    expect(
+      selectPermissionOption(full, ToolConfirmationOutcome.ProceedAlways),
+    ).toBe('always');
+    // Cancel resolves to undefined, which the caller turns into a `cancelled`
+    // outcome rather than a selected reject option.
+    expect(
+      selectPermissionOption(full, ToolConfirmationOutcome.Cancel),
+    ).toBeUndefined();
+  });
+
+  it('denies rather than widening a one-time approval to the session', () => {
+    // The exact escalation: the user approved "proceed once", the agent never
+    // offered allow_once, and the first offered option is allow_always. The
+    // previous `?? options[0]` fallback answered 'always'.
+    expect(
+      selectPermissionOption(offered, ToolConfirmationOutcome.ProceedOnce),
+    ).toBe('no');
+    expect(
+      selectPermissionOption(offered, ToolConfirmationOutcome.ProceedOnce),
+    ).not.toBe('always');
+  });
+
+  it('grants nothing when no reject option is offered either', () => {
+    expect(
+      selectPermissionOption(
+        [{ optionId: 'always', kind: 'allow_always' }],
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('grants nothing on Cancel, nor on an empty offer set', () => {
+    expect(
+      selectPermissionOption(offered, ToolConfirmationOutcome.Cancel),
+    ).toBeUndefined();
+    expect(
+      selectPermissionOption([], ToolConfirmationOutcome.ProceedOnce),
+    ).toBeUndefined();
+  });
+
+  it('treats a missing kind as no match rather than as a grant', () => {
+    expect(
+      selectPermissionOption(
+        [
+          { optionId: 'mystery', kind: undefined },
+          { optionId: 'no', kind: 'reject_once' },
+        ],
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ).toBe('no');
   });
 });

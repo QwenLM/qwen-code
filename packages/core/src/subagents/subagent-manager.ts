@@ -1813,11 +1813,28 @@ function parseSubagentContent(
     // Strictly validated because it names an external process to run; see
     // `parseAgentExecutor`. Availability of the named command is NOT checked
     // here — that is the injected executor's job at spawn time.
+    //
+    // A malformed block is a hard error, NOT a lenient drop. Dropping it would
+    // leave `config.executor` undefined, so the definition would run
+    // in-process: the task completes under Qwen's model, billed to the Qwen
+    // provider, with nothing on stdout or stderr — precisely the silent
+    // substitution this feature exists to prevent, and the consumption-point
+    // re-validation can never catch it because the field is already gone. The
+    // warn-only path was invisible in practice too, since `debugLogger.warn`
+    // is a no-op unless QWEN_DEBUG_LOG_FILE is set. This deliberately diverges
+    // from the lenient posture used for `mcpServers` / `hooks`: losing those
+    // degrades a capability, whereas losing this one substitutes a different
+    // agent for the one the definition asked for.
     const executorRaw = frontmatter['executor'];
     const executor = parseAgentExecutor(executorRaw);
     if (executorRaw !== undefined && executor === undefined) {
-      debugLogger.warn(
-        `Agent file ${filePath} has invalid executor (expected { kind: 'acp', command: string, args?: string[] }). Dropping field.`,
+      throw new SubagentError(
+        `Agent file ${filePath} has an invalid executor block (expected ` +
+          `{ kind: 'acp', command: string, args?: string[] }). Refusing to load ` +
+          `the definition: dropping the block would silently run it in-process ` +
+          `instead of in the external agent it asked for.`,
+        SubagentErrorCode.INVALID_CONFIG,
+        name,
       );
     }
 
