@@ -340,14 +340,14 @@ export class OpenTuiSlashDispatcher {
   }
 
   /**
-   * Startup-window self-heal: the first dispatcher can attach a registry
-   * built while config.initialize() was still in flight — the second
-   * initialize() call throws "already initialized", the catch proceeds, and
-   * the skill loaders run before the skill manager exists, so builtin
-   * commands resolve but every skill (e.g. /qc-helper) reports "Unknown
-   * command" until the config-ready dispatcher replaces this one. One
-   * bounded retry per dispatcher lifetime: wait for the skill manager, then
-   * reload the registry so the re-parse sees the complete list.
+   * Startup-window self-heal: the dispatcher can be attached with a registry
+   * snapshot taken before config.initialize() finished — the skill manager
+   * does not exist yet, so builtin commands resolve but every skill (e.g.
+   * /qc-helper) reports "Unknown command". A concurrent initialize() call
+   * now joins the in-flight run instead of throwing, so only a failed first
+   * flight still lands the loader in its partial-commands catch. One bounded
+   * retry per dispatcher lifetime: wait for the skill manager, then reload
+   * the registry so the re-parse sees the complete list.
    */
   private async ensureCommandsLoaded(): Promise<boolean> {
     if (this.startupRetryUsed || !this.services.config) {

@@ -13,7 +13,7 @@ This doc gives the **system-level picture** that the rest of this documentation 
 ```mermaid
 flowchart LR
     subgraph clients["Clients"]
-        WUI["Web UI<br/>(packages/webui/src/daemon)"]
+        WUI["Web Shell<br/>(packages/web-shell/client/daemon)"]
         TUI["CLI TUI<br/>(packages/cli/src/ui/daemon)"]
         IDE["VS Code IDE<br/>(packages/vscode-ide-companion)"]
         CH["Channel bots<br/>(DingTalk / WeChat / Telegram / Feishu)"]
@@ -98,7 +98,7 @@ flowchart TB
     end
 
     subgraph adapters["Adapters"]
-        WUIP["webui/src/daemon/<br/>DaemonSessionProvider.tsx"]
+        WUIP["web-shell/client/daemon/session/<br/>DaemonSessionProvider.tsx"]
         TUIA["cli/src/ui/daemon/<br/>daemon-tui-adapter.ts"]
         CHB["channels/base/<br/>DaemonChannelBridge.ts"]
         DT["channels/dingtalk"]
