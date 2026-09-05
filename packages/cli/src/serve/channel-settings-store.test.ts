@@ -7,12 +7,33 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import stripJsonComments from 'strip-json-comments';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 import { registerPlugin } from '../commands/channel/channel-registry.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
+
+let mockHomeDir = '';
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof import('node:os')>();
+  // Mock both the named and the default export: consumers do
+  // `import os from 'node:os'`, which a bare spread would leave unmocked.
+  const homedir = () => mockHomeDir;
+  return {
+    ...actualOs,
+    homedir,
+    default: { ...actualOs, homedir },
+  };
+});
 
 describe('WorkspaceChannelSettingsStore', () => {
   let testRoot: string;
@@ -127,6 +148,8 @@ describe('WorkspaceChannelSettingsStore', () => {
     workspace = path.join(testRoot, 'workspace');
     settingsPath = path.join(workspace, '.qwen', 'settings.json');
     process.env['QWEN_HOME'] = path.join(testRoot, 'home');
+    mockHomeDir = path.join(testRoot, 'unused-home');
+    fs.mkdirSync(mockHomeDir, { recursive: true });
     resetHomeEnvBootstrapForTesting();
     writeWorkspaceSettings(`{
   // Keep this comment and unrelated setting.
@@ -1976,5 +1999,114 @@ describe('WorkspaceChannelSettingsStore', () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 
     expect(store.snapshot().revision).toBe(store.snapshot().revision);
+  });
+
+  describe('home-directory workspace', () => {
+    it('keeps channel configs readable when the workspace is the home directory', async () => {
+      // A daemon whose workspace is the user's home directory disables the
+      // workspace settings scope; the shared settings file is attributed to
+      // the user scope instead. Point the user scope at the workspace file
+      // (no QWEN_HOME redirect, homedir() === workspace) to reproduce it.
+      const savedQwenHome = process.env['QWEN_HOME'];
+      delete process.env['QWEN_HOME'];
+      mockHomeDir = workspace;
+      resetHomeEnvBootstrapForTesting();
+      try {
+        // The node:os mock has to cover the default export too: consumers that
+        // do `import os from 'node:os'` (this file, core's paths.ts) would
+        // otherwise resolve the real home directory and write outside
+        // testRoot while the suite still reports green.
+        expect(os.homedir()).toBe(workspace);
+
+        const store = new WorkspaceChannelSettingsStore(workspace);
+        const initial = store.snapshot();
+        expect(initial.channels).toHaveProperty('bot');
+
+        const next = await store.upsert('home-bot', {
+          expectedRevision: initial.revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'home-client',
+            senderPolicy: 'open',
+          },
+          secrets: { clientSecret: { operation: 'replace', value: 's' } },
+        });
+        expect(next.channels).toHaveProperty('home-bot');
+        // saveSettings replaces the whole `channels` subtree, so the
+        // pre-existing channel survives only because the write set is derived
+        // from the scope this store reads.
+        expect(next.channels).toHaveProperty('bot');
+
+        // The written config must survive a fresh read from disk.
+        const reread = new WorkspaceChannelSettingsStore(workspace);
+        expect(reread.snapshot().channels['home-bot']).toMatchObject({
+          type: 'management-validation-test',
+          clientId: 'home-client',
+        });
+        expect(reread.snapshot().channels).toHaveProperty('bot');
+      } finally {
+        if (savedQwenHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = savedQwenHome;
+        }
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('writes channel configs to the scope it reads them from', async () => {
+      // Same home-directory layout, but QWEN_HOME redirects the user scope to
+      // another directory. Reads come from the redirected file, so writes have
+      // to land there too instead of `<workspace>/.qwen/settings.json`, which
+      // no scope reads in this layout.
+      const redirectedHome = path.join(testRoot, 'redirected-home');
+      const redirectedSettingsPath = path.join(redirectedHome, 'settings.json');
+      fs.mkdirSync(redirectedHome, { recursive: true });
+      fs.writeFileSync(
+        redirectedSettingsPath,
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            'user-bot': {
+              type: 'management-validation-test',
+              clientId: 'user-client',
+              clientSecret: 'user-secret',
+            },
+          },
+        }),
+      );
+      process.env['QWEN_HOME'] = redirectedHome;
+      mockHomeDir = workspace;
+      resetHomeEnvBootstrapForTesting();
+      try {
+        const store = new WorkspaceChannelSettingsStore(workspace);
+        const initial = store.snapshot();
+        expect(initial.channels).toHaveProperty('user-bot');
+
+        const next = await store.upsert('home-bot', {
+          expectedRevision: initial.revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'home-client',
+            senderPolicy: 'open',
+          },
+          secrets: { clientSecret: { operation: 'replace', value: 's' } },
+        });
+        expect(next.channels).toHaveProperty('home-bot');
+        expect(next.channels).toHaveProperty('user-bot');
+
+        const written = JSON.parse(
+          stripJsonComments(fs.readFileSync(redirectedSettingsPath, 'utf8')),
+        ) as { channels?: Record<string, unknown> };
+        expect(written.channels).toHaveProperty('home-bot');
+        // The workspace-scope file must not turn into a second channel store
+        // that no read path consults.
+        expect(readWorkspaceSettings()['channels']).not.toHaveProperty(
+          'home-bot',
+        );
+      } finally {
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
   });
 });
