@@ -1368,6 +1368,7 @@ export interface BridgeBackgroundNotification {
   status: 'completed' | 'failed' | 'cancelled';
   kind: 'agent';
   toolUseId?: string;
+  label?: string;
 }
 
 export type RuntimeMcpServerAddResult =

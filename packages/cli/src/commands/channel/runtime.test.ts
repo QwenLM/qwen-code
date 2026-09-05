@@ -378,12 +378,24 @@ describe('registerBackgroundResponseRelay', () => {
       router as never,
       new Map([['telegram', channel as never]]),
     );
-    bridge.emit('backgroundResponse', 'session-1', 'Background final answer.');
+    const context = {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: true,
+    };
+    bridge.emit(
+      'backgroundResponse',
+      'session-1',
+      'Background final answer.',
+      context,
+    );
 
     await vi.waitFor(() => {
       expect(channel.dispatchBackgroundResponse).toHaveBeenCalledWith(
         'session-1',
         'Background final answer.',
+        context,
       );
     });
   });

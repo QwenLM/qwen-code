@@ -96,6 +96,24 @@ function makeWaitingEvent(
 }
 
 describe('notification emission and agent context (#7156)', () => {
+  it('omits the internal agent type from the notification card label', () => {
+    const registry = new BackgroundTaskRegistry();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(
+      makeRegistration('bg-1', {
+        description: 'Explore: Check Node.js requirements',
+        subagentType: 'Explore',
+      }),
+    );
+
+    registry.complete('bg-1', 'done');
+
+    expect(callback.mock.calls[0]![2]).toMatchObject({
+      label: 'Check Node.js requirements',
+    });
+  });
+
   it('captures the Todo work-chain owner at registration', () => {
     const registry = new BackgroundTaskRegistry();
     const entry = todoWorkChainContext.run('work-chain-1', () =>
@@ -2234,6 +2252,9 @@ describe('BackgroundTaskRegistry', () => {
       expect(callback.mock.calls[0]![1]).toContain(
         '<all-terminal>false</all-terminal>',
       );
+      expect(callback.mock.calls[0]![2]).toMatchObject({
+        label: 'spawned',
+      });
     });
 
     it('counts a top-level reserved background launch as remaining', () => {
