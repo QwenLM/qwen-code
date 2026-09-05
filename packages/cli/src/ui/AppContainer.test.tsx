@@ -8306,6 +8306,29 @@ describe('AppContainer State Management', () => {
       expect(notice).not.toContain('another session');
     });
 
+    it('names the grant when a controller message is held', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            controller: { id: 'c_0123abcd', label: 'voice bridge' },
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a trusted controller (voice bridge)',
+      );
+      expect(notice).not.toContain('another session');
+    });
+
     it('does not announce arrivals that only replace an evicted entry', () => {
       // Once the hold buffer is full, every further frame evicts the
       // oldest while carrying a fresh id; announcing those would add a

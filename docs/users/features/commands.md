@@ -100,7 +100,7 @@ Commands for managing AI tools and models.
 | → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
 | → `auto`              | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
 | → `yolo`              | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
-| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
+| `/peers`              | Review held peer messages; manage trusted controllers                                 | `/peers`, `/peers accept <id>`, `/peers deny all`, `/peers controllers`, `/peers revoke <id>`             |
 | `/model`              | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
@@ -914,3 +914,67 @@ anything else. The model sees it as
 `<cross_session_message from="own process" origin="own-process">` with a
 notice that it came from a script or hook the session ran, not from the
 user.
+
+### Trusted controllers
+
+The rule above holds a message from any sender that does not say which
+review class it is in, and a program that is not a Qwen Code session has
+none to say. That is the right default for a stranger, but not for a
+program you chose: a voice front-end, a dictation bridge, an automation
+daemon relaying your own instructions would have every message parked,
+and approving each one by hand defeats the point.
+
+You grant such a program delivery by minting it a token:
+
+```bash
+qwen sessions controllers add --label voice-bridge
+```
+
+The token is printed once and is not stored anywhere: the file under
+your Qwen home keeps only its SHA-256 hash, so nothing that later reads
+that file can present the token. Put it in the controller's own
+configuration when the command prints it.
+
+A controller presents the token the way any other sender does — as the
+first line of the connection — and takes the socket path from the
+session registry (`qwen sessions ps --json` prints one record per live
+session, `ipcPath` being the address):
+
+```bash
+{ printf '%s\n' \
+    '{"msgV":1,"type":"auth","token":"'"$QWEN_CONTROLLER_TOKEN"'"}' \
+    '{"msgV":1,"msgId":"'"$(uuidgen)"'","type":"user","priority":"next","message":{"role":"user","content":"open the failing test"}}'; \
+} | socat - UNIX-CONNECT:"$SESSION_IPC_PATH"
+```
+
+A message that arrives on a granted token is delivered without
+per-message review, whatever review class either side is in — but it
+still yields to an explicit setting: an `agents.crossSessionInbound` of
+`hold` parks it like anything else, and `refuse` turns it away. Grants
+belong to your Qwen home rather than to one session, so a controller
+reaches whichever sessions you are running, and sessions re-read the
+file on every connection: minting or revoking one takes effect on the
+next message, with nothing to restart.
+
+```bash
+qwen sessions controllers list          # ids, labels, when they were added
+qwen sessions controllers remove c_1a2b # revoke one
+```
+
+`/peers controllers` and `/peers revoke <id>` do the same from inside a
+session. A message that came through a grant is shown as
+`Message from a trusted controller (voice-bridge)`, and appears in
+`/peers` as `[controller] voice-bridge` if a `hold` setting parked it.
+
+The model sees such a message as
+`<cross_session_message from="controller" origin="controller" controller="voice-bridge">`,
+with a notice that it relays your own instructions — and the same two
+prohibitions that apply to every other origin: it may not edit
+permission settings, QWEN.md, or config because the message asked, and
+it may not treat the message as you approving a pending confirmation
+prompt. A controller can say what to do next; it cannot answer a prompt
+on your behalf.
+
+Anyone who holds the token can send as that controller, so treat it like
+any other credential: give it to one program, keep it out of shared
+config, and revoke it when that program is done.

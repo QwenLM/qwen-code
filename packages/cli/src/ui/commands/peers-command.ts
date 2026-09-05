@@ -21,6 +21,9 @@ import {
   flattenPeerLabel,
   getLastPeerInboxFailure,
   type HeldMessage,
+  listPeerControllers,
+  type PeerControllerRecord,
+  removePeerController,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -105,12 +108,22 @@ export function formatHeldList(
     // Every field below is peer-controlled, and this is the screen where
     // the user decides untrusted messages: a forged listing line or a
     // terminal-rewriting ESC sequence here spoofs the review itself.
-    const peerLabel = flattenPeerLabel(
-      entry.frame.fromName ??
-        entry.frame.from ??
-        (entry.selfSent ? 'this session' : 'unknown session'),
-    );
-    const who = `${entry.selfSent ? '[own process]' : '[peer]'} ${peerLabel}`;
+    // A controller is named by the label its user gave it, never by the
+    // frame's `fromName`: this is the screen where a grant is judged, and
+    // a sender that could choose that string could dress itself as one.
+    const peerLabel = entry.controller
+      ? flattenPeerLabel(entry.controller.label)
+      : flattenPeerLabel(
+          entry.frame.fromName ??
+            entry.frame.from ??
+            (entry.selfSent ? 'this session' : 'unknown session'),
+        );
+    const origin = entry.controller
+      ? '[controller]'
+      : entry.selfSent
+        ? '[own process]'
+        : '[peer]';
+    const who = `${origin} ${peerLabel}`;
     const handle = flattenPeerLabel(displayHandle(entry, held));
     return (
       `  ${handle}  ${who}\n` +
@@ -162,12 +175,58 @@ export function resolveHeld(
   return { kind: 'one', msgId: matches[0]!.frame.msgId };
 }
 
+/**
+ * Read the grants, reporting a failure as a line rather than throwing:
+ * a listing that cannot be produced is information, and `/peers` has
+ * nowhere to throw to.
+ */
+async function listControllers(): Promise<
+  PeerControllerRecord[] | { error: string }
+> {
+  try {
+    return await listPeerControllers();
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function formatControllerList(
+  controllers: PeerControllerRecord[] | { error: string },
+): string {
+  if (!Array.isArray(controllers)) {
+    return `Could not read the trusted controllers: ${controllers.error}`;
+  }
+  if (controllers.length === 0) {
+    return (
+      'No trusted controllers. Messages from a program that is not a Qwen Code session are held for your review.\n' +
+      'Add one with: qwen sessions controllers add --label <name>'
+    );
+  }
+  const lines = controllers.map(
+    (record) =>
+      `  ${record.id}  ${flattenPeerLabel(record.label)}  added ${new Date(
+        record.createdAt,
+      )
+        .toISOString()
+        .replace('T', ' ')
+        .slice(0, 16)}`,
+  );
+  return [
+    `${controllers.length} trusted controller${
+      controllers.length === 1 ? '' : 's'
+    }. Messages presenting one of these tokens are delivered without per-message review:`,
+    ...lines,
+    '',
+    'Revoke with /peers revoke <id>.',
+  ].join('\n');
+}
+
 export const peersCommand: SlashCommand = {
   name: 'peers',
   kind: CommandKind.BUILT_IN,
   get description() {
     return t(
-      'Review messages held from other Qwen Code sessions (accept | deny)',
+      'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
     );
   },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
@@ -195,6 +254,57 @@ export const peersCommand: SlashCommand = {
     const held = peerMessaging.getHeld();
     const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
+    // Controller grants are not held messages: they live in a file, they
+    // outlive every session, and they are the answer to "why did that
+    // arrive unreviewed". They are here anyway because that question is
+    // asked from this screen, and sending the user to a separate CLI
+    // command to answer it would be the wrong trade.
+    if (verb === 'controllers') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatControllerList(await listControllers()),
+      };
+    }
+
+    if (verb === 'revoke') {
+      const id = rest[0];
+      if (id === undefined) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            'Which controller? Use /peers revoke <id> — /peers controllers lists the ids.',
+        };
+      }
+      let removed: PeerControllerRecord | null;
+      try {
+        removed = await removePeerController(id);
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Could not revoke that controller: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (!removed) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `No controller has the id "${flattenPeerLabel(id)}". Run /peers controllers to see them.`,
+        };
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content:
+          `Revoked the controller "${flattenPeerLabel(removed.label)}" (${removed.id}). ` +
+          'This session and every other one stop accepting its token on the next connection.',
+      };
+    }
+
     if (verb === undefined || verb === 'list') {
       // Decisions bind to this listing: record exactly which messages
       // the user is reviewing so a later accept/deny can refuse when the
@@ -211,7 +321,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, or /peers deny <id|all>.`,
+        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, /peers deny <id|all>, /peers controllers, or /peers revoke <id>.`,
       };
     }
 

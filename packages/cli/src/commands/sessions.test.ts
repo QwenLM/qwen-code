@@ -51,7 +51,7 @@ describe('sessions command', () => {
     expect(options.key).toHaveProperty('help');
   });
 
-  it('should register list and ps subcommands', () => {
+  it('should register the list, ps and controllers subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -64,13 +64,14 @@ describe('sessions command', () => {
     }
     builder(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(2);
+    expect(mockYargs.command).toHaveBeenCalledTimes(3);
 
     const commandCalls = mockYargs.command.mock.calls;
     const commandNames = commandCalls.map((call) => call[0].command);
 
     expect(commandNames).toContain('list');
     expect(commandNames).toContain('ps');
+    expect(commandNames).toContain('controllers');
 
     expect(mockYargs.demandCommand).toHaveBeenCalledWith(
       1,
