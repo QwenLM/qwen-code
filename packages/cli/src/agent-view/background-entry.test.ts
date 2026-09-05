@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const ensureAgentViewSupervisor = vi.fn();
 const supervisorDispatch = vi.fn();
 const dispatchAgentViewSession = vi.fn();
+const listAgentViewSessionStates = vi.fn();
 
 vi.mock('./supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: (...args: unknown[]) =>
@@ -18,6 +19,15 @@ vi.mock('./supervisor-runner.js', () => ({
 vi.mock('./supervisor-dispatch.js', () => ({
   dispatchAgentViewSession: (...args: unknown[]) =>
     dispatchAgentViewSession(...args),
+}));
+
+// The store is the positive "the session was already recorded" signal the
+// dispatch rejection cannot carry; the entry reads it through this one
+// helper. Empty by default, so a rejection stays a failure unless a test
+// says the store holds something.
+vi.mock('./supervisor-store.js', () => ({
+  listAgentViewSessionStates: (...args: unknown[]) =>
+    listAgentViewSessionStates(...args),
 }));
 
 const stdout: string[] = [];
@@ -54,6 +64,37 @@ const { readBackgroundPrompt, runBackgroundDispatch } = await import(
 );
 const { BACKGROUND_FLAG } = await import('./entry-flags.js');
 
+// The error the client settles with when the supervisor dies mid-request:
+// the socket's 'end' handler builds it with code 'closed', never
+// 'timeout' (supervisor-client.ts).
+function supervisorClosedError(): Error & { code: string } {
+  const error = new Error(
+    'Agent View supervisor closed before sending a response.',
+  ) as Error & { code: string };
+  error.code = 'closed';
+  return error;
+}
+
+// A store row shaped like the one dispatchAgentViewSession writes before
+// the ready wait; overrides let a test age it, move it or unmanage it.
+function recordedSession(
+  overrides: Partial<{
+    createdAt: string;
+    projectCwd: string;
+    ownership: string;
+    sessionState: string;
+  }> = {},
+) {
+  return {
+    sessionId: 'sess-recorded',
+    ownership: 'managed',
+    sessionState: 'starting',
+    projectCwd: '/w/app',
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   stdout.length = 0;
   stderr = [];
@@ -71,6 +112,7 @@ beforeEach(() => {
   dispatchAgentViewSession
     .mockReset()
     .mockResolvedValue({ sessionId: 'sess-abc', state: 'created' });
+  listAgentViewSessionStates.mockReset().mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -112,6 +154,35 @@ describe('readBackgroundPrompt', () => {
     expect(
       readBackgroundPrompt([`${BACKGROUND_FLAG}=audit`, 'the', 'release']),
     ).toEqual({ prompt: 'audit the release' });
+  });
+
+  it('reads the attached boolean literals as the flag, not as prompt text', () => {
+    // `bg` is declared `type: 'boolean'` in the help surface, so
+    // `--bg=false` / `--bg=0` is how a wrapper (`qwen --bg=$ENABLED
+    // "$TASK"` with ENABLED=false) turns the launch OFF. Reading the
+    // attached value as prompt data dispatched a real agent on the prompt
+    // `false audit the release` — supervisor started, session recorded,
+    // worker spawned, quota burned — and certified it with exit 0.
+    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=false`])).toBeUndefined();
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=0`, 'audit', 'the', 'release']),
+    ).toBeUndefined();
+    // The affirmative spellings mean the bare flag, so they contribute no
+    // prompt word of their own.
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=true`, 'audit the release']),
+    ).toEqual({ prompt: 'audit the release' });
+    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=1`, 'audit'])).toEqual({
+      prompt: 'audit',
+    });
+    // Only the exact boolean literals are special: every other attached
+    // value stays prompt data, dash-led included.
+    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=-repro`])).toEqual({
+      prompt: '-repro',
+    });
+    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=falsey`])).toEqual({
+      prompt: 'falsey',
+    });
   });
 
   it('declines any other flag and names it, because --bg forwards nothing', () => {
@@ -323,6 +394,73 @@ describe('runBackgroundDispatch', () => {
     expect(stderr.join('')).toContain('may still be starting');
     expect(stderr.join('')).toContain('qwen sessions ps');
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
+  });
+
+  it('reports a supervisor that died after recording the session as in flight, not failed', async () => {
+    // The dispatch handler records the session, spawns the PTY host and
+    // persists its pids BEFORE the ready wait, and rolls the record back
+    // only if it survives to do so. A supervisor killed inside that window
+    // — an OOM kill, CI teardown, a logout — leaves the client with the
+    // socket's 'closed' error (never 'timeout') beside a persisted
+    // `starting` session, `ownership: 'managed'` and a live detached host.
+    // Certifying exit 1 "Could not start" contradicts the product's own
+    // store and has a wrapper honoring this entry's contract retry, which
+    // starts a SECOND agent on the same prompt.
+    supervisorDispatch.mockRejectedValue(supervisorClosedError());
+    listAgentViewSessionStates.mockResolvedValue([
+      recordedSession({ createdAt: new Date().toISOString() }),
+    ]);
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(2);
+    expect(stderr.join('')).toContain('may still be starting');
+    expect(stderr.join('')).toContain('qwen sessions ps');
+    expect(stderr.join('')).not.toContain(
+      'Could not start a background session',
+    );
+  });
+
+  it('keeps a dispatch rejection the store does not date to this launch a failure', async () => {
+    // The positive signal is narrow: a MANAGED session for THIS cwd
+    // recorded AT OR AFTER the dispatch began. None of these rows is that
+    // — an older `starting` session (an earlier launch), a fresh session in
+    // another directory (a concurrent launch), a fresh unmanaged one — so a
+    // genuine failure must keep its exit 1 and its reason. Widening the
+    // guard to every dispatch rejection would turn the pre-record
+    // rejections (an oversize prompt, an empty one) into do-not-retry
+    // in-flight reports.
+    supervisorDispatch.mockRejectedValue(supervisorClosedError());
+    listAgentViewSessionStates.mockResolvedValue([
+      recordedSession({
+        createdAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+      recordedSession({ projectCwd: '/w/other' }),
+      recordedSession({ ownership: 'unmanaged' }),
+    ]);
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toBe(
+      'Could not start a background session: Agent View supervisor closed before sending a response.\n',
+    );
+  });
+
+  it('keeps a supervisor that never came up a failure even with a fresh session in the store', async () => {
+    // The widened guard is scoped to the dispatch RPC: this launch never
+    // reached it, so it recorded nothing, and a concurrent launch's fresh
+    // session must not certify it as in flight.
+    ensureAgentViewSupervisor.mockRejectedValue(
+      new Error('ECONNREFUSED: no supervisor socket'),
+    );
+    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(1);
+    expect(supervisorDispatch).not.toHaveBeenCalled();
+    expect(stderr.join('')).toContain('Could not start a background session');
   });
 
   it('reports an error-like rejection reason instead of [object Object]', async () => {

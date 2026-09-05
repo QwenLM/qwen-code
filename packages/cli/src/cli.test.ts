@@ -1425,6 +1425,150 @@ describe('runCliEntry', () => {
       expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
+
+    it('declines a --help typed as a bare --bg prompt word instead of hijacking the launch', async () => {
+      // The shell splits `qwen --bg add a --help section to the README`, so
+      // the help flag arrives as its own argv word among prompt words — a
+      // spelling this gate's own reader supports. The whole-argv help scan
+      // matched it and fell through to top-level help: exit 0, prompt
+      // dropped, no session, no diagnostic, while every other unsupported
+      // flag in the same position is declined by name with exit 1. Only the
+      // ATTACHED spelling keeps the whole-argv scan, because it carries its
+      // prompt inside its own token and consumes no positional words.
+      await runCliEntry([BACKGROUND_FLAG, 'add', '--help', 'section']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor --help');
+      expect(stderr.join('')).toContain('after --');
+    });
+
+    it('declines a -h typed as a bare --bg prompt word the same way', async () => {
+      await runCliEntry([BACKGROUND_FLAG, 'write', '-h', 'docs']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor -h');
+    });
+
+    it('declines a version token typed as a --bg prompt word instead of printing the version', async () => {
+      // The version intercept ran inside resolveBootstrapRoute and returned
+      // before this block computed the flag index, so `qwen --bg -v audit`
+      // printed the version and exited 0: no supervisor, no session, no
+      // diagnostic, and a wrapper's `qwen --bg -v "$TASK" && notify`
+      // reported success with nothing running. The intercept is order-aware
+      // now — a version token AFTER the flag is prompt data the gate
+      // declines by name, exactly like every other flag it does not honor.
+      await runCliEntry([BACKGROUND_FLAG, '-v', 'audit']);
+
+      expect(stdout.join('')).not.toContain('9.9.9');
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor -v');
+    });
+
+    it('declines a trailing --version in a --bg prompt the same way', async () => {
+      await runCliEntry([BACKGROUND_FLAG, 'audit', '--version']);
+
+      expect(stdout.join('')).not.toContain('9.9.9');
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor --version');
+    });
+
+    it('does not dispatch the launch the boolean off spelling turns off', async () => {
+      // `bg` is declared `type: 'boolean'` in the help surface this PR
+      // adds, so `--bg=false` / `--bg=0` is how a wrapper (`qwen
+      // --bg=$ENABLED "$TASK"` with ENABLED=false) disables it. Both
+      // scanners read the attached value as prompt text, so the OFF
+      // spelling started a supervisor, recorded a session, spawned a
+      // worker and burned quota on the prompt `false audit the release`,
+      // then certified it with `Started background session …` and exit 0.
+      await runCliEntry([`${BACKGROUND_FLAG}=false`, 'audit the release']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      // Not a background launch at all: it falls through to the parser.
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not dispatch the --bg=0 off spelling either', async () => {
+      await runCliEntry([`${BACKGROUND_FLAG}=0`, 'audit the release']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads the boolean on spelling as the bare flag, not as a prompt word', async () => {
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([`${BACKGROUND_FLAG}=true`, 'audit the release']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'audit the release',
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('scopes the help scan the same way for --bg=true as for a bare --bg', async () => {
+      // The whole-argv help scan belongs to the spelling that carries its
+      // prompt INSIDE the token (`--bg=<prompt>`), because that token
+      // consumes no positional words. `--bg=true` means the bare flag, so
+      // the tokens after it are prompt words exactly as after `--bg` — a
+      // help token among them is declined by name, not honored as a
+      // top-level help request that silently drops the prompt.
+      await runCliEntry([
+        `${BACKGROUND_FLAG}=true`,
+        'add',
+        '--help',
+        'section',
+      ]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor --help');
+    });
+
+    it('leaves an internal supervisor flag named by a positional launch to the parser', async () => {
+      // bg-absence was the only condition on the intercepts, so an ordinary
+      // launch whose prompt words name this PR's own flag — `qwen fix the
+      // --internal-agent-view-supervisor handling` — was hijacked into
+      // serving as the daemon: it bound the process-global socket, wrote
+      // supervisor.json with this pid and blocked in the foreground until
+      // killed, with no output and no session. The merge base's strict
+      // parser rejected the same argv loudly. A spawn is flag-shaped
+      // instead: the flag with no positional before it, which is what both
+      // spawners produce.
+      await runCliEntry([
+        'fix',
+        'the',
+        INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+        'handling',
+      ]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves an internal pty-host flag named by a positional launch to the parser', async () => {
+      // Twin of the supervisor case: the intercept read the next two prompt
+      // words as a launch record and a socket path, so the launch died on
+      // an unrelated fs/JSON error inside the host runtime.
+      await runCliEntry([
+        'audit',
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('pins the --bg gate’s command surface to the registered command modules', async () => {

@@ -28,13 +28,18 @@
  * nothing and cost all of it.
  */
 
+import * as path from 'node:path';
+
 import { getErrorMessage } from '../utils/errors.js';
 import {
   ignoreBrokenPipe,
   writeStderrLine,
   writeStdoutLineSafe,
 } from '../utils/stdioHelpers.js';
-import { BACKGROUND_FLAG } from './entry-flags.js';
+import {
+  backgroundFlagPromptWord,
+  isBackgroundFlagToken,
+} from './entry-flags.js';
 
 /**
  * Serve as the Agent View supervisor for the rest of this process's life.
@@ -81,27 +86,31 @@ export type BackgroundPromptRead =
  *
  * The attached `--bg=<prompt>` spelling reads like the CLI's other prompt
  * flags (`--prompt=<value>`); its value travels inside the token and is
- * prompt data even when it starts with a dash.
+ * prompt data even when it starts with a dash. The boolean literals the
+ * flag's own `type: 'boolean'` declaration advertises are the exception:
+ * `--bg=false` / `--bg=0` turn the launch off — this is not one, so the
+ * argv falls through to the parser — and `--bg=true` / `--bg=1` mean the
+ * bare flag, contributing no prompt word. Reading them as prompt data
+ * dispatched a real agent on the prompt `false audit the release` for a
+ * wrapper's `qwen --bg=$ENABLED "$TASK"` with ENABLED=false, and
+ * certified it with exit 0.
  */
 export function readBackgroundPrompt(
   rawArgv: readonly string[],
 ): BackgroundPromptRead | undefined {
   const separator = rawArgv.indexOf('--');
   const argv = separator === -1 ? rawArgv : rawArgv.slice(0, separator);
-  if (
-    !argv.some(
-      (token) =>
-        token === BACKGROUND_FLAG || token.startsWith(`${BACKGROUND_FLAG}=`),
-    )
-  ) {
+  if (!argv.some(isBackgroundFlagToken)) {
     return undefined;
   }
 
   const words: string[] = [];
   for (const token of argv) {
-    if (token === BACKGROUND_FLAG) continue;
-    if (token.startsWith(`${BACKGROUND_FLAG}=`)) {
-      words.push(token.slice(BACKGROUND_FLAG.length + 1));
+    if (isBackgroundFlagToken(token)) {
+      const attached = backgroundFlagPromptWord(token);
+      if (attached !== undefined) {
+        words.push(attached);
+      }
       continue;
     }
     if (token.startsWith('-')) {
@@ -119,15 +128,53 @@ export function readBackgroundPrompt(
 }
 
 /**
+ * True when the store holds a managed session for `cwd` recorded at or
+ * after `since` — the positive "the supervisor already wrote the record"
+ * signal that a dispatch rejection cannot carry: the response envelope
+ * has only a code and a message, and a supervisor that dies mid-dispatch
+ * sends nothing at all, so the client settles from the socket's `end`
+ * with `code: 'closed'`.
+ *
+ * The dispatch handler records the session, spawns its PTY host and
+ * persists the pids BEFORE the ready wait — a window as long as the
+ * worker takes to come up — and rolls the record back only if it survives
+ * to do so. Exit 1 "Could not start" beside a persisted `starting`
+ * session and a live detached host is a contradiction a wrapper resolves
+ * by retrying, which starts a SECOND agent on the same prompt.
+ */
+async function sessionRecordedSince(
+  since: number,
+  cwd: string,
+): Promise<boolean> {
+  try {
+    const { listAgentViewSessionStates } = await import(
+      './supervisor-store.js'
+    );
+    const resolvedCwd = path.resolve(cwd);
+    return (await listAgentViewSessionStates()).some(
+      (state) =>
+        state.ownership === 'managed' &&
+        state.projectCwd === resolvedCwd &&
+        Date.parse(state.createdAt) >= since,
+    );
+  } catch {
+    // An unreadable store proves nothing about the launch; the failure
+    // report stands.
+    return false;
+  }
+}
+
+/**
  * Start a background Agent View session and report its id.
  *
  * Returns a process exit code. A failure is reported as a sentence, not
  * a stack: the supervisor can be unstartable for ordinary reasons — a
  * stale socket, a read-only home — and the user needs the reason. A
- * client-side dispatch timeout returns a distinct exit code (2) with an
- * in-flight sentence instead of a failure: the supervisor may still
- * bring the session up after the client cap, so a wrapper keyed on the
- * exit code must not retry it.
+ * dispatch that may already have a session running returns a distinct
+ * exit code (2) with an in-flight sentence instead of a failure, so a
+ * wrapper keyed on the exit code does not retry it: a client-side
+ * timeout, and any rejection the store shows arrived after the session
+ * was recorded.
  */
 export async function runBackgroundDispatch(
   prompt: string,
@@ -152,6 +199,8 @@ export async function runBackgroundDispatch(
 
   const { ensureAgentViewSupervisor } = await import('./supervisor-runner.js');
 
+  const dispatchStartedAt = Date.now();
+  let reachedDispatch = false;
   let sessionId: string;
   try {
     // Route through the supervisor's dispatch RPC: it is the one path that
@@ -162,20 +211,42 @@ export async function runBackgroundDispatch(
     // nothing ever starts. The ready-wait means this can block while the
     // worker starts; the returned session id is the output contract.
     const supervisor = await ensureAgentViewSupervisor();
+    reachedDispatch = true;
     ({ sessionId } = (await supervisor.dispatch(prompt, cwd)) as {
       sessionId: string;
     });
   } catch (error) {
     const reason = getErrorMessage(error);
-    // A client-side timeout is not a launch failure: the dispatch RPC
-    // runs under a client cap (LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS),
-    // and the supervisor's handler keeps recording and launching the
-    // session after the client gives up — a store I/O stall can push it
-    // past the cap. Certifying failure here would have a wrapping
-    // script (the consumer this entry is built for) retry and start a
-    // second agent on the same prompt. Report the in-flight launch and
-    // a distinct exit code a wrapper can treat as "do not retry".
-    if ((error as { code?: string } | undefined)?.code === 'timeout') {
+    // Not every rejection from the dispatch RPC means nothing started, and
+    // the rejection itself cannot say which: the envelope carries only a
+    // code and a message, so a session id cannot ride a custom error
+    // property, and a supervisor that dies mid-dispatch sends no envelope
+    // at all — the client settles from the socket's 'end' with `code:
+    // 'closed'`. Two cases are in flight rather than failed:
+    //
+    // - a client-side timeout: the dispatch RPC runs under a client cap
+    //   (LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS) and the supervisor's handler
+    //   keeps recording and launching after the client gives up — a store
+    //   I/O stall can push it past the cap;
+    // - a rejection the store shows arrived AFTER the session was recorded
+    //   for this cwd (see sessionRecordedSince), which is what a supervisor
+    //   killed inside the ready wait leaves behind: `sessionState:
+    //   'starting'`, `ownership: 'managed'`, a live detached PTY host and a
+    //   session directory on disk.
+    //
+    // Certifying failure in either case has a wrapping script (the consumer
+    // this entry is built for) retry and start a second agent on the same
+    // prompt, so both report the in-flight launch and return the distinct
+    // exit code a wrapper can treat as "do not retry". The widened guard is
+    // scoped to the RPC by reachedDispatch: a supervisor that never came up
+    // recorded nothing, and pre-record rejections inside the handler (an
+    // oversize prompt, an empty one) leave the store empty too, so both
+    // stay exit 1.
+    if (
+      reachedDispatch &&
+      ((error as { code?: string } | undefined)?.code === 'timeout' ||
+        (await sessionRecordedSince(dispatchStartedAt, cwd)))
+    ) {
       writeStderrLine(
         `The background session may still be starting: ${reason}. Check: qwen sessions ps`,
       );
