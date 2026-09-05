@@ -3058,7 +3058,6 @@ jobs:
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
             echo "::warning::Resolve was skipped, but posting the skip-reason comment failed."
 
-
   # Publishes what the agent job produced — verification, push and the result
   # comment — on a runner that never executed the agent. It starts from a
   # fresh checkout, fetches the base and head refs from GitHub itself, and

@@ -296,9 +296,17 @@ export function runYamllint() {
   }
 }
 
+// `--check`, not `--write`. `--write` reformats in place and exits 0
+// whether or not anything changed, and no caller inspects the tree
+// afterwards, so for the life of this script the Prettier lane reported a
+// pass on unformatted code and CI discarded the rewrites when the job
+// ended. ESLint does not cover the gap either: eslint.config.js loads
+// eslint-config-prettier, which turns formatting rules off rather than
+// enforcing them. `npm run format` remains the way to fix what this
+// reports.
 export function runPrettier() {
   console.log('\nRunning Prettier...');
-  if (!runCommand('prettier --write .')) {
+  if (!runCommand('prettier --check .')) {
     process.exit(1);
   }
 }

@@ -32,7 +32,9 @@ const kernelChildren = () => {
 
 let failures = 0;
 const check = (label, cond, detail) => {
-  console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
+  console.log(
+    `${cond ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`,
+  );
   if (!cond) failures++;
 };
 
@@ -86,8 +88,14 @@ const stillAlive = before.filter((pid) => {
     return false;
   }
 });
-check('kernel child reaped', stillAlive.length === 0, `alive=${stillAlive.join(',') || 'none'}`);
+check(
+  'kernel child reaped',
+  stillAlive.length === 0,
+  `alive=${stillAlive.join(',') || 'none'}`,
+);
 
 if (!exited) server.kill('SIGKILL');
-console.log(failures === 0 ? '\nLIFECYCLE SMOKE PASSED' : `\n${failures} FAILED`);
+console.log(
+  failures === 0 ? '\nLIFECYCLE SMOKE PASSED' : `\n${failures} FAILED`,
+);
 process.exit(failures === 0 ? 0 : 1);

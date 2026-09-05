@@ -191,9 +191,8 @@ test('the body stays bounded on a total-suite failure', () => {
     `body is ${body.length} chars, must stay under GitHub's 65,536 limit`,
   );
   assert.ok(body.includes(`- …and ${400 - MAX_BODY_TESTS} more`));
-  const markerCount = (
-    body.match(new RegExp(TEST_MARKER_PREFIX, 'g')) ?? []
-  ).length;
+  const markerCount = (body.match(new RegExp(TEST_MARKER_PREFIX, 'g')) ?? [])
+    .length;
   assert.ok(
     markerCount <= MAX_SEARCH_MARKERS,
     `body carries ${markerCount} markers, at most ${MAX_SEARCH_MARKERS}`,

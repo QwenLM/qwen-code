@@ -390,10 +390,6 @@ jobs:
           npm run postinstall
           npm run generate
 
-      - name: 'Format Project'
-        run: |-
-          npm run format
-
       - name: 'Run Lint'
         run: |-
           npm run lint:ci

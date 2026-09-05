@@ -29,7 +29,9 @@ const run = async (code) => {
 
 let failures = 0;
 const check = (label, cond, detail) => {
-  console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
+  console.log(
+    `${cond ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`,
+  );
   if (!cond) failures++;
 };
 
@@ -46,7 +48,11 @@ try {
   );
   const r3 = await run('nodeRepl.write(typeof host);');
   const text3 = r3.mcp.content.find((b) => b.type === 'text')?.text ?? '';
-  check('dynamic import binding persists', text3.includes('string'), text3.trim());
+  check(
+    'dynamic import binding persists',
+    text3.includes('string'),
+    text3.trim(),
+  );
 
   // 3. Image output (1x1 PNG).
   const png =
@@ -75,5 +81,9 @@ try {
   manager.dispose();
 }
 
-console.log(failures === 0 ? '\nALL SMOKE CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
+console.log(
+  failures === 0
+    ? '\nALL SMOKE CHECKS PASSED'
+    : `\n${failures} CHECK(S) FAILED`,
+);
 process.exit(failures === 0 ? 0 : 1);
