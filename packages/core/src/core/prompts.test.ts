@@ -970,6 +970,7 @@ describe('main-session style: project trust gate', () => {
     getExperimentalZedIntegration: () => false,
     getInputFormat: () => InputFormat.TEXT,
     isInteractive: () => true,
+    isTodoWriteEnabled: () => false,
     ...(trusted === undefined ? {} : { isTrustedFolder: () => trusted }),
   });
 
