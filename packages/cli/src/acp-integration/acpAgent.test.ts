@@ -29584,6 +29584,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const bootstrapExtensionManager = {
       refreshCache: vi.fn().mockReturnValue(bootstrapRefreshGate),
+      refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const bootstrapSkillRefresh = vi.fn().mockResolvedValue(undefined);
     const bootstrapConfig = makeConfig({
@@ -29687,6 +29688,41 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(refreshSystemInstruction.mock.invocationCallOrder[0]).toBeLessThan(
       sendAvailableCommandsUpdate.mock.invocationCallOrder[0]!,
     );
+
+    skillManager.refreshCache.mockResolvedValue(undefined);
+    sendAvailableCommandsUpdate.mockClear();
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toEqual({
+      configsRefreshed: 2,
+      configsFailed: 0,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      sessionsSkipped: 0,
+    });
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+
+    extensionManager.refreshCache.mockRejectedValueOnce(
+      new Error('broken session config'),
+    );
+    sendAvailableCommandsUpdate.mockClear();
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toEqual({
+      configsRefreshed: 1,
+      configsFailed: 1,
+      configErrors: ['broken session config'],
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      sessionsSkipped: 1,
+    });
+    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

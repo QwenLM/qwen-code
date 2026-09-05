@@ -13523,6 +13523,72 @@ class QwenAgent implements Agent {
           reason,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile: {
+        const sessions = this.getActiveSessions();
+        const configs = new Set([
+          this.config,
+          ...(this.workspaceMcpDiscoveryConfig
+            ? [this.workspaceMcpDiscoveryConfig]
+            : []),
+          ...sessions.map((session) => session.getConfig()),
+        ]);
+        const configList = [...configs];
+        const configResults = await Promise.allSettled(
+          configList.map(async (config) => {
+            const extensionManager = config.getExtensionManager();
+            await extensionManager.refreshCache();
+            await extensionManager.refreshTools();
+            // refreshTools retries the Skill refresh here so a second failure
+            // is surfaced instead of remaining best-effort inside it.
+            await config.getSkillManager()?.refreshCache();
+            await config.getLlmClient()?.refreshSystemInstruction();
+          }),
+        );
+        const failedConfigs = new Set<Config>();
+        const configErrors: string[] = [];
+        configResults.forEach((result, index) => {
+          if (result.status !== 'rejected') return;
+          failedConfigs.add(configList[index]!);
+          const error =
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason);
+          configErrors.push(error);
+          debugLogger.warn(`Extension config refresh failed: ${error}`);
+        });
+        const attemptedSessions = sessions.filter(
+          (session) => !failedConfigs.has(session.getConfig()),
+        );
+        const sessionResults = await Promise.allSettled(
+          attemptedSessions.map((session) =>
+            session.sendAvailableCommandsUpdate(),
+          ),
+        );
+        const sessionErrors: Array<{ sessionId: string; error: string }> = [];
+        sessionResults.forEach((result, index) => {
+          if (result.status !== 'rejected') return;
+          const sessionId = attemptedSessions[index]!.getId();
+          const error =
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason);
+          sessionErrors.push({ sessionId, error });
+          debugLogger.warn(
+            `Session ${sessionId} Extension command refresh failed: ${error}`,
+          );
+        });
+        return {
+          configsRefreshed: configResults.length - failedConfigs.size,
+          configsFailed: failedConfigs.size,
+          ...(configErrors.length > 0 ? { configErrors } : {}),
+          sessionsRefreshed: sessionResults.filter(
+            (result) => result.status === 'fulfilled',
+          ).length,
+          sessionsFailed: sessionErrors.length,
+          sessionsSkipped: sessions.length - attemptedSessions.length,
+          ...(sessionErrors.length > 0 ? { sessionErrors } : {}),
+        };
+      }
       default:
         throw RequestError.methodNotFound(method);
     }

@@ -24,6 +24,7 @@ import {
   Trash2Icon,
 } from 'lucide-react';
 import {
+  useOptionalWorkspace,
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
@@ -556,6 +557,7 @@ export function ScheduledTasksDialog({
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
+  const workspace = useOptionalWorkspace();
   const actions = useWorkspaceActions();
   const portalRoot = useWebShellPortalRoot();
 
@@ -871,7 +873,23 @@ export function ScheduledTasksDialog({
       try {
         let items: PromptReferenceItem[];
         if (kind === 'extension') {
-          const status = await actions.loadExtensionsStatus();
+          let status;
+          if (
+            workspace?.capabilities?.features.includes(
+              'workspace_extension_mentions',
+            ) === true
+          ) {
+            if (formWorkspace?.primary === false) {
+              const client = workspace.client.workspaceByCwd(formWorkspace.cwd);
+              await client.ensureRuntime();
+              status = await client.workspaceRuntimeExtensions();
+            } else {
+              await workspace.client.ensureWorkspaceRuntime();
+              status = await workspace.client.workspaceRuntimeExtensions();
+            }
+          } else {
+            status = await actions.loadExtensionsStatus();
+          }
           items = (status.extensions ?? [])
             .filter((extension) => extension.isActive)
             .map((extension) => ({
@@ -920,9 +938,11 @@ export function ScheduledTasksDialog({
     },
     [
       actions,
+      formWorkspace,
       referenceKind,
       resetReferenceState,
       updateReferencePickerPosition,
+      workspace,
     ],
   );
 

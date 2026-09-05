@@ -40,9 +40,32 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
 }));
 
-vi.mock('../extensions/ExtensionsManagerPage', () => ({
-  ExtensionsManagerPage: () => <div>Extensions</div>,
-}));
+vi.mock('../extensions/ExtensionsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    ExtensionsManagerPage: (props: {
+      workspaceCwd?: string;
+      workspaceControl?: ReactNode;
+      embedded?: { onDetailChange(open: boolean): void };
+    }) => {
+      const [detail, setDetail] = React.useState(false);
+      return (
+        <div data-testid="extensions-page" data-workspace={props.workspaceCwd}>
+          {detail ? props.workspaceControl : null}
+          <button
+            type="button"
+            onClick={() => {
+              setDetail(true);
+              props.embedded?.onDetailChange(true);
+            }}
+          >
+            Open extension detail
+          </button>
+        </div>
+      );
+    },
+  };
+});
 vi.mock('../agents/AgentsManagerPage', () => ({
   AgentsManagerPage: () => <div>Agents</div>,
 }));
@@ -183,6 +206,47 @@ describe('PluginManagerPage Skills workspace selector', () => {
     expect(
       container.querySelector('[data-testid="workspace-cwd"]')?.textContent,
     ).toBe('/work/a');
+  });
+});
+
+describe('PluginManagerPage Extensions workspace selection', () => {
+  beforeEach(() => {
+    workspaceState.workspaceCwd = '/work/a';
+    workspaceState.capabilities.features = [
+      'workspace_extensions_config_runtime',
+    ];
+    workspaceState.capabilities.workspaces = [
+      { id: 'a', cwd: '/work/a', primary: true, trusted: true },
+      { id: 'b', cwd: '/work/b', primary: false, trusted: true },
+    ];
+  });
+
+  it('shows the selector and locks it in Extension detail', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage onClose={vi.fn()} onUseSkill={vi.fn()} />
+        </I18nProvider>,
+      );
+    });
+
+    const listSelector =
+      container.querySelector<HTMLButtonElement>('[role="combobox"]');
+    expect(listSelector?.disabled).toBe(false);
+    expect(
+      container
+        .querySelector('[data-testid="extensions-page"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('/work/a');
+
+    const openDetail = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Open extension detail',
+    );
+    await act(async () => openDetail!.click());
+
+    expect(
+      container.querySelector<HTMLButtonElement>('[role="combobox"]')?.disabled,
+    ).toBe(true);
   });
 });
 

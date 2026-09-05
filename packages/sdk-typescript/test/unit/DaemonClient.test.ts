@@ -1257,10 +1257,21 @@ describe('DaemonClient', () => {
           runtimeEpoch: 2,
           skills: [],
         };
+        const extensionsStatus = {
+          v: 1 as const,
+          workspaceCwd: '/work/secondary',
+          initialized: true,
+          runtimeEpoch: 2,
+          extensions: [],
+        };
         const { fetch: restFetch, calls } = recordingFetch((request) =>
           jsonResponse(
             200,
-            request.url.includes('/skills') ? skillsStatus : runtimeStatus,
+            request.url.includes('/skills')
+              ? skillsStatus
+              : request.url.includes('/extensions')
+                ? extensionsStatus
+                : runtimeStatus,
           ),
         );
         const transportFetch = vi.fn(async () =>
@@ -1296,11 +1307,17 @@ describe('DaemonClient', () => {
         await expect(client.workspaceRuntimeSkills()).resolves.toEqual(
           skillsStatus,
         );
+        await expect(client.workspaceRuntimeExtensions()).resolves.toEqual(
+          extensionsStatus,
+        );
         await expect(workspace.workspaceConfigSkills()).resolves.toEqual(
           skillsStatus,
         );
         await expect(workspace.workspaceRuntimeSkills()).resolves.toEqual(
           skillsStatus,
+        );
+        await expect(workspace.workspaceRuntimeExtensions()).resolves.toEqual(
+          extensionsStatus,
         );
 
         expect(calls.map((call) => [call.method, call.url])).toEqual([
@@ -1316,10 +1333,15 @@ describe('DaemonClient', () => {
           ],
           ['GET', 'http://daemon/workspace/config/skills'],
           ['GET', 'http://daemon/workspace/runtime/skills'],
+          ['GET', 'http://daemon/workspace/runtime/extensions'],
           ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/config/skills'],
           [
             'GET',
             'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/skills',
+          ],
+          [
+            'GET',
+            'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/extensions',
           ],
         ]);
         expect(

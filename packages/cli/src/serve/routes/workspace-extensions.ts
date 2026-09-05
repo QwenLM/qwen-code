@@ -53,6 +53,7 @@ import type {
 } from '../workspace-registry.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -716,12 +717,14 @@ export function registerWorkspaceExtensionRoutes(
       },
     };
   };
-  const appliedGenerationByWorkspaceId = new Map<string, number>();
+  const legacyAppliedGenerationByWorkspaceId = new Map<string, number>();
   const onRuntimeReconciled = (
     runtime: WorkspaceRuntime,
     generation: number,
   ): void => {
-    appliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
+    if (!getWorkspaceRuntimeCoordinatorIfSupported(runtime)) {
+      legacyAppliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
+    }
   };
   const globalReconciliationOptions = () =>
     workspaceRegistry
@@ -762,13 +765,26 @@ export function registerWorkspaceExtensionRoutes(
         );
         const generation = (await manager.getExtensionStoreSnapshot())
           .generation;
+        for (const runtime of workspaceRegistry.listAll()) {
+          getWorkspaceRuntimeCoordinatorIfSupported(
+            runtime,
+          )?.observeExtensionGeneration(generation);
+        }
         const pendingRuntimes = workspaceRegistry
           .listAll()
-          .filter(
-            (runtime) =>
-              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) !==
-              generation,
-          );
+          .filter((runtime) => {
+            const coordinator =
+              getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+            const status = coordinator?.status();
+            return coordinator
+              ? status?.runtimeLive === true &&
+                  status.state !== 'stopping' &&
+                  status.capabilities?.extensions?.appliedGeneration !==
+                    generation
+              : (legacyAppliedGenerationByWorkspaceId.get(
+                  runtime.workspaceId,
+                ) ?? 0) !== generation;
+          });
         if (generation === observedGeneration && pendingRuntimes.length === 0)
           return;
         const runtimes = pendingRuntimes;
@@ -780,6 +796,21 @@ export function registerWorkspaceExtensionRoutes(
                 runtimes.map(async (runtime) => {
                   runtime.workspaceService.invalidateWorkspaceSkillsStatus();
                   try {
+                    const coordinator =
+                      getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+                    if (coordinator) {
+                      const result =
+                        await coordinator.reconcileExtensionGeneration(
+                          generation,
+                        );
+                      if (result.state === 'failed') {
+                        throw new Error(
+                          result.error ??
+                            'Extension generation reconciliation failed',
+                        );
+                      }
+                      return;
+                    }
                     const result =
                       await runtime.bridge.refreshExtensionsForAllSessions();
                     if (result.failed > 0) {
@@ -799,7 +830,9 @@ export function registerWorkspaceExtensionRoutes(
         results.forEach((result, index) => {
           if (result.status === 'fulfilled') {
             const workspaceId = runtimes[index]!.workspaceId;
-            appliedGenerationByWorkspaceId.set(workspaceId, generation);
+            if (!getWorkspaceRuntimeCoordinatorIfSupported(runtimes[index]!)) {
+              legacyAppliedGenerationByWorkspaceId.set(workspaceId, generation);
+            }
           } else {
             writeStderrLine(
               `qwen serve: extension generation reconciliation failed for workspace ${runtimes[index]!.workspaceId}: ${redactUrlCredentials(
@@ -1830,7 +1863,7 @@ export function registerWorkspaceExtensionRoutes(
         manager,
         operationBasePath: '/extensions/operations',
         onRuntimeReconciled: (runtime, generation) => {
-          const applied = appliedGenerationByWorkspaceId.get(
+          const applied = legacyAppliedGenerationByWorkspaceId.get(
             runtime.workspaceId,
           );
           // A skill refresh cannot certify an earlier failed full refresh.
@@ -1855,23 +1888,24 @@ export function registerWorkspaceExtensionRoutes(
         true,
       );
       const snapshot = await manager.refreshCacheWithSnapshot();
+      const local = await primaryController.buildLocalExtensionsStatus(manager);
       res.status(200).json({
         v: 1,
         generation: snapshot.generation,
-        extensions: manager.getLoadedExtensions().map((extension) => {
+        extensions: local.extensions.map((extension) => {
           const policy = snapshot.extensions[extension.id];
           return {
             id: extension.id,
             name: extension.name,
             version: extension.version,
-            ...(extension.installMetadata?.type
-              ? { installType: extension.installMetadata.type }
+            ...(extension.installType
+              ? { installType: extension.installType }
               : {}),
-            ...(extension.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : extension.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
+            ...(extension.credentialPersistence
+              ? {
+                  credentialPersistence: extension.credentialPersistence,
+                }
+              : {}),
             defaultActivation: policy?.defaultActivation ?? 'enabled',
             workspaceOverrideCount: Object.values(
               policy?.workspaceOverrides ?? {},
@@ -2349,6 +2383,39 @@ export function registerWorkspaceExtensionRoutes(
 
   if (workspaceRegistry) {
     const registry = workspaceRegistry;
+    const sendRuntimeCatalog = async (
+      runtime: WorkspaceRuntime,
+      res: Response,
+      route: string,
+    ) => {
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      try {
+        res.status(200).json(
+          await runtime.workspaceService.getWorkspaceExtensionsStatus({
+            route,
+            workspaceCwd: runtime.workspaceCwd,
+          }),
+        );
+      } catch (error) {
+        sendBridgeError(res, error, { route });
+      }
+    };
+    app.get('/workspace/runtime/extensions', async (_req, res) => {
+      await sendRuntimeCatalog(
+        registry.primary,
+        res,
+        'GET /workspace/runtime/extensions',
+      );
+    });
+    app.get('/workspaces/:workspace/runtime/extensions', async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+      if (!runtime) return;
+      await sendRuntimeCatalog(
+        runtime,
+        res,
+        'GET /workspaces/:workspace/runtime/extensions',
+      );
+    });
     app.get('/workspaces/:workspace/extensions', async (req, res) => {
       const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
       if (!runtime) return;
@@ -2359,6 +2426,8 @@ export function registerWorkspaceExtensionRoutes(
         );
         const snapshot = await manager.refreshCacheWithSnapshot();
         runtime.generationGuard?.assertOpen();
+        const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+        coordinator?.observeExtensionGeneration(snapshot.generation);
         const extensions = manager.getLoadedExtensions().map((extension) => {
           const activation = manager.getExtensionActivationFromSnapshot(
             extension.id,
@@ -2383,7 +2452,9 @@ export function registerWorkspaceExtensionRoutes(
           trusted: runtime.trusted,
           desiredGeneration: snapshot.generation,
           appliedGeneration:
-            appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
+            coordinator?.status().capabilities?.extensions?.appliedGeneration ??
+            legacyAppliedGenerationByWorkspaceId.get(runtime.workspaceId) ??
+            0,
           extensions,
         });
       } catch (error) {

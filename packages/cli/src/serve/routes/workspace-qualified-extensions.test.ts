@@ -90,6 +90,13 @@ function makeWorkspaceService(): DaemonWorkspaceService {
       refreshed: 1,
       failed: 0,
     })),
+    getWorkspaceExtensionsStatus: vi.fn(async () => ({
+      v: 1,
+      workspaceCwd: '/work/fixture',
+      initialized: true,
+      runtimeEpoch: 1,
+      extensions: [],
+    })),
   } as unknown as DaemonWorkspaceService;
 }
 
@@ -367,13 +374,14 @@ describe('extension management v2 REST', () => {
     try {
       const response = await auth(request(h.app).get('/extensions'));
       expect(response.status).toBe(200);
-      expect(response.body).toMatchObject({
+      expect(response.body).toEqual({
         v: 1,
         generation: 7,
         extensions: [
           {
             id: extensionId,
             name: 'demo',
+            version: '1.0.0',
             installType: 'archive-url',
             defaultActivation: 'disabled',
             workspaceOverrideCount: 0,
@@ -385,6 +393,61 @@ describe('extension management v2 REST', () => {
       ).toHaveBeenCalledOnce();
       expect(
         ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the selected live runtime extension catalog', async () => {
+    const h = await makeHarness();
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 9,
+      extensions: [
+        {
+          kind: 'extension',
+          id: extensionId,
+          name: 'demo',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/demo',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+      ],
+    });
+    try {
+      const response = await auth(
+        request(h.app).get(
+          `/workspaces/${h.secondary.workspaceId}/runtime/extensions`,
+        ),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        runtimeEpoch: 9,
+        extensions: [{ name: 'demo', isActive: true }],
+      });
+      expect(
+        h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+      ).toHaveBeenCalledWith({
+        route: 'GET /workspaces/:workspace/runtime/extensions',
+        workspaceCwd: h.secondary.workspaceCwd,
+      });
+      expect(
+        h.primary.workspaceService.getWorkspaceExtensionsStatus,
       ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });

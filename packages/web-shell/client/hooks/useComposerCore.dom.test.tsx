@@ -18,6 +18,36 @@ import type {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+const optionalWorkspaceState = vi.hoisted(() => ({
+  current: undefined as
+    | undefined
+    | {
+        actions: {
+          loadExtensionsStatus: () => Promise<{ extensions: never[] }>;
+        };
+        capabilities: { features: string[] };
+        client: {
+          workspaceByCwd: (cwd: string) => {
+            ensureRuntime: () => Promise<unknown>;
+            workspaceRuntimeExtensions: () => Promise<{
+              extensions: never[];
+            }>;
+          };
+        };
+      },
+}));
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
+  return {
+    ...actual,
+    useOptionalWorkspace: () => optionalWorkspaceState.current,
+  };
+});
+
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 let latest: UseComposerCoreReturn | null = null;
@@ -219,7 +249,56 @@ afterEach(() => {
   root = null;
   container = null;
   latest = null;
+  optionalWorkspaceState.current = undefined;
   vi.unstubAllGlobals();
+});
+
+it('loads composer extensions from the selected workspace runtime when advertised', async () => {
+  const legacyLoad = vi.fn(async () => ({ extensions: [] as never[] }));
+  const ensureRuntime = vi.fn(async () => ({}));
+  const workspaceRuntimeExtensions = vi.fn(async () => ({
+    extensions: [] as never[],
+  }));
+  const workspaceByCwd = vi.fn(() => ({
+    ensureRuntime,
+    workspaceRuntimeExtensions,
+  }));
+  optionalWorkspaceState.current = {
+    actions: { loadExtensionsStatus: legacyLoad },
+    capabilities: { features: ['workspace_extension_mentions'] },
+    client: { workspaceByCwd },
+  };
+
+  await mount({ atWorkspaceCwd: '/secondary' });
+  await latest!.workspaceActionsRef.current!.loadExtensionsStatus!();
+
+  expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+  expect(ensureRuntime).toHaveBeenCalledOnce();
+  expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
+  expect(legacyLoad).not.toHaveBeenCalled();
+});
+
+it('keeps the legacy composer extension loader without the capability', async () => {
+  const legacyLoad = vi.fn(async () => ({ extensions: [] as never[] }));
+  const workspaceRuntimeExtensions = vi.fn(async () => ({
+    extensions: [] as never[],
+  }));
+  optionalWorkspaceState.current = {
+    actions: { loadExtensionsStatus: legacyLoad },
+    capabilities: { features: [] },
+    client: {
+      workspaceByCwd: () => ({
+        ensureRuntime: vi.fn(async () => ({})),
+        workspaceRuntimeExtensions,
+      }),
+    },
+  };
+
+  await mount({ atWorkspaceCwd: '/secondary' });
+  await latest!.workspaceActionsRef.current!.loadExtensionsStatus!();
+
+  expect(legacyLoad).toHaveBeenCalledOnce();
+  expect(workspaceRuntimeExtensions).not.toHaveBeenCalled();
 });
 
 function pressHistoryKey(key: 'ArrowUp' | 'ArrowDown') {
