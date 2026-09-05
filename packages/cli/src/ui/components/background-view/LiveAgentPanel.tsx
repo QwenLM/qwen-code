@@ -29,7 +29,10 @@
 import type React from 'react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
-import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
+import {
+  AgentStatus,
+  DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE,
+} from '@qwen-code/qwen-code-core';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import {
   useBackgroundTaskViewActions,
@@ -51,6 +54,10 @@ import {
   isLiveAgentPanelVisibleEntry,
   LIVE_AGENT_PANEL_MAX_ROWS,
 } from './liveAgentPanelVisibility.js';
+import {
+  isTeamAgentDialogEntry,
+  type LiveAgentDialogEntry,
+} from '../../hooks/use-team-agent-roster.js';
 import {
   type AgentTreeInfo,
   computeAgentTreeInfo,
@@ -86,7 +93,7 @@ const DEFAULT_MAX_ROWS = LIVE_AGENT_PANEL_MAX_ROWS;
 // rendered as a bold anchor.
 const DEFAULT_SUBAGENT_TYPE = CORE_DEFAULT_SUBAGENT_TYPE;
 
-type LivePanelEntry = AgentDialogEntry & {
+type LivePanelEntry = LiveAgentDialogEntry & {
   /** True when the row is past its terminal-visibility window. */
   expired: boolean;
   /**
@@ -112,6 +119,23 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
   glyph: string;
   color: string;
 } {
+  if (isTeamAgentDialogEntry(entry)) {
+    switch (entry.teamStatus) {
+      case AgentStatus.INITIALIZING:
+      case AgentStatus.RUNNING:
+        return { glyph: '●', color: theme.status.warning };
+      case AgentStatus.IDLE:
+        return { glyph: '●', color: theme.status.success };
+      case AgentStatus.COMPLETED:
+        return { glyph: '✔', color: theme.status.success };
+      case AgentStatus.FAILED:
+        return { glyph: '✖', color: theme.status.error };
+      case AgentStatus.CANCELLED:
+        return { glyph: '○', color: theme.text.secondary };
+      default:
+        return { glyph: '●', color: theme.text.secondary };
+    }
+  }
   if (entry.synthesized) {
     // Outcome unknown — registry forgot the entry without going
     // through complete / fail / cancel. Use a neutral marker so
@@ -177,8 +201,15 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   maxRows = DEFAULT_MAX_ROWS,
   width,
 }) => {
-  const { entries, dialogOpen, livePanelFocused, livePanelSelectedIndex } =
-    useBackgroundTaskViewState();
+  const {
+    entries,
+    liveAgentEntries,
+    dialogOpen,
+    livePanelFocused,
+    livePanelSelectedIndex,
+  } = useBackgroundTaskViewState();
+  const rosterEntries =
+    liveAgentEntries ?? entries.filter((entry) => entry.kind === 'agent');
   const { setLivePanelFocused } = useBackgroundTaskViewActions();
   // Reach for Config via the raw context (NOT useConfig) so the panel
   // can degrade to snapshot-only when no provider is mounted — e.g.
@@ -205,7 +236,9 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   useEffect(() => {
     if (dialogOpen) return;
     const needsTick = (whenMs: number) =>
-      entries.some((e) => isLiveAgentPanelVisibleEntry(e, whenMs));
+      rosterEntries.some((entry) =>
+        isLiveAgentPanelVisibleEntry(entry, whenMs),
+      );
     if (!needsTick(Date.now())) return;
     const id = setInterval(() => {
       const wallNow = Date.now();
@@ -217,7 +250,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       if (!needsTick(wallNow)) clearInterval(id);
     }, 1000);
     return () => clearInterval(id);
-  }, [entries, dialogOpen]);
+  }, [dialogOpen, rosterEntries]);
 
   // Re-pull each agent from the live registry on every tick so the row
   // shows the latest `recentActivities` — `useBackgroundTaskView`
@@ -272,8 +305,8 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // ref outlives both the snapshot and the tick state.
   const missingSinceRef = useRef<Map<string, number>>(new Map());
 
-  const liveAgentSnapshots: AgentDialogEntry[] = useMemo(() => {
-    const snapshots = entries.filter(isAgentEntry);
+  const liveAgentSnapshots: LiveAgentDialogEntry[] = useMemo(() => {
+    const snapshots = rosterEntries.filter(isAgentEntry);
     if (!config) return snapshots;
     const registry = config.getBackgroundTaskRegistry();
     // `now` participates in the dependency array so the memo recomputes
@@ -287,6 +320,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
     const next = snapshots
       .map((snap) => {
         seenIds.add(snap.agentId);
+        if (isTeamAgentDialogEntry(snap)) return snap;
         const live = registry.get(snap.agentId);
         if (live) {
           // Recovered (or never went missing) — drop any stale
@@ -335,7 +369,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
         // the visibility window has no way to evict.
         return null;
       })
-      .filter((e): e is AgentDialogEntry => e !== null);
+      .filter((e): e is LiveAgentDialogEntry => e !== null);
     // GC: drop missing-since records for agents that are no longer
     // even in the snapshot (e.g. statusChange refreshed and the
     // entry left useBackgroundTaskView's view entirely).
@@ -343,7 +377,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       if (!seenIds.has(id)) missingSinceRef.current.delete(id);
     }
     return next;
-  }, [entries, config, now]);
+  }, [rosterEntries, config, now]);
 
   const hasVisibleAgent = liveAgentSnapshots.some((entry) =>
     isLiveAgentPanelVisibleEntry(entry, now),
@@ -381,7 +415,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
 };
 
 const LiveAgentPanelBody: React.FC<{
-  snapshots: AgentDialogEntry[];
+  snapshots: LiveAgentDialogEntry[];
   now: number;
   maxRows: number;
   width: number | undefined;
@@ -441,7 +475,7 @@ const LiveAgentPanelBody: React.FC<{
       {focused && (
         <Box>
           <Text color={theme.text.secondary}>
-            {'  ↑↓ navigate · Enter detail · Esc back'}
+            {'  ↑↓ navigate · Enter open · Esc back'}
           </Text>
         </Box>
       )}
@@ -450,7 +484,7 @@ const LiveAgentPanelBody: React.FC<{
 };
 
 const AgentRow: React.FC<{
-  entry: AgentDialogEntry;
+  entry: LiveAgentDialogEntry;
   now: number;
   selected?: boolean;
   tree?: AgentTreeInfo;
@@ -489,6 +523,9 @@ const AgentRow: React.FC<{
     entry.stats?.outputTokens && entry.stats.outputTokens > 0
       ? ` · ${formatTokenCount(entry.stats.outputTokens)} tokens`
       : '';
+  const teamStatusSuffix = isTeamAgentDialogEntry(entry)
+    ? ` · ${entry.teamStatus}`
+    : '';
 
   // Layout (Claude Code's CoordinatorTaskPanel visual + our
   // right-pin to keep elapsed / tokens from being clipped):
@@ -508,7 +545,7 @@ const AgentRow: React.FC<{
   //   columns sit side by side at intrinsic widths; empty slack
   //   falls off the row tail rather than opening a visual gap
   //   between the description and the right-pinned elapsed.
-  const tail = ` ▶ ${elapsed}${tokenSuffix}`;
+  const tail = ` ▶ ${elapsed}${teamStatusSuffix}${tokenSuffix}`;
   const prefix = selected ? '▸ ' : '  ';
   // Tree gutter (indent + ↳) comes from the shared agent-forest helper so
   // the panel and the dialog list can't drift; the orphan additionally
@@ -534,7 +571,14 @@ const AgentRow: React.FC<{
           <Text color={color}>{`${glyph} `}</Text>
           {showType && (
             <>
-              <Text bold>{safeSubagentType}</Text>
+              <Text
+                bold
+                color={
+                  isTeamAgentDialogEntry(entry) ? entry.teamColor : undefined
+                }
+              >
+                {safeSubagentType}
+              </Text>
               <Text color={theme.text.secondary}>{': '}</Text>
             </>
           )}

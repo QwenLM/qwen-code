@@ -605,7 +605,7 @@ const MAX_SEARCH_TOP_RESULTS = 5;
 
 /**
  * Detect sub-agent delegation. Matches toolName containing "delegate" /
- * "subagent" / "spawn-task" / "Task" (Anthropic-style) plus an explicit
+ * "subagent" / "spawn-task" / "Agent" / "Task" plus an explicit
  * agent name or prompt-like field.
  */
 function detectSubagentDelegation(
@@ -616,12 +616,12 @@ function detectSubagentDelegation(
   // wenshao R3 (claude-opus-4-7): `task` was previously matched in either
   // `^|_` position, which falsely caught `edit_task`, `list_task`,
   // `create_task`, etc. — common tool names that have nothing to do with
-  // sub-agent delegation. The Anthropic-style delegation tool is
-  // literally named `Task` (no prefix), so restrict the bare-`task`
-  // match to whole-name only. `delegate` / `subagent` / `spawn_task`
+  // sub-agent delegation. The built-in delegation tools are literally named
+  // `Agent` / `Task`, so restrict those bare names to whole-name matches.
+  // `delegate` / `subagent` / `spawn_task`
   // are specific enough to keep the `^|_` prefix.
   const looksLikeDelegate =
-    /^task$/i.test(toolName) ||
+    /^(?:agent|task)$/i.test(toolName) ||
     /(?:^|_)(?:delegate|subagent|spawn[_-]?task)$/i.test(toolName) ||
     /agent/i.test(opts.toolKind ?? '');
   if (!looksLikeDelegate) return undefined;
@@ -641,6 +641,7 @@ function detectSubagentDelegation(
     'query',
   ]);
   if (!agentName && !task) return undefined;
+  const teammateName = getFirstString(input, ['name']);
   const parentDelegationId = getFirstString(input, [
     'parentDelegationId',
     'parent_delegation_id',
@@ -649,6 +650,7 @@ function detectSubagentDelegation(
   return {
     kind: 'subagent_delegation',
     agentName: agentName ?? 'subagent',
+    ...(teammateName ? { teammateName } : {}),
     task: task ?? '(no task description)',
     ...(parentDelegationId ? { parentDelegationId } : {}),
   };

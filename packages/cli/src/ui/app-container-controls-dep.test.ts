@@ -64,7 +64,7 @@ describe('AppContainer controls-height measurement wiring', () => {
     // The key must be derived from the roster + focus, not a constant. Match
     // whitespace-tolerantly so prettier reformatting can't break the guard.
     expect(source).toMatch(
-      /liveAgentPanelLayoutKey\s*=\s*getLiveAgentPanelLayoutKey\(\s*bgTaskEntries\s*,\s*bgLivePanelFocused\s*,?\s*\)/,
+      /liveAgentPanelLayoutKey\s*=\s*getLiveAgentPanelLayoutKey\(\s*liveAgentEntries\s*\?\?\s*bgTaskEntries\s*,\s*bgLivePanelFocused\s*,?\s*\)/,
     );
   });
 });

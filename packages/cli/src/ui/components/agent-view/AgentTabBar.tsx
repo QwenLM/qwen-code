@@ -70,12 +70,14 @@ export const AgentTabBar: React.FC = () => {
     useAgentViewState();
   const { switchToNext, switchToPrevious, setAgentTabBarFocused } =
     useAgentViewActions();
-  const { entries: bgEntries } = useBackgroundTaskViewState();
+  const { entries: bgEntries, liveAgentEntries } = useBackgroundTaskViewState();
   const { setLivePanelFocused, setPillFocused } =
     useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
   const hasVisibleBgAgentRoster = () =>
-    bgEntries.some((e) => isLiveAgentPanelVisibleEntry(e, Date.now()));
+    (liveAgentEntries ?? bgEntries).some((entry) =>
+      isLiveAgentPanelVisibleEntry(entry, Date.now()),
+    );
 
   useKeypress(
     (key) => {

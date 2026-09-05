@@ -443,7 +443,7 @@ interface WebShellTaskBase {
 
 export interface WebShellAgentTask extends WebShellTaskBase {
   kind: 'agent';
-  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'idle' | 'paused' | 'completed' | 'failed' | 'cancelled';
   subagentType?: string;
   isBackgrounded: boolean;
   prompt?: string;

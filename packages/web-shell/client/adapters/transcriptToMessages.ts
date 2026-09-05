@@ -1537,6 +1537,7 @@ function daemonToolPreviewToArgs(
     case 'subagent_delegation':
       return {
         subagent_type: preview.agentName,
+        ...(preview.teammateName ? { name: preview.teammateName } : {}),
         prompt: preview.task,
         ...(preview.parentDelegationId
           ? { parentDelegationId: preview.parentDelegationId }

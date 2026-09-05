@@ -127,6 +127,47 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   }
 });
 
+test('shows Agent Team status and shared work in the environment panel @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: ['session_events', 'session_agents'],
+    },
+    agentTasks: [
+      {
+        kind: 'agent',
+        id: 'reviewer@review-team',
+        label: 'reviewer',
+        description: 'Reviewing authentication flow',
+        status: 'idle',
+        startTime: Date.now() - 3_000,
+        runtimeMs: 3_000,
+        isBackgrounded: false,
+        teamName: 'review-team',
+        color: '#4ECDC4',
+        teamTask: {
+          id: '1',
+          subject: 'Review authentication flow',
+          status: 'in_progress',
+        },
+      },
+    ],
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await page
+    .getByRole('button', { name: 'Toggle environment information' })
+    .click();
+
+  const panel = page.getByTestId('environment-panel');
+  await expect(panel).toContainText('reviewer');
+  await expect(panel).toContainText('Review authentication flow');
+  await expect(panel).toContainText('Idle');
+  await expect(panel.locator('[data-status="idle"]')).toBeVisible();
+});
+
 test('branches from an earlier completed Assistant response and resumes the fork @smoke', async ({
   page,
 }, testInfo) => {

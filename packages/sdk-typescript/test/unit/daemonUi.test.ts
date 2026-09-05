@@ -5979,18 +5979,20 @@ describe('daemon UI render contract (PR-D)', () => {
 });
 
 describe('daemon UI tool preview taxonomy — long-tail kinds (PR-F)', () => {
-  it('detects subagent_delegation from Anthropic-style Task tool', () => {
+  it('detects a named subagent delegation from the Agent tool', () => {
     const preview = createDaemonToolPreview(
       {
         subagent_type: 'code-reviewer',
+        name: 'security-reviewer',
         prompt: 'Review the auth module',
         description: 'Security review',
       },
-      { toolName: 'Task' },
+      { toolName: 'agent', toolKind: 'other' },
     );
     expect(preview).toMatchObject({
       kind: 'subagent_delegation',
       agentName: 'code-reviewer',
+      teammateName: 'security-reviewer',
       task: 'Review the auth module',
     });
   });

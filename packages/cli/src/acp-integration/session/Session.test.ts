@@ -966,6 +966,8 @@ describe('Session', () => {
       getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       getGoalRuntimePrepared: vi.fn().mockResolvedValue(mockGoalRuntime),
+      getTeamManager: vi.fn().mockReturnValue(null),
+      onTeamManagerChange: vi.fn(),
       bindGoalTurnHost: vi.fn().mockImplementation((host) => {
         boundGoalHost = host;
         return () => {
@@ -9766,6 +9768,191 @@ describe('Session', () => {
           source: 'background_notification',
         },
       );
+    });
+
+    it('continues the leader turn when a teammate reports after the prompt is idle', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Reconciled teammate result.' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+      const teamEvents = new EventEmitter();
+      const manager = {
+        setLeaderMessageCallback: vi.fn(),
+        getEventEmitter: () => teamEvents,
+      } as unknown as core.TeamManager;
+      const managerChanged = vi.mocked(mockConfig.onTeamManagerChange).mock
+        .calls[0]?.[0];
+      expect(managerChanged).toBeTypeOf('function');
+      managerChanged?.(manager);
+      const leaderCallback = vi.mocked(manager.setLeaderMessageCallback).mock
+        .calls[0]?.[0];
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'coordinate teammates' }],
+      });
+
+      leaderCallback?.(
+        '<teammate_message>package scripts inspected</teammate_message>',
+        'scripts-inspector reported',
+      );
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      const continuation = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+      expect(continuation?.[1]).toEqual(
+        expect.objectContaining({
+          message: expect.arrayContaining([
+            expect.objectContaining({
+              text: '<teammate_message>package scripts inspected</teammate_message>',
+            }),
+          ]),
+        }),
+      );
+      expect(agentMessageChunks()).toContain('scripts-inspector reported');
+      await vi.waitFor(() => {
+        expect(agentMessageChunks()).toContain('Reconciled teammate result.');
+      });
+
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+      leaderCallback?.('queued old team message', 'queued old team message');
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue,
+      ).toHaveLength(1);
+      managerChanged?.(null);
+      leaderCallback?.('stale team message', 'stale team message');
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue,
+      ).toHaveLength(0);
+    });
+
+    it('routes teammate approvals through the ACP permission dialog', async () => {
+      const teamEvents = new EventEmitter();
+      const manager = {
+        setLeaderMessageCallback: vi.fn(),
+        getEventEmitter: () => teamEvents,
+      } as unknown as core.TeamManager;
+      const managerChanged = vi.mocked(mockConfig.onTeamManagerChange).mock
+        .calls[0]?.[0];
+      managerChanged?.(manager);
+      const respond = vi.fn().mockResolvedValue(undefined);
+
+      teamEvents.emit(core.TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+        teammateName: 'writer',
+        toolName: 'write_file',
+        toolInput: { file_path: '/repo/result.txt', content: 'done' },
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Write result.txt',
+          fileName: '/repo/result.txt',
+          filePath: '/repo/result.txt',
+          originalContent: '',
+          newContent: 'done',
+          fileDiff: '+done',
+        },
+        respond,
+        timestamp: Date.now(),
+      } satisfies core.TeammateApprovalRequestEvent);
+
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledOnce());
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          toolCall: expect.objectContaining({
+            title: expect.stringContaining('writer:'),
+            rawInput: {
+              file_path: '/repo/result.txt',
+              content: 'done',
+            },
+            _meta: expect.objectContaining({
+              toolName: 'write_file',
+              teammateName: 'writer',
+            }),
+          }),
+        }),
+      );
+      expect(respond).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+    });
+
+    it('cancels a pending teammate approval when the team is detached', async () => {
+      let resolvePermission:
+        | ((response: RequestPermissionResponse) => void)
+        | undefined;
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolvePermission = resolve;
+          }),
+      );
+      const teamEvents = new EventEmitter();
+      const manager = {
+        setLeaderMessageCallback: vi.fn(),
+        getEventEmitter: () => teamEvents,
+      } as unknown as core.TeamManager;
+      const managerChanged = vi.mocked(mockConfig.onTeamManagerChange).mock
+        .calls[0]?.[0];
+      managerChanged?.(manager);
+      const respond = vi.fn().mockResolvedValue(undefined);
+
+      teamEvents.emit(core.TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+        teammateName: 'writer',
+        toolName: 'write_file',
+        toolInput: { file_path: '/repo/result.txt', content: 'done' },
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Write result.txt',
+          fileName: '/repo/result.txt',
+          filePath: '/repo/result.txt',
+          originalContent: '',
+          newContent: 'done',
+          fileDiff: '+done',
+        },
+        respond,
+        timestamp: Date.now(),
+      } satisfies core.TeammateApprovalRequestEvent);
+
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+      managerChanged?.(null);
+      await vi.waitFor(() =>
+        expect(respond).toHaveBeenCalledWith(
+          core.ToolConfirmationOutcome.Cancel,
+        ),
+      );
+      resolvePermission?.({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
     });
 
     it('attaches structured agent metadata built from the canonical entry label', async () => {

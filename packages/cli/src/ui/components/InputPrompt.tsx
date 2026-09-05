@@ -73,6 +73,7 @@ import {
   getLiveAgentPanelVpMaxRows,
 } from './background-view/liveAgentPanelVisibility.js';
 import { panelDisplayOrder } from './background-view/agent-forest.js';
+import { isTeamAgentDialogEntry } from '../hooks/use-team-agent-roster.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
@@ -272,10 +273,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     mouseTrackingEnabled;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
-  const { setAgentTabBarFocused } = useAgentViewActions();
+  const { setAgentTabBarFocused, switchToAgent } = useAgentViewActions();
   const { menu: contextMenu, closeMenu: closeContextMenu } = useContextMenu();
   const {
     entries: bgEntries,
+    liveAgentEntries,
     dialogOpen: bgDialogOpen,
     pillFocused: bgPillFocused,
     livePanelFocused,
@@ -289,6 +291,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setPillFocused: setBgPillFocused,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
+  const rosterEntries =
+    liveAgentEntries ?? bgEntries.filter((entry) => entry.kind === 'agent');
   // panelDisplayOrder + the maxRows tail-window mirror LiveAgentPanel's
   // rendered rows exactly (oldest-first, nested agents grouped under
   // their parent, windowed to the last LIVE_AGENT_PANEL_MAX_ROWS) so
@@ -304,9 +308,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const getVisibleBgAgents = useCallback(
     () =>
       panelDisplayOrder(
-        bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+        rosterEntries.filter((entry) =>
+          isLiveAgentPanelVisibleEntry(entry, Date.now()),
+        ),
       ).slice(-liveAgentPanelMaxRows),
-    [bgEntries, liveAgentPanelMaxRows],
+    [liveAgentPanelMaxRows, rosterEntries],
   );
   const hasActiveToolConfirmation = useMemo(
     () =>
@@ -1003,6 +1009,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           } else {
             const agentIdx = livePanelSelectedIndex - 1;
             const entry = visibleBgAgents[agentIdx];
+            if (entry && isTeamAgentDialogEntry(entry)) {
+              switchToAgent(entry.agentId);
+              setLivePanelFocused(false);
+              return true;
+            }
             const entryIdx = entry
               ? bgEntries.findIndex(
                   (e) => e.kind === 'agent' && e.agentId === entry.agentId,
@@ -1958,6 +1969,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       hasAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
+      switchToAgent,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
       livePanelFocused,
