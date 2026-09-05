@@ -1026,7 +1026,13 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
-    it('merges thinking blocks before non-thinking blocks', () => {
+    it('merges consecutive assistant messages by straight concatenation, preserving chronological order across the merge', () => {
+      // Interleaved-thinking-2025-05-14 is unconditionally enabled whenever
+      // `thinking` is set (see buildPerRequestHeaders), so hoisting every
+      // thinking block ahead of both messages' other content is wrong -- it
+      // would move "text A" (which chronologically precedes "thought B") to
+      // after it. A straight concatenation of each side's already-ordered
+      // blocks preserves true chronological order across the merge.
       const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
@@ -1064,9 +1070,592 @@ describe('AnthropicContentConverter', () => {
       expect(assistant?.role).toBe('assistant');
       const blocks = assistant?.content as Array<{ type: string }>;
       expect(blocks[0]?.type).toBe('thinking');
-      expect(blocks[1]?.type).toBe('thinking');
-      expect(blocks[2]?.type).toBe('text');
+      expect(blocks[1]?.type).toBe('text');
+      expect(blocks[2]?.type).toBe('thinking');
       expect(blocks[3]?.type).toBe('tool_use');
+    });
+
+    it('adaptive/default mode preserves chronological order when the first merged message has no leading thinking block', () => {
+      // Adaptive-thinking models don't require the final assistant turn to
+      // begin with thinking, so straight chronological concatenation is
+      // both correct and sufficient here -- no reordering should occur.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: 'no thinking here' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'thought B', thought: true, thoughtSignature: 'sigB' },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{ type: string }>;
+      expect(blocks[0]?.type).toBe('text');
+      expect(blocks[1]?.type).toBe('thinking');
+      expect(blocks[2]?.type).toBe('tool_use');
+    });
+
+    it('ensureLeadingAssistantThinking relocates the first thinking run to the front of the latest assistant message', () => {
+      // Anthropic's manual-mode extended thinking requires the FINAL
+      // assistant turn of a thinking-enabled request to begin with a
+      // thinking block. `ensureLeadingAssistantThinking` is the minimal
+      // reorder that satisfies this without reintroducing the
+      // hoist-every-thinking-block behavior this generator moved away from.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'no thinking here' }],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thought B',
+                  thought: true,
+                  thoughtSignature: 'sigB',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+        signature?: string;
+      }>;
+      expect(blocks[0]?.type).toBe('thinking');
+      expect(blocks[1]?.type).toBe('text');
+      expect(blocks[2]?.type).toBe('tool_use');
+      // The relocated block itself is untouched -- same text/signature.
+      expect(blocks[0]?.thinking).toBe('thought B');
+      expect(blocks[0]?.signature).toBe('sigB');
+    });
+
+    it('ensureLeadingAssistantThinking moves only the first thinking run when the assistant turn has multiple thinking/tool_use pairs', () => {
+      // Guards the "only the first thinking run moves" invariant: a
+      // mutation that scans with `blocks.filter(isThinking)` (hoist every
+      // thinking block, the exact corruption this option was added to
+      // avoid) produces the identical result as the single-run test above
+      // and would pass undetected without this multi-run case.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'text A' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 1',
+                  thought: true,
+                  thoughtSignature: 'sig1',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 2',
+                  thought: true,
+                  thoughtSignature: 'sig2',
+                },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+        id?: string;
+      }>;
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+        'thinking',
+        'tool_use',
+      ]);
+      expect(blocks[0]?.thinking).toBe('thinking 1');
+      expect(blocks[1]?.text).toBe('text A');
+      expect(blocks[2]?.id).toBe('t1');
+      // The second thinking run stays exactly where it was chronologically.
+      expect(blocks[3]?.thinking).toBe('thinking 2');
+      expect(blocks[4]?.id).toBe('t2');
+    });
+
+    it('ensureLeadingAssistantThinking normalizes EVERY tool_use-bearing assistant message, not only the last', () => {
+      // Every other case here collapses all model turns into exactly one
+      // assistant message, so "which messages get normalized" has no
+      // discriminating test. A mutation that stops at the first (or the
+      // last) assistant message and returns would leave every other test
+      // green while leaving a sibling turn text-leading. That shape is the
+      // #3786 rejection reported against a PRIOR assistant turn, and it
+      // also makes a turn's serialization depend on its position in
+      // history, which breaks the prompt-cache prefix on every request
+      // (see the position-independence test below).
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'text A' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 1',
+                  thought: true,
+                  thoughtSignature: 'sig1',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'text B' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 2',
+                  thought: true,
+                  thoughtSignature: 'sig2',
+                },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(2);
+
+      const earlierBlocks = assistantMessages[0]?.content as Array<{
+        type: string;
+      }>;
+      expect(earlierBlocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
+
+      const latestBlocks = assistantMessages[1]?.content as Array<{
+        type: string;
+      }>;
+      expect(latestBlocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
+    });
+
+    it('ensureLeadingAssistantThinking relocates a first thinking run that starts AFTER a tool_use block', () => {
+      // Every other fixture here puts the first thinking run ahead of the
+      // first tool_use, so the contract for a run starting after one is
+      // pinned in neither direction. The shape is reachable through this
+      // pass's own documented source: a truncated turn ending in a
+      // functionCall whose recovery continuation opens with
+      // thought + functionCall. Current behavior relocates it -- the scan is
+      // a bare findIndex(isThinking) with no tool_use-position condition.
+      // Pinning that stops a plausible future "skip when runStart is after
+      // the first tool_use" refinement from silently shipping the
+      // text-leading tool_use shape #3786 rejects.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'text A' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                { text: 'thinking E2', thought: true, thoughtSignature: 's2' },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: 't2',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const blocks = messages.filter((m) => m.role === 'assistant')[0]
+        ?.content as Array<{ type: string }>;
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+        'tool_use',
+      ]);
+    });
+
+    it('ensureLeadingAssistantThinking leaves an assistant message with no tool_use in chronological order', () => {
+      // The wire only enforces leading thinking on tool_use turns
+      // (this option's documented scope, and the boundary
+      // injectEmptyThinkingOnToolUseTurns was live-verified against). A
+      // mutation dropping the tool_use gate would reorder plain-text
+      // replay turns for no protocol reason, moving blocks the previous
+      // latest-only implementation also never touched once a later turn
+      // existed.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'plain answer' },
+                { text: 'thought A', thought: true, thoughtSignature: 'sigA' },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'and again' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'thought B', thought: true, thoughtSignature: 'sigB' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      const noToolUseBlocks = assistantMessages[0]?.content as Array<{
+        type: string;
+      }>;
+      expect(noToolUseBlocks.map((b) => b.type)).toEqual(['text', 'thinking']);
+    });
+
+    it('ensureLeadingAssistantThinking serializes a turn identically whether or not a later turn follows it (prompt-cache prefix stability)', () => {
+      // Normalizing only the latest assistant message made one turn's
+      // wire shape a function of its position in history: it went out as
+      // [thinking, text, tool_use] on the request where it was current and
+      // [text, thinking, tool_use] on every request after. cache_control's
+      // breakpoint sits on the last user message, so that rewrites the
+      // cached prefix and forces a full re-read every turn. Pin that the
+      // same turn converts byte-identically in both positions.
+      const firstTurnContents = [
+        { role: 'user', parts: [{ text: 'Hi' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'text A' },
+            { text: 'thinking 1', thought: true, thoughtSignature: 'sig1' },
+            { functionCall: { id: 't1', name: 'tool', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 't1',
+                name: 'tool',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ];
+
+      const whenLatest = converter.convertLlmRequestToAnthropic(
+        { model: 'models/test', contents: firstTurnContents },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const whenPrior = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            ...firstTurnContents,
+            {
+              role: 'model',
+              parts: [
+                { text: 'thinking 2', thought: true, thoughtSignature: 'sig2' },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't2',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const firstAssistant = (r: { messages: Anthropic.MessageParam[] }) =>
+        r.messages.filter((m) => m.role === 'assistant')[0]?.content;
+
+      expect(firstAssistant(whenPrior)).toEqual(firstAssistant(whenLatest));
+    });
+
+    it('ensureLeadingAssistantThinking relocates a multi-block first thinking run as a single unit', () => {
+      // Every other case here has a first thinking run exactly one block
+      // long, so the run-extension loop's contract ("only the first
+      // thinking run moves, as a unit") has no discriminating test -- a
+      // mutation that stops extending the run after one block (e.g.
+      // `runEnd = runStart + 1`) would still pass every other case while
+      // splitting a multi-block first run apart from itself.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'text A' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking X',
+                  thought: true,
+                  thoughtSignature: 'sigX',
+                },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking Y',
+                  thought: true,
+                  thoughtSignature: 'sigY',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{
+        type: string;
+        thinking?: string;
+        text?: string;
+      }>;
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
+      // The run moves as a unit, preserving its own internal order.
+      expect(blocks[0]?.thinking).toBe('thinking X');
+      expect(blocks[1]?.thinking).toBe('thinking Y');
+      expect(blocks[2]?.text).toBe('text A');
+    });
+
+    it('ensureLeadingAssistantThinking leaves a tool_use turn with no thinking block untouched', () => {
+      // Every other case here feeds a message that contains at least one
+      // thinking block, so the `runStart === -1` guard (nothing is
+      // fabricated when the message has no thinking block at all) is pinned
+      // by nothing. This shape is reachable in production:
+      // dropUnsignedThinkingFromAssistantMessages strips every unsigned
+      // thinking block from a completed mid-history tool_use turn, and a
+      // model may simply return a tool round with no thinking. A mutation
+      // deleting the guard runs the run-extension loop from runStart === -1
+      // and reads blocks[-1].type -> TypeError.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'no thinking here' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{ type: string }>;
+      // Nothing fabricated, nothing reordered: chronological order stands.
+      expect(blocks.map((b) => b.type)).toEqual(['text', 'tool_use']);
+    });
+
+    it('ensureLeadingAssistantThinking relocates a first thinking run that ends at the final block', () => {
+      // Every other case here places the first thinking run strictly before
+      // the end of the content array, so the run-extension loop's
+      // `runEnd < blocks.length` bound is pinned by nothing. This trailing-
+      // run shape is one this PR manufactures: a single STOP stream
+      // [text, functionCall, signed episode] now persists in stream order,
+      // and the recovery-coalescing keep path merges into
+      // [text..., functionCall, signed episode]. A mutation deleting the
+      // bound extends runEnd past the array and reads blocks[blocks.length]
+      // .type -> TypeError.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'text A' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                { text: 'episode', thought: true, thoughtSignature: 'sE' },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const blocks = messages.filter((m) => m.role === 'assistant')[0]
+        ?.content as Array<{ type: string }>;
+      // The trailing thinking run is relocated to the front as a unit.
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
     });
 
     it('cleans orphaned tool_use blocks without matching tool_result', () => {
@@ -2984,6 +3573,59 @@ describe('AnthropicContentConverter', () => {
           ],
         },
         { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+
+    it('runs before dropEmptyTextThinkingBlocks so a promoted "new latest" turn keeps its empty-text signed thinking block', () => {
+      // Regression for a pipeline-ordering hazard: dropEmptyTextThinkingBlocks
+      // computes "the latest assistant message" once and skips stripping an
+      // empty-text thinking block only from that index. If a genuinely
+      // empty trailing assistant turn (a leftover prefill artifact) is
+      // popped by stripTrailingAssistantPrefill AFTER dropEmptyTextThinkingBlocks
+      // already ran, the turn it promotes to "new latest" -- which carries
+      // its own empty-text SIGNED thinking block plus a tool_use -- would
+      // have already had that thinking block stripped under the
+      // now-stale "non-latest" premise, violating manual-mode's
+      // leading-thinking requirement. stripTrailingAssistantPrefill must
+      // run first so dropEmptyTextThinkingBlocks sees the array's true
+      // final shape.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: '', thought: true, thoughtSignature: 'sig1' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            // Whitespace-only trailing turn -- a leftover prefill artifact
+            // that stripTrailingAssistantPrefill should pop entirely.
+            { role: 'model', parts: [{ text: '   ' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]?.content).toEqual([
+        { type: 'thinking', thinking: '', signature: 'sig1' },
+        { type: 'tool_use', id: 't1', name: 'tool', input: {} },
       ]);
     });
   });

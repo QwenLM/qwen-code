@@ -138,6 +138,20 @@ export interface ConvertLlmRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Ensure every assistant message that carries a `tool_use` block starts
+   * with its first contiguous thinking/redacted-thinking run. Anthropic
+   * manual extended thinking requires an assistant turn in a tool loop to
+   * begin with thinking; adaptive thinking does not. Gate this on the
+   * outgoing request's actual `thinking.type === 'enabled'` mode so adaptive
+   * histories keep their exact chronological block order.
+   *
+   * Applies to prior turns as well as the current one -- see
+   * `ensureLeadingThinkingOnToolUseAssistantMessages` for why scoping it to
+   * the latest message both misses the #3786 shape one turn later and breaks
+   * the prompt cache on every request.
+   */
+  ensureLeadingAssistantThinking?: boolean;
+  /**
    * Strip a trailing assistant message that would otherwise be sent as an
    * "assistant-turn prefill" (a request whose final message has
    * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
@@ -291,6 +305,21 @@ export class AnthropicContentConverter {
     if (options.dropUnsignedAssistantThinking) {
       messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
     }
+    // Must run BEFORE dropEmptyTextThinkingBlocks: that pass computes
+    // "the latest assistant message" once and skips stripping an
+    // empty-text thinking block only from that index -- if a genuinely
+    // empty trailing assistant message (a leftover prefill artifact) gets
+    // popped here AFTER dropEmptyTextThinkingBlocks already ran, the
+    // message it promotes to "new latest" would have had its own
+    // empty-text signed thinking block stripped under the now-stale
+    // premise that it wasn't the latest turn, violating manual-mode
+    // thinking's leading-thinking requirement if that promoted message
+    // also carries a tool_use. Running this first ensures
+    // dropEmptyTextThinkingBlocks's one-shot "latest" computation reflects
+    // the array's true final shape.
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
     // Defense-in-depth against an empty-text thinking block surviving into
     // a non-latest turn (see dropEmptyTextThinkingBlocks's doc) -- e.g. one
     // that DOES carry a signature, so dropUnsignedThinkingFromAssistant...
@@ -307,8 +336,8 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
-    if (options.stripTrailingAssistantPrefill) {
-      this.stripTrailingAssistantPrefill(messages);
+    if (options.ensureLeadingAssistantThinking) {
+      ensureLeadingThinkingOnToolUseAssistantMessages(messages);
     }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
@@ -1367,9 +1396,19 @@ export class AnthropicContentConverter {
  * pairing and cause HTTP 400 "tool_use ids were found without tool_result
  * blocks immediately after".
  *
- * Thinking blocks must come first in Anthropic's content array, so merged
- * blocks are reordered: all thinking blocks (from both messages) precede
- * non-thinking blocks (text, tool_use, etc.).
+ * Concatenates each side's blocks in original order rather than hoisting
+ * every thinking block to the front. "Thinking blocks must come first" only
+ * holds for classic (non-interleaved) extended thinking; this generator
+ * unconditionally enables interleaved-thinking-2025-05-14 whenever
+ * `thinking` is set (see buildPerRequestHeaders), and interleaved
+ * thinking's entire point is allowing thinking blocks between tool_use
+ * blocks in original generation order — hoisting all thinking blocks ahead
+ * of both messages' other content destroys that order (e.g. a leading
+ * `[text, thinkingX]` merged with `[thinkingY, tool_use]` previously
+ * produced `[thinkingX, thinkingY, text, tool_use]`, moving `text` after
+ * `thinkingY` even though it chronologically preceded it). The classic
+ * single-leading-thinking-block case is unaffected by this change since
+ * there is nothing to reorder in that shape either way.
  *
  * Mirrors the same-name function in the OpenAI converter.
  */
@@ -1392,17 +1431,10 @@ function mergeConsecutiveAssistantMessages(
         const lastBlocks = lastMessage.content as AnthropicContentBlockParam[];
         const currentBlocks = message.content as AnthropicContentBlockParam[];
 
-        const isThinking = (b: AnthropicContentBlockParam): boolean => {
-          const t = (b as { type?: string }).type;
-          return t === 'thinking' || t === 'redacted_thinking';
-        };
-
         const seenToolUseIds = new Set<string>();
         const combined: AnthropicContentBlockParam[] = [
-          ...lastBlocks.filter(isThinking),
-          ...currentBlocks.filter(isThinking),
-          ...lastBlocks.filter((b) => !isThinking(b)),
-          ...currentBlocks.filter((b) => !isThinking(b)),
+          ...lastBlocks,
+          ...currentBlocks,
         ].filter((b) => {
           const t = (b as { type?: string }).type;
           if (t === 'tool_use') {
@@ -1423,6 +1455,78 @@ function mergeConsecutiveAssistantMessages(
   }
 
   return merged;
+}
+
+/**
+ * Relocate the first contiguous run of `thinking`/`redacted_thinking`
+ * blocks to the front of its content array, for every assistant message
+ * that carries a `tool_use` block and doesn't already start with thinking.
+ *
+ * See {@link ConvertGeminiRequestToAnthropicOptions.ensureLeadingAssistantThinking}
+ * for why this is needed: `mergeConsecutiveAssistantMessages`'s straight
+ * concatenation -- and, now that reasoning episodes are no longer hoisted
+ * to `parts[0]` during history consolidation, an ordinary "say a line,
+ * then think, then call a tool" turn -- can leave a leading text block
+ * ahead of a later thinking run, which is chronologically correct but
+ * invalid on the wire for Anthropic's manual-mode extended thinking. Only
+ * the first thinking run moves; every other block -- including any later
+ * thinking blocks and their relative order -- is untouched, and nothing is
+ * fabricated when the message has no thinking block at all.
+ *
+ * Applied to EVERY tool_use-bearing assistant message rather than only the
+ * most recent one, for two independent reasons:
+ *
+ *  1. The constraint is not latest-turn-only. #3786 describes the
+ *     anthropic-compatible rejection in terms of a PRIOR assistant turn
+ *     carrying `tool_use`, and `injectEmptyThinkingOnToolUseTurns`
+ *     correspondingly repairs every tool_use turn, not just the last. Under
+ *     latest-only scoping a turn normalized while it was current reverts to
+ *     the text-leading shape on the very next request, so the defect
+ *     surfaces one turn after the turn that produced it.
+ *  2. Latest-only scoping makes an assistant turn's serialization depend on
+ *     its position in history, so the same turn goes out two different ways
+ *     on consecutive requests. `addCacheControlToMessages` puts its
+ *     breakpoint on the last user message, so that rewrites the cached
+ *     prefix and forces a full re-read on every turn for the life of the
+ *     conversation. Normalizing uniformly makes the shape position-
+ *     independent and the prefix stable.
+ *
+ * Gated on `tool_use` because that is the boundary the wire actually
+ * enforces (matching this option's documented scope and
+ * `injectEmptyThinkingOnToolUseTurns`): a plain-text assistant turn that
+ * doesn't lead with thinking is accepted, so reordering one would move
+ * blocks for no protocol reason.
+ */
+function ensureLeadingThinkingOnToolUseAssistantMessages(
+  messages: AnthropicMessageParam[],
+): void {
+  const blockType = (b: AnthropicContentBlockParam) =>
+    (b as { type?: string }).type;
+  const isThinking = (b: AnthropicContentBlockParam) => {
+    const t = blockType(b);
+    return t === 'thinking' || t === 'redacted_thinking';
+  };
+
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    if (!Array.isArray(message.content)) continue;
+
+    const blocks = message.content as AnthropicContentBlockParam[];
+    if (blocks.length === 0 || isThinking(blocks[0]!)) continue;
+    if (!blocks.some((b) => blockType(b) === 'tool_use')) continue;
+
+    const runStart = blocks.findIndex(isThinking);
+    if (runStart === -1) continue;
+
+    let runEnd = runStart;
+    while (runEnd < blocks.length && isThinking(blocks[runEnd]!)) {
+      runEnd++;
+    }
+
+    const run = blocks.slice(runStart, runEnd);
+    const rest = [...blocks.slice(0, runStart), ...blocks.slice(runEnd)];
+    message.content = [...run, ...rest];
+  }
 }
 
 /**
@@ -1634,7 +1738,15 @@ function cleanOrphanedToolCalls(
  * `thinking` block.
  *
  * Scoped to non-latest assistant turns, matching Anthropic's contract that
- * the latest assistant turn's signatures must replay byte-exact.
+ * the latest assistant turn's signatures must replay byte-exact: a
+ * signed, empty-text `thinking` block is not inherently invalid (see
+ * geminiChat.ts's flushThoughtEpisode, which deliberately keeps this same
+ * shape as still potentially replayable when it belongs to the ACTIVE
+ * turn). This pass drops it only from earlier, non-latest turns, where
+ * Anthropic doesn't require prior thinking to survive verbatim -- do not
+ * broaden it to the latest turn on the theory that the shape itself is
+ * unreplayable; that would delete a legitimately signed episode from an
+ * active tool loop.
  *
  * This was originally one guard inside a larger `pruneUntrustworthyThinking`
  * pass that also tried to detect and downgrade a non-latest, thinking-only

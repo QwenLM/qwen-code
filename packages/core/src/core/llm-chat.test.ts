@@ -3013,6 +3013,165 @@ describe('LlmChat', async () => {
       }
     });
 
+    it('accepts a quiet tool-result completion with every signed reasoning episode in history and JSONL', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new LlmChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof LlmChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: {},
+                },
+              },
+            ],
+          },
+        ]);
+        const expectedParts: Part[] = [
+          {
+            text: 'reasoning A',
+            thought: true,
+            thoughtSignature: 'sigA',
+          },
+          {
+            text: 'reasoning B',
+            thought: true,
+            thoughtSignature: 'sigB',
+          },
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse(
+            stopResponse([
+              { text: 'reasoning A', thought: true },
+              { thought: true, thoughtSignature: 'sigA' },
+              { text: 'reasoning B', thought: true },
+              { thought: true, thoughtSignature: 'sigB' },
+            ]),
+          ),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-quiet-signed-episodes',
+        );
+        await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: expectedParts,
+        });
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn).toHaveBeenCalledWith(
+          expect.objectContaining({ message: expectedParts }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries a tool-result continuation whose reasoning spans multiple episodes', async () => {
+      // Regression guard for the contentText filter needing `&& !part.thought`:
+      // consolidatedHistoryParts now contains thought parts inline, so an
+      // unguarded contentText filter would count reasoning text as visible
+      // progress and skip the retries.
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          return streamResponse(
+            stopResponse(
+              callCount === 5
+                ? [{ text: 'Finished after retries.' }]
+                : [
+                    { text: 'First, ', thought: true },
+                    { thought: true, thoughtSignature: 'sigA' },
+                    { text: 'then, ', thought: true },
+                    { thought: true, thoughtSignature: 'sigB' },
+                  ],
+            ),
+          );
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-multi-episode-no-progress',
+        );
+        await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Finished after retries.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should not retry tool result continuations that make another tool call', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'inspect the project' }] },
@@ -4194,6 +4353,663 @@ describe('LlmChat', async () => {
         text: 'p1',
         thoughtSignature: 's1',
       });
+    });
+
+    it('should preserve each reasoning episode as its own Part, in order, with its own signature, when tool calls interleave with reasoning', async () => {
+      // A turn can legitimately contain multiple distinct reasoning
+      // episodes separated by tool calls (Anthropic interleaved thinking,
+      // OpenAI Responses reasoning items on parallel function calls).
+      // Merging every thought part into one blob and keeping only the
+      // first signature silently discards every other episode and
+      // destroys the interleaving with tool calls.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'A', thought: true },
+                  { thought: true, thoughtSignature: 'sigA' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'B', thought: true },
+                  { thought: true, thoughtSignature: 'sigB' },
+                  { functionCall: { id: 'call2', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'interleave' },
+        'p-interleave',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 'sigA' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+        { text: 'B', thought: true, thoughtSignature: 'sigB' },
+        { functionCall: { id: 'call2', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('records interleaved reasoning episodes in the JSONL turn, not just in-memory history', async () => {
+      // Regression guard: `getHistory()` and the recorded JSONL message are
+      // built from separately-maintained data (recordAssistantTurn takes
+      // its own `message` argument). A regression that drops reasoning
+      // before recording (e.g. filtering thought parts out of the recorded
+      // message only) would keep every history-only assertion above green
+      // while silently losing every thoughtSignature on `--resume` replay.
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new LlmChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
+        uiTelemetryService,
+      );
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'A', thought: true },
+                  { thought: true, thoughtSignature: 'sigA' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'B', thought: true },
+                  { thought: true, thoughtSignature: 'sigB' },
+                  { functionCall: { id: 'call2', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chatWithRecording.sendMessageStream(
+        'm1',
+        { message: 'interleave' },
+        'p-interleave-recording',
+      );
+      for await (const _ of res);
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 'sigA' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+        { text: 'B', thought: true, thoughtSignature: 'sigB' },
+        { functionCall: { id: 'call2', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('drops a dangling unsigned trailing thought episode when the turn is truncated before its terminating signature (avoids permanently wedging the session)', async () => {
+      // ep1 completes normally (has its signature); ep2 starts but the
+      // stream is cut off (MAX_TOKENS) before ep2's terminating
+      // signature-only chunk ever arrives -- flushThoughtEpisode's own
+      // "Known limitation" note documents this as exactly the case where a
+      // trailing episode can end up unsigned. Left in history alongside a
+      // tool_use in the same turn, this permanently wedges proxy-hosted
+      // adaptive Claude sessions: once the tool result arrives, the turn
+      // enters the active tool-use chain, and every subsequent request
+      // throws from dropUnsignedThinkingFromAssistantMessages -- nothing
+      // in-tree repairs an already-persisted history entry.
+      //
+      // A user-set max_tokens override keeps this test focused on the
+      // consolidation fix by skipping the unrelated MAX_TOKENS
+      // escalation/recovery machinery entirely (see the "does not
+      // escalate ... when max tokens are user-set" test above) rather
+      // than making it a no-op via a functionCall in the truncated turn:
+      // recovery's own functionCall skip only breaks out of a loop it
+      // already entered, but escalation itself is gated solely on
+      // `!hasUserMaxTokensOverride`.
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        samplingParams: { max_tokens: 4096 },
+      });
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'ep1', thought: true, thoughtSignature: 'sig1' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'ep2 partial', thought: true }, // truncated: no signature
+                ],
+              },
+              finishReason: 'MAX_TOKENS',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'truncated tool turn' },
+        'p-truncated-tool-turn',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.parts).toEqual([
+        { text: 'ep1', thought: true, thoughtSignature: 'sig1' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('pins current behavior: an unsigned thought immediately preceding a tool_use in an otherwise-complete stream is preserved, not dropped', async () => {
+      // Known residual risk (deliberately not fixed here): the trailing-only
+      // scope of dropDanglingUnsignedTrailingThought cannot catch a
+      // non-compliant proxy that drops exactly one episode's terminating
+      // signature-only chunk without the connection itself dropping,
+      // leaving an unsigned thought immediately BEFORE a functionCall
+      // instead of trailing (see the "Known limitation" note above the
+      // episode consolidation loop). Broadening the check to scan the
+      // whole array (tried and reverted) makes this shape indistinguishable
+      // from DeepSeek's normal, complete wire shape -- DeepSeek doesn't
+      // sign thinking blocks at all, so "unsigned thought right before a
+      // functionCall" is DeepSeek's ordinary, correct output, not a
+      // corruption signal (see "preserves thinking parts alongside
+      // tool_use when stream throws mid-tool" above). Since a stream's OWN
+      // truncation can only ever leave the dangling episode trailing (see
+      // dropDanglingUnsignedTrailingThought's doc), staying trailing-only
+      // is what lets the two cases be told apart at this layer. This test
+      // pins today's accepted behavior, not asserting it is safe against a
+      // genuinely non-compliant proxy -- see the design discussion for
+      // reachability.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'reasoning with a dropped signature',
+                    thought: true,
+                  },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'buried dangling episode' },
+        'p-buried-dangling-episode',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.parts).toEqual([
+        { text: 'reasoning with a dropped signature', thought: true },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('should split back-to-back reasoning episodes with no intervening tool call, once the first episode has its signature', async () => {
+      // Both wires terminate an episode with a text-less, signature-only
+      // chunk. Fresh text arriving after an already-signed open episode can
+      // only be the start of a new episode -- this is what lets two
+      // reasoning episodes survive as distinct parts even when nothing
+      // else separates them (e.g. reasoning for two parallel tool calls
+      // streamed back to back before either tool_call part arrives).
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'A', thought: true },
+                  { thought: true, thoughtSignature: 'sigA' },
+                  { text: 'B', thought: true },
+                  { thought: true, thoughtSignature: 'sigB' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'parallel' },
+        'p-parallel',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 'sigA' },
+        { text: 'B', thought: true, thoughtSignature: 'sigB' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('should concatenate a signature that arrives fragmented across multiple parts within one episode', async () => {
+      // anthropicContentGenerator.ts emits one Gemini chunk per
+      // signature_delta SSE event, carrying only that event's raw
+      // fragment -- a long signature can legitimately arrive split across
+      // several such events for the same thinking block. Concatenating
+      // (not "first fragment wins") is required to reconstruct a valid,
+      // replayable signature.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'A', thought: true },
+                  { thought: true, thoughtSignature: 'frag1' },
+                  { thought: true, thoughtSignature: 'frag2' },
+                  { text: 'visible response' },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'fragmented' },
+        'p-fragmented',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 'frag1frag2' },
+        { text: 'visible response' },
+      ]);
+    });
+
+    it('does not split an episode when its signature-only chunk arrives before any thinking text', async () => {
+      // Guards the `openEpisodeText.length > 0` clause in the episode-split
+      // condition: without it, a signature arriving before any text for
+      // its episode (a non-compliant proxy ordering, defended against by
+      // this guard) would flush a phantom empty signed episode as soon as
+      // the first real text chunk arrived, then flush that text again
+      // unsigned at the end of the turn -- two corrupted parts instead of
+      // one correct one.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { thought: true, thoughtSignature: 's' },
+                  { text: 'A', thought: true },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'signature before text' },
+        'p-signature-before-text',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 's' },
+      ]);
+    });
+
+    it('concatenates text across multiple deltas within the same still-open episode (the normal live-streaming shape)', async () => {
+      // Guards the `openEpisodeSignature !== ''` clause in the
+      // episode-split condition: a live thinking block arrives as one
+      // `{text, thought: true}` chunk per delta event, terminated by a
+      // separate signature-only chunk -- so multiple consecutive
+      // text-bearing thought parts before any signature is the NORMAL
+      // live shape, not a boundary between two episodes. Without this
+      // clause, every such block would fragment into N-1 unsigned parts
+      // plus one signed tail, which -- on proxy-hosted Claude, whenever
+      // the turn also contains a tool_use -- risks the same active-chain
+      // hazard as a truncation-induced dangling episode.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'part one ', thought: true },
+                  { text: 'part two', thought: true },
+                  { thought: true, thoughtSignature: 'sig' },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'multi-delta episode' },
+        'p-multi-delta-episode',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'part one part two', thought: true, thoughtSignature: 'sig' },
+      ]);
+    });
+
+    it('should still emit a single trailing reasoning episode when the turn ends mid-reasoning with no subsequent tool call', async () => {
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'trailing thought', thought: true },
+                  { thought: true, thoughtSignature: 'sigTrailing' },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'trailing' },
+        'p-trailing',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        {
+          text: 'trailing thought',
+          thought: true,
+          thoughtSignature: 'sigTrailing',
+        },
+      ]);
+    });
+
+    it('should preserve two OpenAI-Responses-shaped reasoning episodes (JSON-encoded signature payloads), each next to the function_call it preceded', async () => {
+      // The grouping algorithm only ever touches part.thought/text/
+      // thoughtSignature as opaque fields, so it must behave identically
+      // regardless of whether thoughtSignature is Anthropic's plain string
+      // or the OpenAI Responses PR's JSON-encoded {id, encrypted_content}
+      // payload (encodeReasoningSignature). This pins that claim with a
+      // concrete fixture shaped like the Responses generator's actual
+      // emission (a signature-only closing chunk carrying the JSON string).
+      const sigA = JSON.stringify({ id: 'rs_1', encrypted_content: 'encA' });
+      const sigB = JSON.stringify({ id: 'rs_2', encrypted_content: 'encB' });
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'reasoning for call 1', thought: true },
+                  { thought: true, thoughtSignature: sigA },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'reasoning for call 2', thought: true },
+                  { thought: true, thoughtSignature: sigB },
+                  { functionCall: { id: 'call2', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'responses-shaped' },
+        'p-responses-shaped',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        {
+          text: 'reasoning for call 1',
+          thought: true,
+          thoughtSignature: sigA,
+        },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+        {
+          text: 'reasoning for call 2',
+          thought: true,
+          thoughtSignature: sigB,
+        },
+        { functionCall: { id: 'call2', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('should still record a mid-turn signature-only reasoning episode with no accompanying text, rather than dropping it', async () => {
+      // A signature-only chunk with empty text is still potentially
+      // replayable per Anthropic's spec, so it must survive as its own
+      // Part ({text:'', thought:true, thoughtSignature}) rather than being
+      // silently dropped -- even when it isn't the trailing part of the
+      // turn (a functionCall follows it here, not just end-of-stream).
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'visible reasoning', thought: true },
+                  { thought: true, thoughtSignature: 'sig1' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { thought: true, thoughtSignature: 'sig2' },
+                  { functionCall: { id: 'call2', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'mid-turn-signature-only' },
+        'p-mid-turn-signature-only',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts).toEqual([
+        { text: 'visible reasoning', thought: true, thoughtSignature: 'sig1' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+        { text: '', thought: true, thoughtSignature: 'sig2' },
+        { functionCall: { id: 'call2', name: 'tool', args: {} } },
+      ]);
+    });
+
+    it('documents the accepted false positive: a truncated all-unsigned tool turn loses its trailing reasoning episode', async () => {
+      // Pins a KNOWN, accepted loss rather than desired behavior. A
+      // non-signing provider (DeepSeek) truncated mid-reasoning after a
+      // tool call produces `[thought(unsigned), functionCall,
+      // thought(unsigned)]` -- byte-for-byte the same array shape as a
+      // signing provider whose final episode was cut off before its
+      // signature arrived. dropDanglingUnsignedTrailingThought cannot tell
+      // them apart with only the array to look at, so it pops the trailing
+      // episode and the reasoning is gone from history AND from the JSONL
+      // record. Gating the pop on "this turn carries at least one
+      // signature" would fix this call site but is wrong at the
+      // recovery-coalescing site, where a truncated turn legitimately has
+      // no signature yet. See dropDanglingUnsignedTrailingThought's doc.
+      // If this test ever goes red, the trade-off was revisited on purpose
+      // -- update the doc alongside it.
+      //
+      // Asserted against BOTH surfaces on purpose. The "and from the JSONL
+      // record" half of the claim above holds only because `recordArgs.message`
+      // is built from the already-dropped `consolidatedHistoryParts`; that
+      // agreement is ordering-dependent, so a future reorder that moves the
+      // drop after the record call would leave a history-only assertion green
+      // while the JSONL kept the wedge shape for `--resume` to rehydrate.
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new LlmChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
+        uiTelemetryService,
+      );
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'first thought', thought: true },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'truncated second thought', thought: true },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chatWithRecording.sendMessageStream(
+        'm1',
+        { message: 'truncated-all-unsigned' },
+        'p-truncated-all-unsigned',
+      );
+      for await (const _ of res);
+
+      const expectedParts = [
+        { text: 'first thought', thought: true },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ];
+      expect(chatWithRecording.getHistory()[1].parts).toEqual(expectedParts);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual(
+        expectedParts,
+      );
+    });
+
+    it('documents the accepted limitation: two adjacent text-less signed thought parts concatenate their signatures', async () => {
+      // Pins a KNOWN corruption, not desired behavior. The episode split
+      // condition requires `partText !== ''`, so a text-less thought part
+      // can never open a new episode, while signature accumulation is
+      // unconditional -- two text-less signed parts therefore emit one
+      // part whose signature is 'sigAsigB', valid for neither block. This
+      // is indistinguishable at this layer from legitimate signature
+      // fragmentation within a single episode, which is exactly what the
+      // concatenation exists to serve. Unreachable on the Anthropic wire
+      // (thinking blocks always carry text); reachable on the OpenAI
+      // Responses wire when summaries are off and only encrypted_content
+      // is returned (#8169).
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { thought: true, thoughtSignature: 'sigA' },
+                  { thought: true, thoughtSignature: 'sigB' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'glued-signatures' },
+        'p-glued-signatures',
+      );
+      for await (const _ of res);
+
+      expect(chat.getHistory()[1].parts).toEqual([
+        { text: '', thought: true, thoughtSignature: 'sigAsigB' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ]);
     });
   });
 
@@ -10316,8 +11132,13 @@ describe('LlmChat', async () => {
       it('inserts the delivered text when the continuation has no text part', async () => {
         // Covers `textIndex < 0`: a thinking model completes the continuation
         // with only a thought part. The delivered text has nothing to merge
-        // into, so it is inserted as its own part — and must land *after* the
-        // thought, not ahead of it.
+        // into, so it would be inserted as its own part after any leading
+        // thought parts -- but inserting it AFTER an unsigned trailing
+        // thought would bury that episode mid-array before the
+        // coalescing-site trailing-only drop ever runs (see the
+        // "fourth call site" in dropDanglingUnsignedTrailingThought's doc
+        // comment), so the episode is dropped first and only the merged
+        // text survives.
         vi.useFakeTimers();
         try {
           vi.mocked(mockContentGenerator.generateContentStream)
@@ -10347,10 +11168,7 @@ describe('LlmChat', async () => {
 
           expect(chat.getHistory().at(-1)).toEqual({
             role: 'model',
-            parts: [
-              { text: 'only thinking', thought: true },
-              { text: 'part one ' },
-            ],
+            parts: [{ text: 'part one ' }],
           });
         } finally {
           vi.useRealTimers();
@@ -14406,6 +15224,7 @@ describe('LlmChat', async () => {
         text?: string;
         functionCall?: unknown;
         thought?: boolean;
+        thoughtSignature?: string;
       }>,
       finishReason?: string,
     ): GenerateContentResponse {
@@ -15435,6 +16254,181 @@ describe('LlmChat', async () => {
       expect(thoughtIdx).toBeGreaterThanOrEqual(0);
       expect(mergedTextIdx).toBeGreaterThanOrEqual(0);
       expect(thoughtIdx).toBeLessThan(mergedTextIdx);
+    });
+
+    it('drops a dangling unsigned thought episode reintroduced by recovery coalescing when the continuation calls a tool', async () => {
+      // Regression for a gap the per-stream trailing-pop fix didn't cover:
+      // that check only fires when THAT stream's own hasToolCall is true,
+      // but a thought-only truncated turn (no functionCall yet) is
+      // exactly the precondition the MAX_TOKENS recovery loop requires to
+      // proceed (geminiChat.ts's recovery loop skips recovery only when
+      // the truncated turn already has a functionCall). If the recovery
+      // continuation then calls a tool -- an ordinary agentic-loop event,
+      // no proxy bug needed -- coalesceRecoveryPairs merges the two
+      // attempts via appendRecoveryContinuationParts, whose dedup anchor
+      // is blind to `thought` parts, burying the original unsigned
+      // episode in the same turn as the continuation's functionCall.
+      // Without re-checking after the merge, this reopens the exact
+      // permanent-wedge hazard the trailing-pop fix exists to prevent.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [{ text: 'thinking about it', thought: true }],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'continuing',
+                functionCall: { id: 'c1', name: 'tool', args: {} },
+              },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'do a task' },
+        'prompt-recovery-dangling-episode',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const hasUnsignedThought = (lastEntry.parts ?? []).some(
+        (part) => part.thought && part.text && !part.thoughtSignature,
+      );
+      expect(hasUnsignedThought).toBe(false);
+      expect((lastEntry.parts ?? []).some((part) => part.functionCall)).toBe(
+        true,
+      );
+    });
+
+    it('keeps a SIGNED trailing reasoning episode on the truncated turn when coalescing recovery pairs', async () => {
+      // Complement to the drop test above, and the direction that site was
+      // missing: the XML-recovery call site pins both directions, but this
+      // one pinned only the pop. An over-pop localized here passed the whole
+      // suite. The drop is scoped to UNSIGNED trailing episodes -- a signed
+      // one is complete and replayable, so a signing provider whose episode
+      // completed just before MAX_TOKENS truncation must keep it when the
+      // continuation introduces a functionCall.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'complete episode',
+                thought: true,
+                thoughtSignature: 'sig-kept',
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'continuing',
+                functionCall: { id: 'c1', name: 'tool', args: {} },
+              },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'do a task' },
+        'prompt-recovery-signed-episode',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const parts =
+        chat.getHistory()[chat.getHistory().length - 1]!.parts ?? [];
+      const signed = parts.find((p) => p.thought && p.thoughtSignature);
+      expect(signed?.thoughtSignature).toBe('sig-kept');
+      expect(signed?.text).toBe('complete episode');
+      expect(parts.some((p) => p.functionCall)).toBe(true);
+      // Order is the replay-load-bearing half, same as the XML-recovery keep
+      // test: a signature-validating provider rejects a turn whose reasoning
+      // episode trails the tool call it preceded. Presence assertions alone
+      // survive a mutation that swaps appendRecoveryContinuationParts's final
+      // concat to `[...nextParts, ...mergedParts]`, splicing the continuation
+      // (with its functionCall) ahead of the merged episode.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
+    });
+
+    it('keeps a dangling unsigned trailing episode when coalescing recovery pairs and the continuation calls NO tool', async () => {
+      // Negative control for the coalescing-site drop gate. The drop is
+      // gated on "the recovery continuation introduces a functionCall"
+      // ((modelContinuation.parts ?? []).some((p) => p.functionCall)). When
+      // that continuation is plain text with NO tool call, the unsigned
+      // trailing episode is a legitimate reasoning fragment with nothing to
+      // wedge -- no tool_use will ever pair with it -- so it must be KEPT.
+      // Hardcoding that gate argument to `true` pops the episode here while
+      // every functionCall path (the drop test above, the whole describe)
+      // stays green, so without this complement the gate's FALSE branch is
+      // completely unpinned.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [{ text: 'thinking about it', thought: true }],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([makeChunk([{ text: 'continuing' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'do a task' },
+        'prompt-recovery-kept-unsigned-episode',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+      // The unsigned trailing episode survives because the continuation
+      // never introduced a functionCall.
+      expect(
+        parts.some(
+          (part) => part.thought && part.text && !part.thoughtSignature,
+        ),
+      ).toBe(true);
+      expect(parts.some((part) => part.text === 'thinking about it')).toBe(
+        true,
+      );
+      expect(parts.some((part) => part.functionCall)).toBe(false);
     });
 
     it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
@@ -18046,6 +19040,259 @@ describe('LlmChat', async () => {
       expect(hasRawXml).toBe(false);
     });
 
+    it('preserves a preceding reasoning episode (text + signature) when XML tool call recovery fires on the same turn', async () => {
+      // Regression guard: flushThoughtEpisode always sets `episodePart.text`
+      // (even '' for a signature-only episode), so a reasoning episode Part
+      // satisfies a bare `.text !== undefined` check exactly like a
+      // plain-text Part. The XML-recovery splice below must not treat the
+      // reasoning episode as one of the "text parts to remove and replace
+      // with remainingText" -- doing so silently deletes the episode's text
+      // and thoughtSignature from history instead of merely rewriting the
+      // XML into a structured functionCall.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      text: 'planning my read',
+                      thought: true,
+                      thoughtSignature: 'sig-should-survive',
+                    },
+                    { text: xml },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-with-reasoning',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      const syntheticChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      );
+      expect(syntheticChunk).toBeDefined();
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+      const thoughtPart = parts.find((p) => p.thought);
+      expect(thoughtPart).toBeDefined();
+      expect(thoughtPart?.thoughtSignature).toBe('sig-should-survive');
+      expect(thoughtPart?.text).toBe('planning my read');
+      expect(parts.some((p) => p.functionCall)).toBe(true);
+      expect(parts.some((p) => p.text?.includes('<invoke'))).toBe(false);
+      // Order is the replay-load-bearing half: a signature-validating
+      // provider rejects a turn whose reasoning episode trails the tool call
+      // it preceded. Presence assertions alone survive a mutation that
+      // splices functionCallParts ahead of the episode.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
+    });
+
+    it('drops a dangling unsigned trailing reasoning episode when XML tool call recovery attaches a functionCall', async () => {
+      // The per-stream dropDanglingUnsignedTrailingThought call can never
+      // fire on this path: XML recovery's own gate requires
+      // `hasToolCall === false`, which is exactly the condition under which
+      // the drop early-returns. Recovery then appends the recovered
+      // functionCall AFTER the surviving unsigned episode, producing an
+      // active tool-use turn that contains an unsigned thinking block --
+      // once the tool result returns,
+      // dropUnsignedThinkingFromAssistantMessages throws on every
+      // subsequent request and the session is permanently wedged. Re-running
+      // the trailing-only check after the append cannot catch it either,
+      // because by then the last part is the functionCall.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      text: 'planning my read',
+                      thought: true,
+                      thoughtSignature: 'sig-complete',
+                    },
+                    { text: xml },
+                    { text: 'cut off mid-thought', thought: true },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-dangling-episode',
+      );
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          // drain
+        }
+      }
+
+      const history = chat.getHistory();
+      const parts = history[history.length - 1]!.parts ?? [];
+      expect(parts.some((p) => p.functionCall)).toBe(true);
+      // The completed, signed episode is untouched...
+      const signed = parts.find((p) => p.thought && p.thoughtSignature);
+      expect(signed?.thoughtSignature).toBe('sig-complete');
+      // ...while the dangling unsigned one must not survive alongside the
+      // recovered tool call.
+      expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(false);
+      expect(parts.some((p) => p.text === 'cut off mid-thought')).toBe(false);
+      // The surviving signed episode must still precede the recovered call.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
+    });
+
+    it('keeps a dangling unsigned episode that PRECEDES the consumed XML text (it was never trailing)', async () => {
+      // The drop is trailing-only, and trailing-ness must be judged from the
+      // ORIGINAL stream shape, before the recovery branch's own removal loop
+      // splices out non-thought text parts. Here the unsigned episode is
+      // FIRST, not last -- a complete, untruncated turn from a non-signing
+      // provider (finish reason STOP, no truncation) -- so it was never
+      // trailing and must survive: dropping it would have no protective
+      // benefit (non-signing providers never validate signatures) and would
+      // be a pure loss of legitimate reasoning from history and the JSONL
+      // record.
+      //
+      // Shape: an unsigned episode first, then a plain-text part carrying a
+      // stray `thoughtSignature` and no `thought` flag -- the wire shape
+      // isVisibleTextPart's doc calls out as real -- whose text holds the
+      // XML. `remainingText` is non-empty ('Sure.'), which is what makes
+      // the ordering observable.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: 'planning my read', thought: true },
+                    { text: 'Sure.\n' + xml, thoughtSignature: 'stray-sig' },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-preceding-episode',
+      );
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          // drain
+        }
+      }
+
+      const parts = chat.getHistory()[1]!.parts ?? [];
+      expect(parts.some((p) => p.functionCall)).toBe(true);
+      expect(parts.some((p) => p.text?.includes('<invoke'))).toBe(false);
+      // The unsigned episode was never trailing, so it survives -- it is not
+      // the dangling-truncation shape this drop exists to catch, and this
+      // non-signing provider's tool-use turn carries no wedge risk from it.
+      expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(true);
+      expect(parts.some((p) => p.text === 'planning my read')).toBe(true);
+      // remainingText is non-empty here; the visible prose the user already
+      // saw streamed must survive the re-insertion, or `--resume` loses it
+      // permanently.
+      expect(parts.some((p) => p.text === 'Sure.')).toBe(true);
+    });
+
+    it('keeps a SIGNED trailing reasoning episode when XML tool call recovery fires', async () => {
+      // Complement to the drop above: the drop is scoped to UNSIGNED
+      // trailing episodes. A signed trailing episode is a complete,
+      // replayable episode and must survive recovery -- a mutation that
+      // popped unconditionally would still pass the drop test above.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: xml },
+                    {
+                      text: 'a complete afterthought',
+                      thought: true,
+                      thoughtSignature: 'sig-trailing',
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-signed-trailing',
+      );
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          // drain
+        }
+      }
+
+      const history = chat.getHistory();
+      const parts = history[history.length - 1]!.parts ?? [];
+      expect(parts.some((p) => p.functionCall)).toBe(true);
+      const trailing = parts.find((p) => p.thought);
+      expect(trailing?.thoughtSignature).toBe('sig-trailing');
+      expect(trailing?.text).toBe('a complete afterthought');
+      // Even though this episode arrived AFTER the XML text on the wire, the
+      // consumed text part is spliced out and the recovered calls are
+      // appended last, so every surviving episode ends up preceding them --
+      // the shape a signature-validating provider requires on replay.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
+    });
+
     it('retains a short text prefix in history when recovering XML tool calls', async () => {
       const xml =
         '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
@@ -18084,6 +19331,62 @@ describe('LlmChat', async () => {
       const callIndex = parts.findIndex((p) => p.functionCall);
       expect(textIndex).toBeGreaterThanOrEqual(0);
       expect(callIndex).toBeGreaterThan(textIndex);
+      expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
+        false,
+      );
+    });
+
+    it('recovers XML tool calls from a plain-text part carrying a stray thoughtSignature (no thought flag)', async () => {
+      // Regression for a predicate-divergence bug: loggingContentGenerator's
+      // stream aggregation spreads `thought` and `thoughtSignature`
+      // independently (see loggingContentGenerator.ts), so a real wire shape
+      // can carry `thoughtSignature` on a part that is NOT flagged
+      // `thought: true`. contentText's filter (`part.text && !part.thought`)
+      // picks this part up for XML detection, but the removal loop must use
+      // an identical predicate or the part survives untouched -- leaking the
+      // raw XML into durable history right alongside the recovered
+      // functionCall.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      const text = 'Sure.\n' + xml;
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text, thoughtSignature: 'stray-sig' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-stray-signature',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      const syntheticChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      );
+      expect(syntheticChunk).toBeDefined();
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+      expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
         false,
       );
