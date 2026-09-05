@@ -559,7 +559,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description: 'Cross-origin allowlist for browser webui clients.',
+        description: 'Cross-origin allowlist for browser clients.',
       })
       .option('allow-private-auth-base-url', {
         type: 'boolean',
