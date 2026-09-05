@@ -9007,18 +9007,30 @@ export class Session implements SessionContext {
                     nextMessage.parts ?? [],
                     ac.signal,
                   );
-                if (!sendResult.responseStream) {
+                const responseStream = sendResult.responseStream;
+                const preserveFullMessage =
+                  !responseStream && sendResult.stopReason === 'cancelled';
+                if (!responseStream) {
                   this.todoStopGuard.suspend();
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
-                    sendResult.stopReason === 'cancelled',
+                    preserveFullMessage,
                   );
                   if (sendResult.stopReason === 'max_tokens') {
                     this.#stopCronAfterTokenLimit();
                   }
-                  return;
                 }
-                const responseStream = sendResult.responseStream;
+                // Keep transcript replay aligned with model history: persist
+                // only if the prompt reached the model or was preserved in full.
+                if (
+                  turnCount === 1 &&
+                  (responseStream || preserveFullMessage)
+                ) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordCronPrompt([{ text: modelText }], echoText);
+                }
+                if (!responseStream) return;
                 const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
