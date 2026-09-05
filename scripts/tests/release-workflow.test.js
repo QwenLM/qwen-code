@@ -645,9 +645,11 @@ describe('release workflow', () => {
     // Lint, quality_build at 45m13s in Pack Build Outputs. A timeout kill
     // reports as 'cancelled', the quality aggregate fails closed on it, and
     // the release failure was filed against a tree with nothing to fix. Same
-    // remedy as workspace_tests: a runtime knob, defaults unchanged.
+    // remedy as workspace_tests: a runtime knob. The static default moved
+    // 30 -> 60 on the pricing evidence its lane comment records (#11121);
+    // the build default stays a fleet-load call for the operator.
     expect(releaseYaml.jobs.quality_static['timeout-minutes']).toBe(
-      "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}",
+      "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
     );
     expect(releaseYaml.jobs.quality_build['timeout-minutes']).toBe(
       "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
@@ -1472,7 +1474,7 @@ describe('release workflow', () => {
       // The three bounds an operator can retune without a PR; their defaults
       // are pinned by their own tests above.
       quality_static:
-        "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '30') }}",
+        "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
       quality_build:
         "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
       quality_typecheck: 30,
