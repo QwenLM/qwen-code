@@ -3121,9 +3121,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // dropped stream.
           {
             const loadedIndex = turnIndexRef.current;
+            // The run-local `capabilities` is assigned only on the fresh-load
+            // branch; a re-run that attaches an already-held session skips that
+            // fetch entirely, so reading it alone would see `undefined` and park
+            // a capable daemon's index on `disabled` forever. That is the
+            // standard new-chat flow: mount without a session, first prompt
+            // creates and attaches, the re-run takes the attach branch.
+            // `sessionCapabilitiesRef` survives across iterations and is what
+            // the callbacks outside this branch already read.
+            const attachCapabilities =
+              capabilities ?? sessionCapabilitiesRef.current;
             const turnNavigationSupported =
-              Array.isArray(capabilities?.features) &&
-              capabilities.features.includes(SESSION_TURN_NAVIGATION_FEATURE);
+              Array.isArray(attachCapabilities?.features) &&
+              attachCapabilities.features.includes(
+                SESSION_TURN_NAVIGATION_FEATURE,
+              );
             if (
               loadedIndex.sessionId !== activeSession.sessionId ||
               (!turnNavigationSupported && loadedIndex.status !== 'disabled')
