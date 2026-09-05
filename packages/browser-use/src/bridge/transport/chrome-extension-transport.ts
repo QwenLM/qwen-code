@@ -404,12 +404,11 @@ async function listen(server: Server, socketPath: string): Promise<void> {
 }
 
 export function isAddressInUse(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    error.code === 'EADDRINUSE'
-  );
+  return hasErrorCode(error, 'EADDRINUSE');
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return isObject(error) && error.code === code;
 }
 
 async function recoverStaleSocketAndListen(
@@ -431,8 +430,7 @@ async function recoverStaleSocketAndListen(
 async function removeStaleSocket(socketPath: string): Promise<boolean> {
   if (process.platform === 'win32') return false;
   const info = await lstat(socketPath).catch((error: unknown) => {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
-      return undefined;
+    if (hasErrorCode(error, 'ENOENT')) return undefined;
     throw error;
   });
   if (info === undefined) return true;
@@ -441,8 +439,7 @@ async function removeStaleSocket(socketPath: string): Promise<boolean> {
     return false;
   if (await socketAcceptsConnections(socketPath)) return false;
   const current = await lstat(socketPath).catch((error: unknown) => {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
-      return undefined;
+    if (hasErrorCode(error, 'ENOENT')) return undefined;
     throw error;
   });
   if (current === undefined) return true;
@@ -453,8 +450,7 @@ async function removeStaleSocket(socketPath: string): Promise<boolean> {
   )
     return false;
   await unlink(socketPath).catch((error: unknown) => {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
-      throw error;
+    if (!hasErrorCode(error, 'ENOENT')) throw error;
   });
   return true;
 }
@@ -477,21 +473,11 @@ async function acquireRecoveryLock(
         throw error;
       }
     } catch (error) {
-      if (
-        !(error instanceof Error && 'code' in error && error.code === 'EEXIST')
-      )
-        throw error;
+      if (!hasErrorCode(error, 'EEXIST')) throw error;
       const owner = await readRecoveryLockOwner(path);
       if (owner === undefined || processIsAlive(owner)) return undefined;
       await unlink(path).catch((unlinkError: unknown) => {
-        if (
-          !(
-            unlinkError instanceof Error &&
-            'code' in unlinkError &&
-            unlinkError.code === 'ENOENT'
-          )
-        )
-          throw unlinkError;
+        if (!hasErrorCode(unlinkError, 'ENOENT')) throw unlinkError;
       });
     }
   }
@@ -520,11 +506,7 @@ function processIsAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return !(
-      error instanceof Error &&
-      'code' in error &&
-      error.code === 'ESRCH'
-    );
+    return !hasErrorCode(error, 'ESRCH');
   }
 }
 
@@ -557,8 +539,7 @@ async function unlinkOwnedSocket(
   )
     return;
   await unlink(socketPath).catch((error: unknown) => {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
-      throw error;
+    if (!hasErrorCode(error, 'ENOENT')) throw error;
   });
 }
 
@@ -576,8 +557,9 @@ async function socketAcceptsConnections(socketPath: string): Promise<boolean> {
     const timer = setTimeout(() => finish(true), 500);
     candidate.once('connect', () => finish(true));
     candidate.once('error', (error: Error) => {
-      const code = 'code' in error ? error.code : undefined;
-      finish(code !== 'ECONNREFUSED' && code !== 'ENOENT');
+      finish(
+        !hasErrorCode(error, 'ECONNREFUSED') && !hasErrorCode(error, 'ENOENT'),
+      );
     });
   });
 }

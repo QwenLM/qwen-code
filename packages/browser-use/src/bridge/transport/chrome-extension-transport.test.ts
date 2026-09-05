@@ -5,10 +5,14 @@
  */
 
 import { connect } from 'node:net';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
+import { build } from 'esbuild';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
@@ -41,6 +45,81 @@ describe('ChromeExtensionTransport', () => {
     expect(error instanceof Error).toBe(false);
     expect(isAddressInUse(error)).toBe(true);
   });
+
+  it.skipIf(process.platform === 'win32').each(['dead', 'live'] as const)(
+    'handles a %s recovery-lock owner when running in a VM realm',
+    async (ownerState) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const socketPath = path.join(root, 'bridge.sock');
+      const child = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))",
+          socketPath,
+        ],
+        { timeout: 15_000 },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      expect(() => process.kill(child.pid, 0)).toThrowError(
+        expect.objectContaining({ code: 'ESRCH' }),
+      );
+      const originalSocket = fs.statSync(socketPath);
+      expect(originalSocket.isSocket()).toBe(true);
+      const lockPath = `${socketPath}.recovery-lock`;
+      const lockContents = JSON.stringify({
+        pid: ownerState === 'dead' ? child.pid : process.pid,
+        token: 'fixture-owner',
+      });
+      fs.writeFileSync(lockPath, lockContents);
+
+      const bundled = await build({
+        entryPoints: [
+          fileURLToPath(
+            new URL('./chrome-extension-transport.ts', import.meta.url),
+          ),
+        ],
+        bundle: true,
+        write: false,
+        format: 'cjs',
+        platform: 'node',
+      });
+      const sandbox = {
+        module: { exports: {} },
+        require: createRequire(import.meta.url),
+        process,
+        Buffer,
+      };
+      runInNewContext(bundled.outputFiles[0].text, sandbox);
+      const { ChromeExtensionTransport: ForeignTransport } = sandbox.module
+        .exports as {
+        ChromeExtensionTransport: typeof ChromeExtensionTransport;
+      };
+      const transport = new ForeignTransport({ socketPath });
+      transports.push(transport);
+      expect(transport instanceof ChromeExtensionTransport).toBe(false);
+
+      if (ownerState === 'dead') {
+        await expect(transport.start()).resolves.toBeUndefined();
+        expect(fs.existsSync(lockPath)).toBe(false);
+        const socket = connect(socketPath);
+        await new Promise<void>((resolve) => socket.once('connect', resolve));
+        socket.destroy();
+      } else {
+        await expect(transport.start()).rejects.toMatchObject({
+          code: 'TRANSPORT_UNAVAILABLE',
+        });
+        expect(fs.readFileSync(lockPath, 'utf8')).toBe(lockContents);
+        expect(fs.statSync(socketPath)).toMatchObject({
+          dev: originalSocket.dev,
+          ino: originalSocket.ino,
+        });
+      }
+    },
+    30_000,
+  );
 
   it('uses an environment-independent Unix socket path', () => {
     if (process.platform === 'win32') return;
