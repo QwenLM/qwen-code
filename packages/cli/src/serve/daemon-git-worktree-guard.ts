@@ -10,7 +10,9 @@ import { parse } from 'shell-quote';
 import {
   getShellConfiguration,
   GitWorktreeService,
+  heredocSafetyForStateTracking,
   isWithinRoot,
+  projectHeredocBodiesForStateTracking,
   realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
@@ -291,6 +293,8 @@ const CMD_REWRITE_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
 const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing Windows shell syntax it cannot evaluate before execution.';
+const UNMODELLED_HEREDOC_DENIAL =
+  'Daemon shell guard denied a shell command containing heredoc structure it cannot evaluate before execution.';
 const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
@@ -2255,35 +2259,6 @@ interface EvaluationScope {
  * quote and substitution rules. `separators[i]` follows segment `i`. Both
  * sides of a `|` run in subshells, so a `cd` there must not move the shell.
  */
-/**
- * A heredoc body is stdin data delivered to the command, not shell commands,
- * yet `splitCommands` has no heredoc state and would parse each body line as
- * its own segment — letting a body `cd` launder the tracked directory. Strip
- * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
- * best-effort: only the first heredoc on a line is handled, which is the
- * shape a model emits, and anything unrecognised is left untouched.
- */
-function stripHeredocBodies(command: string): string {
-  const lines = command.split('\n');
-  const out: string[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
-    out.push(line);
-    const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
-    if (!match) continue;
-    const delimiter = match[2]!;
-    const stripTabs = line.includes('<<-');
-    // Consume the body up to the delimiter line, dropping it from the output.
-    while (index + 1 < lines.length) {
-      index++;
-      const body = lines[index]!;
-      const trimmed = stripTabs ? body.replace(/^\t+/, '') : body;
-      if (trimmed === delimiter) break;
-    }
-  }
-  return out.join('\n');
-}
-
 function readTopLevelSeparators(command: string): string[] {
   const separators: string[] = [];
   let single = false;
@@ -2523,8 +2498,20 @@ async function evaluateCommandWithCwd(
   const windowsNative = platformNow === 'win32' && shellNow !== 'bash';
   // Heredocs are a POSIX shell construct: on the Windows lanes the marker
   // line's body lines are separate commands, so stripping them would hide
-  // commands the executed text really runs.
-  const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
+  // commands the executed text really runs. Everywhere else the projection
+  // neutralizes inert heredoc bodies instead of deleting them (#9417), and
+  // anything whose receiver or structure the parser cannot prove inert is
+  // denied outright rather than scanned further.
+  let strippedCommand = command;
+  if (!windowsNative) {
+    if (!heredocSafetyForStateTracking(command).safe) {
+      return {
+        denial: { allowed: false, reason: UNMODELLED_HEREDOC_DENIAL },
+        cwdAfter: trackedCwd,
+      };
+    }
+    strippedCommand = projectHeredocBodiesForStateTracking(command);
+  }
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
       denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },

@@ -2614,6 +2614,10 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     // A heredoc body must not launder a tracked cwd.
     () =>
       `cd ${plainOutsidePath}; cat <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    () =>
+      `cd ${plainOutsidePath}; bash <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    () =>
+      `cd ${plainOutsidePath}; bash <<EOF\ngit() { true; }\nEOF\ngit reset --hard`,
     // A `-C` inside a function body is seen when the body spans segments.
     () => `f() { true; git -C ${plainOutsidePath} reset --hard; }; f`,
   ])('denies the round-9 critical form %#', async (build) => {
@@ -2634,6 +2638,96 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
+  });
+
+  it('keeps valid compound heredoc openers parseable', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'cat <<EOF && echo done\nhello\nEOF',
+      'cat <<EOF || echo done\nhello\nEOF',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
+  // Heredocs are bash syntax; on the cmd.exe lane these shapes never execute
+  // as heredocs and the divergent-syntax gate owns what is provable there.
+  it.runIf(bashSemanticsLane)(
+    'denies a heredoc piped into a shell outright',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // The body runs as shell code here; nothing about it is provable, so the
+      // guard must fail closed instead of dropping it from view (#9417).
+      await expect(
+        guard(request('cat <<EOF | bash\necho done\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request('tee /tmp/s.sh <<EOF\nrm -rf /important\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.runIf(bashSemanticsLane).each([
+    // A shell-fed body is executed code, never stdin data.
+    `bash <<'EOF'\ngit reset --hard\nEOF`,
+    `sh <<'EOF'\ngit reset --hard\nEOF`,
+    `bash -s <<'EOF'\ngit reset --hard\nEOF`,
+    `bash - <<'EOF'\ngit reset --hard\nEOF`,
+    `bash /dev/stdin <<'EOF'\ngit reset --hard\nEOF`,
+    // Interpreters run the body as a program.
+    `python <<'EOF'\nimport os\nEOF`,
+    `python - X=1 <<'EOF'\nprint(1)\nEOF`,
+    `node <<'EOF'\nprocess.exit(1)\nEOF`,
+    // Command substitution inside an unquoted body executes.
+    `cat <<EOF\n$(git reset --hard)\nEOF`,
+    // A delimiter prefix is not a word boundary in bash.
+    `cat <<END-X\nbody\nEND-X`,
+    // Arithmetic spanning lines is outside the grammar.
+    `(( a\ncat <<EOF\n))`,
+    // An unsafe opener keeps the body, and the body must not launder the cwd.
+    `cat $F <<'EOF'\ncd /tmp\nEOF\ngit reset --hard`,
+    // An odd trailing backslash splices lines the parser cannot see across.
+    `bash -s \\\ncat <<EOF\nrm -rf /important\nEOF`,
+    `cat <<EOF # c \\\nbody\nEOF`,
+    // A bare dot is the POSIX source builtin.
+    `. /tmp/evil\ncat <<EOF\nrm -rf /important\nEOF`,
+    // trap redefines the receiver behind the guard's back.
+    `trap 'cat() { bash; }' DEBUG\ncat <<EOF\ngit reset --hard\nEOF`,
+  ])('fails closed on heredoc entrance %#', async (command) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(command))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it.runIf(bashSemanticsLane)(
+    'does not let an LF-only line terminate a CRLF heredoc early',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // bash keeps the CR in the delimiter word, so "EOF" without it is body,
+      // not the terminator; the command is unterminated and must fail closed.
+      await expect(
+        guard(request('cat <<EOF\r\nbody\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      // A consistently CRLF command parses fine and stays inert.
+      await expect(
+        guard(request('cat <<EOF\r\nbody\r\nEOF\r')),
+      ).resolves.toMatchObject({ allowed: true });
+    },
+  );
+
+  it('treats an escaped quote as a literal, not a string opener', async () => {
+    const guard = createDaemonToolGuard();
+
+    // \" is a literal character, so the heredoc below is real and its body is
+    // stripped as usual instead of being hidden inside a phantom string.
+    await expect(
+      guard(request("echo \\\"\ncat <<'EOF'\nrm -rf /important\nEOF")),
+    ).resolves.toMatchObject({ allowed: true });
   });
 
   // Backgrounding, heredocs and function definitions are bash spellings the

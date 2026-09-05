@@ -35,7 +35,7 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegments } from './rule-parser.js';
+import { splitCompoundCommandSegmentsForStateTracking } from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2177,93 +2177,13 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
   return ops;
 }
 
-function stripHeredocBodies(command: string): string {
-  const lines = command.split('\n');
-  const kept: string[] = [];
-  const pendingDelimiters: string[] = [];
-
-  for (const line of lines) {
-    if (pendingDelimiters.length > 0) {
-      if (line.trim() === pendingDelimiters[0]) {
-        pendingDelimiters.shift();
-      }
-      continue;
-    }
-
-    kept.push(line);
-    pendingDelimiters.push(...getHeredocDelimiters(line));
-  }
-
-  return kept.join('\n');
-}
-
-function getHeredocDelimiters(line: string): string[] {
-  const delimiters: string[] = [];
-  let inSingle = false;
-  let inDouble = false;
-  let escaped = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]!;
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\' && !inSingle) {
-      escaped = true;
-      continue;
-    }
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle;
-      continue;
-    }
-    if (ch === '"' && !inSingle) {
-      inDouble = !inDouble;
-      continue;
-    }
-    if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
-      continue;
-    }
-    if (line[i + 2] === '<') {
-      i += 2;
-      continue;
-    }
-
-    let wordStart = i + 2;
-    if (line[wordStart] === '-') wordStart++;
-    while (line[wordStart] === ' ' || line[wordStart] === '\t') {
-      wordStart++;
-    }
-
-    const quote = line[wordStart];
-    const quoted = quote === "'" || quote === '"';
-    if (quoted) wordStart++;
-
-    let wordEnd = wordStart;
-    while (wordEnd < line.length) {
-      const wordCh = line[wordEnd]!;
-      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./-]/.test(wordCh)) {
-        break;
-      }
-      wordEnd++;
-    }
-
-    if (wordEnd > wordStart) {
-      delimiters.push(line.slice(wordStart, wordEnd));
-    }
-    i = wordEnd;
-  }
-  return delimiters;
-}
-
 function walkCompoundCommand(
   command: string,
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const subCommands = splitCompoundCommandSegmentsForStateTracking(command);
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
