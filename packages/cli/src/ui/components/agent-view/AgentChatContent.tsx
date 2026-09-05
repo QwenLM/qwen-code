@@ -38,6 +38,7 @@ import {
   type ScrollableListRef,
 } from '../shared/ScrollableList.js';
 import { TextSelectionController } from '../../selection/use-text-selection.js';
+import { ContentMouseController } from '../../context-menu/ContentMouseController.js';
 
 // Virtual-viewport item wrapper for the VP scroll path. `pending` preserves
 // the committed/live split: items from an executing/confirming tool group
@@ -305,6 +306,7 @@ export const AgentChatContent = ({
             isPending={true}
             terminalWidth={terminalWidth}
             mainAreaWidth={contentWidth}
+            fullDetail={fullDetail}
             availableTerminalHeight={
               constrainHeight ? availableTerminalHeight : undefined
             }
@@ -321,6 +323,7 @@ export const AgentChatContent = ({
           terminalWidth={terminalWidth}
           mainAreaWidth={contentWidth}
           thoughtHeadId={thoughtHeadIdByItem.get(vpItem.item)}
+          fullDetail={fullDetail}
         />
       );
     },
@@ -334,6 +337,7 @@ export const AgentChatContent = ({
       constrainHeight,
       availableTerminalHeight,
       readonly,
+      fullDetail,
       activePtyId,
       embeddedShellFocused,
       thoughtHeadIdByItem,
@@ -365,6 +369,19 @@ export const AgentChatContent = ({
               innerHeight: 0,
             }
           }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+        />
+        {/* SGR mouse tracking is armed by ScrollableList above, which takes
+            the mouse away from the terminal. Mount the controller that gives
+            back what tracking costs — OSC 8 link clicks and the right-click
+            context menu — exactly as MainContent does on its VP path. The
+            menu itself is painted by the shared <ContextMenuOverlay /> in
+            DefaultAppLayout, which sits above this tab. */}
+        <ContentMouseController
+          isActive={!dialogsVisible && !embeddedShellFocused}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           hitTestScrollbar={(location) =>
             scrollRef.current?.hitTestScrollbar(location) ?? false
           }

@@ -33,6 +33,7 @@ import { Text } from 'ink';
 import { AgentChatContent } from './AgentChatContent.js';
 import { UIStateContext, type UIState } from '../../contexts/UIStateContext.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
+import { ThoughtExpandedProvider } from '../../contexts/ThoughtExpandedContext.js';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import type { AgentMessage } from '@qwen-code/qwen-code-core';
 
@@ -54,21 +55,37 @@ vi.mock('ink', async (importOriginal) => {
   };
 });
 
+const historyItemDisplaySpy = vi.hoisted(() => vi.fn());
+type HistoryItemDisplayProps = {
+  id: number;
+  isPending?: boolean;
+  fullDetail?: boolean;
+};
+/** Props of every HistoryItemDisplay render recorded so far. */
+const historyItemDisplayCalls = (): HistoryItemDisplayProps[] =>
+  historyItemDisplaySpy.mock.calls.map(
+    (args: unknown[]) => args[0] as HistoryItemDisplayProps,
+  );
 vi.mock('../HistoryItemDisplay.js', () => ({
   HistoryItemDisplay: ({
     item,
     isPending,
+    fullDetail,
   }: {
     item: { id: number; type: string; text?: string };
     isPending?: boolean;
-  }) => (
-    <Text>
-      {item.type === 'tool_group'
-        ? `TOOLGROUP:${item.id}`
-        : (item.text ?? `ITEM:${item.id}`)}
-      {isPending ? ':pending' : ''}
-    </Text>
-  ),
+    fullDetail?: boolean;
+  }) => {
+    historyItemDisplaySpy({ id: item.id, isPending, fullDetail });
+    return (
+      <Text>
+        {item.type === 'tool_group'
+          ? `TOOLGROUP:${item.id}`
+          : (item.text ?? `ITEM:${item.id}`)}
+        {isPending ? ':pending' : ''}
+      </Text>
+    );
+  },
 }));
 
 vi.mock('./AgentHeader.js', () => ({
@@ -83,6 +100,17 @@ const textSelectionControllerSpy = vi.hoisted(() => vi.fn());
 vi.mock('../../selection/use-text-selection.js', () => ({
   TextSelectionController: (props: { isActive: boolean }) => {
     textSelectionControllerSpy(props);
+    return null;
+  },
+}));
+
+// The VP path arms SGR mouse capture through ScrollableList, which takes the
+// mouse away from the terminal. ContentMouseController is what hands back
+// OSC 8 link clicks and the right-click menu, so pin that it is mounted.
+const contentMouseControllerSpy = vi.hoisted(() => vi.fn());
+vi.mock('../../context-menu/ContentMouseController.js', () => ({
+  ContentMouseController: (props: { isActive: boolean }) => {
+    contentMouseControllerSpy(props);
     return null;
   },
 }));
@@ -243,16 +271,32 @@ const makeInteractiveAgent = () =>
     getExecutionStartTimes: () => new Map(),
   }) as never;
 
-const renderContent = (uiState: UIState, core: unknown) =>
+// `allExpanded` is the app-wide Ctrl+O/Alt+T full-detail switch that
+// AppContainer flips and HistoryItemDisplay consumes as `fullDetail`.
+// Default it to ON so the forwarded value is observable (a dropped prop
+// reads as `undefined`, not `false`).
+const renderContent = (
+  uiState: UIState,
+  core: unknown,
+  { allExpanded = true }: { allExpanded?: boolean } = {},
+) =>
   render(
     <KeypressProvider kittyProtocolEnabled={false}>
       <UIStateContext.Provider value={uiState}>
-        <AgentChatContent
-          core={core as never}
-          interactiveAgent={makeInteractiveAgent()}
-          instanceKey="teammate@team"
-          modelName="teammate"
-        />
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded,
+            expandedHeadIds: new Set<number>(),
+            toggle: () => {},
+          }}
+        >
+          <AgentChatContent
+            core={core as never}
+            interactiveAgent={makeInteractiveAgent()}
+            instanceKey="teammate@team"
+            modelName="teammate"
+          />
+        </ThoughtExpandedProvider>
       </UIStateContext.Provider>
     </KeypressProvider>,
   );
@@ -278,6 +322,8 @@ describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
   beforeEach(() => {
     setAgentShellFocusedSpy.mockClear();
     textSelectionControllerSpy.mockClear();
+    contentMouseControllerSpy.mockClear();
+    historyItemDisplaySpy.mockClear();
   });
 
   it('VP mode: Page Up scrolls the teammate transcript back to earlier output', async () => {
@@ -347,5 +393,67 @@ describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
     // re-enters the window: scroll to the head and back to the tail.
     await pageUpToTop(view);
     expect(view.lastFrame()).toContain('user-msg-0');
+  });
+
+  it('VP mode: forwards the Ctrl+O full-detail toggle on both render paths', async () => {
+    // Truncated tool rows advertise "… +N chars (ctrl+o)", so the toggle has
+    // to reach HistoryItemDisplay through the virtual viewport too — on the
+    // committed branch AND the pending branch, or the key does nothing here.
+    const messages: AgentMessage[] = [
+      ...makeMessages(20),
+      {
+        role: 'tool_call',
+        content: '',
+        timestamp: Date.now(),
+        metadata: { callId: 'call-1', toolName: 'run_shell_command' },
+      },
+    ];
+    renderContent(createUIState(), makeCore(messages));
+    await settle();
+
+    const calls = historyItemDisplayCalls();
+    expect(calls.length).toBeGreaterThan(0);
+
+    // Both branches rendered, and neither dropped the prop. A VP path that
+    // forgets `fullDetail` reports `undefined` here, not `false`.
+    expect(calls.some((c) => c.isPending === true)).toBe(true);
+    expect(calls.some((c) => c.isPending === false)).toBe(true);
+    expect(calls.every((c) => c.fullDetail === true)).toBe(true);
+  });
+
+  it('VP mode: full-detail forwarding tracks the toggle instead of being hardcoded', async () => {
+    renderContent(createUIState(), makeCore(makeMessages(20)), {
+      allExpanded: false,
+    });
+    await settle();
+
+    const calls = historyItemDisplayCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.fullDetail === false)).toBe(true);
+  });
+
+  it('VP mode: mounts ContentMouseController so link clicks and the right-click menu survive SGR capture', async () => {
+    // ScrollableList arms SGR mouse tracking (bypassVpGate), which makes the
+    // terminal stop handling the mouse natively. Without this controller OSC 8
+    // link clicks and the right-click menu silently do nothing on this tab —
+    // MainContent mounts it for exactly this reason.
+    renderContent(createUIState(), makeCore(makeMessages(40)));
+    await settle();
+
+    expect(contentMouseControllerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: true }),
+    );
+  });
+
+  it('legacy mode: does not mount ContentMouseController (terminal still owns the mouse)', async () => {
+    // No SGR tracking is armed on the `<Static>` path, so the terminal handles
+    // clicks itself; mounting the controller here would double-handle them.
+    renderContent(
+      createUIState({ useTerminalBuffer: false }),
+      makeCore(makeMessages(40)),
+    );
+    await settle();
+
+    expect(contentMouseControllerSpy).not.toHaveBeenCalled();
   });
 });
