@@ -10,7 +10,7 @@ import { skillArgsPath } from './skill-args-file.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CommandKind } from '../ui/commands/types.js';
+import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
   type Config,
@@ -38,9 +38,11 @@ describe('BundledSkillLoader', () => {
     listSkills: ReturnType<typeof vi.fn>;
   };
   let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
+  let mockAddSessionHook: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddSessionHook = vi.fn();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
@@ -57,6 +59,13 @@ describe('BundledSkillLoader', () => {
       // assertions about bundled skills surfacing stay true; per-test
       // cases override.
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getHookSystem: vi.fn().mockReturnValue({
+        getSessionHooksManager: () => ({
+          addSessionHook: mockAddSessionHook,
+          getHooksForEvent: () => [],
+        }),
+      }),
     } as unknown as Config;
   });
 
@@ -521,6 +530,35 @@ describe('BundledSkillLoader', () => {
       expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
         'review',
       ]);
+    });
+  });
+  describe('frontmatter hooks registration (#11067)', () => {
+    it("registers a bundled skill's hooks when invoked via /<skill-name>", async () => {
+      const skill = makeSkill({
+        skillRoot: '/bundled/my-skill',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: 'command', command: './gate.sh' }],
+            },
+          ],
+        } as unknown as SkillConfig['hooks'],
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        'PreToolUse',
+        'Shell',
+        expect.objectContaining({ type: 'command', command: './gate.sh' }),
+        expect.objectContaining({ trustGated: false }),
+      );
     });
   });
 });

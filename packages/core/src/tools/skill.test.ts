@@ -1227,6 +1227,75 @@ describe('SkillTool', () => {
       expect(skillTool.getLoadedSkillContents()).toEqual(new Set([output]));
     });
 
+    it('re-applies side effects for each restored Skill, so a resumed session keeps its gate', () => {
+      // Session hooks and allow rules are in-memory only, so a resumed
+      // session starts with none. The restored body still carries the
+      // skill's instructions, and the dedup guard answers "already loaded",
+      // so nothing would prompt a re-invocation that re-registers them —
+      // the skill's PreToolUse gate would never fire again.
+      vi.mocked(registerSkillHooks).mockClear();
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager: vi.fn().mockReturnValue({}),
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const gated: SkillConfig = {
+        name: 'gated-skill',
+        description: 'Gated',
+        level: 'user',
+        filePath: '/home/user/.qwen/skills/gated-skill/SKILL.md',
+        skillRoot: '/home/user/.qwen/skills/gated-skill',
+        body: 'Gated body.',
+        allowedTools: ['Edit'],
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: 'command', command: './gate.sh' }],
+            },
+          ],
+        } as unknown as SkillConfig['hooks'],
+      };
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([gated]);
+
+      const output = buildSkillLlmContent(
+        '/home/user/.qwen/skills/gated-skill',
+        gated.body,
+      );
+      skillTool.restoreLoadedSkillsFromHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                args: { skill: 'gated-skill' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(skillTool.getLoadedSkillNames()).toEqual(new Set(['gated-skill']));
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Edit', {
+        trustGated: false,
+      });
+    });
+
     it('does not restore command output that matches an unrelated cached Skill', () => {
       const output = buildSkillLlmContent(
         '/project/.qwen/skills/code-review',

@@ -22,7 +22,6 @@ import {
 } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 const debugLogger = createDebugLogger('SKILL');
@@ -36,8 +35,7 @@ export interface SkillParams {
 export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
-  applySkillAllowedTools,
-  canApplySkillSideEffects,
+  applySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -354,13 +352,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   restoreLoadedSkillsFromHistory(history: Content[]): void {
     this.clearLoadedSkills();
 
-    const skillByName = new Map<string, { name: string; output: string }>();
+    const skillByName = new Map<
+      string,
+      { name: string; output: string; config: SkillConfig }
+    >();
     for (const skill of this.skillManager.getCachedSkills() ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
-      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+      skillByName.set(skill.name.toLowerCase(), {
+        name: skill.name,
+        output,
+        config: skill,
+      });
     }
 
     const pendingSkillCalls = new Map<string, string>();
@@ -400,6 +405,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
         this.loadedSkillContents.add(skill.output);
         this.loadedSkillNames.add(skill.name);
+        // Session hooks and allow rules live only in memory, so a resumed
+        // session starts with none of them — while the restored body still
+        // carries the skill's instructions to the model. Without this the
+        // skill's PreToolUse gate would never fire again after `--continue` /
+        // `--resume`: the dedup guard answers "already loaded in context", so
+        // nothing prompts a re-invocation that would re-apply them. That is
+        // the same fail-open shape this path is meant to prevent. Both
+        // registrations dedup, and the trust gate is re-applied here.
+        applySkillSideEffects(this.config, skill.config);
       }
     }
   }
@@ -487,60 +501,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * restart, and a trust granted again restores them.
    */
   private applySideEffects(skill: SkillConfig): void {
-    if (!canApplySkillSideEffects(skill, this.config)) {
-      debugLogger.warn(
-        `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
-      );
-      return;
-    }
-    // Auto-approve the skill's declared allowedTools for the rest of the session.
-    applySkillAllowedTools(
-      this.config.getPermissionManager(),
-      skill.allowedTools,
-      { trustGated: skill.level === 'project' },
-    );
-    this.registerHooks(skill);
-  }
-
-  private registerHooks(skill: SkillConfig): void {
-    debugLogger.debug('Skill hooks check:', {
-      hasHooks: !!skill.hooks,
-      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-      skillName: skill.name,
-    });
-    if (!skill.hooks) {
-      // Re-run on every invocation (the gate is re-evaluated each time), so
-      // a hookless skill would otherwise WARN on every use of it.
-      debugLogger.debug(
-        `Skill "${this.params.skill}" has no hooks to register`,
-      );
-      return;
-    }
-    const hookSystem = this.config.getHookSystem();
-    const sessionId = this.config.getSessionId();
-    debugLogger.debug('Hook system and session:', {
-      hasHookSystem: !!hookSystem,
-      sessionId,
-    });
-    if (!hookSystem || !sessionId) {
-      return;
-    }
-    const sessionHooksManager = hookSystem.getSessionHooksManager();
-    const hookCount = registerSkillHooks(sessionHooksManager, sessionId, skill);
-    if (hookCount > 0) {
-      debugLogger.info(
-        `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-      );
-    } else {
-      // Zero is the expected outcome of every re-invocation: the hooks are
-      // already registered and `registerSkillHooks` dedups them (it logs
-      // each skip at debug level). Not a warning — a steady-state WARN
-      // claiming "no hooks registered" over hooks that are firing sends
-      // whoever reads the log after a phantom failure.
-      debugLogger.debug(
-        `No new hooks registered from skill "${this.params.skill}" (already registered or none registrable)`,
-      );
-    }
+    applySkillSideEffects(this.config, skill);
   }
 
   private async recordAutoSkillUsageBestEffort(

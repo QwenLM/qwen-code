@@ -148,6 +148,8 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  applySkillHooks,
+  applySkillSideEffects,
   canApplySkillSideEffects,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
