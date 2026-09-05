@@ -19,6 +19,7 @@ import {
   type ReviewBudget,
 } from './budget.js';
 import type { RepositoryContext } from './repository-context.js';
+import { buildSelectionIdentity, type SelectionIdentity } from './selection.js';
 
 export interface FileMetric {
   path: string;
@@ -109,6 +110,15 @@ export interface PlanReport {
    * roster's job, and the roster reads `effort`.
    */
   budget: ReviewBudget;
+  /**
+   * What this plan was computed from, digested — see lib/selection.ts.
+   *
+   * Coverage re-reads the plan from its path long after the agents ran, and
+   * until this existed the only thing tying the two together was the plan
+   * file's mtime, which says nothing about the diff the chunk ranges index
+   * into.
+   */
+  selection: SelectionIdentity;
   repositoryContext?: RepositoryContext;
 }
 
@@ -133,6 +143,17 @@ export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
   context: BudgetContext,
+  /**
+   * The diff text `plan` was built from, so the report can record what its
+   * chunk ranges index into (see lib/selection.ts).
+   *
+   * Required, and positional, for exactly the reason `context` is: three
+   * capture commands build a plan, and an identity that two of them record is
+   * worse than one none of them do — a reader cannot tell a plan with no
+   * identity apart from a plan whose writer forgot. The type system asks all
+   * three.
+   */
+  diffText: string,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -186,6 +207,7 @@ export function buildPlanReport(
     wrapperSignal: plan.wrapperSignal,
     chunks: plan.chunks,
     files,
+    selection: buildSelectionIdentity(diffText, plan.chunks, plan.diffLines),
     budget: reviewBudget(
       {
         srcDiffLines: plan.srcDiffLines,

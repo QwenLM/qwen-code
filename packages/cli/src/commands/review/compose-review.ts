@@ -32,6 +32,8 @@ import {
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
+  ChunkPartitionError,
+  type ChunkCoverageItem,
 } from './lib/coverage.js';
 import {
   compressSummary,
@@ -141,6 +143,99 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * How much of the planned diff this run actually covered.
+ *
+ * Deliberately NOT a verdict: a `complete` run can still post Request changes,
+ * and a `partial` one can still be an Approve capped to Comment. The verdict
+ * answers "what should happen to this PR"; this answers "how much of it did
+ * the review read", which is the question `event` has never been able to.
+ */
+export type TerminalState = 'complete' | 'partial' | 'failed' | 'skipped';
+
+/**
+ * The three kinds of fact that can forbid an Approve, separated.
+ *
+ * Every entry here is also in `cappedBy`, which stays the single list the caps
+ * are computed into — this is a view, not a second source. A cap the grouping
+ * does not recognise lands in `other`, so adding one to `cappedBy` without
+ * classifying it is visible rather than silently dropped.
+ */
+export interface CapAxes {
+  /** The diff was not fully read. Repair: relaunch or rebuild agents. */
+  coverage: string[];
+  /** It was read, but a claim about it could not be settled. Repair: verify. */
+  verification: string[];
+  /** Read and verified; a posture or a missing context withheld the approval. */
+  posture: string[];
+  /** In `cappedBy` and not classified above. */
+  other: string[];
+}
+
+const CAP_AXIS_OF: Record<string, keyof CapAxes> = {
+  'chunk-nobody-read': 'coverage',
+  'uncoverable-chunk': 'coverage',
+  'unreviewed-dimension': 'coverage',
+  'cannot-tell-existing-critical': 'verification',
+  'criticals-unverified': 'verification',
+  'findings-unverified-at-compose': 'verification',
+  'context-unavailable': 'posture',
+  'unlicensed-deferral': 'posture',
+};
+
+/**
+ * `unreviewedDimensionAxis` is the one axis not decided by the map: three
+ * kinds of fact fire that cap — a doubt that lines were read, a Step 4/5
+ * floor over a fully-read diff, and the reverse audit's budget stop — and a
+ * caller holding the entries that fired it says which axis it belongs on.
+ * The map entry is the default for a caller with only the cap's name.
+ */
+export function groupCapAxes(
+  cappedBy: readonly string[],
+  unreviewedDimensionAxis: keyof CapAxes = 'coverage',
+): CapAxes {
+  const axes: CapAxes = {
+    coverage: [],
+    verification: [],
+    posture: [],
+    other: [],
+  };
+  for (const cap of cappedBy) {
+    const axis =
+      cap === 'unreviewed-dimension'
+        ? unreviewedDimensionAxis
+        : (CAP_AXIS_OF[cap] ?? 'other');
+    axes[axis].push(cap);
+  }
+  return axes;
+}
+
+/**
+ * The run's coverage state, from the chunk ledger and the run-level failure.
+ *
+ * Reads nothing else — not the finding count, not `cappedBy`, not a warning
+ * list. The rule this mirrors is `ocr`'s `computeTerminal`, with one deliberate
+ * departure: there, a `waived` item does not stop a run being `complete`, and
+ * the nearest thing here — a chunk an agent declared unreachable — DOES. That
+ * is not a porting slip. This pipeline's existing position, stated where the
+ * set is built ("a disclosed gap, not coverage") and enforced in `ok`, is that
+ * a diff with a line no read can reach was not fully reviewed. A terminal state
+ * that called such a run `complete` would contradict the report it ships in.
+ */
+export function deriveTerminalState(
+  ledger: readonly ChunkCoverageItem[],
+  runFailure: string | null,
+): TerminalState {
+  if (runFailure !== null) return 'failed';
+  if (ledger.length === 0) return 'skipped';
+  const readIt = ledger.filter(
+    (i) => i.outcome === 'covered' || i.outcome === 'recovered',
+  ).length;
+  if (readIt === ledger.length) return 'complete';
+  if (readIt === 0) return 'failed';
+  return 'partial';
+}
 
 /**
  * The floor above which a zero-finding Approve is disclosed as low-signal,
@@ -1396,6 +1491,27 @@ export interface ComposeReviewInput {
 export interface ComposeReviewResult {
   event: ReviewEvent;
   body: string;
+  /**
+   * How much of the planned diff this run covered — derived from the chunk
+   * ledger alone. Never rendered into the posted body: the author is told what
+   * the review could not certify in prose, and a state code is an operator's
+   * and a caller's surface, not a PR comment's.
+   */
+  terminalState: TerminalState;
+  /**
+   * `cappedBy`, split by what kind of fact each cap is. A view over that
+   * array, so the two can never disagree about which caps fired.
+   */
+  capAxes: CapAxes;
+  /**
+   * The per-chunk coverage ledger this run computed, or `[]` when coverage
+   * could not be computed at all (the run-level failure case). Note
+   * `terminalState: 'failed'` is wider: it also reports a computed ledger in
+   * which no chunk was read. Carried so the persisted artifact and the
+   * terminal summary read the SAME object rather than each recomputing
+   * coverage — two derivations of one number is how they come to disagree.
+   */
+  chunkLedger: ChunkCoverageItem[];
   /** The table row before caps and downgrades — for the terminal report. */
   baseEvent: ReviewEvent;
   /** Which cap states applied (empty when none). */
@@ -3441,6 +3557,45 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
   }
 }
 
+/**
+ * What may remain of an orchestrator entry once a structural sentence it
+ * contains is removed, for the entry to still count as a RELAY of that
+ * sentence rather than a claim of its own: whitespace, punctuation, and the
+ * one prefix shape the stderr instruction's own numbering coins (`step 5 —
+ * `, `第 5 步——`). Anything else — a clause, a word — is a remainder, and an
+ * entry with a remainder is a distinct disclosure: it renders, and it caps on
+ * the coverage axis (R30-1).
+ *
+ * This is a boundary held on purpose, not a class to be extended (R32-2
+ * asked for more decorations — `step 5/7 — `, `[step 5] `, `step five — ` —
+ * to count as residue). No finite rule separates a decoration from a claim
+ * in open-ended prose, so the rule picks a FAILURE DIRECTION, and it picks
+ * the one the module's contract picks everywhere else: a disclosed gap
+ * reaches the author, and over-withholding is the safe direction. An
+ * unlisted decoration therefore costs a second rendering of the gap and a
+ * coverage-axis cap; a bare `includes` costs a swallowed whiff report and a
+ * verification-axis cap on a run whose auditor read nothing — the R22-4 /
+ * R30-1 harm. The two alternatives R32-2 offered do not move this: equality
+ * against the minted set treats MORE decorations as claims, and deleting the
+ * matcher treats every relay as one. The instruction site (SKILL.md, the
+ * `BUDGET:` line) asks for the EXACT entry; a reshaped relay is
+ * non-compliance, and non-compliance already withholds the anchor.
+ *
+ * Shared by the two consumers that must agree — the caller-echo filter and
+ * the canonical-stop splice (R32-3) — so a relay spliced out of the rendered
+ * list is exactly a relay the echo filter would have deduped, never more.
+ */
+const RELAY_RESIDUE_RE =
+  /^[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*(?:step\s*\d+|\u7b2c\s*\d+\s*\u6b65)?[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*$/i;
+
+/** Is `entry` a relay of `sentence` — the sentence plus residue, nothing more? */
+function relaysSentence(entry: string, sentence: string): boolean {
+  return (
+    entry.includes(sentence) &&
+    RELAY_RESIDUE_RE.test(entry.replace(sentence, ''))
+  );
+}
+
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
@@ -3653,6 +3808,16 @@ function composeReviewBody(
     subjectZh?: string;
     reasonZh?: string;
   }> = [];
+  // The Step 4/5 floor's entries, tracked by reference: they ride
+  // `coverageEntries` for the render and the cap like every other gap, but
+  // they are verification facts, not coverage facts — the axis view below
+  // must not classify the cap they fire as "the diff was not fully read".
+  const verificationFloorEntries = new Set<(typeof coverageEntries)[number]>();
+  // The floor's BY-DESIGN entries, tracked by reference the same way: the
+  // medium tier's skipped reverse audit caps a clean verdict at Comment,
+  // but no repair lifts that cap and no verification clears it — the axis
+  // view below routes it to posture, not verification.
+  const byDesignFloorEntries = new Set<(typeof coverageEntries)[number]>();
   // The budget-stop marker: when the reverse-audit round builder refused a
   // round on the review's time budget, it recorded the refusal beside the
   // prompt records. Synthesizing the disclosure from the marker makes the
@@ -3747,9 +3912,18 @@ function composeReviewBody(
       // capping. (The anchor DECISION below stays exact-text: a reshaped
       // relay spliced here still withholds, over-withholding being the safe
       // direction.)
+      // A relay, not merely a container: the same remainder test the
+      // caller-echo filter applies (`relaysSentence`). Bare `includes`
+      // spliced a DISTINCT report that quoted the stop sentence inside its
+      // own reason — "reverse audit — the floor already said '…' and chunk
+      // 2's auditor returned nothing substantive twice" — out of the
+      // rendered list, so the whiff clause never reached the author while
+      // the splice exemption below routed the cap to the verification axis
+      // (R32-3). An entry with a remainder stays in `unreviewed`: rendered,
+      // and capping on the coverage axis.
       const entries = [...canonicalStopEntries];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (entries.some((c) => unreviewed[i].includes(c))) {
+        if (entries.some((c) => relaysSentence(unreviewed[i], c))) {
           splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
@@ -3813,6 +3987,16 @@ function composeReviewBody(
   // zero-certified test falls to the `coverage` disclosure instead.
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
+  /**
+   * The per-chunk ledger, and why coverage could not be computed at all.
+   *
+   * `terminalState` is derived from these and from nothing else — not from the
+   * finding count, not from `cappedBy`, not from any warning. A run that read
+   * 17 of 18 chunks covered 17 of 18 chunks whether or not it found a bug in
+   * them, and whether or not something unrelated capped the verdict.
+   */
+  let chunkLedger: ChunkCoverageItem[] = [];
+  let coverageRunFailure: string | null = null;
 
   // The deterministic script-lint gate. `compose-review` is the authority here:
   // it reads the report the orchestrator's `qwen review script-lint` step wrote
@@ -4296,12 +4480,30 @@ function composeReviewBody(
       subjectZh: '覆盖情况',
       reasonZh: '未提供 plan，本次运行无法证明 diff 的任何部分被读过',
     });
+    // `coverageRunFailure` stays null on purpose: a run with no plan never
+    // attempted coverage, which is the `'skipped'` state. `'failed'` is
+    // reserved for a run whose coverage machinery ran and broke — setting
+    // the failure here would leave `'skipped'` unreachable and persist the
+    // two shapes identically.
     criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      chunkLedger = cov.chunkItems;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (compose-review folds every entry into the
+      // unreviewed-dimension cap and the posted "Not reviewed:" list), and a
+      // check this new must not be able to take an Approve away before anyone
+      // has seen how often it fires. The repair is an operator's — re-capture
+      // and re-plan — so it belongs where the other repairs are.
+      if (cov.selectionDrift !== null) {
+        remediation.push(
+          `selection drift: ${cov.selectionDrift}. The coverage below is ` +
+            `reported against the plan as written.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
@@ -4430,20 +4632,33 @@ function composeReviewBody(
       // Both cap — a run that cannot show what it read has not shown it read
       // anything — but a reader chasing "could not read the transcripts" over a
       // plan with no `chunks[]` is chasing the wrong thing.
+      // A third: the chunk ledger contradicted its own plan. That is a defect
+      // in `coverage.ts`, not a fact about this environment or this caller's
+      // plan, and an operator handed "the plan could not be used" would go and
+      // re-capture a diff that was never the problem.
       const why =
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
-          : `the plan could not be used (${(err as Error).message})`;
+          : err instanceof ChunkPartitionError
+            ? `the coverage ledger contradicted the plan (${err.message})`
+            : `the plan could not be used (${(err as Error).message})`;
       const whyZh =
         err instanceof TranscriptsUnavailableError
           ? `无法读取 agent 的运行记录（${err.message}）`
-          : `plan 无法使用（${(err as Error).message}）`;
+          : err instanceof ChunkPartitionError
+            ? `覆盖率台账与 plan 自相矛盾（${err.message}）`
+            : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
         subjectZh: '覆盖情况',
         reasonZh: `${whyZh}，本次运行无法证明 diff 的任何部分被读过`,
       });
+      // The coverage machinery itself failed, so no per-chunk outcome exists to
+      // derive a state from. This is the run-level failure `terminalState`
+      // keys on — distinct from "every chunk failed", which is a coverage fact
+      // about a run that did compute one.
+      coverageRunFailure = why;
     }
 
     // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
@@ -4485,25 +4700,30 @@ function composeReviewBody(
       // Structural, both languages — no boundary is recovered from rendered
       // prose (reparsing was the bug the disclosure entries already fixed).
       for (const gap of verification.gaps) {
-        coverageEntries.push({
+        const entry = {
           subject: gap.subject,
           reason: gap.reason,
           subjectZh: gap.subjectZh,
           reasonZh: gap.reasonZh,
-        });
+        };
+        coverageEntries.push(entry);
+        verificationFloorEntries.add(entry);
+        if (gap.byDesign === true) byDesignFloorEntries.add(entry);
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
         verification.unverifiedFindings && criticalsNeedingVerify >= 1;
     } catch (err) {
-      coverageEntries.push({
+      const entry = {
         subject: 'verification',
         reason:
           `could not check that Step 4 and Step 5 ran ` +
           `(${(err as Error).message})`,
         subjectZh: '验证',
         reasonZh: `无法检查步骤 4 与步骤 5 是否运行（${(err as Error).message}）`,
-      });
+      };
+      coverageEntries.push(entry);
+      verificationFloorEntries.add(entry);
       // Fail closed: a verification that cannot be CHECKED is not a
       // verification that happened.
       criticalsUnverified = criticalsNeedingVerify >= 1;
@@ -4683,6 +4903,21 @@ function composeReviewBody(
     cappedBy.push('findings-unverified-at-compose');
   }
 
+  // What this run COVERED, as distinct from what it will POST.
+  //
+  // `event` is a posting decision and `cappedBy` is the list of reasons it was
+  // not allowed to be an Approve — and those reasons are three different kinds
+  // of fact wearing one label. A reader (or an automated caller) seeing
+  // `Approve -> Comment` cannot tell whether the diff was not fully read, or
+  // was read and the findings could not be verified, or was read and verified
+  // and the convergence posture withheld the approval. The three have three
+  // different repairs, and only the first is a coverage fact at all.
+  //
+  // So: a state derived from the chunk ledger and nothing else, and an axis
+  // view of the caps that leaves `cappedBy` itself untouched. Neither changes
+  // `event`. This is a reporting surface, not a new gate.
+  const terminalState = deriveTerminalState(chunkLedger, coverageRunFailure);
+
   // Is there any doubt that the whole diff was READ? That is a narrower
   // question than "did anything cap the verdict", and it is the only one the
   // incremental anchor needs — see `ledgerMarkerFor`. Every entry counted here
@@ -4692,12 +4927,20 @@ function composeReviewBody(
   // opened it, a chunk with no receipt, a plan or transcript set that could
   // not be read, a context fetch that failed. `budgetEntry` is excluded on
   // purpose — a disclosed budget gap is the ceiling working, and it says
-  // something about DEPTH, not about which lines were read.
+  // something about DEPTH, not about which lines were read. The by-design
+  // floor entries are excluded for the same reason: the medium tier
+  // skipping the reverse audit is a posture fact no repair lifts, and it
+  // says nothing about which lines were read — counting it as scope doubt
+  // withheld the anchor from every clean balanced-medium run, regenerating
+  // the closed full-diff re-review loop `ledgerMarkerFor`'s own docstring
+  // measures.
   const scopeUnproven =
     missingReceipts.length > 0 ||
     uncoverable.length > 0 ||
     contextUnavailable ||
-    coverageEntries.some((entry) => entry !== budgetEntry);
+    coverageEntries.some(
+      (entry) => entry !== budgetEntry && !byDesignFloorEntries.has(entry),
+    );
 
   // Is every dimension gap the orchestrator disclosed about DEPTH rather than
   // about which lines were read?
@@ -4745,10 +4988,126 @@ function composeReviewBody(
   // is the safe direction).
   const isRelayedStopEntry = (entry: string): boolean =>
     canonicalStopEntries?.has(entry.trim()) ?? false;
-  const dimensionGapsAreDepthOnly = [
+  // The same subject-echo dedup the render path applies below: a Step 4/5
+  // floor gap the orchestrator relays into `unreviewedDimensions` is an
+  // echo of a structural coverage entry, not an independent line-coverage
+  // claim. Unfiltered it fails both exemptions here and flips
+  // `dimensionGapsAreDepthOnly` false — routing the cap onto the coverage
+  // axis for a run whose only doubt is the verification floor, the exact
+  // misrouting this derivation exists to remove. The match is anchored on
+  // the structural REASON as well as the subject: a same-subject entry
+  // carrying its own reason is a DISTINCT claim — `reverse audit — chunk
+  // 2's auditor returned nothing substantive twice` beside the floor's own
+  // sentence — and swallowing it routed a whiffed audit scope to the
+  // verification axis. `includes`, not equality, so a prefix-reshaped
+  // relay ("step 5 — …") still dedupes. The budget entry AND the floor
+  // entries are exempt from the two BARE-SUBJECT arms: their subjects are
+  // `reverse audit` / `反向审计`, which are also the subjects the
+  // orchestrator gives a WHIFFED reverse audit — a bare-subject entry that
+  // is the whiff's only detector and a line-coverage claim, not an echo of
+  // the structural gap. Swallowing it lost the whiff sentence from the
+  // body, left `axisDimensionGapsAreDepthOnly` vacuously true, and routed
+  // the cap to the verification axis — an automated repair caller
+  // relaunched verification instead of the auditor whose scope read
+  // nothing (R22-4). A compliant relay of a floor entry always carries its
+  // reason, so the full-sentence arms still dedup it exactly as before.
+  //
+  // "Contains the sentence" is necessary, not sufficient. An entry is an echo
+  // only when removing the structural sentence leaves NOTHING substantive: a
+  // relay prefix (`step 5 — `, `第 5 步——`) and punctuation are not a claim,
+  // a clause of the orchestrator's own is. A whiff report that QUOTES the
+  // floor sentence inside its own reason — `reverse audit — the floor already
+  // said '…' and round 2's auditor returned nothing substantive twice` —
+  // matched the bare `includes` and was swallowed: the whiff clause never
+  // reached the body, `dimensionGapsAreDepthOnly` went vacuously true, and
+  // the cap routed to the verification axis for a run whose auditor read
+  // nothing (R30-1). The remainder test keeps every compliant relay an echo
+  // — verbatim, prefix-reshaped, zh — and hands anything carrying more to
+  // the coverage axis, where a distinct claim belongs.
+  const echoesSentence = (entry: string, sentence: string): boolean =>
+    relaysSentence(entry, sentence);
+  const echoesCoverageEntry = (entry: string): boolean =>
+    coverageEntries.some(
+      (e) =>
+        e !== budgetEntry &&
+        (echoesSentence(entry, `${e.subject} — ${e.reason}`) ||
+          // The Chinese twin of the same match: the stderr instruction
+          // relays the structural entries in BOTH languages, and a zh relay
+          // (the `subjectZh——reasonZh` shape deadline.ts coins) that
+          // escapes the dedup flips `dimensionGapsAreDepthOnly` and
+          // withholds the anchor from a run its English relay clears.
+          (e.subjectZh !== undefined &&
+            e.reasonZh !== undefined &&
+            echoesSentence(entry, `${e.subjectZh}——${e.reasonZh}`)) ||
+          (!verificationFloorEntries.has(e) &&
+            (entry === e.subject || entry === e.subjectZh))),
+    );
+  const nonEchoedDimensionGaps = [
     ...unreviewed,
     ...splicedForBudgetPhrase,
-  ].every((entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry));
+  ].filter((entry) => !echoesCoverageEntry(entry));
+  const dimensionGapsAreDepthOnly = nonEchoedDimensionGaps.every(
+    (entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry),
+  );
+  // The AXIS decision treats spliced relays as depth-only, ahead of the
+  // exact-text exemption: the splice retains an entry only when it contains
+  // the full machine-minted canonical stop text, and the stop fact itself
+  // is marker-proven — a depth fact whichever prefix the orchestrator
+  // added. Without this, a 'step 5 — …' reshaped relay failed all three
+  // exemptions and the same underlying stop landed on the coverage axis
+  // with the prefix, the verification axis without it. The ANCHOR keeps
+  // reading the exact-text predicate above: a reshaped relay still
+  // withholds it, over-withholding being the safe direction.
+  const axisDimensionGapsAreDepthOnly = nonEchoedDimensionGaps.every(
+    (entry) =>
+      splicedForBudgetPhrase.includes(entry) ||
+      isNonDiffDimensionGap(entry) ||
+      isRelayedStopEntry(entry),
+  );
+
+  // The axis `unreviewed-dimension` lands on, derived from the facts that
+  // fired it rather than read off its name: a doubt that any line was read
+  // puts it on the coverage axis, and when nothing but verification facts
+  // back it — the Step 4/5 floor, or the reverse audit's budget stop — the
+  // diff WAS read and the cap belongs on the verification axis instead. A
+  // third fact is the medium tier's by-design reverse-audit skip: no
+  // verification clears it and no repair lifts it, so when it is the only
+  // non-budget backing fact the cap belongs on the posture axis — routing
+  // it as a verification gap would send an automated caller to relaunch
+  // verification against a permanently uncleared axis. A repairable floor
+  // gap beside the skip keeps the verification axis: the axis names what a
+  // repair can lift — whichever channel names the gap: the orchestrator's
+  // prose entries back the same cap, and a repairable one there
+  // (`build-and-test — the integration tests did not run`) is verification
+  // work exactly as a structural verify-floor gap is, so posture fires only
+  // when the skip is the cap's SOLE backing fact. The fixed map sent every
+  // backing fact to coverage,
+  // and an automated caller routing repairs by axis was told to relaunch
+  // Step 3 agents that had read everything. Coverage doubt wins when both
+  // hold: its repair subsumes the other's, the same precedence
+  // `coverage.ts`'s `classify()` applies.
+  const nonBudgetCoverageEntries = coverageEntries.filter(
+    (entry) => entry !== budgetEntry,
+  );
+  const capAxes = groupCapAxes(
+    cappedBy,
+    !axisDimensionGapsAreDepthOnly ||
+      nonBudgetCoverageEntries.some(
+        (entry) => !verificationFloorEntries.has(entry),
+      )
+      ? 'coverage'
+      : nonBudgetCoverageEntries.length > 0 &&
+          nonBudgetCoverageEntries.every((entry) =>
+            byDesignFloorEntries.has(entry),
+          ) &&
+          nonEchoedDimensionGaps.every(
+            (entry) =>
+              splicedForBudgetPhrase.includes(entry) ||
+              isRelayedStopEntry(entry),
+          )
+        ? 'posture'
+        : 'verification',
+  );
 
   const diagnosis = convergence
     ? diagnoseConvergence({
@@ -5592,9 +5951,10 @@ function composeReviewBody(
   // can carry anything, and a boundary guessed wrong regroups the entries it
   // garbles. Coverage now hands the entries over as `{subject, reason}`
   // pairs; only the CALLER\'s entries are prose, and those are never parsed —
-  // they are matched against known coverage subjects by prefix (exactly how
-  // the chunk list above dedupes), and rendered verbatim when nothing
-  // matches. A run that pasted the gate\'s own gap lines into its input
+  // they are matched against known coverage entries by subject AND reason
+  // (a verbatim or prefix-reshaped relay of a structural sentence dedupes;
+  // a same-subject entry carrying its own reason is a distinct claim and
+  // renders verbatim). A run that pasted the gate\'s own gap lines into its input
   // posted every disclosure twice — 22 clauses for 11 roles on a public PR
   // (#7188) — and the coverage-derived text wins the collision: it is the
   // evidence-bounded register this body is written in.
@@ -5604,17 +5964,11 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
-    // The budget-stop entry never prefix-matches: its relays are already
-    // deduped by the marker phrase above, and letting its `reverse audit`
-    // subject claim the prefix swallowed unrelated reverse-audit scopes the
-    // caller disclosed with their own reasons (a bare subject echo still
-    // dedups).
-    const echoesCoverage = covEntries.some(
-      (e) =>
-        d === e.subject ||
-        (e !== budgetEntry && d.startsWith(`${e.subject} — `)),
-    );
-    if (!echoesCoverage) callerLeft.push(d);
+    // The SAME predicate the decision layer applies: one dedup rule for
+    // both registers. Its budget exemption keeps a bare `reverse audit`
+    // whiff renderable (the whiff's only detector), and its zh arms dedup
+    // a Chinese relay of a structural entry the English arms cover.
+    if (!echoesCoverageEntry(d)) callerLeft.push(d);
   }
   // Bare caller names share the whiffed-agent explanation; an entry that
   // brought its own reason (after an em-dash) is rendered verbatim, its own
@@ -6379,6 +6733,9 @@ function composeReviewBody(
     return {
       event,
       body,
+      terminalState,
+      capAxes,
+      chunkLedger,
       baseEvent,
       cappedBy,
       downgraded,
@@ -6473,6 +6830,9 @@ function composeReviewBody(
     return {
       event,
       body,
+      terminalState,
+      capAxes,
+      chunkLedger,
       baseEvent,
       cappedBy,
       downgraded,
@@ -6754,6 +7114,9 @@ function composeReviewBody(
   return {
     event,
     body: visibleBody,
+    terminalState,
+    capAxes,
+    chunkLedger,
     baseEvent,
     cappedBy,
     downgraded,

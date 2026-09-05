@@ -3892,10 +3892,17 @@ describe('fetch-pr run-session ledger wiring', () => {
 // count the gitRaw mock answers every `git show` with (the diff's own five
 // lines).
 function resumePlanFields(diffBytes: string): Record<string, unknown> {
-  return buildPlanReport(buildDiffPlan(diffBytes, 400), () => 5, {
-    operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-    hasDeadline: hasReviewDeadline(process.env),
-  }) as unknown as Record<string, unknown>;
+  return buildPlanReport(
+    buildDiffPlan(diffBytes, 400),
+    () => 5,
+    {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    },
+    // The same bytes the plan was built from — the fixture stands in for what
+    // a real `fetch-pr` wrote, and a real one records its own diff text here.
+    diffBytes,
+  ) as unknown as Record<string, unknown>;
 }
 
 describe('fetch-pr --resume', () => {

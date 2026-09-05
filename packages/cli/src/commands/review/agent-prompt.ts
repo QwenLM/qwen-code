@@ -96,6 +96,7 @@ import {
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
+import { PLAN_TOKEN_LABEL, planTokenLine } from './lib/selection.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
@@ -178,6 +179,14 @@ interface PlanReport {
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
   /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
   incremental?: unknown;
+  /**
+   * The plan's capture identity (see lib/selection.ts). The chunk launch
+   * writes its epoch token from it — a same-session re-plan keeps the count
+   * and can keep every window, so the token is the one signal that moves
+   * with every re-plan, and the coverage seal reads it back to order
+   * fence-surviving records against the plan they were written for.
+   */
+  selection?: unknown;
 }
 
 /**
@@ -956,10 +965,16 @@ export function buildChunkLaunchPrompt(
 ): string {
   const { diffPath, chunk, total } = chunkFrom(report, id);
   const { offset, limit } = diffWindow(chunk.startLine, chunk.endLine);
+  // The plan's epoch: a same-session re-plan can keep the count and every
+  // window, so the coverage seal cannot order a fence-surviving record by
+  // those — it orders by this token instead (see lib/selection.ts). Absent
+  // on a plan with no identity: those launches keep the older seals.
+  const tokenLine = planTokenLine(report.selection);
 
   return [
     `You are review agent \`chunk ${chunk.id} of ${total}\` — the territory agent for ` +
       `lines ${chunk.startLine}-${chunk.endLine} of the diff.`,
+    ...(tokenLine === null ? [] : [tokenLine]),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',
@@ -1008,7 +1023,15 @@ export function buildWholeDiffBlock(
   residue?: WorktreeResidue,
 ): string {
   const diffPath = requireDiffPath(report);
-  const parts = [...diffReadingBlock(report, diffPath)];
+  // The plan's epoch, exactly as the chunk launch carries it: a same-session
+  // re-plan keeps every window these reads spell out, so the coverage seal
+  // orders fence-surviving whole-diff records by this token too (see
+  // lib/selection.ts). Absent on a plan with no identity.
+  const tokenLine = planTokenLine(report.selection);
+  const parts = [
+    ...(tokenLine === null ? [] : [tokenLine, '']),
+    ...diffReadingBlock(report, diffPath),
+  ];
   // An Agent 8 specialist reads source out of the same shared worktree every
   // other agent is pinned to, so it owes the same rule (#9207). It is the one
   // launch class built outside `buildLaunch`, which is exactly how it was
@@ -1032,6 +1055,8 @@ export function buildWholeDiffBlock(
   parts.push(
     ...toolBudgetBlock(report, { mandatoryReads: wholeDiffReadPages(report) }),
   );
+  // Repo-controlled text rides a launch below the marker lines — `tail()`
+  // inerts it, never appends it raw (see FORGEABLE_MARKER_LINE).
   parts.push(...tail(rules));
   return parts.join('\n');
 }
@@ -1192,6 +1217,29 @@ function diffReadingBlock(
   return parts;
 }
 
+// The identity-marker CLASS a launch may carry, matched by prefix: every
+// line the identity parsers can read starts with one of two prefixes —
+// the plan-token label (lib/selection.ts's PLAN_TOKEN_RE) and the
+// identity-line prefix (lib/coverage.ts's CHUNK_RE and
+// lib/agent-identity.ts's labelFromLaunchPrompt, which reads ANY
+// role-shaped identity line, not only the chunk shape). Enumerating the
+// full shapes missed the role-shaped line, so a repo rule wearing one
+// rode the whole-diff launch raw and became the record's identity.
+// Repository rules ride the whole-diff launch BELOW the token line, and
+// one forged line re-keys the record: `launchPlanToken` reads the LAST
+// standalone marker and the anchored CHUNK_RE takes the FIRST identity
+// line. Inerting by PREFIX closes the class — a parser later added on
+// either prefix stays covered — and a leading space breaks every anchor
+// (all parsers match from line start) while leaving the rule legible
+// (R21-1).
+const FORGEABLE_MARKER_LINE = new RegExp(
+  `^(?:${PLAN_TOKEN_LABEL} |` + 'You are review agent `)',
+  'gm',
+);
+
+const inertMarkerLines = (text: string): string =>
+  text.replace(FORGEABLE_MARKER_LINE, (line) => ` ${line}`);
+
 /** The closing half every prompt shares: how to report, and what "nothing" means. */
 function tail(
   rules?: string,
@@ -1210,7 +1258,12 @@ function tail(
       ? ['', EXCLUSIONS]
       : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS, '', RECALL];
   if (rules && rules.trim()) {
-    parts.push('', '## Project rules', '', rules.trim());
+    // Inert the exact text `tail()` emits — trim FIRST, then inert.
+    // Inerting before the trim lets the trim strip the inerting space off
+    // the first rule line, and a marker wearing leading whitespace or a
+    // blank line escapes the column-0 anchor only to be promoted to
+    // column 0 by the trim (R17-1).
+    parts.push('', '## Project rules', '', inertMarkerLines(rules.trim()));
   }
   parts.push(
     '',
@@ -2134,9 +2187,16 @@ export function buildRoleLaunchPrompt(
   // delivery check anchors on — both launches read as rewritten. What the
   // caller will reach for, the CLI prints.
   const roundLabel = opts.round !== undefined ? ` (round ${opts.round})` : '';
+  // The plan's epoch, exactly as the chunk launch carries it: role records
+  // credit coverage, and a same-session re-plan keeps every window their
+  // reads spell out, so the seal orders them by this token too (see
+  // lib/selection.ts). After the identity line — `foldFindings` requires
+  // that line first. Absent on a plan with no identity.
+  const tokenLine = planTokenLine(report.selection);
   const parts = [
     `You are review agent \`${role}\` — ${b.label}${roundLabel}.` +
       (safeFile ? ` Your file: \`${safeFile}\`.` : ''),
+    ...(tokenLine === null ? [] : [tokenLine]),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',
@@ -2248,8 +2308,11 @@ export function findingsSection(
       // itself then, the delivery check compares it verbatim as before, and
       // the floor owes no separate findings read (findingsPointerOf finds
       // none). The pointer shape below is the happy path; this is the
-      // degraded one that still reviews with what it was launched.
-      listRef = body;
+      // degraded one that still reviews with what it was launched. Inerted,
+      // not raw: the list rides between the identity line and the token
+      // line, and a quoted marker line there would forge the record's
+      // identity exactly as a forged rules line would (R20-2).
+      listRef = inertMarkerLines(body);
     } else {
       listRef = [
         // The line count makes under-reading visible: `read_file` truncates,

@@ -62,7 +62,13 @@ import {
   type ComposeReviewResult,
   type DeferredEntry,
   type PrBodyFetcher,
+  deriveTerminalState,
+  groupCapAxes,
 } from './compose-review.js';
+import * as coverageModule from './lib/coverage.js';
+import type { ChunkCoverageItem } from './lib/coverage.js';
+import { buildSelectionIdentity, planIdentityToken } from './lib/selection.js';
+import type { DiffChunk } from './lib/diff-plan.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
@@ -170,9 +176,29 @@ function plan(
     fetchedSha?: string;
     incremental?: { since: string; effective: boolean };
     reviewModelId?: string;
+    /**
+     * Record the plan's selection identity (lib/selection.ts) over the
+     * fixture diff — the shape every capture command writes. Off by default:
+     * most cases stand in for plans written before the field existed.
+     */
+    withSelection?: boolean;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
+  const chunks = [
+    {
+      id: 1,
+      startLine: 1,
+      endLine: 100,
+      files: [{ path: 'src/a.ts', newStart: 1, newEnd: 80 }],
+    },
+    {
+      id: 2,
+      startLine: 101,
+      endLine: 200,
+      files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+    },
+  ];
   writeFileSync(
     p,
     JSON.stringify({
@@ -206,20 +232,16 @@ function plan(
       // renderer names THEM, never the chunk id, so the fixture carries them
       // too. The 3A fixture below stays file-less on purpose: it is the
       // pre-files plan shape, and the renderer must fall back to counting.
-      chunks: [
-        {
-          id: 1,
-          startLine: 1,
-          endLine: 100,
-          files: [{ path: 'src/a.ts', newStart: 1, newEnd: 80 }],
-        },
-        {
-          id: 2,
-          startLine: 101,
-          endLine: 200,
-          files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
-        },
-      ],
+      ...(opts.withSelection
+        ? {
+            selection: buildSelectionIdentity(
+              readFileSync(DIFF, 'utf8'),
+              chunks as unknown as DiffChunk[],
+              5000,
+            ),
+          }
+        : {}),
+      chunks,
     }),
   );
   // Every high-effort review runs Step 4 (verify) and Step 5 (reverse audit), and
@@ -417,17 +439,22 @@ function goodPrompt(chunk: number): string {
   const offset = (chunk - 1) * 100;
   const brief = briefPath(join(dir, 'plan.json'), `chunk-${chunk}`);
   return (
-    `You are reviewing chunk ${chunk} of 2.\n` +
+    `You are review agent \`chunk ${chunk} of 2\` — the territory agent for ` +
+    `lines ${offset + 1}-${offset + 100} of the diff.\n` +
     `read_file(file_path="${brief}")\n` +
     `read_file(file_path="${DIFF}", offset=${offset}, limit=100)`
   );
 }
 
 /** Lay down the CLI's record of the prompt it built for `chunk`. */
-function recordBuilt(planPath: string, chunk: number): void {
+function recordBuilt(
+  planPath: string,
+  chunk: number,
+  prompt = goodPrompt(chunk),
+): void {
   const d = promptRecordDir(planPath);
   mkdirSync(d, { recursive: true });
-  writeFileSync(join(d, `chunk-${chunk}.txt`), goodPrompt(chunk));
+  writeFileSync(join(d, `chunk-${chunk}.txt`), prompt);
   writeFileSync(briefPath(planPath, `chunk-${chunk}`), `chunk-${chunk} brief`);
 }
 
@@ -449,7 +476,10 @@ function recordMatrix(planPath: string): void {
 
 /** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
 function blindPrompt(chunk: number): string {
-  return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
+  return (
+    `You are review agent \`chunk ${chunk} of 2\` — the territory agent for ` +
+    `lines ${(chunk - 1) * 100 + 1}-${chunk * 100} of the diff.`
+  );
 }
 
 /**
@@ -473,13 +503,27 @@ function coveredPlan(
     fetchedSha?: string;
     incremental?: { since: string; effective: boolean };
     reviewModelId?: string;
+    withSelection?: boolean;
   } = {},
 ): string {
-  transcript('a1', goodPrompt(1), { toolCalls: 3 });
-  transcript('a2', goodPrompt(2), { toolCalls: 2 });
   const p = plan({ step45: false, ...planOpts });
-  recordBuilt(p, 1);
-  recordBuilt(p, 2);
+  // An identity-carrying plan marks every chunk launch it builds with its
+  // epoch token; a compliant fixture over one must carry the marker too,
+  // or the seal refuses the run's own coverage.
+  const token = planIdentityToken(
+    (JSON.parse(readFileSync(p, 'utf8')) as { selection?: unknown }).selection,
+  );
+  const marked = (prompt: string): string =>
+    token === null
+      ? prompt
+      : prompt.replace(
+          /of the diff\.\n/,
+          (m) => `${m}Plan identity: ${token}\n`,
+        );
+  transcript('a1', marked(goodPrompt(1)), { toolCalls: 3 });
+  transcript('a2', marked(goodPrompt(2)), { toolCalls: 2 });
+  recordBuilt(p, 1, marked(goodPrompt(1)));
+  recordBuilt(p, 2, marked(goodPrompt(2)));
   recordMatrix(p);
   recordStep45(p, step45Keys);
   // A plan naming the PR owes the roster's issue-fidelity agent (Agent 0)
@@ -5088,17 +5132,23 @@ describe('coverage is recomputed, never accepted', () => {
       env: ENV,
       modelId: MODEL,
       unreviewedDimensions: [
-        `${label} — the run described this gap in its own words`,
+        `${label} — no record shows its brief reaching an agent, so this ` +
+          'dimension was reviewed, if at all, from a prompt the run wrote ' +
+          'for itself',
         'a subject only the caller noticed — the auditor returned nothing twice',
       ],
     });
-    // One clause for the shared subject — the machine's sentence, not the
-    // caller's paraphrase, and in the author's register: the internal
-    // codename stays off the posted body (it is the stderr selector).
+    // One clause for the shared subject — the machine's sentence, and in
+    // the author's register: the internal codename stays off the posted
+    // body (it is the stderr selector). The dedup is anchored on the
+    // structural reason — the relay the stderr instruction asks for is
+    // verbatim; a same-subject entry with its own wording is a distinct
+    // claim and renders (the dashed-reason test below pins that half).
     expect(r.body.split('the whole-diff test-coverage check')).toHaveLength(2);
     expect(r.body).not.toContain(label);
-    expect(r.body).toContain('no record shows its brief reaching an agent');
-    expect(r.body).not.toContain('described this gap in its own words');
+    expect(
+      r.body.split('no record shows its brief reaching an agent'),
+    ).toHaveLength(2);
     // A subject the coverage recomputation cannot see survives untouched.
     expect(r.body).toContain(
       'a subject only the caller noticed — the auditor returned nothing twice',
@@ -5117,12 +5167,12 @@ describe('coverage is recomputed, never accepted', () => {
     recordBuilt(p, 2);
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 2 },
     );
     transcript(
       'a2',
-      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
       { toolCalls: 2 },
     );
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
@@ -5150,12 +5200,12 @@ describe('coverage is recomputed, never accepted', () => {
     recordBuilt(p, 2);
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 2 },
     );
     transcript(
       'a2',
-      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
       { toolCalls: 2 },
     );
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
@@ -5171,12 +5221,13 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).not.toContain('no agent on record was launched with it');
   });
 
-  it('a reason carrying its own em-dash neither garbles the subject nor duplicates the line', () => {
+  it('a reason carrying its own em-dash neither garbles the subject nor swallows a distinct same-subject claim', () => {
     // Reasons are free-form — internal failures interpolate raw error
     // messages — so a subject/reason boundary reparsed from rendered prose
     // regroups exactly the entries it garbles. The entries are structural
-    // now; the caller's echo of a dashed line still dedupes, by prefix
-    // against the known subject.
+    // now, and the dedup is anchored on the structural reason: a caller
+    // entry under the same subject with its own wording is a distinct
+    // claim, and renders verbatim beside the machine's sentence.
     const p = plan();
     const r = composeReview({
       planPath: p,
@@ -5191,10 +5242,11 @@ describe('coverage is recomputed, never accepted', () => {
       ],
       modelId: MODEL,
     });
-    // One coverage clause — the caller's dashed echo deduped by subject
-    // prefix, the machine's own text rendered once, subject intact.
-    expect(r.body.match(/Not reviewed: coverage/g)).toHaveLength(1);
-    expect(r.body).not.toContain('echoed back by the caller');
+    // The machine's clause renders once with its subject intact — and the
+    // caller's entry is NOT an echo (its reason differs), so it renders
+    // verbatim beside it.
+    expect(r.body.match(/Not reviewed: coverage/g)).toHaveLength(2);
+    expect(r.body).toContain('echoed back by the caller');
   });
 
   it('caller echoes of per-role gaps fold into the one grouped sentence — the #7188 shape end to end', () => {
@@ -5206,7 +5258,7 @@ describe('coverage is recomputed, never accepted', () => {
     const p = plan();
     recordBuilt(p, 1);
     recordBuilt(p, 2);
-    // Chunks reviewed properly; the whole-diff role built but never launched.
+    // Chunks reviewed properly; the whole-diff role's prompt never built.
     transcript('a1', goodPrompt(1), { toolCalls: 3 });
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
     const label = 'Test coverage matrix (whole-diff)';
@@ -5214,7 +5266,9 @@ describe('coverage is recomputed, never accepted', () => {
       planPath: p,
       env: ENV,
       unreviewedDimensions: [
-        `${label} — its prompt was built, but no agent on record was launched with it`,
+        `${label} — no record shows its brief reaching an agent, so this ` +
+          'dimension was reviewed, if at all, from a prompt the run wrote ' +
+          'for itself',
       ],
       modelId: MODEL,
     });
@@ -5289,12 +5343,12 @@ describe('coverage is recomputed, never accepted', () => {
     recordBuilt(p, 2);
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 2 },
     );
     transcript(
       'a2',
-      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
       { toolCalls: 2 },
     );
     const r = composeReview({
@@ -5359,6 +5413,11 @@ describe('coverage is recomputed, never accepted', () => {
     // No chunk universe to count means nothing countable was certified — the
     // opener says so instead of "Reviewed."
     expect(r.body).toMatch(/could not certify that any of this diff/);
+    // Coverage was never ATTEMPTED, which is the `'skipped'` state —
+    // `'failed'` is reserved for a run whose coverage machinery ran and
+    // broke. A no-plan run persisting in the failed shape would make the
+    // two indistinguishable in the artifact.
+    expect(r.terminalState).toBe('skipped');
   });
 
   it('caps when the agents made no tool call — whatever their prose said', () => {
@@ -5558,7 +5617,7 @@ describe('coverage is recomputed, never accepted', () => {
     recordMatrix(p); // roster satisfied: these three categories, nothing else
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\n` +
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 3 },
     );
@@ -6073,6 +6132,11 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
     verdictLine({
       event: 'COMMENT',
       body: '',
+      // `verdictLine` reads neither of these; they are here because the result
+      // type carries them and this literal stands in for a real compose.
+      terminalState: 'complete',
+      capAxes: { coverage: [], verification: [], posture: [], other: [] },
+      chunkLedger: [],
       baseEvent: 'COMMENT',
       cappedBy: [],
       downgraded: false,
@@ -8432,6 +8496,48 @@ describe('the ledger marker reaches the POSTED body', () => {
     ]);
     expect(whiffed.dimensionGapsAreDepthOnly).toBe(false);
     expect(parseLedger(whiffed.body)?.sha).toBeUndefined();
+  });
+
+  it('does not swallow a bare reverse-audit whiff beside the budget-stop marker', () => {
+    // The stop's structural entry has subject `reverse audit` — and so does
+    // the orchestrator's entry for a WHIFFED reverse audit, which an audit
+    // that made tool calls and returned bare prose twice leaves as the ONLY
+    // detector (`coverageFromTranscripts` reports nothing of it). The echo
+    // filter's bare-subject arm matched the whiff against the budget entry
+    // and swallowed it: `dimensionGapsAreDepthOnly` turned vacuously true,
+    // the incremental anchor rode past the lines the whiffed audit never
+    // reviewed, and the cap routed to the verification axis. A bare-subject
+    // entry carrying no reason is not an echo of the stop's `subject —
+    // reason` sentence — the budget entry may claim no bare-subject echo.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      p,
+      { remainingSeconds: 10, reserveSeconds: 300, expectedRoundSeconds: 60 },
+      3,
+    );
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+    // The decision layer keeping the entry is only half the contract: the
+    // render path's echo dedup must not swallow it either, or the posted
+    // body never discloses the whiff while `capAxes.coverage` says coverage
+    // is in doubt (R19-32).
+    expect(r.body).toContain('returned no evidence of its walk twice');
   });
 
   it('classifies a ROUND-CAP stop the same way, relay or no relay', () => {
@@ -15849,6 +15955,706 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
     // ...and the differential is not vacuously true because every arm is
     // undefined: the prescribed shape does carry its id.
     expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
+  });
+});
+
+describe('terminalState — coverage, not verdict', () => {
+  const item = (
+    id: number,
+    outcome: ChunkCoverageItem['outcome'],
+    classification?: ChunkCoverageItem['classification'],
+  ): ChunkCoverageItem => ({
+    id,
+    files: [],
+    outcome,
+    agents: [],
+    ...(classification ? { classification } : {}),
+  });
+
+  it('is complete when every planned chunk was read', () => {
+    expect(
+      deriveTerminalState([item(1, 'covered'), item(2, 'covered')], null),
+    ).toBe('complete');
+  });
+
+  it('counts recovered work as read', () => {
+    // A resumed run that reused the interrupted attempt's evidence read the
+    // diff. Calling that `partial` would report a gap where there is none.
+    expect(
+      deriveTerminalState([item(1, 'covered'), item(2, 'recovered')], null),
+    ).toBe('complete');
+  });
+
+  it('is partial when some chunks were read and some were not', () => {
+    expect(
+      deriveTerminalState(
+        [item(1, 'covered'), item(2, 'missing', 'idle')],
+        null,
+      ),
+    ).toBe('partial');
+  });
+
+  it('is failed when nothing was read at all', () => {
+    expect(
+      deriveTerminalState(
+        [item(1, 'missing', 'no-agent'), item(2, 'missing', 'no-agent')],
+        null,
+      ),
+    ).toBe('failed');
+  });
+
+  it('is skipped when nothing was planned', () => {
+    expect(deriveTerminalState([], null)).toBe('skipped');
+  });
+
+  it('is failed when coverage itself could not be computed', () => {
+    // Distinct from "every chunk failed": that is a coverage fact about a run
+    // that produced a ledger. This is a run with no ledger to read.
+    expect(deriveTerminalState([], 'no plan was given')).toBe('failed');
+    expect(deriveTerminalState([item(1, 'covered')], 'no plan')).toBe('failed');
+  });
+
+  it('does not call a run with an uncoverable chunk complete', () => {
+    // A deliberate departure from `ocr`'s rule, where a waived item does not
+    // stop a run being complete. This pipeline's stated position — where the
+    // set is built, and in `ok` — is that a diff with a line no read can reach
+    // was not fully reviewed. A state that said `complete` would contradict
+    // the report it ships in.
+    expect(
+      deriveTerminalState(
+        [item(1, 'covered'), item(2, 'uncoverable', 'declared-uncoverable')],
+        null,
+      ),
+    ).toBe('partial');
+  });
+
+  it('reads nothing but the ledger — findings do not move it', () => {
+    // The property that makes it worth having. A run that read all 18 chunks
+    // covered 18 chunks whether it found a blocker in them or nothing at all.
+    const full = [item(1, 'covered'), item(2, 'covered')];
+    expect(deriveTerminalState(full, null)).toBe('complete');
+    const r = composeReview({
+      bodyCriticals: ['[build] `npm run build` failed'],
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // A blocker, and the diff was still fully read.
+    expect(r.terminalState).toBe('complete');
+  });
+});
+
+describe('selection drift — report-only, end to end', () => {
+  it('lands in remediation, caps nothing, and moves no event', () => {
+    // A valid identity bound to the diff, and the diff rewritten AFTER the
+    // agents ran — the exact failure the identity exists to catch. Every
+    // existing drift test exercised only absence (identity-less plans); this
+    // is the non-null path across the compose surface: disclosed where the
+    // other repairs are, and wired to NOTHING that caps.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      withSelection: true,
+    });
+    writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.remediation.join(' ')).toContain('selection drift:');
+    expect(r.remediation.join(' ')).toMatch(/diff file has changed/);
+    // Report-only by construction: the drift rides remediation, NOT
+    // coverageEntries — a push there would cap this fully-covered run's
+    // verdict on a check that has never fired on a real run.
+    expect(r.cappedBy).toEqual([]);
+    expect(r.event).toBe('APPROVE');
+    expect(r.terminalState).toBe('complete');
+  });
+});
+
+describe('the coverage-failure arms keep their distinct messages', () => {
+  it('renders the ledger-contradiction arm when coverage throws ChunkPartitionError', () => {
+    // A partition violation is a defect in coverage.ts, not an unusable plan
+    // or unreadable transcripts: folded into the generic else, an operator
+    // handed "the plan could not be used" goes to re-capture a diff that was
+    // never the problem — the exact misdirection this arm exists to prevent.
+    const p = coveredPlan();
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new coverageModule.ChunkPartitionError(
+          'probe — uncoverable disagrees with the ledger',
+        );
+      });
+    try {
+      const r = composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: p,
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.body).toContain('the coverage ledger contradicted the plan');
+      expect(r.body).not.toContain('the plan could not be used');
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      // The run-level failure terminalState keys on: a coverage machinery
+      // break, not the nothing-was-planned 'skipped'.
+      expect(r.terminalState).toBe('failed');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('capAxes — three kinds of cap, three repairs', () => {
+  it('sorts each known cap onto the axis whose repair it names', () => {
+    const axes = groupCapAxes([
+      'chunk-nobody-read',
+      'criticals-unverified',
+      'unlicensed-deferral',
+    ]);
+    expect(axes.coverage).toEqual(['chunk-nobody-read']);
+    expect(axes.verification).toEqual(['criticals-unverified']);
+    expect(axes.posture).toEqual(['unlicensed-deferral']);
+    expect(axes.other).toEqual([]);
+  });
+
+  it('puts an unclassified cap in `other` rather than dropping it', () => {
+    // A cap added to `cappedBy` and not classified here must be visible. A
+    // grouping that silently swallowed it would under-report the reason an
+    // Approve was unavailable — which is the whole thing this view exists to
+    // report.
+    expect(groupCapAxes(['some-future-cap']).other).toEqual([
+      'some-future-cap',
+    ]);
+  });
+
+  it('accounts for every entry in `cappedBy`, exactly once', () => {
+    const caps = [
+      'cannot-tell-existing-critical',
+      'chunk-nobody-read',
+      'uncoverable-chunk',
+      'unreviewed-dimension',
+      'context-unavailable',
+      'unlicensed-deferral',
+      'criticals-unverified',
+      'findings-unverified-at-compose',
+    ];
+    const axes = groupCapAxes(caps);
+    const all = [
+      ...axes.coverage,
+      ...axes.verification,
+      ...axes.posture,
+      ...axes.other,
+    ];
+    expect(all.sort()).toEqual([...caps].sort());
+    expect(axes.other).toEqual([]);
+  });
+
+  it('is a view of `cappedBy`, so the two cannot disagree', () => {
+    const r = composeReview({
+      planPath: undefined,
+      env: ENV,
+      modelId: MODEL,
+    });
+    const all = [
+      ...r.capAxes.coverage,
+      ...r.capAxes.verification,
+      ...r.capAxes.posture,
+      ...r.capAxes.other,
+    ];
+    expect(all.sort()).toEqual([...r.cappedBy].sort());
+  });
+
+  it('puts a verification-floor cap on the verification axis — the diff WAS read', () => {
+    // A fully covered run whose reverse audit never ran: the only fact
+    // behind the cap is the Step 4/5 floor. The fixed map put the cap on
+    // the coverage axis, and an automated caller routing repairs by axis
+    // was told to relaunch Step 3 agents that had read everything.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('puts the reverse-audit budget stop on the verification axis too', () => {
+    // The depth disclosure is the third fact riding the cap: the audit ran
+    // out of rounds over a diff every agent had read, so its repair is the
+    // audit — never a Step 3 relaunch.
+    const p = coveredPlan();
+    writeRoundCapStop(p, 3, 4);
+    const r = composeReview(base({ planPath: p }));
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('keeps a prefix-reshaped budget-stop relay on the verification axis', () => {
+    // The splice retires a 'step 5 — …' reshaped relay by substring, but
+    // the reshaped entry then fails all three depth exemptions — it no
+    // longer starts with `reverse audit — `, `step 5` is no non-diff
+    // head, and the exact-text set does not carry it — so the same
+    // underlying stop classified as coverage with the prefix and
+    // verification without it. The splice retains an entry only when it
+    // contains the full machine-minted canonical stop text, and the stop
+    // fact itself is marker-proven: a depth fact whichever prefix the
+    // orchestrator added.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    // Built directly, not through base(): its default `planPath:
+    // coveredPlan()` rewrites the shared plan.json fixture, dropping this
+    // test's prNumber/fetchedSha before the override takes effect.
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        'step 5 — reverse audit — stopped before round 4 by the review time budget',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+    // The axis split leaves the anchor's exact-text rule untouched: a
+    // reshaped relay still withholds the incremental anchor.
+    expect(parseLedger(r.body)?.round).toBe(1);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('keeps a prefix-reshaped round-cap relay on the verification axis', () => {
+    // The round-cap twin: the identical run with the relay verbatim
+    // classifies as verification (the test above this pair), so the
+    // orchestrator's prefix alone must not move the axis.
+    const p = coveredPlan();
+    writeRoundCapStop(p, 3, 4);
+    const r = composeReview(
+      base({
+        planPath: p,
+        unreviewedDimensions: [
+          'step 5 — reverse audit — did not converge within the reverse-audit round cap of 3',
+        ],
+      }),
+    );
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('keeps a coverage-fired cap on the coverage axis', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: idlePlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+  });
+
+  it('coverage doubt wins when both kinds of fact fire the same cap', () => {
+    // The same repair-subsumption precedence `classify()` applies: a
+    // relaunch of the agents that never read their chunks subsumes
+    // re-running the audit that also never ran.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 0 });
+    transcript('a2', goodPrompt(2), { toolCalls: 0 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    // No recordStep45: the floor fires beside the idle agents.
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+  });
+
+  it('puts a whiffed dimension on the coverage axis — the caller prose channel', () => {
+    // A whiffed agent made tool calls, so `coverageFromTranscripts` reports
+    // nothing — the orchestrator's entry is the ONLY detector, and it rides
+    // the `!dimensionGapsAreDepthOnly` disjunct. Deleting that disjunct
+    // routes the cap to the verification axis and tells an automated caller
+    // to re-verify instead of relaunching the whiffed agent.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['security — the agent whiffed twice'],
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+  });
+
+  it('keeps a floor-only cap on the verification axis when the orchestrator echoes the gap', () => {
+    // The render path dedupes caller echoes of structural coverage entries
+    // by subject and reason; the axis decision must too. Unfiltered, the
+    // echoed floor line fails both depth exemptions, flips
+    // `dimensionGapsAreDepthOnly`, and a caller routing repairs by axis
+    // relaunches Step 3 agents that read everything — for a run whose only
+    // doubt is the verification floor. The relay is the structural
+    // sentence verbatim — the shape the stderr instruction asks for; a
+    // same-subject entry with its own reason is a distinct claim (the
+    // whiffed-scope test below pins that half).
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'reverse audit — no auditor was launched with a prompt this skill ' +
+          'builds — the pass that hunts what the rest of the review ' +
+          'missed ran, if at all, without the method its brief carries',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('keeps a floor-only cap on the verification axis when the echo is the zh relay', () => {
+    // The stderr instruction relays the structural entry in BOTH languages
+    // (R17-3): the zh sentence — the `subjectZh——reasonZh` shape
+    // coverage.ts coins — must dedup exactly like the English relay, or it
+    // flips `dimensionGapsAreDepthOnly` and misroutes the cap to the
+    // coverage axis for a run whose only doubt is the verification floor.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        '反向审计——没有审计 agent 是用本 skill 构建的 prompt 启动的——负责搜寻' +
+          '评审其余部分遗漏问题的这道工序，即便运行过，也缺失了 brief 承载的方法',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('does not swallow a bare zh-subject whiff beside the floor entry', () => {
+    // The zh twin of the whiff pin below: the floor entry's `subjectZh` is
+    // `反向审计`, the very entry an orchestrator gives a WHIFFED reverse
+    // audit too. A bare-subject entry is the whiff's only detector and a
+    // line-coverage claim — the floor entry may claim no bare-subject echo,
+    // exactly like the budget entry (R22-4). Swallowing it routed the cap
+    // to the verification axis and an automated repair caller relaunched
+    // verification instead of the auditor whose scope read nothing. A
+    // COMPLIANT zh relay carries the full `subjectZh——reasonZh` sentence
+    // and still dedupes (the test above pins that half).
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['反向审计'],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+    // No Han description on this fixture, so the body keeps the English
+    // register — with the verbatim zh entry rendered inside it, which is
+    // the rendering proof the entry escaped the swallow.
+    expect(r.body).toContain(
+      'Not reviewed: 反向审计 — the agent returned no evidence of its walk twice.',
+    );
+  });
+
+  it('does not swallow a bare-subject whiff beside the floor entry', () => {
+    // The floor gap's subject is `reverse audit` — and so is the
+    // orchestrator's entry for a WHIFFED reverse audit, which an audit
+    // that made tool calls and returned bare prose twice leaves as the
+    // ONLY detector. The bare-subject arms of the echo dedup matched the
+    // whiff against the floor entry and swallowed it: the body lost the
+    // whiff sentence, `axisDimensionGapsAreDepthOnly` stayed vacuously
+    // true, and the cap routed to the verification axis — an automated
+    // repair caller relaunched verification instead of the auditor whose
+    // scope read nothing (R22-4). The floor entry may claim no
+    // bare-subject echo, the same exemption the budget entry carries; a
+    // compliant relay of the floor entry carries its reason and still
+    // dedupes through the full-sentence arms (the test above pins that
+    // half).
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — the agent returned no evidence of its walk twice.',
+    );
+  });
+
+  it('keeps a distinct same-subject report on the coverage axis — the echo dedup is anchored on the reason', () => {
+    // A structural reverse-audit floor entry can coexist with a DISTINCT
+    // whiff report under the same subject. The subject-prefix echo
+    // treated the report as the floor entry's relay, removed it from the
+    // decision, and routed the cap to verification — but a whiffed audit
+    // scope is a line-coverage claim, and its repair is a Step 3 relaunch:
+    // the cap belongs on coverage.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+    // …and the distinct claim reaches the author beside the structural line.
+    expect(r.body).toContain(
+      "chunk 2's auditor returned nothing substantive twice",
+    );
+  });
+
+  it('does not swallow a distinct report that quotes the floor sentence inside its own reason', () => {
+    // The full-sentence arm read "contains the structural sentence" as "is
+    // its relay". A whiff report that QUOTES the floor sentence inside its
+    // own reason contains it and is not a relay — it carries a claim of its
+    // own — yet it was filtered as an echo: the whiff clause never reached
+    // the body, `dimensionGapsAreDepthOnly` went vacuously true, and the
+    // cap routed to the verification axis for a run whose auditor read
+    // nothing (R30-1). An echo is what is left when nothing substantive
+    // remains after the sentence is removed; a remainder is a distinct
+    // claim and belongs on the coverage axis, rendered.
+    const floor =
+      'reverse audit — no auditor was launched with a prompt this skill ' +
+      'builds — the pass that hunts what the rest of the review missed ' +
+      'ran, if at all, without the method its brief carries';
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        `reverse audit — the floor already said '${floor}' and round 2's ` +
+          'auditor returned nothing substantive twice',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).toEqual([]);
+    expect(r.body).toContain(
+      "round 2's auditor returned nothing substantive twice",
+    );
+  });
+
+  it('does not splice a distinct report that quotes the canonical stop sentence beside its own clause', () => {
+    // The canonical-stop splice matched bare `includes(canonical)`, so with
+    // a stop marker on disk a report that QUOTED the stop sentence inside
+    // its own reason was spliced out of `unreviewed`: the whiff clause never
+    // reached the posted body, and the splice exemption routed the cap to
+    // the verification axis — an automated caller re-ran verification
+    // instead of relaunching the whiffed chunk's auditor (R32-3). The
+    // splice now applies the same remainder test as the echo filter: an
+    // entry with a clause of its own stays, renders, and caps on coverage.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const canonical =
+      'reverse audit — stopped before round 4 by the review time budget';
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        `reverse audit — the floor already said '${canonical}' and chunk 2's ` +
+          'auditor returned nothing substantive twice',
+      ],
+    });
+    expect(r.body).toContain(
+      "chunk 2's auditor returned nothing substantive twice",
+    );
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).toEqual([]);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('puts the medium tier by-design reverse-audit skip on the posture axis', () => {
+    // A clean balanced-medium review caps on the tier's own by-design
+    // omission: no verification can clear it and no repair lifts it — the
+    // tier skip is unfixable by construction. Routing it as a verification
+    // gap sends an automated caller to relaunch verification against a
+    // permanently uncleared axis.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toEqual([]);
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+  });
+
+  it('anchors a clean balanced-medium run — the by-design skip is posture, not scope doubt', () => {
+    // Every chunk covered, every required role performed, reverse audit
+    // skipped by design: `scopeUnproven` read the by-design floor entry as
+    // doubt that the diff was READ and withheld the incremental SHA anchor
+    // — closing the full-diff re-review loop the anchor exists to end.
+    // The skip still caps the verdict at Comment on the posture axis;
+    // only the anchor's scope question stops reading it as doubt.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], {
+        effort: 'medium',
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+    const ledger = parseLedger(r.body);
+    expect(ledger?.round).toBe(1);
+    expect(ledger?.sha).toBe('deadbeef00112233');
+  });
+
+  it('anchors a clean balanced-medium run whose orchestrator relays the skip in Chinese', () => {
+    // The zh twin of the anchor test (R17-3): the by-design skip relayed as
+    // the zh structural sentence must echo-dedup exactly like the English
+    // relay, or `dimensionGapsAreDepthOnly` flips false, the cap misroutes
+    // to the coverage axis, and the anchor withholds — regenerating the
+    // full-diff re-review loop the anchor exists to end.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], {
+        effort: 'medium',
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        '反向审计——未运行——均衡（medium）档跳过二次审查步骤，因此本次判定上限为 ' +
+          'Comment，不会 Approve',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.dimensionGapsAreDepthOnly).toBe(true);
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('keeps a repairable floor gap on the verification axis beside the medium skip', () => {
+    // Medium runs Step 4: a verify floor that actually failed is
+    // repairable and shares the cap with the by-design skip. The axis
+    // names what a repair can lift, so a mixed entry set stays on the
+    // verification axis.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan([], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toEqual([]);
+  });
+
+  it('keeps a repairable orchestrator gap on the verification axis beside the medium skip', () => {
+    // The by-design skip is the cap's only STRUCTURAL fact here, but the
+    // orchestrator's build-and-test disclosure backs the same cap, and it
+    // IS repairable — re-run the suite. The posture branch that examined
+    // structural entries alone swallowed it; posture fires only when the
+    // skip is the cap's sole backing fact, so a mixed run stays on the
+    // verification axis whichever channel names the gap.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'build-and-test — the integration tests did not run',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toEqual([]);
   });
 });
 

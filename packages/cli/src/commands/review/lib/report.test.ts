@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import { buildDiffPlan } from './diff-plan.js';
 import { buildPlanReport, stringifyPlanReport } from './report.js';
 import { makeDiff } from './test-utils.js';
@@ -22,18 +23,29 @@ function editFile(path: string, ctx: number, add: number): string {
   ].join('\n');
 }
 
+/**
+ * Plan and report over ONE diff text.
+ *
+ * `buildPlanReport` now records what its plan was computed from (see
+ * lib/selection.ts), so the text has to reach both halves. Threading it through
+ * a single parameter is what keeps these tests unable to describe a plan with
+ * another plan's identity — the confusion the recorded identity exists to catch
+ * in production.
+ */
+function planReportOf(
+  diff: string,
+  postImageLines: ((p: string) => number) | null,
+) {
+  return buildPlanReport(buildDiffPlan(diff, 400), postImageLines, {}, diff);
+}
+
 describe('buildPlanReport', () => {
   it('resolves the post-image through the injected dependency', () => {
-    const plan = buildDiffPlan(editFile('src/a.ts', 3, 2), 400);
     const asked: string[] = [];
-    const report = buildPlanReport(
-      plan,
-      (p) => {
-        asked.push(p);
-        return 1000;
-      },
-      {},
-    );
+    const report = planReportOf(editFile('src/a.ts', 3, 2), (p) => {
+      asked.push(p);
+      return 1000;
+    });
     expect(asked).toEqual(['src/a.ts']);
     expect(report.files[0].fileLines).toBe(1000);
     // pre = post - added + removed
@@ -43,17 +55,16 @@ describe('buildPlanReport', () => {
   it('flags a heavy file, using the injected line count', () => {
     // 900 added lines into a file that ends up 1 000 long: it existed at 100
     // lines, so it is not "large enough before" — not heavy.
-    const plan = buildDiffPlan(editFile('src/a.ts', 3, 900), 400);
-    expect(buildPlanReport(plan, () => 1000, {}).files[0].heavy).toBe(false);
+    const diff = editFile('src/a.ts', 3, 900);
+    expect(planReportOf(diff, () => 1000).files[0].heavy).toBe(false);
     // Same change into a file that ends up 6 000 long: it existed at 5 100,
     // and 900 changed lines clears the volume threshold.
-    expect(buildPlanReport(plan, () => 6000, {}).files[0].heavy).toBe(true);
+    expect(planReportOf(diff, () => 6000).files[0].heavy).toBe(true);
   });
 
   it('treats a null resolver as "no tree to read", so nothing is heavy', () => {
     // `plan-diff` has a bare diff file and no ref. It must not guess.
-    const plan = buildDiffPlan(makeDiff('src/big.ts', 2000), 400);
-    const report = buildPlanReport(plan, null, {});
+    const report = planReportOf(makeDiff('src/big.ts', 2000), null);
     expect(report.files[0].fileLines).toBe(0);
     expect(report.files[0].preLines).toBe(0);
     expect(report.files[0].heavy).toBe(false);
@@ -67,14 +78,10 @@ describe('buildPlanReport', () => {
       'Binary files a/logo.png and b/logo.png differ',
     ].join('\n');
     const asked: string[] = [];
-    const report = buildPlanReport(
-      buildDiffPlan(diff, 400),
-      (p) => {
-        asked.push(p);
-        return 500;
-      },
-      {},
-    );
+    const report = planReportOf(diff, (p) => {
+      asked.push(p);
+      return 500;
+    });
     expect(asked).toEqual([]);
     expect(report.files[0].binary).toBe(true);
     expect(report.files[0].heavy).toBe(false);
@@ -83,26 +90,19 @@ describe('buildPlanReport', () => {
   it('carries the wrapper signal through — the 1e roster gate reads the report, not the diff', () => {
     // All three capture commands spread `buildPlanReport`, so the field the
     // diff parser computed rides into every plan the roster can read.
+    expect(planReportOf(editFile('src/a.ts', 3, 2), null).wrapperSignal).toBe(
+      false,
+    );
     expect(
-      buildPlanReport(buildDiffPlan(editFile('src/a.ts', 3, 2), 400), null, {})
-        .wrapperSignal,
-    ).toBe(false);
-    expect(
-      buildPlanReport(
-        buildDiffPlan(makeDiff('src/caching-layer.ts', 20), 400),
-        null,
-        {},
-      ).wrapperSignal,
+      planReportOf(makeDiff('src/caching-layer.ts', 20), null).wrapperSignal,
     ).toBe(true);
   });
 
   it('emits addedRanges only on heavy files', () => {
     const diff =
       editFile('src/heavy.ts', 3, 900) + makeDiff('src/light.ts', 20);
-    const report = buildPlanReport(
-      buildDiffPlan(diff, 400),
-      (p) => (p === 'src/heavy.ts' ? 6000 : 30),
-      {},
+    const report = planReportOf(diff, (p) =>
+      p === 'src/heavy.ts' ? 6000 : 30,
     );
     const heavy = report.files.find((f) => f.path === 'src/heavy.ts')!;
     const light = report.files.find((f) => f.path === 'src/light.ts')!;
@@ -127,7 +127,7 @@ describe('buildPlanReport', () => {
       '-gone2',
       '',
     ].join('\n');
-    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 100, {});
+    const report = planReportOf(diff, () => 100);
     expect(report.files[0].hunks).toEqual([{ newStart: 1, newEnd: 2 }]);
   });
 
@@ -136,7 +136,7 @@ describe('buildPlanReport', () => {
     // `clearTimeout()` leaves nothing behind. This range points it at the `-`
     // lines that are the only evidence the call ever existed.
     const diff = editFile('src/heavy.ts', 3, 900);
-    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 6000, {});
+    const report = planReportOf(diff, () => 6000);
     const f = report.files[0];
     expect(f.heavy).toBe(true);
     expect(f.diffRange).toEqual({
@@ -146,11 +146,7 @@ describe('buildPlanReport', () => {
   });
 
   it('withholds the diff range from files no invariant agent will read', () => {
-    const report = buildPlanReport(
-      buildDiffPlan(makeDiff('src/a.ts', 20), 400),
-      () => 30,
-      {},
-    );
+    const report = planReportOf(makeDiff('src/a.ts', 20), () => 30);
     expect(report.files[0].heavy).toBe(false);
     expect(report.files[0].diffRange).toBeUndefined();
   });
@@ -162,12 +158,29 @@ describe('buildPlanReport', () => {
       makeDiff('docs/g.md', 30) +
       makeDiff('package-lock.json', 40);
     const plan = buildDiffPlan(diff, 400);
-    const report = buildPlanReport(plan, () => 100, {});
+    // Called directly, not through `planReportOf`: the last assertion is a
+    // REFERENCE check — the report must pass the plan's own `chunks` array
+    // through rather than copy it — and a helper that builds its own plan
+    // would compare two equal-but-distinct arrays and always fail.
+    const report = buildPlanReport(plan, () => 100, {}, diff);
     expect(report.srcDiffLines).toBe(plan.srcDiffLines);
     expect(report.testDiffLines).toBe(plan.testDiffLines);
     expect(report.docsDiffLines).toBe(plan.docsDiffLines);
     expect(report.generatedDiffLines).toBe(plan.generatedDiffLines);
     expect(report.chunks).toBe(plan.chunks);
+  });
+
+  it('records the diff text digest as the source-artifact identity', () => {
+    // The write side of the drift check: `selectionDrift` re-hashes the diff
+    // on disk and compares it to this field, so the field must be the digest
+    // of the VERY text the plan was chunked from. Wiring
+    // `buildSelectionIdentity` to any other input compiles fine and would
+    // surface only as drift false-positives on every real run.
+    const diff = editFile('src/a.ts', 3, 2);
+    const report = planReportOf(diff, () => 1000);
+    expect(report.selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(diff, 'utf8').digest('hex'),
+    );
   });
 });
 
@@ -175,20 +188,14 @@ describe('stringifyPlanReport', () => {
   it('round-trips: the collapsed text parses back to the same object', () => {
     const diff =
       editFile('src/heavy.ts', 3, 900) + makeDiff('src/light.ts', 20);
-    const report = buildPlanReport(
-      buildDiffPlan(diff, 400),
-      (p) => (p === 'src/heavy.ts' ? 6000 : 30),
-      {},
+    const report = planReportOf(diff, (p) =>
+      p === 'src/heavy.ts' ? 6000 : 30,
     );
     expect(JSON.parse(stringifyPlanReport(report))).toEqual(report);
   });
 
   it('keeps every range on one line, and stays pageable', () => {
-    const report = buildPlanReport(
-      buildDiffPlan(editFile('src/heavy.ts', 3, 900), 400),
-      () => 6000,
-      {},
-    );
+    const report = planReportOf(editFile('src/heavy.ts', 3, 900), () => 6000);
     const text = stringifyPlanReport(report);
     // Not one giant line: `read_file` pages at line boundaries, so a compact
     // one-line report could never be paged at all.
@@ -201,11 +208,7 @@ describe('stringifyPlanReport', () => {
   });
 
   it('is smaller than the indenting serializer it replaced', () => {
-    const report = buildPlanReport(
-      buildDiffPlan(editFile('src/heavy.ts', 3, 900), 400),
-      () => 6000,
-      {},
-    );
+    const report = planReportOf(editFile('src/heavy.ts', 3, 900), () => 6000);
     const collapsed = stringifyPlanReport(report).length;
     const indented = JSON.stringify(report, null, 2).length + 1;
     expect(collapsed).toBeLessThan(indented);
@@ -223,7 +226,7 @@ describe('stringifyPlanReport', () => {
       '+x',
       '',
     ].join('\n');
-    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 1, {});
+    const report = planReportOf(diff, () => 1);
     const parsed = JSON.parse(stringifyPlanReport(report)) as typeof report;
     expect(parsed.files[0].path).toBe(weird);
   });

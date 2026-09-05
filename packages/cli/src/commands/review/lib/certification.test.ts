@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   chunkOfKey,
+  declaredUncoverableChunkIds,
   declaresOwnUncoverable,
   openedBrief,
   readBrief,
@@ -98,11 +99,45 @@ describe('declaresOwnUncoverable', () => {
     ).toBe(true);
   });
 
-  it('ignores a declaration indented into prose', () => {
-    // The `^` anchor with only whitespace allowed before the marker: a
-    // quoted line inside a bullet does not match.
+  it('ignores a declaration quoted mid-line in prose', () => {
+    // The `^` anchor: a quotation that does not start its own line cannot
+    // match, whatever whitespace the quote carries.
     const quoted = `- the agent said "${declaring}" which I verified`;
     expect(declaresOwnUncoverable(rec({ finalText: quoted }), 3)).toBe(false);
+  });
+
+  it('vetoes when the record\u2019s own declaration follows a quoted one', () => {
+    // EVERY match is read, not only the first: a declarer that quotes
+    // another chunk's declaration — indented, on its own line, exactly as
+    // a reverse-audit return does — ahead of its own line still declares
+    // its own chunk. The first-match read saw the quotation and missed
+    // the declaration (R22-2).
+    const text =
+      'The chunk-2 agent returned:\n' +
+      '  Uncoverable: chunk 2 — line exceeds the read limit\n' +
+      `${declaring}`;
+    expect(declaresOwnUncoverable(rec({ finalText: text }), 3)).toBe(true);
+  });
+});
+
+describe('declaredUncoverableChunkIds', () => {
+  it('returns every declaration in text order, quotations included', () => {
+    // The walk adjudicates each candidate against its shape gates, so the
+    // atom must hand over ALL of them — an earlier quotation of another
+    // chunk's declaration must not hide the record's own (R22-2).
+    const text =
+      'The chunk-2 agent returned:\n' +
+      '  Uncoverable: chunk 2 — line exceeds the read limit\n' +
+      'Uncoverable: chunk 3 — binary payload, no readable lines';
+    expect(declaredUncoverableChunkIds(rec({ finalText: text }))).toEqual([
+      2, 3,
+    ]);
+  });
+
+  it('returns nothing when the return carries no declaration', () => {
+    expect(
+      declaredUncoverableChunkIds(rec({ finalText: 'All clear.' })),
+    ).toEqual([]);
   });
 });
 
