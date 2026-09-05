@@ -237,6 +237,7 @@ describe('InputPrompt', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([]);
     mockFsStat.mockRejectedValue(new Error('file not found'));
     mockFsMkdir.mockResolvedValue(undefined);
     mockFsCopyFile.mockResolvedValue(undefined);
@@ -1685,7 +1686,6 @@ describe('InputPrompt', () => {
     ];
 
     beforeEach(() => {
-      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([]);
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
       vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
