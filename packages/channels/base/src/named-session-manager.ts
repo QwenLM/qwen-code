@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import process from 'node:process';
 import { canonicalizeWorkspacePath } from './paths.js';
 import type { SessionTarget } from './types.js';
@@ -28,7 +28,7 @@ export interface NamedSessionOwnerInput {
 export interface NamedSessionView {
   name: string;
   status: 'open' | 'closed';
-  isolation: 'shared';
+  isolation: NamedSessionIsolation;
   active: boolean;
 }
 
@@ -51,11 +51,13 @@ export interface NamedSessionManagerOptions {
   now?: () => number;
 }
 
+export type NamedSessionIsolation = 'shared' | 'worktree';
+
 interface StoredTask {
   name: string;
   sessionId: string;
   cwd: string;
-  isolation: 'shared';
+  isolation: NamedSessionIsolation;
   status: 'open' | 'closed';
   target: SessionTarget;
   createdAt: number;
@@ -73,6 +75,7 @@ interface StoredOwner {
 
 interface StoredRegistry {
   version: 1;
+  workspaceCwd: string;
   owners: StoredOwner[];
 }
 
@@ -252,6 +255,7 @@ export class NamedSessionManager {
   create(
     input: NamedSessionOwnerInput,
     name: string,
+    isolation: NamedSessionIsolation = 'shared',
   ): Promise<NamedSessionSelection> {
     return this.withOwnerLock(input, async () => {
       this.validateName(name);
@@ -270,14 +274,21 @@ export class NamedSessionManager {
       const target = this.target(input);
       const sessionId = await this.createSession(
         target,
-        this.cwd,
+        isolation,
         `Could not create task "${name}".`,
       );
+      const sessionCwd = this.router.getSessionCwd(sessionId);
+      if (!sessionCwd) {
+        await this.router
+          .detachManagedSession(sessionId)
+          .catch(() => undefined);
+        throw new Error(`Could not determine task "${name}" workspace.`);
+      }
       const task: StoredTask = {
         name,
         sessionId,
-        cwd: this.cwd,
-        isolation: 'shared',
+        cwd: sessionCwd,
+        isolation,
         status: 'open',
         target,
         createdAt: timestamp,
@@ -297,7 +308,7 @@ export class NamedSessionManager {
           .catch(() => undefined);
         throw error;
       }
-      this.router.activateManagedSession(sessionId, target, this.cwd);
+      this.router.activateManagedSession(sessionId, target, task.cwd);
       return this.selection(nextOwner, task);
     });
   }
@@ -466,11 +477,16 @@ export class NamedSessionManager {
       if (!owner?.activeTaskName) return undefined;
       const task = this.findTask(owner, owner.activeTaskName);
       if (!task || task.status !== 'open') return undefined;
+      if (task.isolation === 'worktree') {
+        throw new Error(
+          `Task "${task.name}" uses a worktree and cannot be cleared or reset yet. Continue using the task or close it. Its files were not changed.`,
+        );
+      }
       const timestamp = this.nextTimestamp(owner);
 
       const sessionId = await this.createSession(
         task.target,
-        task.cwd,
+        task.isolation,
         `Could not reset task "${task.name}".`,
       );
       const updatedTask: StoredTask = {
@@ -561,7 +577,7 @@ export class NamedSessionManager {
     const timestamp = this.nextTimestamp();
     const createdSessionId = await this.createSession(
       target,
-      this.cwd,
+      'shared',
       'Could not create the default task.',
     );
     const task: StoredTask = {
@@ -655,7 +671,9 @@ export class NamedSessionManager {
         await this.router.loadManagedSession(
           task.sessionId,
           task.target,
+          this.cwd,
           task.cwd,
+          task.isolation,
         )
       ).loaded;
     } catch (error) {
@@ -665,11 +683,15 @@ export class NamedSessionManager {
 
   private async createSession(
     target: SessionTarget,
-    cwd: string,
+    isolation: NamedSessionIsolation,
     failureMessage: string,
   ): Promise<string> {
     try {
-      return await this.router.createManagedSession(target, cwd);
+      return await this.router.createManagedSession(
+        target,
+        this.cwd,
+        isolation,
+      );
     } catch (error) {
       throw new Error(failureMessage, { cause: error });
     }
@@ -861,7 +883,11 @@ export class NamedSessionManager {
     ) {
       owners.push(owner);
     }
-    const next: StoredRegistry = { version: REGISTRY_VERSION, owners };
+    const next: StoredRegistry = {
+      version: REGISTRY_VERSION,
+      workspaceCwd: this.canonicalCwd,
+      owners,
+    };
     if (!this.isRegistry(next)) {
       throw new Error('Invalid named-session registry update.');
     }
@@ -873,7 +899,11 @@ export class NamedSessionManager {
 
   private readRegistry(): StoredRegistry {
     if (!existsSync(this.filePath)) {
-      return { version: REGISTRY_VERSION, owners: [] };
+      return {
+        version: REGISTRY_VERSION,
+        workspaceCwd: this.canonicalCwd,
+        owners: [],
+      };
     }
     let value: unknown;
     try {
@@ -887,7 +917,13 @@ export class NamedSessionManager {
       );
     }
     if (!this.isRegistry(value)) {
-      if (this.isRegistry(value, false)) {
+      if (this.isRegistry(value, true, true)) {
+        return { ...value, workspaceCwd: this.canonicalCwd };
+      }
+      if (
+        this.isRegistry(value, false) ||
+        this.isRegistry(value, false, true)
+      ) {
         const stalePath = `${this.filePath}.stale-${randomUUID()}`;
         try {
           renameSync(this.filePath, stalePath);
@@ -899,7 +935,11 @@ export class NamedSessionManager {
         process.stderr.write(
           '[NamedSessionManager] Archived a stale registry after the channel working directory changed.\n',
         );
-        return { version: REGISTRY_VERSION, owners: [] };
+        return {
+          version: REGISTRY_VERSION,
+          workspaceCwd: this.canonicalCwd,
+          owners: [],
+        };
       }
       throw new Error(`Invalid named-session registry: ${this.filePath}`);
     }
@@ -942,8 +982,19 @@ export class NamedSessionManager {
   private isRegistry(
     value: unknown,
     requireCurrentCwd = true,
+    allowMissingWorkspaceCwd = false,
   ): value is StoredRegistry {
     if (!this.isRecord(value) || value['version'] !== REGISTRY_VERSION) {
+      return false;
+    }
+    const workspaceCwd = value['workspaceCwd'];
+    if (
+      workspaceCwd === undefined
+        ? !allowMissingWorkspaceCwd
+        : typeof workspaceCwd !== 'string' ||
+          (requireCurrentCwd &&
+            canonicalizeWorkspacePath(workspaceCwd) !== this.canonicalCwd)
+    ) {
       return false;
     }
     const owners = value['owners'];
@@ -954,6 +1005,19 @@ export class NamedSessionManager {
       if (!this.isOwner(owner, ownerKeys, sessionIds, requireCurrentCwd)) {
         return false;
       }
+    }
+    if (
+      workspaceCwd === undefined &&
+      owners.some(
+        (owner) =>
+          this.isRecord(owner) &&
+          Array.isArray(owner['tasks']) &&
+          owner['tasks'].some(
+            (task) => this.isRecord(task) && task['isolation'] === 'worktree',
+          ),
+      )
+    ) {
+      return false;
     }
     return true;
   }
@@ -1022,8 +1086,12 @@ export class NamedSessionManager {
       typeof value['sessionId'] === 'string' &&
       value['sessionId'].length > 0 &&
       typeof value['cwd'] === 'string' &&
-      (!requireCurrentCwd || this.isCurrentCwd(value['cwd'])) &&
-      value['isolation'] === 'shared' &&
+      isAbsolute(value['cwd']) &&
+      (value['isolation'] === 'shared' || value['isolation'] === 'worktree') &&
+      (!requireCurrentCwd ||
+        (value['isolation'] === 'shared'
+          ? this.isCurrentCwd(value['cwd'])
+          : !this.isCurrentCwd(value['cwd']))) &&
       (value['status'] === 'open' || value['status'] === 'closed') &&
       this.isTimestamp(value['createdAt']) &&
       this.isTimestamp(value['updatedAt']) &&

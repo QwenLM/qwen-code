@@ -179,13 +179,28 @@ describe('package scripts', () => {
       ].join(' '),
     );
 
-    const vscodePackageJson = JSON.parse(
-      readFileSync(
-        path.join(root, 'packages/vscode-ide-companion/package.json'),
+    // No workspace forces coverage from its test:ci script any more; the
+    // configs decide, and only a post-merge run flips their switch on. A
+    // reintroduced `--coverage` flag would override the switch on every
+    // pull-request run.
+    for (const workspace of [
+      'packages/vscode-ide-companion',
+      'packages/web-shell',
+    ]) {
+      const workspacePackageJson = JSON.parse(
+        readFileSync(path.join(root, workspace, 'package.json'), 'utf8'),
+      );
+      expect(workspacePackageJson.scripts['test:ci']).not.toContain(
+        '--coverage',
+      );
+      const vitestConfig = readFileSync(
+        path.join(root, workspace, 'vitest.config.ts'),
         'utf8',
-      ),
-    );
-    expect(vscodePackageJson.scripts['test:ci']).toContain('--coverage');
+      );
+      expect(vitestConfig).toContain(
+        "enabled: process.env['QWEN_CI_COVERAGE'] === '1'",
+      );
+    }
   });
 
   it('skips build/bundle/husky but still generates git-commit info when CI builds explicitly', () => {

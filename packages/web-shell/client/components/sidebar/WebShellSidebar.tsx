@@ -59,6 +59,7 @@ import {
   SquarePenIcon,
   SunIcon,
   TargetIcon,
+  WorkflowIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -96,6 +97,7 @@ import {
   type WorkspaceOverviewItem,
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
+import { isDesktopShell } from '../../utils/externalOpen';
 import { isLocalDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
@@ -139,6 +141,7 @@ import {
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
+import { LocalFilesControl } from '../LocalFilesControl';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -216,6 +219,7 @@ export type WebShellSidebarFooterItem =
   | 'workspacesOverview'
   | 'splitView'
   | 'daemonStatus'
+  | 'localFiles'
   | 'collapse';
 
 export interface WebShellSidebarBranding {
@@ -238,6 +242,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'plugins'
   | 'channels'
   | 'scheduledTasks'
+  | 'workflows'
   | 'goals';
 
 export interface WebShellSidebarPrimaryNavOptions {
@@ -261,14 +266,23 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'sessionsOverview',
   'splitView',
   'daemonStatus',
+  'localFiles',
   'collapse',
 ];
+
+// The desktop shell always spawns its own loopback daemon, whose regular tools
+// already reach the local disk, so the bridge has nothing to add there — and on
+// WebKit webviews it could only ever render a dead entry. An explicit
+// `footer.items` still wins, so the entry stays reachable by choice.
+const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
+  DEFAULT_FOOTER_ITEMS.filter((item) => item !== 'localFiles');
 
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
   'plugins',
   'channels',
   'scheduledTasks',
+  'workflows',
   'goals',
 ];
 
@@ -375,6 +389,7 @@ interface WebShellSidebarProps {
   onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenWorkflows: () => void;
   onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
@@ -877,6 +892,7 @@ export function WebShellSidebar({
   onOpenChannels,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenWorkflows,
   onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
@@ -924,7 +940,14 @@ export function WebShellSidebar({
   );
   const footerItems = useMemo(
     () =>
-      new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
+      new Set(
+        footer === false
+          ? []
+          : (footer?.items ??
+            (isDesktopShell()
+              ? DESKTOP_DEFAULT_FOOTER_ITEMS
+              : DEFAULT_FOOTER_ITEMS)),
+      ),
     [footer],
   );
   const primaryNavItems = useMemo(
@@ -936,6 +959,7 @@ export function WebShellSidebar({
       (primaryNavItems.has('plugins') ||
         primaryNavItems.has('channels') ||
         primaryNavItems.has('scheduledTasks') ||
+        primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
@@ -1018,6 +1042,16 @@ export function WebShellSidebar({
   const primaryWorkspaceExpansionId = `primary:${
     primaryWorkspaceCwd ?? 'default'
   }`;
+  const workflowWorkspaceCwd = connection.sessionId
+    ? connection.workspaceCwd
+    : (lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd);
+  const workspaceWorkflowsEnabled =
+    workspaces.find((entry) => entry.cwd === workflowWorkspaceCwd)
+      ?.workflowsEnabled ?? false;
+  const workflowsEnabled = connection.sessionId
+    ? (connection.supportedCommands?.workflowsEnabled ??
+      workspaceWorkflowsEnabled)
+    : workspaceWorkflowsEnabled;
   const lockedWorkspace = lockedWorkspaceCwd
     ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
     : undefined;
@@ -5316,6 +5350,22 @@ export function WebShellSidebar({
                     {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
                   </button>
                 )}
+              {projectFeaturesEnabled &&
+                primaryNavItems.has('workflows') &&
+                workflowsEnabled && (
+                  <button
+                    className={styles.pluginButton}
+                    type="button"
+                    title={t('sidebar.workflows')}
+                    aria-label={t('sidebar.workflows')}
+                    onClick={onOpenWorkflows}
+                  >
+                    <span className={styles.navIcon}>
+                      <WorkflowIcon size={16} strokeWidth={1.2} />
+                    </span>
+                    {!collapsed && <span>{t('sidebar.workflows')}</span>}
+                  </button>
+                )}
               {projectFeaturesEnabled && primaryNavItems.has('goals') && (
                 <button
                   className={styles.pluginButton}
@@ -6069,6 +6119,12 @@ export function WebShellSidebar({
                 >
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
+              )}
+              {footerItems.has('localFiles') && (
+                <LocalFilesControl
+                  triggerClassName={styles.collapseButton}
+                  workspaces={workspaces}
+                />
               )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
