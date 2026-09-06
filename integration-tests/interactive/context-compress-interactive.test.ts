@@ -5,6 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
+import stripAnsi from 'strip-ansi';
 import { TestRig, type } from '../test-helper.js';
 
 // The background memory extractor fires a second live model call (measured
@@ -76,7 +77,7 @@ describe('Interactive Mode', () => {
       const seeded = await rig.waitForText('einstein', 60_000);
       expect(
         seeded,
-        'seed turn did not finish before /compress was submitted',
+        `seed turn never rendered the 'einstein' sentinel within 60s. Screen (last 600):\n${stripAnsi(fullOutput).slice(-600)}`,
       ).toBe(true);
 
       await type(ptyProcess, '/compress');
@@ -92,15 +93,20 @@ describe('Interactive Mode', () => {
         true,
       );
 
-      // The event is also emitted on the compression service's failure paths
-      // and carries no status field, so confirm the success-path UI text too.
-      const compressed = await rig.waitForText(
-        'Chat history compressed',
-        15_000,
-      );
+      // The event is also emitted on the compression service's failure
+      // paths and carries no status field, so success is the recorded
+      // token reduction itself (failure paths emit before <= after).
+      // Telemetry, not UI text: the OpenTUI renderer never writes the
+      // compaction row to the PTY byte stream.
+      const compressionEvent = rig.readTelemetryEvent('chat_compression');
+      const tokensBefore = compressionEvent?.attributes?.['tokens_before'];
+      const tokensAfter = compressionEvent?.attributes?.['tokens_after'];
       expect(
-        compressed,
-        'chat_compression event landed but the UI did not report success',
+        typeof tokensBefore === 'number' &&
+          typeof tokensAfter === 'number' &&
+          tokensBefore > tokensAfter,
+        'chat_compression event recorded no token reduction: ' +
+          `tokens_before=${String(tokensBefore)}, tokens_after=${String(tokensAfter)}`,
       ).toBe(true);
     },
   );
@@ -167,7 +173,7 @@ describe('Interactive Mode', () => {
       const seeded = await rig.waitForText('einstein', 60_000);
       expect(
         seeded,
-        'seed turn did not finish before /compress was submitted',
+        `seed turn never rendered the 'einstein' sentinel within 60s. Screen (last 600):\n${stripAnsi(fullOutput).slice(-600)}`,
       ).toBe(true);
 
       // Fire /compress with a trailing instruction. We are not asserting on
@@ -187,15 +193,20 @@ describe('Interactive Mode', () => {
         true,
       );
 
-      // The event is also emitted on the compression service's failure paths
-      // and carries no status field, so confirm the success-path UI text too.
-      const compressed = await rig.waitForText(
-        'Chat history compressed',
-        15_000,
-      );
+      // The event is also emitted on the compression service's failure
+      // paths and carries no status field, so success is the recorded
+      // token reduction itself (failure paths emit before <= after).
+      // Telemetry, not UI text: the OpenTUI renderer never writes the
+      // compaction row to the PTY byte stream.
+      const compressionEvent = rig.readTelemetryEvent('chat_compression');
+      const tokensBefore = compressionEvent?.attributes?.['tokens_before'];
+      const tokensAfter = compressionEvent?.attributes?.['tokens_after'];
       expect(
-        compressed,
-        'chat_compression event landed but the UI did not report success',
+        typeof tokensBefore === 'number' &&
+          typeof tokensAfter === 'number' &&
+          tokensBefore > tokensAfter,
+        'chat_compression event recorded no token reduction: ' +
+          `tokens_before=${String(tokensBefore)}, tokens_after=${String(tokensAfter)}`,
       ).toBe(true);
     },
   );

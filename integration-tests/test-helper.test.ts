@@ -110,4 +110,49 @@ describe('TestRig', () => {
       expect(poll).toHaveBeenCalled();
     },
   );
+
+  describe('readTelemetryEvent', () => {
+    it('returns the latest matching event with its attributes', async () => {
+      const rig = new TestRig();
+      await rig.setup('read telemetry event latest');
+      rig.createFile(
+        'telemetry.log',
+        [
+          JSON.stringify({
+            attributes: {
+              'event.name': 'qwen-code.chat_compression',
+              tokens_before: 1000,
+              tokens_after: 900,
+            },
+          }),
+          JSON.stringify({
+            attributes: { 'event.name': 'qwen-code.api_request' },
+          }),
+          JSON.stringify({
+            attributes: {
+              'event.name': 'qwen-code.chat_compression',
+              tokens_before: 28891,
+              tokens_after: 27128,
+            },
+          }),
+        ].join('\n'),
+      );
+
+      const event = rig.readTelemetryEvent('chat_compression');
+
+      expect(event?.attributes?.['tokens_before']).toBe(28891);
+      expect(event?.attributes?.['tokens_after']).toBe(27128);
+
+      await rig.cleanup();
+    });
+
+    it('returns null when the event never landed', async () => {
+      const rig = new TestRig();
+      await rig.setup('read telemetry event absent');
+
+      expect(rig.readTelemetryEvent('chat_compression')).toBeNull();
+
+      await rig.cleanup();
+    });
+  });
 });
