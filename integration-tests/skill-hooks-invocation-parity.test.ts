@@ -147,29 +147,51 @@ describe('skill hooks fire on both invocation paths', () => {
     const ready = await rig.waitForText('Type your message', 30000);
     expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
 
+    // Every wait below polls for the condition it is actually waiting on, so
+    // the test neither burns a fixed budget on a fast runner nor gives up
+    // early on a slow one.
+    const waitFor = async (label: string, done: () => boolean) => {
+      const ok = await rig.poll(done, 30000, 100);
+      expect(ok, `timed out waiting for ${label}. Output:\n${output}`).toBe(
+        true,
+      );
+    };
+
     if (!options.modelInvokesSkill) {
-      // USER path: start the skill by hand.
+      // USER path: start the skill by hand. Wait for the typed command to be
+      // echoed before submitting it, then for its body to be accepted.
       ptyProcess.write('/gated-skill');
-      await new Promise((r) => setTimeout(r, 800));
+      await waitFor('the slash command to echo', () =>
+        output.includes('/gated-skill'),
+      );
+      // The body is submitted as a prompt rather than echoed, so the
+      // observable signal is the model call it produces.
+      const before = fakeServer.requests.length;
       ptyProcess.write('\r');
-      await new Promise((r) => setTimeout(r, 2500));
+      await waitFor(
+        'the skill body to reach the model',
+        () => fakeServer.requests.length > before,
+      );
     }
 
-    ptyProcess.write('run the downstream command');
-    await new Promise((r) => setTimeout(r, 500));
+    const prompt = 'run the downstream command';
+    ptyProcess.write(prompt);
+    await waitFor('the prompt to echo', () => output.includes(prompt));
     ptyProcess.write('\r');
 
     const flagPath = join(rig.testDir!, EXECUTED_FLAG);
-    await rig.poll(
+    await waitFor(
+      'the shell call to be gated or to run',
       () => existsSync(flagPath) || output.includes(GATE_MARKER),
-      30000,
-      500,
     );
 
+    // Ctrl+C twice to exit; the second only registers once the first has been
+    // acknowledged.
     ptyProcess.write('\x03');
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor('the exit confirmation', () =>
+      output.includes('Ctrl+C again to exit'),
+    );
     ptyProcess.write('\x03');
-    await new Promise((r) => setTimeout(r, 500));
 
     return { output, executed: existsSync(flagPath) };
   }

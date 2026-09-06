@@ -5,6 +5,18 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const debugLoggerSpies = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  isEnabled: () => true,
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => debugLoggerSpies,
+}));
 import {
   applySkillAllowedTools,
   applySkillSideEffects,
@@ -184,14 +196,28 @@ describe('applySkillSideEffects', () => {
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
     });
+    // Pinned at `warn`: a promised gate is being dropped, and at `debug` the
+    // only trace of that would sit below the level anyone reads.
+    expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Skipping hook registration for skill'),
+    );
+    expect(debugLoggerSpies.debug).not.toHaveBeenCalledWith(
+      expect.stringContaining('Skipping hook registration for skill'),
+    );
   });
 
   it('registers nothing and does not throw when there is no session id', () => {
-    const { config, addSessionHook } = makeConfig({
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getSessionId: () => undefined,
     });
     expect(() => applySkillSideEffects(config, gatedSkill)).not.toThrow();
     expect(addSessionHook).not.toHaveBeenCalled();
+    // Same asymmetry as the no-hook-system case: only the hooks half is
+    // skipped. Without this, hoisting the session-id guard above
+    // `applySkillAllowedTools` would ship untested.
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
   });
 
   it('applies neither for a project skill in an untrusted folder', () => {

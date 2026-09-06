@@ -223,6 +223,7 @@ Notes:
 - Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
 - Session hooks live only in memory, so resuming a session with `--continue` / `--resume` does **not** restore them, on either invocation path. The Skill's instructions can come back with the replayed conversation while the hooks meant to enforce them are gone — re-run the Skill after resuming to re-arm its gate.
 - Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
+- Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, bare mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there.
 - A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and folder trust is re-checked each time a hook fires — revoking trust mid-session silences them without a restart. The same gate applies to `allowedTools`.
 - `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
 - See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.

@@ -350,7 +350,12 @@ export function applySkillHooks(
     // the ACP agent's `skipHooks`) never build a hook system. The skill body
     // and its allowedTools still land, so without this line a skill whose
     // frontmatter promises an enforcement gate would go silently ungated.
-    debugLogger.debug(
+    //
+    // `warn`, not `debug`: control only reaches here for a skill that
+    // actually declares hooks (the `!skill.hooks` early return above), so
+    // this cannot become a steady-state warning — it fires exactly when a
+    // promised gate is being dropped.
+    debugLogger.warn(
       `Skipping hook registration for skill "${skill.name}": no hook system or session id (hooks disabled?)`,
     );
     return;
