@@ -74,11 +74,12 @@ import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
-import type {
-  AuthType,
-  ProviderSetupInputs,
-  TelemetryRuntimeConfig,
-  TelemetrySettings,
+import {
+  createDebugLogger,
+  type AuthType,
+  type ProviderSetupInputs,
+  type TelemetryRuntimeConfig,
+  type TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import {
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
@@ -263,6 +264,7 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
 const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
+const debugLogger = createDebugLogger('QWEN_SERVE');
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -8937,8 +8939,13 @@ async function runQwenServeImpl(
         const runtime = registry?.primaryEntry.current?.runtime;
         if (!runtime) return;
         void getWorkspaceRuntimeCoordinatorIfSupported?.(runtime)
-          ?.ensure()
-          .catch(() => undefined);
+          ?.ensure({})
+          .catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            debugLogger.debug(
+              `workspace MCP discovery after preheat failed: ${message}`,
+            );
+          });
       };
       const startBridgePreheat = (
         bridge: AcpSessionBridge,

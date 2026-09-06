@@ -16529,6 +16529,78 @@ describe('runQwenServe startup observability', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-config-')),
     );
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
+      queryWorkspaceStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: tmpDir,
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+        skills: [],
+      })),
+    });
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      expect(ensureSpy).not.toHaveBeenCalled();
+      expect(bridge.preheat).toHaveBeenCalledTimes(1);
+      expect(bridge.preheat).toHaveBeenCalledWith();
+
+      resolvePreheat();
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      expect(ensureSpy).toHaveBeenCalledWith({});
+      expect(ensureSpy.mock.instances[0]).toMatchObject({
+        runtime: expect.objectContaining({ workspaceCwd: tmpDir }),
+      });
+      expect(bridge.preheat).toHaveBeenCalledTimes(1);
+      expect(
+        vi.mocked(bridge.preheat).mock.calls.some(
+          ([arg]) =>
+            arg !== undefined &&
+            typeof arg === 'object' &&
+            arg !== null &&
+            'keepAliveMs' in arg,
+        ),
+      ).toBe(false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not leak an unhandled rejection when boot MCP discovery fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-reject-')),
+    );
     const bridge = installInternalBridge(() => Promise.resolve());
     Object.assign(bridge, {
       getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
@@ -16541,9 +16613,12 @@ describe('runQwenServe startup observability', () => {
     });
     const ensureSpy = vi
       .spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure')
-      .mockResolvedValue({
-        runtimeLive: true,
-      } as never);
+      .mockImplementation(async () => {
+        throw new Error('ensure boom');
+      });
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', recordRejection);
 
     const handle = await runQwenServe(
       {
@@ -16562,7 +16637,10 @@ describe('runQwenServe startup observability', () => {
         status: 'succeeded',
       });
       await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(rejections).toEqual([]);
     } finally {
+      process.off('unhandledRejection', recordRejection);
       await handle.close();
     }
   });

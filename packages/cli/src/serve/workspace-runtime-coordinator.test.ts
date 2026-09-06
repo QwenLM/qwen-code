@@ -816,6 +816,40 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalledOnce();
   });
 
+  it('skips keep-alive preheat when preparing an already-live runtime', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+    });
+    harness.getWorkspaceMcpStatus
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'not_started',
+        servers: [],
+      })
+      .mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+      });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({});
+
+    expect(harness.preheat).not.toHaveBeenCalled();
+    expect(harness.initializeWorkspaceMcp).toHaveBeenCalledOnce();
+  });
+
   it('reports the bridge lifecycle snapshot without synthesizing state', () => {
     const harness = makeRuntime();
     harness.setSnapshot({

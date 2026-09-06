@@ -23,6 +23,11 @@ const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
 const MCP_PREPARE_TIMEOUT_MS = 2 * 60_000;
 const MCP_POLL_INTERVAL_MS = 250;
 
+export type EnsureOptions = {
+  timeoutMs?: number;
+  keepAliveMs?: number;
+};
+
 type LifecycleAcpSessionBridge = AcpSessionBridge & {
   getWorkspaceRuntimeLifecycleSnapshot(): BridgeWorkspaceRuntimeLifecycleSnapshot;
 };
@@ -171,19 +176,33 @@ export class WorkspaceRuntimeCoordinator {
   }
 
   async ensure(
-    timeoutMs = DEFAULT_ENSURE_TIMEOUT_MS,
+    timeoutMsOrOptions: number | EnsureOptions = DEFAULT_ENSURE_TIMEOUT_MS,
   ): Promise<ServeWorkspaceRuntimeStatus> {
+    const options =
+      typeof timeoutMsOrOptions === 'number'
+        ? { timeoutMs: timeoutMsOrOptions }
+        : timeoutMsOrOptions;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_ENSURE_TIMEOUT_MS;
     this.assertAcceptingWork();
     const deadline = Date.now() + timeoutMs;
-    try {
-      await withTimeout(
-        this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS }),
-        timeoutMs,
-      );
-    } catch (error) {
-      this.assertAcceptingWork(error);
-      if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
-      throw new WorkspaceRuntimeInitializationError(error);
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    const skipKeepAlivePreheat =
+      typeof timeoutMsOrOptions !== 'number' &&
+      options.keepAliveMs === undefined &&
+      snapshot.runtimeLive;
+    if (!skipKeepAlivePreheat) {
+      try {
+        await withTimeout(
+          this.bridge.preheat({
+            keepAliveMs: options.keepAliveMs ?? ENSURE_KEEP_ALIVE_MS,
+          }),
+          timeoutMs,
+        );
+      } catch (error) {
+        this.assertAcceptingWork(error);
+        if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
+        throw new WorkspaceRuntimeInitializationError(error);
+      }
     }
     this.assertAcceptingWork();
     const status = this.status();
