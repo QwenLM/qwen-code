@@ -17,9 +17,13 @@ import {
 } from './SessionRouter.js';
 import {
   DaemonChannelBridge,
+  type DaemonChannelSessionFactoryRequest,
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  ChannelAgentBridge,
+  SessionDiedEvent,
+} from './ChannelAgentBridge.js';
 
 const mockRenameSync = vi.hoisted(() => vi.fn());
 
@@ -1484,25 +1488,45 @@ describe('SessionRouter', () => {
     });
 
     it('re-loads the same session when a failed reset never committed', async () => {
-      const discardSession = vi.fn().mockResolvedValue(undefined);
-      const loadSession = vi.fn(async (sessionId: string) => sessionId);
-      const managedBridge = worktreeResetBridge({
-        loadSession,
-        listSessions: vi
-          .fn()
-          .mockReturnValue([worktreeSessionInfo('old-session')]),
-        resetWorktreeSession: vi
-          .fn()
-          .mockRejectedValue(new Error('daemon unavailable')),
-        discardSession,
+      const detaches: Array<ReturnType<typeof vi.fn>> = [];
+      const sessionFactory = vi.fn(
+        async (
+          request: DaemonChannelSessionFactoryRequest,
+        ): Promise<DaemonChannelSessionClient> => {
+          if (request.worktreeReset) {
+            throw new Error('daemon unavailable');
+          }
+          const detach = vi.fn().mockResolvedValue(undefined);
+          detaches.push(detach);
+          return {
+            ...daemonSession(request.sessionId ?? '', detach),
+            worktree: {
+              slug: 'task',
+              path: '/tmp/worktree-task',
+              branch: 'task',
+            },
+            worktreeState: 'persisted-v1',
+          };
+        },
+      );
+      const daemonBridge = new DaemonChannelBridge({
+        cwd: '/tmp',
+        sessionFactory,
+        sessionWorktreeReset: true,
       });
+      await daemonBridge.start();
       const router = new SessionRouter(
-        managedBridge,
+        daemonBridge,
         '/tmp',
         'user',
         undefined,
         { recoveryMode: 'lazy' },
       );
+      const sessionDied = vi.fn();
+      daemonBridge.on('sessionDied', (event: SessionDiedEvent) => {
+        sessionDied(event);
+        router.handleSessionDied(event.sessionId);
+      });
       router.activateManagedSession(
         'old-session',
         target,
@@ -1515,7 +1539,7 @@ describe('SessionRouter', () => {
         '/tmp/worktree-task',
         'worktree',
       );
-      vi.mocked(loadSession).mockClear();
+      expect(daemonBridge.listSessions()).toHaveLength(1);
 
       await expect(
         router.replaceManagedWorktreeSession(
@@ -1526,8 +1550,11 @@ describe('SessionRouter', () => {
         ),
       ).rejects.toThrow('daemon unavailable');
 
-      // A pre-flip failure keeps the same session as the worktree owner: the
-      // retry re-loads and re-attaches it instead of discarding it.
+      // A pre-flip failure keeps the same session as the worktree owner: only
+      // the live flag goes, and the bridge keeps holding its client.
+      expect(router.isSessionLive('old-session')).toBe(false);
+      expect(daemonBridge.listSessions()).toHaveLength(1);
+
       await expect(
         router.loadManagedSession(
           'old-session',
@@ -1537,13 +1564,29 @@ describe('SessionRouter', () => {
           'worktree',
         ),
       ).resolves.toEqual({ loaded: true, sessionId: 'old-session' });
-      expect(loadSession).toHaveBeenCalledWith(
-        'old-session',
-        '/tmp',
-        { sourceId: 'ch' },
-        expect.anything(),
+
+      expect(sessionFactory).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionId: 'old-session', sourceId: 'ch' }),
       );
-      expect(discardSession).not.toHaveBeenCalled();
+      // Attaching over the surviving binding reports the session as replaced,
+      // and that notification would abort the very load recovering it.
+      expect(sessionDied).not.toHaveBeenCalled();
+      expect(detaches).toHaveLength(2);
+      expect(detaches[0]).toHaveBeenCalledOnce();
+      expect(detaches[1]).not.toHaveBeenCalled();
+      expect(daemonBridge.listSessions()).toEqual([
+        {
+          sessionId: 'old-session',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: {
+            slug: 'task',
+            path: '/tmp/worktree-task',
+            branch: 'task',
+          },
+          worktreeState: 'persisted-v1',
+        },
+      ]);
       expect(router.getSessionCwd('old-session')).toBe('/tmp/worktree-task');
       expect(router.isSessionLive('old-session')).toBe(true);
     });

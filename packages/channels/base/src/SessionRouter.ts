@@ -118,6 +118,7 @@ export class SessionRouter {
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
+  private readonly staleBridgeBindings = new Set<string>();
   private readonly routeTokens = new Map<string, object>();
   private lifecycleGeneration = 0;
 
@@ -148,6 +149,7 @@ export class SessionRouter {
   setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
     this.liveSessionIds.clear();
+    this.staleBridgeBindings.clear();
   }
 
   /** Set scope override for a specific channel. */
@@ -587,6 +589,13 @@ export class SessionRouter {
     const bindingToken = {};
     let loadedSessionId: string | undefined;
     try {
+      if (this.staleBridgeBindings.delete(sessionId)) {
+        // A failed worktree reset left the bridge holding a client for this id.
+        // Attaching over that binding reports the session as replaced, which
+        // aborts this very load, so release it first. Tokenless: the surviving
+        // binding carries the previous load's token.
+        await bridge.discardSession?.(sessionId).catch(() => undefined);
+      }
       loadedSessionId = await bridge.loadSession(
         sessionId,
         workspaceCwd,
@@ -682,6 +691,7 @@ export class SessionRouter {
     changed = this.toTarget.delete(oldSessionId) || changed;
     changed = this.toCwd.delete(oldSessionId) || changed;
     this.liveSessionIds.delete(oldSessionId);
+    this.staleBridgeBindings.delete(oldSessionId);
     if (changed) this.persist();
   }
 
@@ -756,7 +766,11 @@ export class SessionRouter {
       // server-side with no eviction event to tell us. While the id stays live
       // the next load short-circuits and never consults the daemon, so the
       // superseded redirect can never heal it. Drop only the live flag: the
-      // route mappings stay, so a pre-flip failure simply re-loads this id.
+      // route mappings stay, so a pre-flip failure re-loads this id. The bridge
+      // keeps holding its client either way, so record the id — the re-load has
+      // to release that binding before attaching, and attaching over it would
+      // report the session as replaced and abort the load that recovers it.
+      this.staleBridgeBindings.add(sessionId);
       this.liveSessionIds.delete(sessionId);
       throw error;
     } finally {
@@ -829,6 +843,7 @@ export class SessionRouter {
     changed = this.toTarget.delete(sessionId) || changed;
     changed = this.toCwd.delete(sessionId) || changed;
     changed = this.liveSessionIds.delete(sessionId) || changed;
+    this.staleBridgeBindings.delete(sessionId);
     if (changed) this.persist();
   }
 
@@ -1106,6 +1121,7 @@ export class SessionRouter {
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
+    this.staleBridgeBindings.clear();
     this.routeTokens.clear();
   }
 

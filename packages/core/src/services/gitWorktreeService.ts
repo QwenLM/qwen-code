@@ -119,12 +119,12 @@ export async function writeWorktreeSessionMarker(
 }
 
 /**
- * The marker is durably committed — written, fsync'd and identity-verified —
- * but this primitive's own post-commit tail failed. The commit stands: a
- * caller that compensates on failure must classify this as "the flip
- * happened" rather than roll back a transfer the marker already records, and
- * must not clean up a valid marker file. `committedOwner` is the session id
- * the marker now names.
+ * The marker is durably committed — staged, fsync'd, identity-verified and
+ * linked into place — but this primitive's own post-commit tail failed. The
+ * commit stands: a caller that compensates on failure must classify this as
+ * "the flip happened" rather than roll back a transfer the marker already
+ * records, and must not clean up a valid marker file. `committedOwner` is the
+ * session id the marker now names.
  */
 export class WorktreeMarkerCommittedError extends Error {
   readonly committedOwner: string;
@@ -149,6 +149,9 @@ export async function createWorktreeSessionMarkerExclusive(
 ): Promise<void> {
   assertValidWorktreeSessionMarkerOwner(sessionId);
   const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  // Staged beside the marker so the publishing link stays on one device, and
+  // named for the `.qwen-session.*.tmp` git-exclude rule.
+  const stagedPath = `${markerPath}.${randomBytes(6).toString('hex')}.tmp`;
   const flags =
     nodeFs.constants.O_WRONLY |
     nodeFs.constants.O_CREAT |
@@ -157,15 +160,15 @@ export async function createWorktreeSessionMarkerExclusive(
   // `fs.open` with O_EXCL throws before anything is created when a path
   // already exists, so it stays outside the try: only a failure past this
   // point has a file of ours to remove.
-  const handle = await fs.open(markerPath, flags, 0o600);
+  const handle = await fs.open(stagedPath, flags, 0o600);
   // Captured from the opened handle so the cleanup below can verify the path
   // still refers to the file this call created before removing it.
-  let createdDev = 0;
-  let createdIno = 0;
+  let stagedDev = 0;
+  let stagedIno = 0;
   try {
     const before = await handle.stat();
-    createdDev = before.dev;
-    createdIno = before.ino;
+    stagedDev = before.dev;
+    stagedIno = before.ino;
     if (!before.isFile() || before.nlink !== 1 || before.ino === 0) {
       throw new Error('Worktree session marker has an unsafe identity');
     }
@@ -173,7 +176,7 @@ export async function createWorktreeSessionMarkerExclusive(
     await handle.sync();
     const [after, pathStats] = await Promise.all([
       handle.stat(),
-      fs.lstat(markerPath),
+      fs.lstat(stagedPath),
     ]);
     if (
       !after.isFile() ||
@@ -186,18 +189,27 @@ export async function createWorktreeSessionMarkerExclusive(
     ) {
       throw new Error('Worktree session marker identity changed');
     }
+    // Publish with a hard link so the marker path first exists once its inode
+    // already holds the owner and is fsync'd. Creating the marker path itself
+    // with O_EXCL and filling it afterwards leaves a crash window holding a
+    // 0-byte marker, which strict reads report as `invalid` — the one state no
+    // recovery path repairs. `link` fails EEXIST when the marker path is
+    // taken, so it is the same compare-and-swap O_EXCL was: a concurrent
+    // create still loses instead of overwriting.
+    await fs.link(stagedPath, markerPath);
   } catch (error) {
     await handle.close().catch(() => {});
     // Remove only the file this call created: on the identity-changed branch
     // the path already refers to someone else's inode, and unlinking it would
     // turn a fail-closed detection into a destructive action against the
     // detected file. Without a captured identity there is nothing to match,
-    // so the rare shell is left for operator cleanup instead.
-    if (createdIno !== 0) {
+    // so the rare residue is left for operator cleanup instead. This catch is
+    // reachable only before the publish, so the marker path is never unlinked.
+    if (stagedIno !== 0) {
       try {
-        const current = await fs.lstat(markerPath);
-        if (current.dev === createdDev && current.ino === createdIno) {
-          await fs.unlink(markerPath);
+        const current = await fs.lstat(stagedPath);
+        if (current.dev === stagedDev && current.ino === stagedIno) {
+          await fs.unlink(stagedPath);
         }
       } catch {
         // Path already gone — nothing of ours to remove.
@@ -205,14 +217,17 @@ export async function createWorktreeSessionMarkerExclusive(
     }
     throw error;
   }
-  // Close after the catch: the marker is fully written and fsync'd at this
-  // point, so a close rejection must propagate with the marker intact rather
-  // than trigger cleanup of a valid file. Classified so a caller that
-  // compensates on failure cannot read the committed flip as a pre-flip
-  // error and dismantle what the marker now names.
+  // Post-commit tail: the marker already names `sessionId`, so a failure here
+  // must propagate with the marker intact rather than trigger cleanup of a
+  // valid file. Classified so a caller that compensates on failure cannot read
+  // the committed flip as a pre-flip error and dismantle what the marker now
+  // names. Dropping the staged name belongs to the commit — until it lands the
+  // marker carries nlink 2 and strict reads reject it.
   try {
+    await fs.unlink(stagedPath);
     await handle.close();
   } catch (error) {
+    await handle.close().catch(() => {});
     throw new WorktreeMarkerCommittedError(sessionId, { cause: error });
   }
   await addWorktreeSessionMarkerExclude(worktreePath);
@@ -440,8 +455,9 @@ export function readWorktreeSessionMarkerStrictSync(
  *
  * `expectedOwner` is the session id the opening strict read must find, or
  * `null` for the missing-marker hatch (caller already proved the sidecar
- * valid; the marker is re-created with O_EXCL so a concurrently created
- * marker fails the transfer instead of being overwritten).
+ * valid; the marker is re-created by linking a fully staged file into the
+ * path, which fails when a concurrently created marker already occupies it
+ * instead of overwriting it).
  *
  * An owned marker is rewritten through `atomicWriteFile` (sibling temp +
  * fsync + rename) with an `assertCanCommit` hook that re-reads the marker

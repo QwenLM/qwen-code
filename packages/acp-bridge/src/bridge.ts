@@ -4261,17 +4261,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // session (worktree reset). While an id is present, every writer that could
   // reach the superseded session's checkout or cwd refuses admission
   // synchronously. Keyed by id (not the SessionEntry) so the barrier survives
-  // entry replacement and dies only with the process; the reset route clears
-  // it on every outcome.
+  // entry replacement and dies only with the process. The reset route clears
+  // it on every outcome up to the marker flip; past the flip the release
+  // belongs to a completed severance, so a post-commit failure leaves the
+  // entry fenced for the retry that finishes the transfer.
   const resetPendingSessions = new Set<string>();
 
   /**
    * Barrier check for the writers other than `sendPrompt`: a rewind restores
    * files under the session cwd, a fork agent runs tools there, a shell
    * command executes in `effectiveCwd`, a branch mutates the session's
-   * persisted history, and a cwd change moves the session inside the
-   * checkout. Each is admitted precisely in the idle state the transfer
-   * requires, so each fails closed on the same id-keyed barrier.
+   * persisted history, a cwd change moves the session inside the checkout, a
+   * workflow action runs through the session's tool registry in that cwd, and
+   * a goal control starts a turn that never passes `sendPrompt`. Each is
+   * admitted precisely in the idle state the transfer requires, so each fails
+   * closed on the same id-keyed barrier.
    */
   function assertSessionResetNotPending(sessionId: string): void {
     if (resetPendingSessions.has(sessionId)) {
@@ -12386,6 +12390,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+
+      // A workflow action runs a saved workflow, or restarts a live run,
+      // through this session's own tool registry in its cwd — the checkout the
+      // transfer is moving — and sets none of the busy flags the barrier or the
+      // route's quiescence re-check reads.
+      assertSessionResetNotPending(sessionId);
       return requestSessionStatus<{
         changed: boolean;
         status?: ServeSessionWorkflowTaskStatus['status'];
@@ -12402,6 +12412,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+
+      // A goal `resume` promotes a queued user turn and queues a continuation,
+      // so it starts work in this session's cwd without ever passing the
+      // fenced `sendPrompt` admission.
+      assertSessionResetNotPending(sessionId);
       return requestSessionStatus(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionGoalControl,

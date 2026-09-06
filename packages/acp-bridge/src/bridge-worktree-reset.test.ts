@@ -411,6 +411,109 @@ describe('worktree reset session transfer', () => {
         await bridge.shutdown();
       }
     });
+
+    it('fences the control writers that start work in the session cwd', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction) {
+            return { changed: true, status: 'running', taskId: 'run-1' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl) {
+            return { snapshot: { v: 2, activity: 'running', goal: null } };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        bridge.setSessionResetPending?.(session.sessionId);
+
+        // No client registration is needed to reach either writer: an absent
+        // client-id header makes the route pass no context at all, and
+        // `resolveTrustedClientId(entry, undefined)` returns without checking
+        // registration. The barrier must still refuse — and for every action on
+        // the method, not only the one that starts a saved workflow, because
+        // `retry`/`rerun`/`resume` restart a live run through the same tool
+        // registry and a goal `resume` starts a turn that never passes
+        // `sendPrompt`.
+        await expect(
+          bridge.controlSessionWorkflowTask(
+            session.sessionId,
+            'wf-1',
+            'run-saved',
+          ),
+        ).rejects.toBeInstanceOf(SessionResetPendingError);
+        await expect(
+          bridge.controlSessionWorkflowTask(session.sessionId, 'wf-1', 'rerun'),
+        ).rejects.toBeInstanceOf(SessionResetPendingError);
+        await expect(
+          bridge.controlSessionGoal(session.sessionId, {
+            action: 'resume',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 1,
+          }),
+        ).rejects.toBeInstanceOf(SessionResetPendingError);
+
+        // Nothing reached the child: the refusal is at admission, not a
+        // dispatched-then-failed mutation.
+        const dispatched = handle.agent.extMethodCalls.map(
+          (call) => call.method,
+        );
+        expect(dispatched).not.toContain(
+          SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+        );
+        expect(dispatched).not.toContain(
+          SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+        );
+
+        // The barrier is the only thing refusing them, and the route clears it
+        // in its `finally`, so a refused control writer cannot wedge past the
+        // transfer: both are admitted and dispatched afterwards.
+        const context = { clientId: session.clientId };
+        bridge.clearSessionResetPending?.(session.sessionId);
+        await expect(
+          bridge.controlSessionWorkflowTask(
+            session.sessionId,
+            'wf-1',
+            'run-saved',
+            context,
+          ),
+        ).resolves.toMatchObject({ changed: true, taskId: 'run-1' });
+        await expect(
+          bridge.controlSessionGoal(
+            session.sessionId,
+            { action: 'resume', expectedGoalId: 'goal-1', expectedRevision: 1 },
+            context,
+          ),
+        ).resolves.toMatchObject({
+          snapshot: expect.objectContaining({ v: 2 }),
+        });
+        expect(handle.agent.extMethodCalls).toContainEqual(
+          expect.objectContaining({
+            method: SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+            params: expect.objectContaining({
+              sessionId: session.sessionId,
+              taskId: 'wf-1',
+              action: 'run-saved',
+            }),
+          }),
+        );
+        expect(handle.agent.extMethodCalls).toContainEqual(
+          expect.objectContaining({
+            method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+            params: expect.objectContaining({
+              sessionId: session.sessionId,
+              request: expect.objectContaining({ action: 'resume' }),
+            }),
+          }),
+        );
+      } finally {
+        await bridge.shutdown();
+      }
+    });
   });
 
   describe('clearSessionWorktree', () => {

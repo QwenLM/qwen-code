@@ -788,7 +788,14 @@ export class NamedSessionManager {
         result.redirectedFrom !== undefined &&
         result.sessionId !== task.sessionId
       ) {
-        this.healSupersededTask(task, result.sessionId);
+        try {
+          this.healSupersededTask(task, result.sessionId);
+        } catch {
+          // The load succeeded and the router already routes the replacement;
+          // a registry still naming the superseded id is the state a failed
+          // reset leaves behind, so the next load re-heals it. Callers that
+          // commit a selection still fail closed on their own write.
+        }
       }
       // Callers must use the returned id for everything after this point:
       // when a superseded redirect fired, the caller's `task` snapshot still

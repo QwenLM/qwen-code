@@ -239,24 +239,131 @@ describe('daemon worktree session markers', () => {
       await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
         state: 'missing',
       });
+      const siblings = await fs.readdir(dir);
+      expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
     } finally {
       writeSpy.mockRestore();
     }
   });
 
-  it('does not remove a foreign file swapped in during the write window', async () => {
+  it('never lets the marker path exist before its owner is fsynced', async () => {
     const dir = await tempDir();
     const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
     const probe = await fs.open(path.join(dir, 'probe'), 'w');
-    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const prototype = Object.getPrototypeOf(probe) as Pick<
+      typeof probe,
+      'stat' | 'writeFile' | 'sync'
+    >;
+    const originalStat = prototype.stat;
+    const originalWriteFile = prototype.writeFile;
+    const originalSync = prototype.sync;
     await probe.close();
-    // Another writer swaps the marker path while our write is in flight, so
-    // the identity check fires with a foreign inode now occupying the path.
+
+    // A crash between the marker path appearing and its owner landing is the
+    // unrecoverable shape: a 0-byte `.qwen-session` reads as `invalid`, which
+    // no route repairs and every retried reset refuses. Sample the path at
+    // every await the create yields on and require each sample to be either
+    // absent or already holding the whole owner.
+    const markerSizes: Array<number | 'absent'> = [];
+    const sample = async (): Promise<void> => {
+      try {
+        markerSizes.push((await fs.lstat(markerPath)).size);
+      } catch {
+        markerSizes.push('absent');
+      }
+    };
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof prototype) {
+        await sample();
+        const stats = await originalStat.call(this);
+        await sample();
+        return stats;
+      });
     const writeSpy = vi
       .spyOn(prototype, 'writeFile')
-      .mockImplementation(async () => {
-        await fs.unlink(markerPath);
-        await fs.writeFile(markerPath, 'foreign-owner');
+      .mockImplementation(async function (
+        this: typeof prototype,
+        ...args: Parameters<typeof originalWriteFile>
+      ) {
+        await sample();
+        await originalWriteFile.apply(this, args);
+        await sample();
+      });
+    const syncSpy = vi
+      .spyOn(prototype, 'sync')
+      .mockImplementation(async function (this: typeof prototype) {
+        await sample();
+        await originalSync.call(this);
+        await sample();
+      });
+
+    try {
+      await createWorktreeSessionMarkerExclusive(dir, 'session-123');
+    } finally {
+      statSpy.mockRestore();
+      writeSpy.mockRestore();
+      syncSpy.mockRestore();
+    }
+
+    expect(markerSizes.length).toBeGreaterThan(0);
+    // Either absent or already holding the whole owner: a 0-byte or partially
+    // written `.qwen-session` reads as `invalid`, which no route repairs.
+    const ownerBytes = Buffer.byteLength('session-123');
+    expect(
+      markerSizes.filter((size) => size !== 'absent' && size !== ownerBytes),
+    ).toEqual([]);
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: 'session-123',
+    });
+    const siblings = await fs.readdir(dir);
+    expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('lets exactly one of two concurrent exclusive creates win', async () => {
+    const dir = await tempDir();
+
+    const results = await Promise.allSettled([
+      createWorktreeSessionMarkerExclusive(dir, 'session-a'),
+      createWorktreeSessionMarkerExclusive(dir, 'session-b'),
+    ]);
+
+    // The publishing link is the compare-and-swap: the loser must fail rather
+    // than overwrite the owner the winner just committed.
+    const winners = results.filter((result) => result.status === 'fulfilled');
+    expect(winners).toHaveLength(1);
+    const winner = winners[0] === results[0] ? 'session-a' : 'session-b';
+    await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
+      state: 'valid',
+      sessionId: winner,
+    });
+    const siblings = await fs.readdir(dir);
+    expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('does not remove a foreign file swapped in during the write window', async () => {
+    const dir = await tempDir();
+    const probe = await fs.open(path.join(dir, 'probe'), 'w');
+    const prototype = Object.getPrototypeOf(probe) as Pick<
+      typeof probe,
+      'writeFile'
+    >;
+    const originalWriteFile = prototype.writeFile;
+    await probe.close();
+    // Another writer swaps the staged file while our write is in flight, so
+    // the identity check fires with a foreign inode now occupying the path.
+    let stagedPath = '';
+    const writeSpy = vi
+      .spyOn(prototype, 'writeFile')
+      .mockImplementation(async function (this: typeof prototype) {
+        const staged = (await fs.readdir(dir)).find((name) =>
+          name.endsWith('.tmp'),
+        );
+        stagedPath = path.join(dir, staged as string);
+        await fs.unlink(stagedPath);
+        await fs.writeFile(stagedPath, 'foreign-owner');
+        await originalWriteFile.call(this, 'session-123', 'utf8');
       });
 
     try {
@@ -264,10 +371,13 @@ describe('daemon worktree session markers', () => {
         createWorktreeSessionMarkerExclusive(dir, 'session-123'),
       ).rejects.toThrow('Worktree session marker identity changed');
       // The cleanup must not delete the file the identity check proved is
-      // not ours.
-      await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
+      // not ours, and a create that never published leaves no marker behind.
+      await expect(fs.readFile(stagedPath, 'utf8')).resolves.toBe(
         'foreign-owner',
       );
+      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
+        state: 'missing',
+      });
     } finally {
       writeSpy.mockRestore();
     }

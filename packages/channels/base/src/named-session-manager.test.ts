@@ -1046,6 +1046,83 @@ describe('NamedSessionManager', () => {
     );
   });
 
+  it('keeps a healed load when the registry cannot persist the heal', async () => {
+    const registryDir = join(dir, 'registry');
+    const filePath = join(registryDir, 'named-sessions.json');
+    const firstManager = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: '/workspace',
+      filePath,
+      router,
+      isBusy: () => false,
+      now: () => 1_000,
+    });
+    const created = await firstManager.create(alice, 'feature', 'worktree');
+    const restarted = supersededRestart(filePath, created.sessionId);
+    rmSync(registryDir, { recursive: true, force: true });
+    writeFileSync(registryDir, 'block');
+    const reserved: string[] = [];
+    const released: string[] = [];
+
+    // The redirect loaded, validated and routed the replacement, so an
+    // unwritable registry must not be reported as a load that created none.
+    await expect(
+      restarted.manager.resolve(alice, (id) => {
+        reserved.push(id);
+        return () => {
+          released.push(id);
+        };
+      }),
+    ).resolves.toBe('session-2');
+    expect(reserved).toEqual([created.sessionId, 'session-2']);
+    expect(released).toEqual([created.sessionId]);
+    // The replacement keeps its route: detaching it would drop a live session
+    // the caller is about to dispatch on.
+    expect(restarted.bridge.discardSession).not.toHaveBeenCalledWith(
+      'session-2',
+    );
+    expect(restarted.router.getSession('channel-a', 'alice', 'group-1')).toBe(
+      'session-2',
+    );
+
+    // The registry still names the superseded id — the state the router
+    // tolerates — and the next load heals it once writing succeeds again.
+    rmSync(registryDir, { force: true });
+    mkdirSync(registryDir, { recursive: true });
+    await expect(restarted.manager.resolve(alice)).resolves.toBe('session-2');
+    const persisted = JSON.parse(readFileSync(filePath, 'utf8')) as {
+      owners: Array<{ tasks: Array<{ sessionId: string }> }>;
+    };
+    expect(persisted.owners[0]?.tasks[0]?.sessionId).toBe('session-2');
+  });
+
+  it('still detaches the replacement when a selection cannot persist a healed load', async () => {
+    const registryDir = join(dir, 'registry');
+    const filePath = join(registryDir, 'named-sessions.json');
+    const firstManager = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: '/workspace',
+      filePath,
+      router,
+      isBusy: () => false,
+      now: () => 1_000,
+    });
+    const created = await firstManager.create(alice, 'feature', 'worktree');
+    const restarted = supersededRestart(filePath, created.sessionId);
+    rmSync(registryDir, { recursive: true, force: true });
+    writeFileSync(registryDir, 'block');
+
+    // A selection change commits itself, so it still fails closed and releases
+    // the replacement it loaded; the best-effort heal must not swallow that.
+    await expect(restarted.manager.use(alice, 'feature')).rejects.toThrow(
+      'Failed to persist',
+    );
+    expect(restarted.bridge.discardSession).toHaveBeenCalledWith('session-2');
+    await expect(restarted.manager.current(alice)).resolves.toEqual(
+      expect.objectContaining({ sessionId: created.sessionId }),
+    );
+  });
+
   it('loads a legacy shared-only v1 registry and writes its workspace root next', async () => {
     const first = manager();
     await first.create(alice, 'review');

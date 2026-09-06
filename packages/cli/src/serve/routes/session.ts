@@ -4834,16 +4834,36 @@ export function registerSessionRoutes(
                     throw new WorktreeResetInvalidStateError(sessionId);
                   }
                   const { supersededBy: _drop, ...restoredOld } = oldSidecar;
-                  await writeWorktreeSession(oldSidecarPath, restoredOld);
-                  await clearWorktreeSession(newSidecarPath);
-                  await runWithWorkspaceRuntimeStorage(runtime, () =>
-                    deleteDaemonSessionIfOrphan({
-                      sessionId: replacementId,
-                      service: sessionService,
-                      bridge: runtime.bridge,
-                      coordinator: archiveCoordinator,
-                    }),
+                  // Confirm the removal before the sidecar writes destroy the
+                  // links a retry classifies by. `false` is a documented
+                  // outcome, not an error — a client attached, so
+                  // `requireZeroAttaches` bailed — and it leaves the
+                  // interrupted replacement live inside the checkout, where
+                  // the fresh transfer below would spawn a second writer
+                  // beside it with nothing on disk naming the survivor.
+                  const removed = await runWithWorkspaceRuntimeStorage(
+                    runtime,
+                    () =>
+                      deleteDaemonSessionIfOrphan({
+                        sessionId: replacementId,
+                        service: sessionService,
+                        bridge: runtime.bridge,
+                        coordinator: archiveCoordinator,
+                      }),
                   ).catch(() => false);
+                  if (!removed) {
+                    daemonLog?.warn(
+                      'worktree reset could not remove the interrupted replacement',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                    throw new WorktreeResetInvalidStateError(sessionId);
+                  }
+                  // Undo in the reverse of the transfer's write order so a
+                  // crash mid-rollback leaves the backward link alone — the
+                  // shape a retry refuses for repair — instead of a forward
+                  // link nothing scans for.
+                  await clearWorktreeSession(newSidecarPath);
+                  await writeWorktreeSession(oldSidecarPath, restoredOld);
                   daemonLog?.warn(
                     'worktree reset rolled back an interrupted transfer',
                     { sessionId, replacementSessionId: replacementId },
@@ -4855,6 +4875,13 @@ export function registerSessionRoutes(
                 ) {
                   // Committed: the replacement is the authoritative owner and
                   // is never rolled back. Finish the transfer idempotently.
+                  // The marker already moved ownership, so releasing the
+                  // barrier stops being this request's to do: every refusal
+                  // below leaves the superseded entry fenced for the retry
+                  // that finishes the severance, exactly as the survivor
+                  // branch does, instead of re-admitting a writer to a
+                  // checkout the marker has handed to the replacement.
+                  barrierArmed = false;
                   if (!linksAgree) {
                     daemonLog?.warn(
                       'worktree reset resume found inconsistent links',
@@ -4885,7 +4912,6 @@ export function registerSessionRoutes(
                       { sessionId, replacementSessionId: replacementId },
                     );
                   }
-                  barrierArmed = false;
                   assertRuntimeGenerationOpen?.();
                   daemonLog?.info(
                     'worktree session reset resumed after interruption',
@@ -4980,6 +5006,19 @@ export function registerSessionRoutes(
                   supersedes: storageSessionId,
                 });
                 newSidecarWritten = true;
+                // The caller is gone — an expired `fetchWithTimeout` budget
+                // aborts the socket mid-transfer. Only the fresh-transfer 200
+                // carries the bridge-minted owner registration, so a handover
+                // nobody receives leaves one no client can detach, and past
+                // the flip below it could not be undone anyway: refuse here
+                // and let the pre-commit rollback reap the replacement. Do
+                // not test `res.writable` — it is an own data property that
+                // stays `true` after a disconnect, unlike these two.
+                if (res.destroyed || res.socket?.writable === false) {
+                  throw new Error(
+                    'Client disconnected before the worktree ownership flip',
+                  );
+                }
                 // 5. A prompt admitted in the check-to-arm window and still
                 // winding down aborts the transfer; after the flip it would
                 // write into a checkout whose ownership just moved.
@@ -5021,6 +5060,7 @@ export function registerSessionRoutes(
                     // request changed nothing. A retry resumes the committed
                     // transfer idempotently.
                     markerTransferred = true;
+                    barrierArmed = false;
                     throw new Error(
                       'Worktree ownership moved to the replacement, but the marker commit did not finish cleanly; retry the reset to complete the transfer',
                     );
@@ -5028,6 +5068,13 @@ export function registerSessionRoutes(
                   throw new WorktreeResetInvalidStateError(sessionId);
                 }
                 markerTransferred = true;
+                // Ownership moved, so this request stops owning the barrier
+                // release: a completed severance clears it explicitly below,
+                // while a survivor's fence — or a failure anywhere in this
+                // post-flip tail — has to outlive the request that left it
+                // armed rather than re-admit a writer to a checkout the
+                // marker already handed to the replacement.
+                barrierArmed = false;
                 // 6. Attest the replacement, then bring the superseded
                 // session's runtime view in line with the disk: no worktree
                 // association, no attaches.
@@ -5064,10 +5111,6 @@ export function registerSessionRoutes(
                     },
                   );
                 }
-                // Either way this request stops owning the barrier release: a
-                // completed severance just cleared it, and a survivor's fence
-                // has to outlive the request that left it armed.
-                barrierArmed = false;
                 daemonLog?.info('worktree session reset', {
                   sessionId,
                   replacementSessionId: spawned.sessionId,
@@ -5099,10 +5142,37 @@ export function registerSessionRoutes(
                   throw transferError;
                 }
                 // Roll back to the pre-commit shape: the old session keeps
-                // ownership and a retry starts a fresh transfer. Undo in the
-                // reverse of the write order above so a crash mid-rollback
-                // leaves the backward link alone — the shape a retry refuses
-                // for repair — instead of a forward link nothing scans for.
+                // ownership and a retry starts a fresh transfer. The removal
+                // goes first and has to be confirmed — `false` means a client
+                // attached, so the replacement is still live inside the
+                // checkout. Unwriting the links anyway would leave that
+                // survivor with nothing on disk naming it and a retry would
+                // spawn a second writer beside it; keeping the pair makes the
+                // retry take the resume path above and refuse for repair.
+                if (spawnedNew) {
+                  const orphanSessionId = spawnedNew.sessionId;
+                  const removed = await runWithWorkspaceRuntimeStorage(
+                    runtime,
+                    () =>
+                      deleteDaemonSessionIfOrphan({
+                        sessionId: orphanSessionId,
+                        service: sessionService,
+                        bridge: runtime.bridge,
+                        coordinator: archiveCoordinator,
+                      }),
+                  ).catch(() => false);
+                  if (!removed) {
+                    daemonLog?.warn(
+                      'worktree reset could not remove the spawned replacement',
+                      { sessionId, replacementSessionId: orphanSessionId },
+                    );
+                    throw transferError;
+                  }
+                }
+                // Undo in the reverse of the write order above so a crash
+                // mid-rollback leaves the backward link alone — the shape a
+                // retry refuses for repair — instead of a forward link
+                // nothing scans for.
                 if (newSidecarWritten && spawnedNew) {
                   await clearWorktreeSession(
                     sessionService.getWorktreeSessionPath(spawnedNew.sessionId),
@@ -5113,17 +5183,6 @@ export function registerSessionRoutes(
                     oldSidecarPath,
                     effectiveOldSidecar,
                   );
-                }
-                if (spawnedNew) {
-                  const orphanSessionId = spawnedNew.sessionId;
-                  await runWithWorkspaceRuntimeStorage(runtime, () =>
-                    deleteDaemonSessionIfOrphan({
-                      sessionId: orphanSessionId,
-                      service: sessionService,
-                      bridge: runtime.bridge,
-                      coordinator: archiveCoordinator,
-                    }),
-                  ).catch(() => false);
                 }
                 throw transferError;
               }

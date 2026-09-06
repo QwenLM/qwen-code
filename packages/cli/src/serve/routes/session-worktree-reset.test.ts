@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import express from 'express';
+import express, { type Response } from 'express';
 import request from 'supertest';
 import {
   afterAll,
@@ -230,7 +230,12 @@ function makeBridge(options: { resetSupport?: boolean } = {}): FakeBridge {
   };
 }
 
-function makeFixture(options: { resetSupport?: boolean } = {}) {
+function makeFixture(
+  options: {
+    resetSupport?: boolean;
+    onResponse?: (res: Response) => void;
+  } = {},
+) {
   const workspaceDir = path.join(tmpRoot, randomUUID());
   const slug = 'task';
   const worktreeDir = path.join(workspaceDir, '.qwen', 'worktrees', slug);
@@ -248,6 +253,15 @@ function makeFixture(options: { resetSupport?: boolean } = {}) {
   } as WorkspaceRuntime;
   const app = express();
   app.use(express.json());
+  // Registered before the routes so a case can hold the live response and
+  // destroy its socket mid-transfer, the way an aborted caller does.
+  if (options.onResponse) {
+    const onResponse = options.onResponse;
+    app.use((_req, res, next) => {
+      onResponse(res);
+      next();
+    });
+  }
   const registry = createWorkspaceRegistry([runtime]);
   registerSessionRoutes(app, {
     boundWorkspace: workspaceDir,
@@ -636,6 +650,79 @@ describe('POST /session/:id/worktree-reset', () => {
     await expectMarkerOwner(fixture, newId);
   });
 
+  it('refuses a pre-commit rollback whose interrupted replacement survives', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const crashedId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, { supersededBy: crashedId });
+    await fixture.writeSidecar(crashedId, { supersedes: oldId });
+    await fixture.createMarker(oldId);
+    // `false` is a documented outcome, not an error: a client attached to the
+    // interrupted replacement, so `requireZeroAttaches` bailed and it is still
+    // live inside the checkout.
+    archiveMocks.deleteDaemonSessionIfOrphan.mockResolvedValueOnce(false);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_invalid_state');
+    // Fail closed before the destructive writes: the survivor keeps both links
+    // that name it, so nothing is dismantled and no second writer is spawned
+    // into the same checkout beside it.
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBe(crashedId);
+    const crashedSidecar = await expectSidecar(fixture, crashedId);
+    expect(crashedSidecar?.supersedes).toBe(oldId);
+    await expectMarkerOwner(fixture, oldId);
+    expect(fixture.fake.clearSessionWorktree).not.toHaveBeenCalled();
+    expect(fixture.fake.severSessionClients).not.toHaveBeenCalled();
+    // Nothing committed, so releasing the barrier is still this request's.
+    expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
+  });
+
+  it('leaves the backward link alone when the pre-commit rollback fails halfway', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const crashedId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, { supersededBy: crashedId });
+    await fixture.writeSidecar(crashedId, { supersedes: oldId });
+    await fixture.createMarker(oldId);
+    // The rollback's second write is the one that drops the backward link, so
+    // an ENOSPC or a crash between the two leaves the residue this pins.
+    coreMocks.writeWorktreeSession.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('no space left on device'), {
+        code: 'ENOSPC',
+      });
+    });
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(500);
+    // The forward link went first, so the residue is the backward link alone:
+    // the replacement's sidecar is gone while `S_old` still names it.
+    expect(await fixture.readSidecar(crashedId)).toEqual({ state: 'missing' });
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBe(crashedId);
+    await expectMarkerOwner(fixture, oldId);
+
+    // A retry refuses that disagreeing pair for repair instead of taking the
+    // fresh path and spawning a second replacement beside the first.
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(409);
+    expect(retry.body.code).toBe('worktree_reset_invalid_state');
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+  });
+
   it('resumes a committed transfer idempotently when the replacement has no transcript record', async () => {
     const fixture = makeFixture();
     const oldId = randomUUID();
@@ -802,6 +889,56 @@ describe('POST /session/:id/worktree-reset', () => {
     const replacementSidecar = await expectSidecar(fixture, replacementId);
     expect(replacementSidecar?.supersedes).toBe(unrelatedId);
     await expectMarkerOwner(fixture, replacementId);
+    // The marker committed ownership, so this refusal is post-commit: the
+    // superseded entry stays fenced for operator repair instead of being
+    // re-admitted as a writer into a checkout the marker has handed over.
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+  });
+
+  it('keeps the barrier armed when a committed resume finds the replacement busy', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const replacementId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, { supersededBy: replacementId });
+    await fixture.writeSidecar(replacementId, { supersedes: oldId });
+    await fixture.createMarker(replacementId);
+    // The replacement is a session in use — reached through the superseded
+    // redirect and prompted by another client — so the idempotent finish
+    // refuses instead of severing underneath it.
+    fixture.fake.setSummary(replacementId, {
+      hasActivePrompt: true,
+      pendingInteractionCount: 0,
+    });
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_active');
+    expect(res.body.sessionId).toBe(replacementId);
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+    expect(fixture.fake.severSessionClients).not.toHaveBeenCalled();
+    // This refusal is post-commit too — the marker named the replacement
+    // before the request started — so the superseded entry stays fenced
+    // rather than being re-admitted into a checkout it no longer owns.
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+
+    // The protocol's answer to `worktree_reset_active` is "retry once it
+    // settles", so the fence must not be stranded: the settled retry finishes
+    // the severance and drops it.
+    fixture.fake.setSummary(replacementId, {
+      hasActivePrompt: false,
+      pendingInteractionCount: 0,
+    });
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).toBe(replacementId);
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
     expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
   });
 
@@ -838,6 +975,137 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
   });
 
+  it('keeps the linked pair when the fresh rollback cannot reap its spawn', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const thirdPartyId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(thirdPartyId);
+    // The flip fails and the spawned replacement cannot be removed: a client
+    // attached to it in the meantime, so it is still live in the checkout.
+    archiveMocks.deleteDaemonSessionIfOrphan.mockResolvedValueOnce(false);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_invalid_state');
+    const spawnedId = fixture.fake.spawnedIds[0]!;
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: spawnedId }),
+    );
+    // The compensation stops before unwriting the links, so the survivor stays
+    // named on disk and a retry classifies it there instead of spawning a
+    // second writer into the same checkout.
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBe(spawnedId);
+    const spawnedSidecar = await expectSidecar(fixture, spawnedId);
+    expect(spawnedSidecar?.supersedes).toBe(oldId);
+    await expectMarkerOwner(fixture, thirdPartyId);
+    expect(fixture.fake.severSessionClients).not.toHaveBeenCalled();
+
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(409);
+    expect(retry.body.code).toBe('worktree_reset_invalid_state');
+    expect(fixture.fake.spawnOrAttach).toHaveBeenCalledTimes(1);
+  });
+
+  it('reaps the spawned replacement when the caller disconnects before the flip', async () => {
+    let liveResponse: Response | undefined;
+    const fixture = makeFixture({
+      onResponse: (res) => {
+        liveResponse = res;
+      },
+    });
+    const oldId = randomUUID();
+    const spawnedId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    const oldSidecarPath = fixture.sessionService.getWorktreeSessionPath(oldId);
+
+    // Park the transfer at the spawn so the socket can go away while the
+    // handover is still running, before the marker flip commits it.
+    let releaseSpawn!: () => void;
+    const spawnGate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    let resetAtSpawn!: () => void;
+    const resetSpawned = new Promise<void>((resolve) => {
+      resetAtSpawn = resolve;
+    });
+    fixture.fake.spawnOrAttach.mockImplementationOnce(async () => {
+      resetAtSpawn();
+      await spawnGate;
+      return { sessionId: spawnedId, attached: false };
+    });
+    // The dead socket settles the caller's promise at once while the route
+    // runs on, so the rollback signals its own progress: the reap is its first
+    // act, and its last is restoring the old sidecar — whose payload has no
+    // `supersededBy`, unlike the transfer's own write to that same path.
+    let reaped!: () => void;
+    const reapCalled = new Promise<void>((resolve) => {
+      reaped = resolve;
+    });
+    archiveMocks.deleteDaemonSessionIfOrphan.mockImplementationOnce(
+      async () => {
+        reaped();
+        return true;
+      },
+    );
+    let rollbackDone!: () => void;
+    const rollbackFinished = new Promise<void>((resolve) => {
+      rollbackDone = resolve;
+    });
+    const realWrite = coreMocks.real.writeWorktreeSession;
+    coreMocks.writeWorktreeSession.mockImplementation(
+      async (...args: Parameters<typeof realWrite>) => {
+        const written = await realWrite(...args);
+        if (args[0] === oldSidecarPath && args[1].supersededBy === undefined) {
+          rollbackDone();
+        }
+        return written;
+      },
+    );
+
+    const inFlight = request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({})
+      .then(
+        (response) => response.status,
+        () => undefined,
+      );
+    await resetSpawned;
+    // The caller's budget expired: `fetchWithTimeout` aborts and the socket
+    // goes away mid-transfer.
+    liveResponse?.destroy();
+    expect(liveResponse?.destroyed).toBe(true);
+    releaseSpawn();
+    // Without the disconnect guard neither signal ever arrives and this hangs
+    // until the test times out.
+    await reapCalled;
+    await rollbackFinished;
+    await inFlight;
+
+    // The handover never committed and the replacement this request minted is
+    // reaped instead of being left live in the checkout, holding a
+    // registration whose id no caller ever received.
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: spawnedId }),
+    );
+    await expectMarkerOwner(fixture, oldId);
+    expect(await fixture.readSidecar(spawnedId)).toEqual({ state: 'missing' });
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBeUndefined();
+    expect(fixture.fake.severSessionClients).not.toHaveBeenCalled();
+    expect(fixture.fake.clearSessionWorktree).not.toHaveBeenCalled();
+  });
+
   it('never compensates backwards when a step after the marker flip fails', async () => {
     const fixture = makeFixture();
     const oldId = randomUUID();
@@ -872,6 +1140,21 @@ describe('POST /session/:id/worktree-reset', () => {
     const newSidecar = await expectSidecar(fixture, newId);
     expect(newSidecar?.supersedes).toBe(oldId);
     expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
+    // The failure is post-commit, so releasing the barrier is not this
+    // request's to do: the superseded entry stays fenced instead of being
+    // re-admitted as a writer into the checkout the marker just handed over.
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+
+    // The fence is not stranded: the retry resumes the committed transfer,
+    // the severance completes, and the barrier is dropped there.
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).toBe(newId);
+    expect(fixture.fake.spawnOrAttach).toHaveBeenCalledTimes(1);
+    expect(fixture.fake.severSessionClients).toHaveBeenCalledTimes(2);
     expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
   });
 
@@ -914,6 +1197,10 @@ describe('POST /session/:id/worktree-reset', () => {
     const newSidecar = await expectSidecar(fixture, newId);
     expect(newSidecar?.supersedes).toBe(oldId);
     await expectMarkerOwner(fixture, newId);
+    // The primitive's tail failed with ownership already moved, so the barrier
+    // stays armed on the superseded entry rather than being released back into
+    // a checkout the marker has handed to the replacement.
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
 
     // The response tells the caller to retry; the retry resumes the committed
     // transfer instead of spawning a second replacement.
@@ -924,6 +1211,8 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(retry.status).toBe(200);
     expect(retry.body.sessionId).toBe(newId);
     expect(fixture.fake.spawnOrAttach).toHaveBeenCalledTimes(1);
+    // The resumed severance completes, and that is what drops the fence.
+    expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
   });
 
   it('keeps the barrier armed and reports a superseded session that survives sever', async () => {

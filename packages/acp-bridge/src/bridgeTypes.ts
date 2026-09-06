@@ -1542,16 +1542,19 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * Arm the worktree-reset admission barrier for a session id: while armed,
    * `sendPrompt` and the other writers that reach the session's checkout or
    * cwd (`rewindSession`, `launchSessionForkAgent`, `branchSession`,
-   * `changeSessionCwd`, `executeShellCommand`) throw `SessionResetPendingError`
-   * synchronously at admission. Returns whether a live entry currently exists
-   * for the id — a dormant session counts as quiescent but is still fenced
-   * against re-admission. Optional so lightweight fakes may omit it.
+   * `changeSessionCwd`, `executeShellCommand`, `controlSessionWorkflowTask`,
+   * `controlSessionGoal`) throw `SessionResetPendingError` synchronously at
+   * admission. Returns whether a live entry currently exists for the id — a
+   * dormant session counts as quiescent but is still fenced against
+   * re-admission. Optional so lightweight fakes may omit it.
    */
   setSessionResetPending?(sessionId: string): boolean;
 
   /**
    * Disarm the worktree-reset admission barrier. Idempotent; the reset route
-   * calls it on every transfer outcome.
+   * calls it on every transfer outcome up to the marker flip. Past the flip
+   * only a completed severance clears it, so a post-commit failure leaves the
+   * barrier armed for the retry that finishes the transfer.
    */
   clearSessionResetPending?(sessionId: string): void;
 

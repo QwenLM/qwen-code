@@ -499,30 +499,50 @@ Quiescence is enforced as a barrier, not a sample. When the check passes, the
 route marks the bridge entry for `S_old` reset-pending; the bridge refuses to
 admit new work for a reset-pending session, returning the same typed
 `worktree_reset_active` failure as the busy-task rejection — same meaning,
-same fail-closed shape. The fence is not prompt-only: it covers every writer
-that can reach the checkout or move the session cwd — `sendPrompt`,
-`rewindSession` (whose file restore is relative to the session cwd, and which
-is admitted precisely in the idle state this route requires),
+same fail-closed shape. The fence is not prompt-only: eight writers consult
+it, each one able to reach the checkout or move the session cwd —
+`sendPrompt`, `rewindSession` (whose file restore is relative to the session
+cwd, and which is admitted precisely in the idle state this route requires),
 `changeSessionCwd`, `branchSession`, `launchSessionForkAgent` (whose fork
-runs its tools in that cwd), and `executeShellCommand` (which runs in the
+runs its tools in that cwd), `executeShellCommand` (which runs in the
 entry's effective cwd — for a relocated worktree session, the checkout
-itself, so it is the strongest vector rather than a workspace-cwd one). Each
-consults the same id-keyed flag the route arms before it chains onto the
-session's prompt queue or dispatches, so a refused writer cannot wedge past
-the transfer when the route clears the flag. This closes the window in which
-a message resolved just before the reset — on the Channel side, `resolve()`
-returns under the owner lock but the turn starts after it is released — could
-begin executing in the worktree mid-transfer, and the same window for any
-non-Channel caller (for whom the check would otherwise be a point-in-time
-sample). Channel users never observe the barrier: the manager holds the owner
-lock across the whole reset, so a concurrent message's `resolve()` blocks and
-then resolves to the replacement session — no chat-facing message for the
-barrier exists by decision, not omission. The flag is cleared on every
-failure or compensation path and is subsumed by the transfer on success —
-with one exception: when the sever step reports a surviving superseded
-session, the barrier stays armed as the only fence left on that entry (see
-step 6). Quiescence is additionally re-verified immediately before the marker
-flip.
+itself, so it is the strongest vector rather than a workspace-cwd one),
+`controlSessionWorkflowTask` (whose action runs a saved workflow, or
+restarts a live run, through the session's own tool registry in that cwd),
+and `controlSessionGoal` (whose `resume` promotes a queued user turn and
+queues a continuation, so it starts work that never passes the fenced
+`sendPrompt` admission). Each consults the same id-keyed flag the route arms
+before it chains onto the session's prompt queue or dispatches, so a refused
+writer cannot wedge past the transfer when the route clears the flag.
+`continueSession` is not a ninth gate: it drives an accepted continuation
+through `sendPrompt` and is refused there. Those eight are the whole fence,
+and the fence is not everything that reaches the child: the release and stop
+paths stay usable mid-transfer by design (`cancelSessionTask`,
+`clearSessionGoal`, `detachClient`, `killSession`), and
+`enqueueBackgroundNotification` is unfenced as well: it is daemon-internal (a
+sub-session's completion acknowledgement to its parent, which no HTTP route
+calls) and enqueues a notification rather than starting a turn. This closes
+the window in which a message resolved just before the reset — on the Channel
+side, `resolve()` returns under the owner lock but the turn starts after it
+is released — could begin executing in the worktree mid-transfer, and the
+same window for any non-Channel caller (for whom the check would otherwise be
+a point-in-time sample). Channel users never observe the barrier: the manager
+holds the owner lock across the whole reset, so a concurrent message's
+`resolve()` blocks and then resolves to the replacement session — no
+chat-facing message for the barrier exists by decision, not omission. The
+flag is cleared on every failure or compensation path and is subsumed by the
+transfer on success — with two exceptions, both of which begin at the commit
+point. When the sever step reports a surviving superseded session, the
+barrier stays armed as the only fence left on that entry (see step 6). And
+once the marker flip has committed ownership, releasing the barrier stops
+being this request's to do: the route disarms its own release at the flip —
+and equally on the committed resume path, and on the primitive's post-commit
+tail failure, which reports the flip as done — so any failure in the
+post-flip tail leaves the superseded entry fenced for the retry that finishes
+the severance, instead of re-admitting a writer to a checkout the marker has
+already handed to `S_new`. Past that point only a completed severance clears
+the flag explicitly. Quiescence is additionally re-verified immediately
+before the marker flip.
 
 If `S_old`'s sidecar already records `supersededBy: S_new`, a previous reset
 crashed mid-transfer. The route reads the marker before choosing its
@@ -546,19 +566,29 @@ point the crash landed on:
   naming `S_old` or `missing`.
 - **Marker names `S_old`, or is missing while `S_new` is dormant —
   pre-commit.** `S_new` is provably non-authoritative, so the destructive
-  rollback is correct here: remove `supersededBy` from `S_old`'s sidecar,
-  delete `S_new`'s sidecar, orphan-confirmed-remove `S_new` — then proceed
-  with a fresh replacement. Two conditions bound that proof. An absent
-  marker alone proves nothing: a committed transfer whose git-excluded marker
-  was later cleaned (a task-local `git clean -xdf`) reads exactly like the
-  pre-commit crash shape, so a missing marker while `S_new` is still live on
-  this daemon fails closed with `worktree_reset_invalid_state` before any
-  destructive write instead of dismantling the committed owner and spawning a
-  second one. And the rollback requires the link pair to agree — `S_new`'s
-  sidecar present and naming `S_old` — because a backward link with no
-  replacement sidecar (the crash window between the two sidecar writes)
-  authorizes nothing; that shape is reported for operator repair, not rolled
-  back.
+  rollback is correct here: orphan-confirmed-remove `S_new` first, then
+  delete `S_new`'s sidecar, then remove `supersededBy` from `S_old`'s
+  sidecar — and proceed with a fresh replacement only once that removal is
+  confirmed. `false` from the removal (a client attached, so
+  `requireZeroAttaches` bailed) fails closed with
+  `worktree_reset_invalid_state` instead of proceeding to spawn: the links
+  stay written, so a retry re-enters this same resume path and refuses again
+  for as long as the removal stays unconfirmed, rather than leaving a live
+  replacement inside the checkout with nothing on disk naming it while the
+  fresh transfer spawns a second writer beside it. The link undo takes the
+  forward link off first for the same reason the transfer writes the backward
+  link first: a crash mid-rollback leaves the backward link alone — the shape
+  a retry refuses for repair — rather than a forward link nothing scans for.
+  Two conditions bound that proof. An absent marker alone proves nothing: a
+  committed transfer whose git-excluded marker was later cleaned (a
+  task-local `git clean -xdf`) reads exactly like the pre-commit crash shape,
+  so a missing marker while `S_new` is still live on this daemon fails closed
+  with `worktree_reset_invalid_state` before any destructive write instead of
+  dismantling the committed owner and spawning a second one. And the rollback
+  requires the link pair to agree — `S_new`'s sidecar present and naming
+  `S_old` — because a backward link with no replacement sidecar (the crash
+  window between the two sidecar writes) authorizes nothing; that shape is
+  reported for operator repair, not rolled back.
 
 Where the links agree, a retried `/clear` converges on exactly one owner
 instead of piling up replacement sessions. The fail-closed shapes — an
@@ -573,11 +603,13 @@ path deletes the session the marker names.
 Ordered steps, with the crash behavior of each:
 
 0. Preconditions pass; arm the reset-pending barrier on `S_old`.
-   Every non-crash failure or compensation path clears the barrier
-   explicitly. A crash clears nothing — the barrier is in-memory bridge
-   state and is discarded with the process, deliberately non-durable:
-   durability of a mid-transfer state lives entirely in the marker and the
-   sidecar pair, which the resume path reads.
+   Every non-crash failure or compensation path before the marker flip
+   clears the barrier explicitly; past the flip the release stops being this
+   request's to do and only a completed severance clears it (see step 6 and
+   the barrier paragraph above). A crash clears nothing — the barrier is
+   in-memory bridge state and is discarded with the process, deliberately
+   non-durable: durability of a mid-transfer state lives entirely in the
+   marker and the sidecar pair, which the resume path reads.
 1. Spawn `S_new` in the root workspace with the same thread-scope and source
    metadata conventions as a fresh worktree creation, minus worktree
    creation. No branch, no directory, no slug allocation.
@@ -601,8 +633,8 @@ Ordered steps, with the crash behavior of each:
    response and keeps its bookkeeping. A retried reset fails closed with
    `worktree_reset_invalid_state` because the pair disagrees, and leaves the
    interrupted state untouched for operator repair. Controlled failure:
-   remove `supersededBy` from `S_old`'s sidecar and orphan-confirmed-remove
-   `S_new`.
+   orphan-confirmed-remove `S_new` first, then remove `supersededBy` from
+   `S_old`'s sidecar.
 4. Write the sidecar for `S_new` via the existing atomic writer, carrying the
    worktree identity from `S_old`'s sidecar (`slug`, `worktreePath`,
    `worktreeBranch`, `originalCwd`, `originalBranch`, `originalHeadCommit`)
@@ -614,8 +646,9 @@ Ordered steps, with the crash behavior of each:
    a fresh replacement. This is the one window where the task is temporarily
    unrestorable and a retry is the documented repair; it is also why a caller
    must not persist the redirect target it was handed until a load of it
-   succeeds, since that retry reaps it. Controlled failure: delete the new
-   sidecar and orphan-confirmed-remove `S_new`.
+   succeeds, since that retry reaps it. Controlled failure:
+   orphan-confirmed-remove `S_new` first, then delete the new sidecar and
+   remove `supersededBy` from `S_old`'s sidecar.
 5. Re-verify quiescence — a prompt admitted in the check-to-arm window and
    still winding down aborts the transfer here — then transfer the marker to
    `S_new` (primitive below). This is the point of no return.
@@ -642,16 +675,21 @@ Ordered steps, with the crash behavior of each:
    becomes a channel kill, and `S_new` was spawned onto that same
    workspace-bound bridge. Set `persisted-v1` on the response and respond.
 
-Controlled failure at steps 3–5 (no crash) compensates in the reverse of the
-write order — delete `S_new`'s sidecar, remove `supersededBy` from `S_old`'s
-sidecar, then orphan-confirmed-remove `S_new` — restoring the exact pre-reset
-state. The reverse order matters for the same reason the forward one does: a
-crash mid-rollback leaves the backward link alone, which a retry refuses for
-operator repair, rather than a forward link nothing scans for. A failure at
-step 6 is past the point of no return and does not compensate: the marker
-already names `S_new`, the on-disk state is consistent, and the Channel —
-which never saw success — heals its registry through the superseded redirect
-on the next selection.
+Controlled failure at steps 3–5 (no crash) compensates by removing `S_new`
+first and then unwriting the links in the reverse of the write order —
+orphan-confirmed-remove `S_new`, delete `S_new`'s sidecar, then remove
+`supersededBy` from `S_old`'s sidecar — restoring the exact pre-reset state.
+The removal goes first and has to be confirmed: `false` (a client attached,
+so `requireZeroAttaches` bailed) abandons the link undo and rethrows, keeping
+the pair on disk so a retry takes the resume path above and refuses for
+repair, instead of leaving that survivor live inside the checkout with
+nothing naming it while a second replacement is spawned beside it. The link
+order matters for the same reason the forward one does: a crash mid-rollback
+leaves the backward link alone, which a retry refuses for operator repair,
+rather than a forward link nothing scans for. A failure at step 6 is past the
+point of no return and does not compensate: the marker already names `S_new`,
+the on-disk state is consistent, and the Channel — which never saw success —
+heals its registry through the superseded redirect on the next selection.
 
 A crash before step 3 can leave a replacement session that was relocated but
 never gained a sidecar. That orphan has no worktree claim: it restores as an
@@ -700,9 +738,14 @@ expectedOwner`, or `missing` when `expectedOwner === null` (the recovery
      in the core worktree service — same checks, same three-state result.
      `atomicFileWrite.ts` itself is reused unchanged.
    - `missing`: commit through the existing
-     `createWorktreeSessionMarkerExclusive`. `O_EXCL` _is_ the
-     compare-and-swap against absence: a concurrent transfer that gets there
-     first turns this create into `EEXIST`, which fails closed.
+     `createWorktreeSessionMarkerExclusive`, which stages the owner in a
+     `.qwen-session.<12-hex>.tmp` sibling (`O_EXCL | O_NOFOLLOW`, inode
+     pinned), writes and fsyncs it there, and publishes it with `link(2)`.
+     The publishing link _is_ the compare-and-swap against absence: it fails
+     `EEXIST` when the marker path is taken, so a concurrent transfer that
+     gets there first loses instead of overwriting — the guarantee the
+     `O_EXCL` create gave, without ever letting the marker path exist before
+     its content is complete and fsynced.
 4. `atomicWriteFile`'s temporary file is a sibling named
    `.qwen-session.<hex>.tmp`. The transfer adds a `.qwen-session.*.tmp` rule
    beside the marker's existing `info/exclude` line so a crashed transfer's
@@ -716,17 +759,46 @@ expectedOwner`, or `missing` when `expectedOwner === null` (the recovery
    rejected below — is unreachable here.
 
 Either commit shape leaves the old marker fully intact or the complete new
-content, so the strict reader never sees a truncated marker from this
-primitive. That holds because the foreign-uid refusal excludes the in-place
-write path, the sibling temp excludes the `EXDEV` path, and the commit-point
-re-check compares owner **and** file identity — leaving the rename and the
-exclusive create as the only commits. One residual is stated honestly: an
-in-place rewrite that preserves inode and ownership is indistinguishable to
-any file-level check, but only a same-uid writer can do that — the daemon
-itself or the local user — and for daemon writers the worktree-keyed lock
-excludes it. Two concurrent transfers targeting one worktree cannot both
-win: the worktree-keyed lock serializes them, and the second-place
-finisher's owner re-check (or `O_EXCL` create) fails closed regardless.
+content, so the strict reader never sees a truncated or empty marker from
+this primitive. That holds because the foreign-uid refusal excludes the
+in-place write path, the sibling temp excludes the `EXDEV` path, and the
+commit-point re-check compares owner **and** file identity — leaving the
+rename and the link publish as the only commits. One residual is stated
+honestly: an in-place rewrite that preserves inode and ownership is
+indistinguishable to any file-level check, but only a same-uid writer can do
+that — the daemon itself or the local user — and for daemon writers the
+worktree-keyed lock excludes it. Two concurrent transfers targeting one
+worktree cannot both win: the worktree-keyed lock serializes them, and the
+second-place finisher's owner re-check (or `EEXIST` from the publishing
+link) fails closed regardless.
+
+A 0-byte `.qwen-session` is consequently not a state the `missing` hatch can
+produce. It is still classified `{state:'invalid', reason:'invalid marker
+owner'}` by both strict readers and is still never auto-recovered: a
+pre-existing empty marker — left by pre-fix code, by
+`writeWorktreeSessionMarker`'s plain `fs.writeFile`, or by external
+truncation — keeps the existing non-typed fail-closed behavior.
+
+The window that replaces the create-then-fill one is the gap between the
+publishing link and the removal of the staged sibling: there the marker holds
+the correct owner but has `nlink === 2`, which both strict readers report as
+`{state:'invalid', reason:'unsafe marker file type'}`. The same call closes
+the gap by unlinking the sibling; a failure of that unlink surfaces as the
+primitive's post-commit `WorktreeMarkerCommittedError`, so the flip stands
+and is never compensated backwards. A crash inside the gap leaves a
+valid-content marker plus a `.qwen-session.<hex>.tmp` sibling sharing its
+inode. Operator repair is to remove the leftover sibling — never the marker —
+which restores the marker to `valid`. It is not auto-recovered.
+
+One portability consequence comes with the publish: the hatch now requires
+hardlink support on the filesystem holding the worktree, where the previous
+plain `O_EXCL` create worked anywhere. Where hardlinks are unavailable the
+publish fails, the staged sibling is removed and no marker is created, so the
+failure is fail-closed — the reset refuses with its typed
+`worktree_reset_invalid_state` after rolling back what it started, rather
+than corrupting. This is a documented boundary of the primitive, not a
+defect, and it applies to the worktree-creation path that already committed
+through the same exclusive create as well as to the hatch.
 
 ### Sidecar schema addition
 
@@ -1118,15 +1190,17 @@ implementation and is not committed.
   marker without catalog record (rejected), and residual attaches severed by
   the transfer rather than blocking it.
 - The reset-pending barrier refuses a prompt admitted after the quiescence
-  check and is cleared by every failure path; the pre-flip re-verify aborts a
-  transfer whose prompt state changed. The same barrier refuses the other
-  writers that can reach the checkout or move the session cwd — a rewind, a
-  cwd change, a branch, a fork-agent launch, or a shell command admitted
+  check and is cleared by every pre-flip failure path — past the flip the
+  release belongs to a completed severance, not to the failing request; the
+  pre-flip re-verify aborts a transfer whose prompt state changed. The same
+  barrier refuses the other writers that can reach the checkout or move the
+  session cwd — a rewind, a cwd change, a branch, a fork-agent launch, a
+  shell command, a workflow-task action, or a goal control admitted
   mid-transfer must each reject with the same typed failure, and deleting any
   one guard must turn its test red.
 - Two concurrent resets against sessions sharing one worktree (the
   post-transfer shape) cannot both win: the second fails the lock, the owner
-  re-check, or the `O_EXCL` create.
+  re-check, or the publishing link's `EEXIST`.
 - Crash injection at every transfer step proves the documented outcome:
   pre-transfer crashes leave `S_old` authoritative; post-transfer crashes
   restore `S_new`; a retried reset completes a half-finished transfer exactly
@@ -1214,20 +1288,30 @@ file writes and the marker flip.
 
 Control: quiescence is enforced as a barrier plus a re-check, not a sample —
 the bridge refuses new work on a reset-pending session from the precondition
-gate until the flip, covering prompt admission and every other writer that
-can reach the checkout or move the session cwd (`sendPrompt`,
+gate until the flip, covering prompt admission and the seven other writers
+that can reach the checkout or move the session cwd (`sendPrompt`,
 `rewindSession`, `changeSessionCwd`, `branchSession`,
-`launchSessionForkAgent`, `executeShellCommand`), and quiescence is
+`launchSessionForkAgent`, `executeShellCommand`,
+`controlSessionWorkflowTask`, `controlSessionGoal`), and quiescence is
 re-verified immediately before the flip. A rewind is the reason the fence
 cannot stop at prompts: it is admitted precisely in the idle state the route
 requires, chains onto the same queue, and sets none of the flags the pre-flip
-re-check reads. A shell command is the strongest of the six — it runs in the
-entry's effective cwd, which for a relocated worktree session is the checkout
-itself — so it is fenced too, and no writer on the superseded session is left
-ungated. The Channel refuses busy tasks up front (`isBusy` covers queued,
-running, and permission-pending states); the user cancels first. A parked
-deferred restore prompt counts as busy once the visibility fix lands, so a
-task stopped on a recovered question cannot be reset out from under the
+re-check reads — and so do the two control writers, a workflow action that
+runs through the session's own tool registry in that cwd and a goal `resume`
+that starts a turn never passing `sendPrompt`. A shell command is the
+strongest of the eight — it runs in the entry's effective cwd, which for a
+relocated worktree session is the checkout itself — so it is fenced too.
+Those eight are the whole fence, and it is not a fence on everything that
+reaches the child: the release and stop paths stay usable mid-transfer by
+design (`cancelSessionTask`, `clearSessionGoal`, `detachClient`,
+`killSession`), `continueSession` is refused transitively at the
+`sendPrompt` admission it drives its continuation through rather than gated
+itself, and the daemon-internal `enqueueBackgroundNotification` is ungated
+because no HTTP route calls it and it enqueues a notification rather than
+starting a turn. The Channel refuses busy tasks up front (`isBusy` covers
+queued, running, and permission-pending states); the user cancels first. A
+parked deferred restore prompt counts as busy once the visibility fix lands,
+so a task stopped on a recovered question cannot be reset out from under the
 question.
 
 ### Concurrent reset double-win
@@ -1237,9 +1321,9 @@ naming the same worktree; two concurrent resets could both claim the marker.
 
 Control: serialization is keyed on the canonical worktree path, the commit is
 a compare-and-swap (owner re-check at the rename commit for the `valid`
-shape, `O_EXCL` for the `missing` shape), and a superseded sidecar routes to
-the resume path rather than starting a competing transfer. The second-place
-finisher fails closed in all shapes.
+shape, `EEXIST` from the publishing link for the `missing` shape), and a
+superseded sidecar routes to the resume path rather than starting a
+competing transfer. The second-place finisher fails closed in all shapes.
 
 ### Silent downgrade of the old session
 
@@ -1285,14 +1369,16 @@ Rejected during this design's review. A plain rename is not a
 compare-and-swap: with the marker absent it degrades to last-writer-wins, and
 even with the marker present it leaves the window between the opening strict
 read and the rename unguarded. The commit must re-check the owner
-(`assertCanCommit`) or exclude by absence (`O_EXCL`).
+(`assertCanCommit`) or exclude by absence (`EEXIST` on the exclusive
+publish).
 
 ### Transfer ownership by unlink + exclusive create
 
 Rejected for the `valid`-owner shape. The window between unlink and re-create
 leaves the worktree ownerless; a crash there forces reliance on the recovery
-hatch for a routine operation. (For the `missing` shape the exclusive create
-is exactly right and is what the primitive uses.)
+hatch for a routine operation. (For the `missing` shape an exclusive create
+is exactly right and is what the primitive uses — staged in a sibling and
+published by the link.)
 
 ### Reattach the old session ID to a fresh conversation
 
