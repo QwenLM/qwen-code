@@ -2245,7 +2245,24 @@ export function gitfileMarker(dotGit: string): string {
 function adminDirOf(probeTree: string, dotGit: string): string {
   try {
     if (!lstatSync(dotGit).isFile()) return dotGit;
-    const raw = readFileSync(dotGit, 'utf8').trim();
+    // Bounded exactly as `gitfileMarker` bounds it, and for the same reason:
+    // this reads the SAME file, on every identity re-ask, so an unbounded read
+    // here hands back the denial of service that cap exists to prevent — one
+    // attacker-sized slurp per spawn and per write guard in the run, of a file
+    // the marker one statement above just declined to read past 4 KiB. Past
+    // the cap there is no pointer git wrote to resolve; `dotGit` is the same
+    // fallback every other failure here takes, and the caller's marker has
+    // already recorded the size that moves when the file is rewritten.
+    const fd = openSync(dotGit, 'r');
+    let raw: string;
+    try {
+      const buf = Buffer.allocUnsafe(MAX_GITFILE_BYTES);
+      const n = readSync(fd, buf, 0, buf.length, 0);
+      if (n === buf.length) return dotGit;
+      raw = buf.subarray(0, n).toString('utf8').trim();
+    } finally {
+      closeSync(fd);
+    }
     const named = raw.startsWith('gitdir:') ? raw.slice(7).trim() : raw;
     return isAbsolute(named) ? named : resolve(probeTree, named);
   } catch {

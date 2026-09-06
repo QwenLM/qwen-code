@@ -32,6 +32,7 @@ import {
   runOneMutant,
   runOneHunkProbe,
   committedSymlinkProbes,
+  gitfileMarker,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
@@ -1146,6 +1147,72 @@ exec ${realGit} "$@"
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('gitfileMarker — a namespace nothing in the file can forge', () => {
+  // The root identity compares these markers as strings, so the WORDS for "it
+  // was a directory" and a file whose literal content is that word must not
+  // share a spelling: capture-1 reads the planted text, capture-2 finds a real
+  // directory, and an untagged pair compares equal over the swap — the re-check
+  // passes and the restore writes into whoever moved in. That is the property
+  // an end-to-end fixture cannot reach, because its middle stages have to look
+  // clean to git, and it is why the function is exported and pinned here.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'qwen-gitfile-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('tags every shape distinctly, so no content collides with another shape', () => {
+    const p = join(dir, '.git');
+    // Absent is its own state, not an error: a file appearing or vanishing
+    // between two captures has to register as a change.
+    expect(gitfileMarker(p)).toBe('absent');
+
+    mkdirSync(p);
+    expect(gitfileMarker(p)).toBe('dir');
+    rmSync(p, { recursive: true, force: true });
+
+    // The collision case. Same three bytes the directory shape spells.
+    writeFileSync(p, 'dir');
+    expect(gitfileMarker(p)).not.toBe('dir');
+    expect(gitfileMarker(p)).toMatch(/^file:3:/);
+
+    // Length-framed, so an EQUAL-LENGTH rewrite — the one a stat comparison
+    // passes, and the reason this is read rather than stat'ed — still moves.
+    const before = gitfileMarker(p);
+    writeFileSync(p, 'abc');
+    expect(gitfileMarker(p)).not.toBe(before);
+    expect(gitfileMarker(p).startsWith('file:3:')).toBe(true);
+
+    // A dangling symlink is neither file nor directory, and is NOT the absent
+    // marker: the entry is there, it just names nothing.
+    rmSync(p);
+    symlinkSync(join(dir, 'nowhere'), p);
+    expect(gitfileMarker(p)).toBe('other');
+  });
+
+  it('sizes a gitfile past the cap rather than reading it', () => {
+    const p = join(dir, '.git');
+    // One byte past 4 KiB takes the branch. What this stands in for is a file
+    // an attacker sized, and reading one in full on every identity re-ask is
+    // the denial of service the cap exists to prevent.
+    writeFileSync(p, `${'x'.repeat(4096)}\n`);
+    const m = gitfileMarker(p);
+    expect(m).toBe('oversized:4097');
+
+    // Size is what moves here, and a same-size rewrite does NOT move it. That
+    // is the acknowledged limit of the branch, and it is safe because the
+    // anchor is captured at `worktree add`, where git wrote a few dozen bytes:
+    // inflating the file at all crosses `file:` to `oversized:` and refuses on
+    // the first re-ask, so no anchor is ever an oversized marker to begin with.
+    writeFileSync(p, `${'y'.repeat(4096)}\n`);
+    expect(gitfileMarker(p)).toBe(m);
+    writeFileSync(p, `${'y'.repeat(4096)}\n\n`);
+    expect(gitfileMarker(p)).not.toBe(m);
   });
 });
 
