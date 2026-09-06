@@ -5,26 +5,31 @@
  */
 
 /**
- * @fileoverview Who, if anyone, a new thread post should wake.
+ * @fileoverview Whether a new thread post books work for a given agent.
  *
  * Kept pure and separate from the daemon service that acts on it, because
  * these rules are the difference between a working mesh and a token fire:
- * every one of them exists to stop a specific runaway or duplicate.
+ * every one exists to stop a specific runaway or duplicate.
  *
- * The first four mirror what Multica arrived at (`server/internal/handler/
- * comment.go`): coalesce into a queued run, defer when one is already active,
- * never let an author wake itself, and let an explicit mention take routing
- * away from the assignee. The budget rule is ours: Multica's runs terminate
- * on their own and a human owns the issue, whereas two mesh agents answering
- * each other have nothing to stop them.
+ * The scope is deliberately narrow — **book, coalesce, or refuse**. Whether a
+ * booked run can start *right now* is the dispatcher's business, because it
+ * depends on what the agent's single body happens to be doing. An earlier
+ * revision had this function return `defer` for a busy agent, which put a
+ * scheduling decision inside a rules function and gave the same situation two
+ * spellings. A run that cannot start yet is simply a queued run.
+ *
+ * Four rules mirror what Multica arrived at (`server/internal/handler/
+ * comment.go`): coalesce rather than double-book, never let an author wake
+ * itself, let an explicit mention take routing away from the assignee, and
+ * fail closed. The budget rules are ours: Multica's runs terminate on their
+ * own and a human owns the issue, whereas two mesh agents answering each other
+ * have nothing to stop them.
  */
 
-import {
-  agentConcurrencyLimit,
-  isAgentEnabled,
-} from './mesh-store.js';
+import { isAgentEnabled, queueLimitFor } from './mesh-store.js';
 import {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
+  DEFAULT_THREAD_TOKEN_BUDGET,
   HUMAN_AUTHOR_ID,
   type MeshAgent,
   type Thread,
@@ -32,27 +37,37 @@ import {
 } from './types.js';
 
 export type DispatchDecision =
-  /** Start a new run for this agent. */
+  /** Book a new queued run. The dispatcher decides when it starts. */
   | { kind: 'dispatch' }
-  /** Fold the message into an existing queued run that has not started. */
-  | { kind: 'coalesce'; runId: string }
   /**
-   * Do nothing now; the named run's completion re-evaluates the thread.
-   * Distinct from `skip`: deferred work is expected to happen.
+   * Add this message to a run the agent already has on this thread. Covers
+   * both a run that has not started and one executing this same thread —
+   * mid-run delivery is available here, so a second run would be waste.
    */
-  | { kind: 'defer'; reason: DeferReason; runId?: string }
+  | { kind: 'coalesce'; runId: string; into: 'queued' | 'running' }
   /** Nothing will run for this target, and nothing is pending. */
   | { kind: 'skip'; reason: SkipReason };
-
-export type DeferReason = 'active_run' | 'agent_at_capacity';
 
 export type SkipReason =
   | 'self_trigger'
   | 'agent_disabled'
   | 'agent_unknown'
   | 'explicit_routing'
-  | 'budget_exhausted'
+  | 'turn_budget_exhausted'
+  | 'token_budget_exhausted'
+  | 'queue_full'
   | 'thread_done';
+
+/** Counters of the thread tree's root, which is what a budget is spent from. */
+export interface BudgetState {
+  autoTurnsUsed: number;
+  tokensUsed: number;
+}
+
+export interface BudgetLimits {
+  autoTurns?: number;
+  tokens?: number;
+}
 
 export interface DispatchContext {
   thread: Thread;
@@ -61,23 +76,27 @@ export interface DispatchContext {
   /** The agent being considered as a target. */
   target: MeshAgent | undefined;
   /**
-   * Runs this agent currently holds across every thread, counting `queued`
-   * and `running`. The caller owns this because concurrency is a workspace
-   * fact, not a thread one.
+   * Counters from `thread.rootThreadId`'s record. Equal to the thread's own
+   * when it is a root. The caller resolves this because reading another
+   * thread's file is I/O, and this function stays pure.
    */
-  agentActiveRunCount: number;
-  /** Absent uses {@link DEFAULT_THREAD_AUTO_TURN_BUDGET}. */
-  autoTurnBudget?: number;
+  budget: BudgetState;
+  /**
+   * Runs already waiting for this agent across every thread, excluding any on
+   * this thread (those coalesce instead of queueing).
+   */
+  agentQueuedElsewhere: number;
+  limits?: BudgetLimits;
 }
 
 /**
  * Decides what a single (message, target) pair should do.
  *
- * Order is load-bearing. Identity and routing checks come first so a decision
- * never depends on run state that a concurrent writer could change; the
- * budget precedes the queue checks so an exhausted thread cannot keep
- * coalescing new work into a run it should not have; capacity comes last
- * because it is the only reason that resolves purely by waiting.
+ * Order is load-bearing. Identity and routing come first, so a decision never
+ * depends on run state a concurrent writer could change. Budget precedes the
+ * queue checks so an exhausted tree cannot keep folding new work into a run it
+ * should not have. Coalescing precedes the queue limit because joining an
+ * existing run adds nothing to the queue.
  */
 export function decideDispatch(context: DispatchContext): DispatchDecision {
   const { thread, message, target } = context;
@@ -103,30 +122,42 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
     return { kind: 'skip', reason: 'explicit_routing' };
   }
 
-  // The loop breaker. Only agent-authored posts spend budget: a person
-  // posting is the signal that the conversation is wanted, and it resets the
-  // counter at the call site.
+  // The loop breakers. Only agent-authored posts are gated: a person posting
+  // is the signal that the conversation is wanted, and it resets the turn
+  // counter at the call site. Tokens are never reset — turns measure how long
+  // this has run unattended, tokens measure money already spent.
   if (message.from !== HUMAN_AUTHOR_ID) {
-    const budget = context.autoTurnBudget ?? DEFAULT_THREAD_AUTO_TURN_BUDGET;
-    if (thread.autoTurnsUsed >= budget) {
-      return { kind: 'skip', reason: 'budget_exhausted' };
+    const turnLimit =
+      context.limits?.autoTurns ?? DEFAULT_THREAD_AUTO_TURN_BUDGET;
+    if (context.budget.autoTurnsUsed >= turnLimit) {
+      return { kind: 'skip', reason: 'turn_budget_exhausted' };
+    }
+    const tokenLimit = context.limits?.tokens ?? DEFAULT_THREAD_TOKEN_BUDGET;
+    if (context.budget.tokensUsed >= tokenLimit) {
+      return { kind: 'skip', reason: 'token_budget_exhausted' };
     }
   }
 
-  const queued = thread.runs.find(
-    (run) => run.agentId === target.id && run.status === 'queued',
+  // An agent has one body, so at most one run of its own can be live on this
+  // thread. Either state absorbs the message: a queued run has not been sent
+  // yet, and a running one accepts mid-turn delivery.
+  const existing = thread.runs.find(
+    (run) =>
+      run.agentId === target.id &&
+      (run.status === 'queued' || run.status === 'running'),
   );
-  if (queued) return { kind: 'coalesce', runId: queued.id };
-
-  const active = thread.runs.find(
-    (run) => run.agentId === target.id && run.status === 'running',
-  );
-  if (active) {
-    return { kind: 'defer', reason: 'active_run', runId: active.id };
+  if (existing) {
+    return {
+      kind: 'coalesce',
+      runId: existing.id,
+      into: existing.status === 'running' ? 'running' : 'queued',
+    };
   }
 
-  if (context.agentActiveRunCount >= agentConcurrencyLimit(target)) {
-    return { kind: 'defer', reason: 'agent_at_capacity' };
+  // Refusing at the limit is the point: silently accepting would build a
+  // backlog whose tail is stale by the time the agent reaches it.
+  if (context.agentQueuedElsewhere >= queueLimitFor(target)) {
+    return { kind: 'skip', reason: 'queue_full' };
   }
 
   return { kind: 'dispatch' };
@@ -138,7 +169,10 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
  * {@link decideDispatch}, so "why did nothing happen" has one answer per
  * target rather than a silent omission.
  */
-export function resolveTargets(thread: Thread, message: ThreadMessage): string[] {
+export function resolveTargets(
+  thread: Thread,
+  message: ThreadMessage,
+): string[] {
   if (message.mentions.length > 0) return [...message.mentions];
   return thread.assigneeAgentId ? [thread.assigneeAgentId] : [];
 }

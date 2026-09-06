@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { decideDispatch, resolveTargets } from './dispatch-policy.js';
+import {
+  decideDispatch,
+  resolveTargets,
+  type DispatchContext,
+} from './dispatch-policy.js';
 import {
   HUMAN_AUTHOR_ID,
   type MeshAgent,
@@ -15,12 +19,7 @@ import {
 } from './types.js';
 
 function agent(overrides: Partial<MeshAgent> = {}): MeshAgent {
-  return {
-    id: 'ag_alice',
-    name: 'alice',
-    createdAt: 1_000,
-    ...overrides,
-  };
+  return { id: 'ag_alice', name: 'alice', createdAt: 1_000, ...overrides };
 }
 
 function thread(overrides: Partial<Thread> = {}): Thread {
@@ -31,9 +30,11 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     status: 'open',
     createdAt: 1_000,
     createdBy: HUMAN_AUTHOR_ID,
+    rootThreadId: 'th_1',
     messages: [],
     runs: [],
     autoTurnsUsed: 0,
+    tokensUsed: 0,
     ...overrides,
   };
 }
@@ -56,121 +57,151 @@ function run(overrides: Partial<ThreadRun> = {}): ThreadRun {
     status: 'queued',
     triggerMessageIds: ['ms_0'],
     queuedAt: 1_500,
+    attempts: 0,
+    ...overrides,
+  };
+}
+
+function context(overrides: Partial<DispatchContext> = {}): DispatchContext {
+  return {
+    thread: thread(),
+    message: message({ mentions: ['ag_alice'] }),
+    target: agent(),
+    budget: { autoTurnsUsed: 0, tokensUsed: 0 },
+    agentQueuedElsewhere: 0,
     ...overrides,
   };
 }
 
 describe('decideDispatch', () => {
-  it('dispatches a mentioned, idle agent', () => {
-    expect(
-      decideDispatch({
-        thread: thread(),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 0,
-      }),
-    ).toEqual({ kind: 'dispatch' });
+  it('books a run for a mentioned, idle agent', () => {
+    expect(decideDispatch(context())).toEqual({ kind: 'dispatch' });
   });
 
   it('never wakes an agent on its own post', () => {
     expect(
-      decideDispatch({
-        thread: thread(),
-        message: message({ from: 'ag_alice', mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 0,
-      }),
+      decideDispatch(
+        context({ message: message({ from: 'ag_alice', mentions: ['ag_alice'] }) }),
+      ),
     ).toEqual({ kind: 'skip', reason: 'self_trigger' });
   });
 
   it('keeps the assignee out of a post that names someone else', () => {
     expect(
-      decideDispatch({
-        thread: thread({ assigneeAgentId: 'ag_alice' }),
-        message: message({ mentions: ['ag_bob'] }),
-        target: agent(),
-        agentActiveRunCount: 0,
-      }),
+      decideDispatch(
+        context({
+          thread: thread({ assigneeAgentId: 'ag_alice' }),
+          message: message({ mentions: ['ag_bob'] }),
+        }),
+      ),
     ).toEqual({ kind: 'skip', reason: 'explicit_routing' });
   });
 
   it('coalesces into a run that has not started', () => {
     expect(
-      decideDispatch({
-        thread: thread({ runs: [run({ status: 'queued' })] }),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 1,
-      }),
-    ).toEqual({ kind: 'coalesce', runId: 'rn_1' });
+      decideDispatch(
+        context({ thread: thread({ runs: [run({ status: 'queued' })] }) }),
+      ),
+    ).toEqual({ kind: 'coalesce', runId: 'rn_1', into: 'queued' });
   });
 
-  it('defers while a run is already executing', () => {
+  it('coalesces into a run already executing this same thread', () => {
+    // Mid-run delivery is available here, so booking a second run would be
+    // waste — this is the case Multica has to defer.
     expect(
-      decideDispatch({
-        thread: thread({ runs: [run({ status: 'running' })] }),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 1,
-      }),
-    ).toEqual({ kind: 'defer', reason: 'active_run', runId: 'rn_1' });
+      decideDispatch(
+        context({ thread: thread({ runs: [run({ status: 'running' })] }) }),
+      ),
+    ).toEqual({ kind: 'coalesce', runId: 'rn_1', into: 'running' });
   });
 
-  it('defers a mention that would exceed the agent concurrency limit', () => {
-    expect(
-      decideDispatch({
-        thread: thread(),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent({ maxConcurrentRuns: 2 }),
-        agentActiveRunCount: 2,
-      }),
-    ).toEqual({ kind: 'defer', reason: 'agent_at_capacity' });
+  it('still books when the agent is busy on another thread', () => {
+    // Whether a queued run can start now is the dispatcher's call, not a rule.
+    expect(decideDispatch(context({ agentQueuedElsewhere: 1 }))).toEqual({
+      kind: 'dispatch',
+    });
   });
 
-  it('stops an agent-to-agent loop once the thread budget is spent', () => {
+  it('refuses once the agent queue is full', () => {
     expect(
-      decideDispatch({
-        thread: thread({ autoTurnsUsed: 3 }),
-        message: message({ from: 'ag_bob', mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 0,
-        autoTurnBudget: 3,
-      }),
-    ).toEqual({ kind: 'skip', reason: 'budget_exhausted' });
+      decideDispatch(
+        context({ target: agent({ queueLimit: 2 }), agentQueuedElsewhere: 2 }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'queue_full' });
   });
 
-  it('lets a person through a thread whose auto budget is spent', () => {
+  it('stops an agent-to-agent loop once the turn budget is spent', () => {
     expect(
-      decideDispatch({
-        thread: thread({ autoTurnsUsed: 99 }),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 0,
-        autoTurnBudget: 3,
-      }),
+      decideDispatch(
+        context({
+          message: message({ from: 'ag_bob', mentions: ['ag_alice'] }),
+          budget: { autoTurnsUsed: 3, tokensUsed: 0 },
+          limits: { autoTurns: 3 },
+        }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'turn_budget_exhausted' });
+  });
+
+  it('stops once the token budget is spent', () => {
+    expect(
+      decideDispatch(
+        context({
+          message: message({ from: 'ag_bob', mentions: ['ag_alice'] }),
+          budget: { autoTurnsUsed: 0, tokensUsed: 200_000 },
+          limits: { tokens: 200_000 },
+        }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'token_budget_exhausted' });
+  });
+
+  it('lets a person through a tree whose budgets are spent', () => {
+    expect(
+      decideDispatch(
+        context({
+          budget: { autoTurnsUsed: 99, tokensUsed: 999_999 },
+          limits: { autoTurns: 3, tokens: 10 },
+        }),
+      ),
     ).toEqual({ kind: 'dispatch' });
+  });
+
+  it('spends the budget of the thread tree, not the thread', () => {
+    // A sub-thread carries its own zeroed counters; the caller passes the
+    // root's, which is what closes the "split work, mint budget" hole.
+    expect(
+      decideDispatch(
+        context({
+          thread: thread({ id: 'th_2', rootThreadId: 'th_1' }),
+          message: message({ from: 'ag_bob', mentions: ['ag_alice'] }),
+          budget: { autoTurnsUsed: 12, tokensUsed: 0 },
+        }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'turn_budget_exhausted' });
   });
 
   it('reports a disabled agent as skipped rather than unknown', () => {
     expect(
-      decideDispatch({
-        thread: thread(),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent({ enabled: false }),
-        agentActiveRunCount: 0,
-      }),
+      decideDispatch(context({ target: agent({ enabled: false }) })),
     ).toEqual({ kind: 'skip', reason: 'agent_disabled' });
+  });
+
+  it('reports an unresolvable target', () => {
+    expect(decideDispatch(context({ target: undefined }))).toEqual({
+      kind: 'skip',
+      reason: 'agent_unknown',
+    });
   });
 
   it('does not reopen a finished thread', () => {
     expect(
-      decideDispatch({
-        thread: thread({ status: 'done' }),
-        message: message({ mentions: ['ag_alice'] }),
-        target: agent(),
-        agentActiveRunCount: 0,
-      }),
+      decideDispatch(context({ thread: thread({ status: 'done' }) })),
     ).toEqual({ kind: 'skip', reason: 'thread_done' });
+  });
+
+  it('still dispatches on a blocked thread, which is how a person unblocks it', () => {
+    expect(
+      decideDispatch(context({ thread: thread({ status: 'blocked' }) })),
+    ).toEqual({ kind: 'dispatch' });
   });
 });
 

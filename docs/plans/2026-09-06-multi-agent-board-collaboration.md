@@ -1,6 +1,6 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: Design settled; implementation started and **not yet reconciled with this document** (§5.1)
+> Status: Design settled; the rules and storage layer is reconciled with it (§5.1). Everything from §5.2 step 2 onward is unbuilt.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Verification: **none of the landed code has ever been executed** — see §0.2 before building on it
 > Supersedes the Agent-Team-first direction in [`2026-09-06-agent-team-webshell-gap.md`](./2026-09-06-agent-team-webshell-gap.md) §6
@@ -166,17 +166,21 @@ Thread              id, title, body, status, assigneeAgentId, createdAt,
                     parentThreadId, rootThreadId,             ← budget is on the root
                     autoTurnsUsed, tokensUsed
 
-There is no `maxConcurrentRuns`. Decisions 5 and 10 — one long-lived body per
-agent, serial across threads — already cap an agent at one running run, so the
-field would have been dead and `defer: agent_at_capacity` collapses into
-`defer: busy_elsewhere`.
-
 ThreadMessage       id, from, text, mentions[], at
 ThreadRun           id, agentId, sessionId, status, triggerMessageIds[],
                     queuedAt, startedAt, endedAt, attempts, error
 
 ThreadStatus        open | in_progress | blocked | in_review | done
 ```
+
+There is no `maxConcurrentRuns`. Decisions 5 and 10 — one long-lived body per
+agent, serial across threads — already cap an agent at one running run, so the
+field would have been dead. What an agent needs bounded instead is its
+*backlog*, hence `queueLimit`.
+
+`rootThreadId` is inherited at creation rather than resolved by walking parents
+at spend time, so a budget never depends on an intermediate file still being
+readable. `attempts` is what makes a revived run's second failure terminal.
 
 Stored under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/mesh/`),
 not the working tree — the reasoning the durable scheduled-tasks file records,
@@ -228,12 +232,20 @@ mechanism, and it is why the guards are not optional.
 | `skip: thread_done` | thread is finished | a late post must not silently restart spend |
 | `skip: self_trigger` | the target wrote the post | otherwise one "I'm done" becomes an infinite self-conversation |
 | `skip: explicit_routing` | post names others, target is only the assignee | an explicit `@` *is* the routing decision |
-| `skip: budget_exhausted` | agent-authored post, the thread tree's gate has tripped | the loop breaker; a human post resets the turn counter |
-| `skip: queue_full` | the agent's pending queue is at its limit | makes real throughput visible instead of accruing a backlog |
-| `coalesce: queued_run` | target has a queued, unstarted run | one run answers both posts instead of two racing |
-| `coalesce: running_same_thread` | target is executing **this** thread | mid-run steering — the thing Multica cannot do |
-| `defer: busy_elsewhere` | target is executing **another** thread | serial per agent; the waiting thread says which thread it is on |
-| `dispatch` | none of the above | book a run |
+| `skip: turn_budget_exhausted` | agent-authored post, the tree's turn budget is spent | the loop breaker; a human post resets it |
+| `skip: token_budget_exhausted` | agent-authored post, the tree's token budget is spent | never reset — turns measure time unattended, tokens measure money spent |
+| `skip: queue_full` | the agent's backlog is at its limit | makes real throughput visible instead of accruing a stale queue |
+| `coalesce (queued)` | the agent has an unstarted run here | one run answers both posts instead of two racing |
+| `coalesce (running)` | the agent is executing **this** thread | mid-run delivery — the case Multica must defer |
+| `dispatch` | none of the above | book a queued run |
+
+**There is no `defer`.** An earlier revision returned one when the agent was
+busy on another thread, which put a scheduling decision inside a rules
+function and gave one situation two spellings. The rules only book, coalesce,
+or refuse; whether a queued run can *start* depends on what the agent's single
+body is doing, and that is the dispatcher's business. A run that cannot start
+yet is simply a queued run, and the waiting thread shows which thread its agent
+is on.
 
 Budget is charged at **booking**, not completion, so a pair of agents that keep
 failing still runs out. A human post resets `autoTurnsUsed`; the token and
@@ -251,20 +263,27 @@ Landed on this branch (storage and rules; nothing starts an agent yet):
 | `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure |
 | `core/src/agents/mesh/thread-actions.ts` | `postMessage` — append and book under one lock |
 
-### 5.1 Changes the settled decisions require in that code
+### 5.1 Reconciliation with the settled decisions — done
 
-1. `types.ts` — add `blocked` to `ThreadStatus`; add `parentThreadId`,
-   `rootThreadId`, `tokensUsed`, `firstDispatchedAt` to `Thread`; add `attempts`
-   to `ThreadRun`; add `backgroundAgentId`, `hostSessionId`, `queueLimit` to
-   `MeshAgent`.
-2. `dispatch-policy.ts` — split `defer: active_run` into
-   `coalesce: running_same_thread` and `defer: busy_elsewhere` (decision 9); add
-   `skip: queue_full` (11); evaluate the budget against the **root** thread (17);
-   add the token gate and drop `agent_at_capacity` (16).
-3. `mesh-store.ts` — parent/root linkage and its cycle check; drop
-   `maxConcurrentRuns` and `agentConcurrencyLimit`.
-4. `thread-actions.ts` — charge tokens from each run's stats delta; reset only
-   the turn counter on a human post.
+The four changes the decisions required have been applied, and the decision
+table above now describes the code rather than an intention.
+
+1. `types.ts` — `blocked` status; `parentThreadId` / `rootThreadId` /
+   `tokensUsed` on `Thread`; `attempts` on `ThreadRun`; `backgroundAgentId`,
+   `hostSessionId` and `queueLimit` on `MeshAgent`; `maxConcurrentRuns` and the
+   wall-clock budget removed.
+2. `dispatch-policy.ts` — rewritten around book/coalesce/refuse, with both
+   budget gates evaluated against the tree's root and the `defer` class gone.
+3. `mesh-store.ts` — root inheritance in `createThread`, `readBudgetThread`,
+   `queueLimitFor`.
+4. `thread-actions.ts` — `countQueuedElsewhere`, budget read from the root and
+   re-applied to it after the child write, `chargeTokens` for the dispatcher to
+   call with each run's usage delta.
+
+One known weakness, deliberate: charging the root happens after the child
+write, not before. A crash between the two under-charges by at most one post's
+turns, which is preferable to charging for runs that were never booked. It is
+recorded in §9.
 
 ### 5.2 Order of work
 
@@ -442,6 +461,10 @@ Everything from the earlier risk list is now decided except these:
    race can book two runs for an agent that is meant to be serial. The dispatcher
    is the second line of defence and must refuse to start a second body for an
    agent that already has one.
+5. **Sub-thread budget charging is not atomic.** The root's counter is updated
+   after the child thread's write, so a crash between them loses that post's
+   turns. Chosen over the reverse because over-charging for runs that were never
+   booked is worse; a workspace-wide lock on every post would fix it properly.
 
 ## 10. Out of scope
 

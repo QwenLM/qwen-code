@@ -46,11 +46,15 @@ export interface MeshAgent {
   /** Model override; absent inherits the workspace default. */
   model?: string;
   /**
-   * How many runs this agent may have in flight at once, across all threads.
-   * Absent means {@link DEFAULT_MAX_CONCURRENT_RUNS}. A mesh agent is a real
-   * model consumer, so this is a spend control as much as a correctness one.
+   * How many runs may wait for this agent across all threads before further
+   * mentions are refused. Absent means {@link DEFAULT_QUEUE_LIMIT}.
+   *
+   * There is deliberately no concurrency setting: an agent is one long-lived
+   * body working one thread at a time, so the only meaningful bound is how
+   * much work may pile up behind it. Refusing at the limit makes the agent's
+   * real throughput visible instead of accruing a backlog nobody reaches.
    */
-  maxConcurrentRuns?: number;
+  queueLimit?: number;
   /**
    * Absent or `true` = can be addressed. `false` keeps the identity and its
    * history but stops it taking new work, matching how a disabled scheduled
@@ -58,10 +62,34 @@ export interface MeshAgent {
    */
   enabled?: boolean;
   createdAt: number;
+  /**
+   * The background agent carrying this identity's long-lived body, once it has
+   * been started. Its transcript is this agent's memory across every thread.
+   * Absent until the first dispatch.
+   */
+  backgroundAgentId?: string;
+  /**
+   * Session owning that background agent. Revival is scoped to a parent
+   * session, so the mesh keeps one hidden host session per workspace and
+   * records it here; losing it would strand the agent's memory.
+   */
+  hostSessionId?: string;
 }
 
-/** Lifecycle of a unit of work. `done` is deliberately a human's call. */
-export type ThreadStatus = 'open' | 'in_progress' | 'in_review' | 'done';
+/**
+ * Lifecycle of a unit of work.
+ *
+ * `blocked` is how an agent asks a person for something: it posts the question,
+ * sets this, and ends its run rather than holding its body and budget open
+ * while it waits. `done` is deliberately a human's call — an agent may push a
+ * thread to `in_review`, never past it.
+ */
+export type ThreadStatus =
+  | 'open'
+  | 'in_progress'
+  | 'blocked'
+  | 'in_review'
+  | 'done';
 
 /**
  * One post on a thread. Append-only: an agent's turn is evidence, and
@@ -100,10 +128,16 @@ export interface ThreadRun {
   sessionId?: string;
   status: ThreadRunStatus;
   /**
-   * Messages this run was told to answer. More than one when a message
-   * arrived while the run was still queued and was coalesced into it.
+   * Messages this run was told to answer. More than one when a further message
+   * arrived while the run was queued, or while it was executing this same
+   * thread — both coalesce rather than booking a second run.
    */
   triggerMessageIds: string[];
+  /**
+   * How many times this run has been started. A run revived after a stall or a
+   * daemon restart is on attempt 2; a second failure is terminal.
+   */
+  attempts: number;
   queuedAt: number;
   startedAt?: number;
   endedAt?: number;
@@ -128,6 +162,14 @@ export interface Thread {
   createdAt: number;
   /** {@link HUMAN_AUTHOR_ID} or an agent id. */
   createdBy: string;
+  /** Set when an agent split this thread out of another one. */
+  parentThreadId?: string;
+  /**
+   * The thread whose counters this thread spends. Equal to `id` for a root
+   * thread. Sub-threads share their root's budget, so splitting work cannot
+   * mint new budget — the hole that per-thread accounting would leave open.
+   */
+  rootThreadId: string;
   messages: ThreadMessage[];
   runs: ThreadRun[];
   /**
@@ -135,19 +177,38 @@ export interface Thread {
    * The loop breaker: two agents that answer each other would otherwise
    * ping-pong until the account runs dry. A human post resets it, because a
    * person watching the thread is the signal that the loop is wanted.
+   *
+   * Meaningful only on a root thread; a sub-thread spends its root's counter.
    */
   autoTurnsUsed: number;
+  /**
+   * Tokens spent by runs on this thread tree, accumulated from each run's
+   * usage delta. Unlike the turn counter this is NOT reset by a human post:
+   * turns measure how long a conversation has run unattended, tokens measure
+   * money already spent.
+   */
+  tokensUsed: number;
 }
 
-/** Default cap on an agent's simultaneous runs. */
-export const DEFAULT_MAX_CONCURRENT_RUNS = 1;
+/** Default cap on runs waiting for one agent across all threads. */
+export const DEFAULT_QUEUE_LIMIT = 5;
 
 /**
- * Default cap on consecutive agent-triggered runs on one thread. Chosen to
+ * Default cap on consecutive agent-triggered runs on one thread tree. Chosen to
  * allow a real hand-off chain (delegate → work → report → follow-up) while
  * still stopping a two-agent loop within a few turns.
  */
 export const DEFAULT_THREAD_AUTO_TURN_BUDGET = 12;
+
+/**
+ * Default cap on tokens spent by one thread tree.
+ *
+ * There is deliberately no wall-clock gate beside these two. An earlier
+ * revision had one, measured from first dispatch, which would have refused a
+ * thread opened on Monday and revisited on Tuesday: elapsed time is not cost.
+ * A run that hangs is the stall sweeper's problem, not the budget's.
+ */
+export const DEFAULT_THREAD_TOKEN_BUDGET = 200_000;
 
 /** Bound on retained posts per thread. */
 export const MAX_THREAD_MESSAGES = 500;

@@ -36,7 +36,7 @@ import { getProjectHash } from '../../utils/paths.js';
 import { Storage } from '../../config/storage.js';
 import { isNodeError } from '../../utils/errors.js';
 import {
-  DEFAULT_MAX_CONCURRENT_RUNS,
+  DEFAULT_QUEUE_LIMIT,
   HUMAN_AUTHOR_ID,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
@@ -160,11 +160,14 @@ function isValidAgent(value: unknown): value is MeshAgent {
       (typeof a['color'] === 'string' && HEX_COLOR.test(a['color']))) &&
     (a['agentType'] === undefined || isNonEmptyString(a['agentType'])) &&
     (a['model'] === undefined || isNonEmptyString(a['model'])) &&
-    (a['maxConcurrentRuns'] === undefined ||
-      (typeof a['maxConcurrentRuns'] === 'number' &&
-        Number.isInteger(a['maxConcurrentRuns']) &&
-        a['maxConcurrentRuns'] > 0)) &&
-    (a['enabled'] === undefined || typeof a['enabled'] === 'boolean')
+    (a['queueLimit'] === undefined ||
+      (typeof a['queueLimit'] === 'number' &&
+        Number.isInteger(a['queueLimit']) &&
+        a['queueLimit'] > 0)) &&
+    (a['enabled'] === undefined || typeof a['enabled'] === 'boolean') &&
+    (a['backgroundAgentId'] === undefined ||
+      isNonEmptyString(a['backgroundAgentId'])) &&
+    (a['hostSessionId'] === undefined || isNonEmptyString(a['hostSessionId']))
   );
 }
 
@@ -203,6 +206,9 @@ function isValidRun(value: unknown): value is ThreadRun {
     isValidId(r['id']) &&
     isValidId(r['agentId']) &&
     RUN_STATUSES.has(r['status'] as ThreadRunStatus) &&
+    typeof r['attempts'] === 'number' &&
+    Number.isInteger(r['attempts']) &&
+    r['attempts'] >= 0 &&
     Array.isArray(r['triggerMessageIds']) &&
     r['triggerMessageIds'].every((id) => isValidId(id)) &&
     isFiniteTimestamp(r['queuedAt']) &&
@@ -229,6 +235,10 @@ function isValidThread(value: unknown): value is Thread {
     t['runs'].every(isValidRun) &&
     typeof t['autoTurnsUsed'] === 'number' &&
     Number.isFinite(t['autoTurnsUsed']) &&
+    typeof t['tokensUsed'] === 'number' &&
+    Number.isFinite(t['tokensUsed']) &&
+    isValidId(t['rootThreadId']) &&
+    (t['parentThreadId'] === undefined || isValidId(t['parentThreadId'])) &&
     (t['assigneeAgentId'] === undefined || isValidId(t['assigneeAgentId']))
   );
 }
@@ -320,8 +330,8 @@ export function isAgentEnabled(agent: MeshAgent): boolean {
   return agent.enabled !== false;
 }
 
-export function agentConcurrencyLimit(agent: MeshAgent): number {
-  return agent.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
+export function queueLimitFor(agent: MeshAgent): number {
+  return agent.queueLimit ?? DEFAULT_QUEUE_LIMIT;
 }
 
 // ─── Threads ────────────────────────────────────────────────
@@ -435,22 +445,61 @@ export async function createThread(
     body?: string;
     createdBy?: string;
     assigneeAgentId?: string;
+    /** Set when an agent splits work out of a thread it is already on. */
+    parentThreadId?: string;
   },
 ): Promise<Thread> {
+  const id = generateThreadId();
+  // The root is inherited, not recomputed, so a chain of sub-threads keeps
+  // spending one budget however deep it goes. Resolving it by walking parents
+  // at spend time would make the budget depend on files that may be missing.
+  let rootThreadId = id;
+  if (input.parentThreadId) {
+    const parent = await readThread(projectRoot, input.parentThreadId);
+    if (!parent) {
+      throw new Error(`No parent thread with id "${input.parentThreadId}".`);
+    }
+    rootThreadId = parent.rootThreadId;
+  }
   const thread: Thread = {
-    id: generateThreadId(),
+    id,
     title: input.title,
     body: input.body ?? '',
     status: 'open',
     createdAt: Date.now(),
     createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
+    rootThreadId,
     messages: [],
     runs: [],
     autoTurnsUsed: 0,
+    tokensUsed: 0,
+    ...(input.parentThreadId
+      ? { parentThreadId: input.parentThreadId }
+      : {}),
     ...(input.assigneeAgentId ? { assigneeAgentId: input.assigneeAgentId } : {}),
   };
   await writeThread(projectRoot, thread);
   return thread;
+}
+
+/**
+ * Reads the record a thread's budget is spent from. A root thread is its own.
+ *
+ * Falls back to the thread itself when the root is unreadable: refusing to
+ * dispatch because a *different* file is broken would strand live work, and
+ * the local counters are a strictly conservative substitute — they are a
+ * subset of what the tree has spent, so the gate can only trip earlier.
+ */
+export async function readBudgetThread(
+  projectRoot: string,
+  thread: Thread,
+): Promise<Thread> {
+  if (thread.rootThreadId === thread.id) return thread;
+  try {
+    return (await readThread(projectRoot, thread.rootThreadId)) ?? thread;
+  } catch {
+    return thread;
+  }
 }
 
 export async function deleteThread(
