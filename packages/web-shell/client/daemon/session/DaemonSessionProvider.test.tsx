@@ -4348,6 +4348,39 @@ describe('DaemonSessionProvider', () => {
             },
           },
         };
+        yield {
+          id: 17,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-complete-edit',
+                    revision: 4,
+                    objective: 'finish the aborted run',
+                    status: 'complete',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 5,
+                    activeTimeMs: 6000,
+                    tokensUsed: 1200,
+                    createdAt: 1234,
+                    updatedAt: 4567,
+                  },
+                },
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'finish the aborted run',
+                },
+              },
+            },
+          },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -4390,6 +4423,14 @@ describe('DaemonSessionProvider', () => {
         data: {
           kind: 'set',
           condition: 'revise the evaluation',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'aborted',
+          condition: 'finish the aborted run',
         },
       }),
     ]);
