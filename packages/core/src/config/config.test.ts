@@ -3717,6 +3717,17 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('rejects readiness when chat recording is disabled instead of throwing synchronously', async () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      await expect(config.getGoalRuntimeReady()).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+      await expect(config.getGoalRuntimePrepared()).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const canonical = config.getGoalRuntime();
@@ -5119,6 +5130,113 @@ describe('Server Config (config.ts)', () => {
       });
 
       await expect(config.initialize()).resolves.toBeUndefined();
+      await expect(config.initialize()).rejects.toThrow(
+        'Config was already initialized',
+      );
+    });
+
+    it('makes a concurrent caller join the in-flight initialization', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      // Make the first flight hang until we release it, so the second call
+      // arrives while initialization is still running.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const initializeInternal = vi
+        .spyOn(
+          config as unknown as {
+            initializeInternal: () => Promise<void>;
+          },
+          'initializeInternal',
+        )
+        .mockImplementation(() => gate);
+
+      const first = config.initialize();
+      // Second call lands mid-flight → joins the first flight instead of
+      // bouncing off the already-set flag.
+      const second = config.initialize();
+
+      // Pin the ordering property this test is named for: while the first
+      // flight is still gated, the joining caller must remain unsettled — it
+      // awaits the in-flight promise instead of returning early. A join branch
+      // that drops the `await` resolves `second` immediately and still passes
+      // every other assertion here, yet it reproduces #11002 (the joiner
+      // proceeds before initialization completes and dies on "Chat not
+      // initialized"). Assert nothing has settled before the gate is released
+      // so that mutant goes red.
+      const settled: string[] = [];
+      first.then(() => settled.push('first'));
+      second.then(() => settled.push('second'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toEqual([]);
+
+      release();
+      await Promise.all([first, second]);
+      expect(initializeInternal).toHaveBeenCalledOnce();
+
+      await expect(config.initialize()).rejects.toThrow(
+        'Config was already initialized',
+      );
+    });
+
+    it('rejects a joining caller whose signal is already aborted', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockImplementation(() => gate);
+
+      const first = config.initialize();
+      const controller = new AbortController();
+      const abortReason = new Error('joining caller already aborted');
+      controller.abort(abortReason);
+      // A joining caller cannot have its options honored, so an
+      // already-aborted signal fails fast instead of blocking on the first
+      // flight. Assert the rejection while the gate is still held: settling
+      // the first flight first would let a guard placed after the `await`
+      // reject with the same reason and pass.
+      const joining = config.initialize({ signal: controller.signal });
+      await expect(joining).rejects.toBe(abortReason);
+      release();
+      await expect(first).resolves.toBeUndefined();
+    });
+
+    it('shares a failed in-flight initialization with concurrent callers', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockRejectedValue(new Error('startup discovery exploded'));
+
+      const first = config.initialize();
+      const second = config.initialize();
+      const [firstError, secondError] = await Promise.all([
+        first.catch((error: unknown) => error),
+        second.catch((error: unknown) => error),
+      ]);
+      expect(firstError).toBeInstanceOf(Error);
+      expect(secondError).toBe(firstError);
+
+      // A failed-and-settled first flight still flips `initializationSettled`,
+      // so a later call must throw rather than re-join the stale rejection.
       await expect(config.initialize()).rejects.toThrow(
         'Config was already initialized',
       );
@@ -9456,6 +9574,34 @@ describe('Server Config (config.ts)', () => {
       ).toContain(ToolNames.LS);
     });
 
+    it('does not register todo_write by default', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.TODO_WRITE);
+    });
+
+    it('registers todo_write when todoWriteEnabled is true', async () => {
+      const config = new Config({ ...baseParams, todoWriteEnabled: true });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.TODO_WRITE);
+    });
+
     it.each([
       { label: 'the canonical name', entry: ToolNames.LS },
       { label: 'an alias', entry: 'ListFiles' },
@@ -9855,6 +10001,7 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
+        todoWriteEnabled: true,
         // Mirrors the CLI wiring. `permissions.allow` is deliberately left
         // unset: the eager/deferred split is driven solely by tools.eager
         // (#10075).
@@ -10017,11 +10164,12 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       ) as string[];
 
-      // Without an allowlist nothing is gated at registry level
+      // Without an allowlist ordinary built-ins are not gated at registry
+      // level, but opt-in tools remain disabled.
       expect(registered).toContain(ToolNames.SEND_MESSAGE);
       expect(registered).toContain(ToolNames.UPDATE_GOAL);
       expect(registered).toContain(ToolNames.AGENT);
-      expect(registered).toContain(ToolNames.TODO_WRITE);
+      expect(registered).not.toContain(ToolNames.TODO_WRITE);
       expect(registered).toContain(ToolNames.READ_FILE);
     });
 

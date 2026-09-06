@@ -1895,6 +1895,60 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // The private Conversations provenance marker is listed in
+  // PROJECT_ENV_HARDCODED_EXCLUSIONS, so a project .env is already rejected —
+  // but home-scoped files are exempt from that list, and the serve fast path
+  // dispatches before llm.tsx's capture-and-delete ever runs. Without its own
+  // gate here the marker would be frozen into daemonRuntimeBaseEnv and handed
+  // to every spawned session child.
+  it('never applies the private Conversations marker from user-level .env files', () => {
+    const trackedKeys = [
+      'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME',
+      'qwen_code_private_conversations_runtime',
+    ] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-marker-home-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      [
+        'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME=1',
+        // Windows env lookup is case-insensitive, so the gate must reject
+        // case variants too.
+        'qwen_code_private_conversations_runtime=1',
+        'FASTPATH_HOME_MARKER_ALLOWED=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(
+        process.env['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME'],
+      ).toBeUndefined();
+      expect(
+        process.env['qwen_code_private_conversations_runtime'],
+      ).toBeUndefined();
+      expect(process.env['FASTPATH_HOME_MARKER_ALLOWED']).toBe('allowed');
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+      delete process.env['FASTPATH_HOME_MARKER_ALLOWED'];
+    }
+  });
+
   // QWEN_CLI_ENTRY is the spawned session-process entrypoint: a start-dir
   // .env fixing it turns `qwen serve` in an untrusted repo into arbitrary
   // script execution for every workspace's sessions. The fast path consults

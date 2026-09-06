@@ -24,6 +24,7 @@ import {
 } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js';
 /* eslint-enable import/no-internal-modules */
 import type { ChannelFactory } from './channel.js';
+import { markChannelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import { redactLogCredentials } from './logRedaction.js';
 import {
   NdJsonQueueLimitError,
@@ -436,7 +437,11 @@ export function createSpawnChannelFactory(
 ): ChannelFactory {
   if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
-  return async (workspaceCwd, childEnvOverrides, signal) => {
+  const factory: ChannelFactory = async (
+    workspaceCwd,
+    childEnvOverrides,
+    signal,
+  ) => {
     if (signal?.aborted) {
       throw signal.reason instanceof Error
         ? signal.reason
@@ -625,6 +630,8 @@ export function createSpawnChannelFactory(
       exited: trackedChild.exited,
     };
   };
+  markChannelFactoryForwardsChildEnv(factory);
+  return factory;
 }
 
 /**

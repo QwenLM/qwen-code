@@ -104,6 +104,13 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  /**
+   * The transcript already holds the user row for this submit, because the
+   * dispatcher echoed the typed invocation. Set by a `submit_prompt` outcome:
+   * its content is generated, never typed, and ink's `submit_prompt` case
+   * returns before adding a USER history item for it.
+   */
+  invocationEchoed?: boolean;
 }
 
 export interface OpenTuiLiveTurn {
@@ -137,8 +144,8 @@ export interface OpenTuiLiveTurn {
 /** Folds a replay batch into a fresh item list (single commit). */
 export function foldBatch(
   events: readonly OpenTuiStreamEvent[],
-): LiveHistoryItem[] {
-  let items: LiveHistoryItem[] = [];
+): readonly LiveHistoryItem[] {
+  let items: readonly LiveHistoryItem[] = [];
   for (const ev of events) items = foldLiveEvent(items, ev);
   return items;
 }
@@ -295,7 +302,9 @@ export function useOpenTuiLiveTurn(
       const prompt: PartListUnion =
         parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
-      apply({ type: 'user', text, promptId, sentToModel: true });
+      if (!options?.invocationEchoed) {
+        apply({ type: 'user', text, promptId, sentToModel: true });
+      }
       void runTurn(prompt, promptId, options);
     },
     [config, apply, pushQueue, runTurn],

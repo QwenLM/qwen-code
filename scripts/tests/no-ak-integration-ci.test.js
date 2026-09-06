@@ -181,6 +181,7 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-inject.test.ts',
         './qwen-live-m2-permission.test.ts',
         './qwen-live-m2-steering.test.ts',
+        './cli/_prompt-latency-policy.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
@@ -302,10 +303,18 @@ describe('no-AK integration CI wiring', () => {
     expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
     expect(classifyJob).not.toContain('CI_BOT_PAT');
 
-    // Both consumers use the profile that was already computed from the
-    // base checkout. Neither may execute a classifier from the PR checkout.
+    // Every consumer uses the profile that was already computed from the
+    // base checkout. None may execute a classifier from the PR checkout —
+    // and none may repoint the env binding to a literal: `profile=
+    // "\${TRUSTED_CI_PROFILE:-full}"` falls back silently, so a dropped
+    // binding turns every docs_only/github_ci_only PR into a full 34-step
+    // pool run with no degraded-path warning.
     for (const profileStep of [
       getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(
+        getWorkflowJob(workflow, 'lint_and_static'),
+        'Use trusted CI profile',
+      ),
       getWorkflowStep(gateJob, 'Use trusted CI profile'),
     ]) {
       expect(profileStep).toContain("id: 'ci_profile'");
@@ -843,8 +852,45 @@ describe('no-AK integration CI wiring', () => {
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
     expect(webShellJob).toContain('ubuntu_runner');
-    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
-    expect(webShellJob).toContain('--with-deps chromium');
+    const hostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium (hosted)',
+    );
+    const selfHostedInstall = getWorkflowStep(
+      webShellJob,
+      'Install Playwright Chromium (self-hosted)',
+    );
+
+    expect(hostedInstall).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium',
+    );
+    expect(selfHostedInstall).toContain(
+      'node node_modules/playwright/cli.js install chromium',
+    );
+    expect(selfHostedInstall).not.toContain('install --with-deps chromium');
+    for (const step of [hostedInstall, selfHostedInstall]) {
+      expect(step).toContain(
+        "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
+      );
+      expect(step).toContain('node "${nested_cli}" install chromium');
+    }
+  });
+
+  it('installs both Playwright Chromium revisions in the nightly browser gate', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/e2e.yml'),
+      'utf8',
+    );
+    const browserJob = getWorkflowJob(workflow, 'web-shell-browser-regression');
+    const install = getWorkflowStep(browserJob, 'Install Playwright Chromium');
+
+    expect(install).toContain(
+      'node node_modules/playwright/cli.js install --with-deps chromium',
+    );
+    expect(install).toContain(
+      "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
+    );
+    expect(install).toContain('node "${nested_cli}" install chromium');
   });
 });
 

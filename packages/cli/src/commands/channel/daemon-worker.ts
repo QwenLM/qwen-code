@@ -102,6 +102,8 @@ const SESSION_SHELL_COMMAND_FEATURE: ServeFeature = 'session_shell_command';
 const SESSION_ATTACHMENTS_FEATURE: ServeFeature = 'session_attachments';
 const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
 const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
+const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
+  'session_worktree_persistence_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -141,6 +143,7 @@ interface DaemonSessionClientStaticLike {
       approvalMode?: string;
       sourceType?: string;
       sourceId?: string;
+      worktree?: Record<string, never>;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -233,7 +236,10 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      daemonReq,
+      {
+        ...daemonReq,
+        ...(req.worktree ? { worktree: req.worktree } : {}),
+      },
       clientId,
     );
   };
@@ -538,6 +544,9 @@ export async function runChannelDaemonWorker(
     ),
     sessionPermissionVote: capabilities.features.includes(
       SESSION_PERMISSION_VOTE_FEATURE,
+    ),
+    sessionWorktreePersistence: capabilities.features.includes(
+      SESSION_WORKTREE_PERSISTENCE_FEATURE,
     ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
