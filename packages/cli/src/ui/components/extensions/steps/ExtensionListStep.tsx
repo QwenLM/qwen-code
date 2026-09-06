@@ -9,11 +9,11 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import {
-  type Extension,
   getExtensionDisplayName,
   getExtensionDescription,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/extension/i18n.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';

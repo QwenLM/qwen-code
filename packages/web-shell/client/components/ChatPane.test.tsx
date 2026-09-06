@@ -148,7 +148,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => catalogController,
-  useSessionHasActivePrompt: () => sessionHasActivePromptValue,
+  useDaemonActivePromptBridge: () => sessionHasActivePromptValue,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
