@@ -228,6 +228,47 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).toBe('chat_thread');
   });
 
+  it('round-trips a managed message prefix', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        messagePrefix: '/review',
+      },
+    });
+
+    expect(next.channels['bot']?.['messagePrefix']).toBe('/review');
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot']?.['messagePrefix'],
+    ).toBe('/review');
+  });
+
+  it('rejects a non-string managed message prefix', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          messagePrefix: 42,
+        } as never,
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "messagePrefix" must be a string.',
+    });
+  });
+
   it.each([
     {
       label: 'an explicit non-user session scope',

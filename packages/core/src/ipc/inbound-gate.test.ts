@@ -13,7 +13,9 @@ import {
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
   parseHeldExpiry,
+  modeClass,
   type InboundPolicy,
+  type PolicyScope,
 } from './inbound-gate.js';
 import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
 
@@ -29,9 +31,11 @@ interface Harness {
   setPolicy: (policy: InboundPolicy | undefined) => void;
   /** Deliberately un-typed: settings.json is not type-checked. */
   setRawPolicy: (policy: unknown) => void;
+  setScope: (scope: PolicyScope | undefined) => void;
   throwOnMode: () => void;
   throwOnPolicy: () => void;
   throwOnExpiry: () => void;
+  throwOnScope: () => void;
   failDelivery: () => void;
   recoverDelivery: () => void;
 }
@@ -41,6 +45,7 @@ function harness(
     mode?: ApprovalMode | null;
     policy?: InboundPolicy;
     heldExpiryMs?: number | null;
+    scope?: PolicyScope;
   } = {},
 ): Harness {
   let mode: ApprovalMode | null = initial.mode ?? ApprovalMode.DEFAULT;
@@ -52,6 +57,8 @@ function harness(
   let modeThrows = false;
   let policyThrows = false;
   let expiryThrows = false;
+  let scope: PolicyScope | undefined = initial.scope;
+  let scopeThrows = false;
   const delivered: PeerUserFrame[] = [];
   const deliveredAsSelfSent: boolean[] = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
@@ -70,6 +77,10 @@ function harness(
     getHeldExpiryMs: () => {
       if (expiryThrows) throw new Error('settings read exploded');
       return heldExpiryMs;
+    },
+    getPolicyScope: () => {
+      if (scopeThrows) throw new Error('scope getter exploded');
+      return scope;
     },
     deliver: (frame, origin) => {
       if (deliveryFails) throw new Error('accepted-message backlog is full');
@@ -103,6 +114,9 @@ function harness(
     setRawPolicy: (next: unknown) => {
       policy = next;
     },
+    setScope: (next) => {
+      scope = next;
+    },
     throwOnMode: () => {
       modeThrows = true;
     },
@@ -111,6 +125,9 @@ function harness(
     },
     throwOnExpiry: () => {
       expiryThrows = true;
+    },
+    throwOnScope: () => {
+      scopeThrows = true;
     },
     failDelivery: () => {
       deliveryFails = true;
@@ -131,12 +148,32 @@ describe('mode parity (no explicit setting)', () => {
     h = harness();
   });
 
-  it('accepts anything when the receiver still prompts', () => {
+  it('accepts a prompting sender when the receiver prompts', () => {
     h.setMode(ApprovalMode.DEFAULT);
+    const f = frame({ fromMode: 'prompting' });
+    expect(h.gate.admit(f)).toBe('accept');
+    expect(h.delivered).toEqual([f]);
+  });
+
+  it('holds a bypassing sender when the receiver prompts', () => {
+    // The per-action prompts guard single actions, not the agenda: a
+    // message nobody watched being written waits for the user here too.
+    h.setMode(ApprovalMode.DEFAULT);
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()[0].cause).toBe('mode-mismatch');
+  });
+
+  it('holds a sender that asserts no mode when the receiver prompts', () => {
+    h.setMode(ApprovalMode.DEFAULT);
+    expect(h.gate.admit(frame())).toBe('held');
+    expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
+  });
+
+  it('treats plan mode as prompting', () => {
+    h.setMode(ApprovalMode.PLAN);
     expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('accept');
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
-    expect(h.gate.admit(frame())).toBe('accept');
-    expect(h.delivered).toHaveLength(3);
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
   });
 
   it('accepts a bypassing sender when the receiver also bypasses', () => {
@@ -202,6 +239,141 @@ describe('receiver modes that do not review every action', () => {
     h.setMode('turbo' as ApprovalMode);
     expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-unknown');
+  });
+});
+
+describe('review classes', () => {
+  it('sorts every known mode into one of the two classes', () => {
+    expect(modeClass(ApprovalMode.DEFAULT)).toBe('prompting');
+    expect(modeClass(ApprovalMode.PLAN)).toBe('prompting');
+    expect(modeClass(ApprovalMode.AUTO_EDIT)).toBe('bypass');
+    expect(modeClass(ApprovalMode.AUTO)).toBe('bypass');
+    expect(modeClass(ApprovalMode.YOLO)).toBe('bypass');
+  });
+
+  it('auto-delivers only within a class, in both directions', () => {
+    // The whole table, so a future row cannot quietly reopen the
+    // prompting-receiver-accepts-everything shortcut.
+    const table: Array<[ApprovalMode, 'prompting' | 'bypass', string]> = [
+      [ApprovalMode.DEFAULT, 'prompting', 'accept'],
+      [ApprovalMode.DEFAULT, 'bypass', 'held'],
+      [ApprovalMode.PLAN, 'prompting', 'accept'],
+      [ApprovalMode.PLAN, 'bypass', 'held'],
+      [ApprovalMode.AUTO_EDIT, 'prompting', 'held'],
+      [ApprovalMode.AUTO_EDIT, 'bypass', 'accept'],
+      [ApprovalMode.AUTO, 'prompting', 'held'],
+      [ApprovalMode.AUTO, 'bypass', 'accept'],
+      [ApprovalMode.YOLO, 'prompting', 'held'],
+      [ApprovalMode.YOLO, 'bypass', 'accept'],
+    ];
+    for (const [mode, sender, expected] of table) {
+      const h = harness({ mode });
+      const result = h.gate.admit(frame({ fromMode: sender }));
+      expect({ mode, sender, result }).toEqual({
+        mode,
+        sender,
+        result: expected,
+      });
+    }
+  });
+
+  it('holds an unasserted sender for every receiver mode', () => {
+    for (const mode of [
+      ApprovalMode.DEFAULT,
+      ApprovalMode.PLAN,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+      ApprovalMode.YOLO,
+    ]) {
+      const h = harness({ mode });
+      expect({ mode, result: h.gate.admit(frame()) }).toEqual({
+        mode,
+        result: 'held',
+      });
+      expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
+    }
+  });
+
+  it('releases a bypassing sender once the receiver bypasses too', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    const f = frame({ fromMode: 'bypass' });
+    expect(h.gate.admit(f)).toBe('held');
+    h.setMode(ApprovalMode.YOLO);
+    expect(h.gate.reevaluate('mode-changed')).toBe(1);
+    expect(h.delivered).toEqual([f]);
+  });
+
+  it('keeps holding an unasserted sender across a mode change', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    h.gate.admit(frame());
+    h.setMode(ApprovalMode.YOLO);
+    expect(h.gate.reevaluate('mode-changed')).toBe(0);
+    expect(h.gate.getHeld()).toHaveLength(1);
+  });
+});
+
+describe('policy scope', () => {
+  it('records which scope set a hold on the held entry', () => {
+    const h = harness({ policy: 'hold', scope: 'workspace' });
+    h.gate.admit(frame({ fromMode: 'prompting' }));
+    expect(h.gate.getHeld()[0]).toMatchObject({
+      cause: 'explicit-setting',
+      policyScope: 'workspace',
+    });
+  });
+
+  it('leaves the scope off the entry when the host does not report one', () => {
+    const h = harness({ policy: 'hold' });
+    h.gate.admit(frame({ fromMode: 'prompting' }));
+    expect(h.gate.getHeld()[0]).not.toHaveProperty('policyScope');
+  });
+
+  it('records the scope of an unreadable value too', () => {
+    const h = harness({ scope: 'system' });
+    h.setRawPolicy('maybe');
+    h.gate.admit(frame({ fromMode: 'prompting' }));
+    expect(h.gate.getHeld()[0]).toMatchObject({
+      cause: 'policy-unreadable',
+      policyScope: 'system',
+    });
+  });
+
+  it('does not let a broken scope getter change the verdict', () => {
+    const h = harness({ policy: 'hold' });
+    h.throwOnScope();
+    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.getHeld()[0]).toMatchObject({ cause: 'explicit-setting' });
+    expect(h.gate.getHeld()[0]).not.toHaveProperty('policyScope');
+  });
+
+  it('refreshes the scope on reevaluate, and drops it when the cause moves on', () => {
+    const h = harness({
+      mode: ApprovalMode.YOLO,
+      policy: 'hold',
+      scope: 'user',
+    });
+    const f = frame({ fromMode: 'prompting' });
+    h.gate.admit(f);
+    expect(h.gate.getHeld()[0].policyScope).toBe('user');
+
+    h.setScope('workspace');
+    expect(h.gate.reevaluate('setting-changed')).toBe(0);
+    expect(h.gate.getHeld()[0].policyScope).toBe('workspace');
+
+    // The setting goes away; the message stays held on parity, which has
+    // no scope to name.
+    h.setPolicy(undefined);
+    expect(h.gate.reevaluate('setting-cleared')).toBe(0);
+    expect(h.gate.getHeld()[0]).toMatchObject({ cause: 'mode-mismatch' });
+    expect(h.gate.getHeld()[0]).not.toHaveProperty('policyScope');
+  });
+
+  it('keeps the entry identity when nothing about the hold changed', () => {
+    const h = harness({ policy: 'hold', scope: 'user' });
+    h.gate.admit(frame({ fromMode: 'prompting' }));
+    const before = h.gate.getHeld()[0];
+    h.gate.reevaluate('no-op');
+    expect(h.gate.getHeld()[0]).toBe(before);
   });
 });
 
@@ -370,10 +542,12 @@ describe('settled ids', () => {
 
   it('acks but does not re-deliver an id that was already delivered', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
-    const f = frame({ msgId: 'task-0002' });
+    const f = frame({ msgId: 'task-0002', fromMode: 'prompting' });
     expect(h.gate.admit(f)).toBe('accept');
     expect(h.delivered).toHaveLength(1);
-    expect(h.gate.admit(frame({ msgId: 'task-0002' }))).toBe('refused');
+    expect(
+      h.gate.admit(frame({ msgId: 'task-0002', fromMode: 'prompting' })),
+    ).toBe('refused');
     expect(h.delivered).toHaveLength(1);
     expect(h.statuses.at(-1)).toEqual({
       msgId: 'task-0002',
@@ -427,7 +601,7 @@ describe('settled ids', () => {
     // A failed delivery is not a verdict; the retry must still land.
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.failDelivery();
-    const f = frame({ msgId: 'task-0007' });
+    const f = frame({ msgId: 'task-0007', fromMode: 'prompting' });
     expect(h.gate.admit(f)).toBe('refused');
     expect(h.statuses.at(-1)).toEqual({
       msgId: 'task-0007',
@@ -442,12 +616,14 @@ describe('settled ids', () => {
   it('prunes the oldest settled ids beyond the cap', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
     const ids = Array.from({ length: MAX_SETTLED_IDS + 1 }, (_, i) => `s-${i}`);
+    const prompting = (msgId: string) =>
+      frame({ msgId, fromMode: 'prompting' });
     for (const msgId of ids) {
-      expect(h.gate.admit(frame({ msgId }))).toBe('accept');
+      expect(h.gate.admit(prompting(msgId))).toBe('accept');
     }
     // The oldest fell out of memory; the newest repeats its verdict.
-    expect(h.gate.admit(frame({ msgId: ids[0] }))).toBe('accept');
-    expect(h.gate.admit(frame({ msgId: ids[ids.length - 1] }))).toBe('refused');
+    expect(h.gate.admit(prompting(ids[0]))).toBe('accept');
+    expect(h.gate.admit(prompting(ids[ids.length - 1]))).toBe('refused');
   });
 });
 
@@ -488,7 +664,7 @@ describe('a transport that throws', () => {
       },
       reportStatus: (_frame, status) => statuses.push(status),
     });
-    expect(gate.admit(frame())).toBe('refused');
+    expect(gate.admit(frame({ fromMode: 'prompting' }))).toBe('refused');
     expect(statuses).toEqual(['expired']);
   });
 });
@@ -496,7 +672,7 @@ describe('a transport that throws', () => {
 describe('receipts', () => {
   it('reports delivered on accept', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
-    const f = frame();
+    const f = frame({ fromMode: 'prompting' });
     h.gate.admit(f);
     expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'delivered' }]);
   });
@@ -828,10 +1004,36 @@ describe('describeHoldCause', () => {
       'crossSessionInbound',
     );
     expect(describeHoldCause('mode-mismatch')).toContain('without per-action');
+    expect(describeHoldCause('mode-mismatch')).toContain(
+      'different review modes',
+    );
     expect(describeHoldCause('no-mode-asserted')).toContain('did not say');
     expect(describeHoldCause('mode-unknown')).toContain('could not be');
     expect(describeHoldCause('policy-unreadable')).toContain(
       'crossSessionInbound',
+    );
+  });
+
+  it('names who set the policy instead of blaming the user', () => {
+    expect(describeHoldCause('explicit-setting', 'user')).toContain('your ');
+    expect(describeHoldCause('explicit-setting', 'workspace')).toContain(
+      'repository',
+    );
+    expect(describeHoldCause('explicit-setting', 'workspace')).not.toContain(
+      'your ',
+    );
+    expect(describeHoldCause('explicit-setting', 'system')).toContain(
+      'system setting',
+    );
+    expect(describeHoldCause('policy-unreadable', 'workspace')).toContain(
+      'workspace settings',
+    );
+    expect(describeHoldCause('policy-unreadable', 'system')).toContain(
+      'system settings',
+    );
+    // The parity causes have no scope to name; passing one is harmless.
+    expect(describeHoldCause('mode-mismatch', 'workspace')).toBe(
+      describeHoldCause('mode-mismatch'),
     );
   });
 });

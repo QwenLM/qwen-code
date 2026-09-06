@@ -63,8 +63,8 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
 | `multiSession`           | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
-| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                                                                        |
-| `sessionRotation`        | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session rotation](#session-rotation)                                            |
+| `messagePrefix`          | No               | Only dispatch user messages that begin with this exact, case-sensitive prefix after any leading `@mentions`; the prefix and following whitespace are removed before dispatch                                            |
+| `sessionRotation`        | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session Rotation](#session-rotation)                                            |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -77,6 +77,10 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                                         |
 | `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                     |
 | `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                               |
+
+When `messagePrefix` is set, every user-authored message must begin with the prefix and a non-empty payload, for example `/review inspect #123`. Only the prefix and the mentions ahead of it are removed; a mention the user typed after the prefix reaches the agent unchanged. Shared and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Telegram's registered command-menu actions remain available without the prefix — unless the configured prefix is itself one of them, in which case the prefix wins and that command has to be sent prefixed too (`/new /new`). Attachments need a matching caption when the platform supports one; captionless Telegram, Feishu, WeChat, DingTalk and WeCom media messages continue to run, and their placeholder text is never quoted back as group history. Native todos, webhooks, and provider-generated assignment or review-request events also continue to run without a prefix because they are system events rather than chat messages.
+
+Two behaviours are deliberate and worth knowing before you turn the prefix on. A voice message whose transcript DingTalk or WeCom fills in counts as text the user spoke, so it must carry the prefix like any other message and is dropped otherwise — only an untranscribed voice note runs as captionless media. And the prefix is checked before pairing, so first contact from an unknown sender or an unapproved group has to carry the prefix as well; without that ordering every unprefixed message in a busy group would draw a pairing reply, which is exactly the noise the prefix exists to suppress. Tell new users the prefix out of band, or leave pairing channels unprefixed.
 
 ### Sender Policy
 
@@ -99,10 +103,6 @@ Controls how conversation sessions are managed:
 
 Daemon-managed Channels can retain several named conversations for the same user in one chat:
 
-### Session Rotation
-
-By default a route keeps the same session forever, so a long-lived route — a busy group thread, a `single`-scope channel — accumulates context without bound. Once it grows past the model's context window every later message on that route fails, while the rest of the channel keeps working. `sessionRotation` puts a ceiling on that: when the current session is past its bound, the next message starts a fresh one instead.
-
 ```json
 {
   "channels": {
@@ -110,13 +110,6 @@ By default a route keeps the same session forever, so a long-lived route — a b
       "type": "telegram",
       "sessionScope": "user",
       "multiSession": true
-    "my-bot": {
-      "type": "dingtalk",
-      "sessionScope": "thread",
-      "sessionRotation": {
-        "maxTurns": 200,
-        "maxAgeHours": 24
-      }
     }
   }
 }
@@ -130,10 +123,29 @@ One task remains selected to receive the next normal message, but other named ta
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 
+### Session Rotation
+
+By default a route keeps the same session forever, so a long-lived route — a busy group thread, a `single`-scope channel — accumulates context without bound. Once it grows past the model's context window every later message on that route fails, while the rest of the channel keeps working. `sessionRotation` puts a ceiling on that: when the current session is past its bound, the next message starts a fresh one instead.
+
+```json
+{
+  "channels": {
+    "my-bot": {
+      "type": "dingtalk",
+      "sessionScope": "chat_thread",
+      "sessionRotation": {
+        "maxTurns": 200,
+        "maxAgeHours": 24
+      }
+    }
+  }
+}
+```
+
 - **`maxTurns`** — Rotate once this many messages have started a turn on the current session. Messages that settle without one (a `!` shell command, a dropped loop firing) do not count.
 - **`maxAgeHours`** — Rotate once the current session is older than this.
 
-Set either, both, or neither; whichever bound is hit first rotates. `maxTurns` must be a positive integer and `maxAgeHours` a positive number. Omitting `sessionRotation` keeps the previous behavior of never rotating. In `collect` dispatch mode, messages buffered while a turn runs are coalesced into one turn and count once against `maxTurns`.
+Set either, both, or neither; whichever bound is hit first rotates. `maxTurns` must be a positive integer and `maxAgeHours` a positive number. Omitting `sessionRotation` keeps the previous behavior of never rotating. In `collect` dispatch mode, messages buffered while a turn runs are coalesced into one turn and count once against `maxTurns`. `sessionRotation` cannot be combined with `multiSession`: named tasks resolve sessions without consulting the rotation gate, so the bound would never fire.
 
 Rotation is a context reset, not a cleanup: the new session starts empty, so the bot no longer remembers the earlier conversation on that route. The channel posts a short notice in the chat or thread whose message triggered the rotation, and the daemon logs the rotated route. With `sessionScope: single`, only the chat whose message triggered the rotation is notified; other chats sharing the session see the reset without a notice. Counters are stored alongside the routes and survive a daemon restart. Sessions that were already routed before you enabled rotation start their clock at the first message after the upgrade. A route that still has a turn running or queued rotates on the next message after it settles instead of mid-turn; under sustained traffic, where every message arrives while a turn is still running or queued, the bound waits for the first pause in traffic. Each message routed during that window extends it, so a continuously saturated route — a webhook receiving events faster than turns complete, or an overrunning loop — rotates only once traffic stops.
 
