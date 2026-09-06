@@ -7,6 +7,7 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
@@ -1012,10 +1013,14 @@ export class DaemonChannelBridge
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true &&
-            text
+            meta['rewritten'] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (text || context?.turnComplete) {
+              this.emit('backgroundResponse', sessionId, text ?? '', context);
+            }
           } else if (meta['source'] === 'vision_bridge_notice' && text) {
             this.emit('textChunk', sessionId, text);
           }
@@ -1048,15 +1053,17 @@ export class DaemonChannelBridge
           !kind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
-          meta?.['shellProgress'] !== undefined
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
         ) {
-          // Silent-shell liveness heartbeat: a kind-less in_progress frame
-          // carrying only the id, status, and _meta.shellProgress stats.
-          // Channels have no use for it — drop it without flagging the
-          // session as malformed. Gate on shellProgress (matching the
-          // qwen-agent and web-shell normalizer guards) so a genuinely
-          // malformed kind-less tool_call still reaches emitProtocolError
-          // below instead of being silently swallowed.
+          // Silent-shell liveness heartbeat OR subagent progress update.
+          // A kind-less in_progress frame carrying only the id, status, and
+          // _meta.shellProgress stats OR _meta.subagentProgress. Drop without
+          // flagging the session as malformed. Gate on kind-absent + in_progress
+          // (matching the qwen-agent and web-shell normalizer guards) so a
+          // kind-bearing or terminal frame — including the compacted parent
+          // Agent slot, which inherits subagentProgress additively — still
+          // reaches the normal flow below instead of being silently swallowed.
           break;
         }
         if (!toolCallId || !kind) {
