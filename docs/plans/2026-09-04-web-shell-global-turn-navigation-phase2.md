@@ -129,11 +129,11 @@ also calls `configure({ sessionId, supported, client })`,
 `DaemonPromptAdmission` types define this ingestion contract; the client owner
 must be the active `DaemonSessionClient` object, not a shared workspace client.
 Queued admissions may have no `blockId`: the queue appends its display block
-separately without durable prompt identity. Phase 2A still counts/reconciles
-these entries by `promptId`; consumers must treat the optional locator as
-unavailable and use durable ordinal lookup once indexed. Wiring queue-display
-identity across the SDK boundary belongs to the Phase 2B/3 integration, not a
-text-based heuristic. Recent server-side removals are remembered (bounded to
+separately, preserving the exact `promptId` in its existing metadata. Phase 2A
+joins live blocks, admissions, and indexed entries by that identity regardless
+of arrival order. Until the matching display block exists, its locator remains
+unavailable. This requires no SDK contract change or text-based heuristic.
+Recent server-side removals are remembered (bounded to
 200 prompt IDs) so an in-flight admission cannot resurrect a removed prompt.
 
 `getSnapshot()` returns the same immutable object until a meaningful state
@@ -282,11 +282,13 @@ interface HistoricalTranscriptPage {
   lastRecordId?: string;
   retainedBytes: number;
   turnBlockById: ReadonlyMap<string, string>;
+  newerRequest?: FrozenTranscriptBoundaryRequest;
 }
 
 interface HistoricalTranscriptRange {
   id: string;
   anchorOrdinal: number;
+  anchorTurnId: string;
   pageIds: readonly string[];
   older: TranscriptBoundary;
   newer: TranscriptBoundary;
@@ -294,7 +296,13 @@ interface HistoricalTranscriptRange {
 
 type FrozenTranscriptBoundaryRequest =
   | { kind: 'older'; beforeRecordId: string; snapshot: string }
-  | { kind: 'cursor'; cursor: string };
+  | { kind: 'cursor'; cursor: string }
+  | {
+      kind: 'gap';
+      anchorRecordId: string;
+      afterRecordId: string;
+      snapshot: string;
+    };
 
 type TranscriptBoundary =
   | { kind: 'end' }
@@ -354,8 +362,33 @@ instead of scrolling to a nearby message.
 
 ### Continuation
 
+Phase 2A also owns recovery after historical page eviction. A forward-fetched
+page retains its actual forward continuation. A backward-fetched page instead
+retains a recovery recipe containing the range's original navigation anchor,
+its frozen snapshot, and the page's last record. Backward cursors are never
+reinterpreted as forward cursors.
+
+To recover newer history from that recipe, reread the original turn anchor and
+walk backward to the exact retained record, holding only the current response
+and its immediate newer neighbor. Admit the nearest missing page (or the
+suffix following the retained record), not the whole gap. When recovery reaches
+the original forward page, resume its real forward cursor. This also covers
+gaps inside a long turn with no intermediate user/turn anchor. Every read and
+admission remains guarded by the active client, session, chain, and boundary
+request. Recovery recipes count toward the page byte budget and disappear with
+their pages; no unbounded list of evicted-page metadata is retained.
+
+Eviction prefers the opposite outer edge from the requested direction and
+preserves both the selected page and the newly requested page. If neither
+outer edge can be removed while preserving adjacency, admission rolls back
+with a retryable window-full error. After the selection moves, manual retry
+can make progress. An individually oversized page remains non-retryable.
+Tail eviction restores the last retained page's forward/recovery request,
+never the cursor after the removed page. Backward-only recovery can require
+multiple bounded reads; ordinary random turn jumps still use a single anchor.
+
 - Older: request `{ beforeRecordId: firstRecordId, snapshot, limit: 200 }`.
-- Newer: request the anchored/forward page's `nextCursor`.
+- Newer: use the retained forward cursor or resolve the explicit gap recipe.
 
 If an older response contains only overlap or records that produce no new
 block, continue with that response's opaque backward cursor; lack of a new
@@ -463,9 +496,10 @@ containing the selected ordinal are pinned. A page that alone exceeds its
 entire cache budget fails atomically. Eviction converts the removed direction
 back into an explicit loadable boundary and never joins its neighbors.
 If the pinned selection prevents retaining the newly requested page, admission
-rolls back and the boundary becomes a non-retryable error instead of reporting
-a successful load with an unchanged request. This local page-budget error is
-not the session-wide `transcript_too_large` fallback; cached content stays usable.
+rolls back with a retryable window-full error; moving the selection permits a
+manual retry. A page that alone exceeds the byte budget is non-retryable.
+Neither local budget error is the session-wide `transcript_too_large` fallback;
+cached content stays usable.
 
 Head-refresh retry state is tracked independently of the visible operation
 error. A successful locate or boundary load clears only its own error, and

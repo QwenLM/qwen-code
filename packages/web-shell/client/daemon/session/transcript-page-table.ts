@@ -13,7 +13,18 @@ import {
 
 export type FrozenTranscriptBoundaryRequest =
   | { kind: 'older'; beforeRecordId: string; snapshot: string }
-  | { kind: 'cursor'; cursor: string };
+  | { kind: 'cursor'; cursor: string }
+  | {
+      kind: 'gap';
+      anchorRecordId: string;
+      afterRecordId: string;
+      snapshot: string;
+    };
+
+export interface TranscriptGapResolution {
+  excludedRecordIds: readonly string[];
+  fromAnchor: boolean;
+}
 
 export type TranscriptBoundary =
   | { kind: 'end' }
@@ -36,11 +47,13 @@ export interface HistoricalTranscriptPage {
   lastRecordId?: string;
   retainedBytes: number;
   turnBlockById: ReadonlyMap<string, string>;
+  newerRequest?: FrozenTranscriptBoundaryRequest;
 }
 
 export interface HistoricalTranscriptRange {
   id: string;
   anchorOrdinal: number;
+  anchorTurnId: string;
   pageIds: readonly string[];
   older: TranscriptBoundary;
   newer: TranscriptBoundary;
@@ -81,6 +94,13 @@ export class HistoricalTranscriptPageTooLargeError extends Error {
   }
 }
 
+export class HistoricalTranscriptWindowFullError extends Error {
+  constructor() {
+    super('Historical transcript window is full; move the selection and retry');
+    this.name = 'HistoricalTranscriptWindowFullError';
+  }
+}
+
 type BoundaryDirection = 'older' | 'newer';
 
 const EMPTY_SNAPSHOT: HistoricalTranscriptPageTableSnapshot = Object.freeze({
@@ -104,7 +124,13 @@ export class HistoricalTranscriptPageTable {
     FrozenTranscriptBoundaryRequest
   >();
 
-  constructor(private readonly options: HistoricalTranscriptPageTableOptions) {}
+  constructor(private readonly options: HistoricalTranscriptPageTableOptions) {
+    if (!Number.isInteger(options.maxPages) || options.maxPages < 1) {
+      throw new RangeError(
+        'Historical transcript maxPages must be a positive integer',
+      );
+    }
+  }
 
   getSnapshot(): HistoricalTranscriptPageTableSnapshot {
     return this.snapshot;
@@ -195,10 +221,11 @@ export class HistoricalTranscriptPageTable {
       materialized.page.blocks,
       knownRecordIds,
     );
-    const page =
+    const filteredPage =
       filteredBlocks.length === materialized.page.blocks.length
         ? materialized.page
         : this.pageFromBlocks(materialized.page.id, snapshot, filteredBlocks);
+    const page = this.withNewerRequest(filteredPage, forwardRequest(response));
     const blockId = page.turnBlockById.get(turnId);
     if (!blockId) {
       throw new Error('Anchored transcript target could not be materialized');
@@ -228,6 +255,7 @@ export class HistoricalTranscriptPageTable {
     const range: HistoricalTranscriptRange = Object.freeze({
       id: rangeId,
       anchorOrdinal: ordinal,
+      anchorTurnId: turnId,
       pageIds: Object.freeze([page.id]),
       older,
       newer,
@@ -316,12 +344,13 @@ export class HistoricalTranscriptPageTable {
     direction: BoundaryDirection,
     snapshot: string,
     response: DaemonSessionTranscriptPage,
+    recovery?: TranscriptGapResolution,
   ): void {
     const previousSnapshot = this.snapshot;
     const previousCachedBoundaryRequests = new Map(this.cachedBoundaryRequests);
     const previousRangeAccess = new Map(this.rangeAccess);
     try {
-      this.admitBoundaryPage(rangeId, direction, snapshot, response);
+      this.admitBoundaryPage(rangeId, direction, snapshot, response, recovery);
     } catch (error) {
       this.snapshot = previousSnapshot;
       this.cachedBoundaryRequests.clear();
@@ -341,12 +370,16 @@ export class HistoricalTranscriptPageTable {
     direction: BoundaryDirection,
     snapshot: string,
     response: DaemonSessionTranscriptPage,
+    recovery?: TranscriptGapResolution,
   ): void {
     assertContinuationCursor(response);
     const range = this.snapshot.ranges.find((item) => item.id === rangeId);
     if (!range || range[direction].kind !== 'loading') return;
     const admittedRequest = range[direction].request;
     const knownRecordIds = this.allRecordIds();
+    for (const recordId of recovery?.excludedRecordIds ?? []) {
+      knownRecordIds.add(recordId);
+    }
     const materialized = this.materializePage(
       snapshot,
       response.events,
@@ -364,11 +397,25 @@ export class HistoricalTranscriptPageTable {
       direction,
     );
     const blocks = filterOverlappingBlocks(page.blocks, knownRecordIds);
-    const admittedPage =
+    const filteredPage =
       blocks.length === page.blocks.length
         ? page
         : this.pageFromBlocks(page.id, snapshot, blocks);
+    const newerRequest =
+      (direction === 'older' || (recovery && !recovery.fromAnchor)) &&
+      filteredPage.lastRecordId
+        ? {
+            kind: 'gap' as const,
+            anchorRecordId: range.anchorTurnId,
+            afterRecordId: filteredPage.lastRecordId,
+            snapshot,
+          }
+        : forwardRequest(response);
+    const admittedPage = this.withNewerRequest(filteredPage, newerRequest);
     if (admittedPage.blocks.length === 0) {
+      if (recovery && !recovery.fromAnchor && !reachedLive && !cachedRangeId) {
+        throw new Error('Gap recovery did not materialize newer records');
+      }
       this.finishBoundaryWithoutPage(
         range,
         direction,
@@ -406,7 +453,9 @@ export class HistoricalTranscriptPageTable {
             cachedRangeId,
             admittedRequest,
           )
-        : this.nextBoundary(direction, snapshot, admittedPage, response);
+        : direction === 'newer'
+          ? requestBoundary(newerRequest)
+          : this.nextBoundary(direction, snapshot, admittedPage, response);
     const nextRange = Object.freeze({
       ...range,
       pageIds: Object.freeze(pageIds),
@@ -501,13 +550,20 @@ export class HistoricalTranscriptPageTable {
   }
 
   private assertPageFits(page: HistoricalTranscriptPage): void {
-    if (
-      page.blocks.length === 0 ||
-      this.options.maxPages < 1 ||
-      page.retainedBytes > this.options.maxRetainedBytes
-    ) {
+    if (page.retainedBytes > this.options.maxRetainedBytes) {
       throw new HistoricalTranscriptPageTooLargeError();
     }
+  }
+
+  private withNewerRequest(
+    page: HistoricalTranscriptPage,
+    newerRequest: FrozenTranscriptBoundaryRequest | undefined,
+  ): HistoricalTranscriptPage {
+    return Object.freeze({
+      ...page,
+      ...(newerRequest ? { newerRequest } : {}),
+      retainedBytes: page.retainedBytes + requestBytes(newerRequest),
+    });
   }
 
   private nextBoundary(
@@ -712,30 +768,32 @@ export class HistoricalTranscriptPageTable {
             ranges: Object.freeze(ranges),
             retainedBytes: this.measureRetainedBytes(pages, ranges),
           });
-          throw new HistoricalTranscriptPageTooLargeError();
+          throw new HistoricalTranscriptWindowFullError();
         }
         break;
       }
-      const removable =
-        active.pageIds[0] === targetPageId
-          ? active.pageIds.at(-1)
-          : active.pageIds[0];
-      if (!removable || removable === targetPageId) break;
+      const edges =
+        admittedBoundary?.direction === 'older'
+          ? [active.pageIds.at(-1), active.pageIds[0]]
+          : [active.pageIds[0], active.pageIds.at(-1)];
+      const removable = edges.find(
+        (pageId) =>
+          pageId !== targetPageId && pageId !== admittedBoundary?.pageId,
+      );
+      if (!removable) throw new HistoricalTranscriptWindowFullError();
       const removedFirst = removable === active.pageIds[0];
-      if (
-        removable === admittedBoundary?.pageId ||
-        (!removedFirst && admittedBoundary?.direction === 'older')
-      ) {
-        throw new HistoricalTranscriptPageTooLargeError();
-      }
       pages.delete(removable);
       const pageIds = active.pageIds.filter((pageId) => pageId !== removable);
       const firstPage = pageIds[0] ? pages.get(pageIds[0]) : undefined;
+      const lastPage = pages.get(pageIds.at(-1)!);
+      if (!removedFirst && !lastPage?.newerRequest) {
+        throw new HistoricalTranscriptWindowFullError();
+      }
       if (removedFirst) {
         this.cachedBoundaryRequests.delete(
           this.boundaryKey(active.id, 'older'),
         );
-      } else if (admittedBoundary?.direction === 'newer') {
+      } else {
         this.cachedBoundaryRequests.delete(
           this.boundaryKey(active.id, 'newer'),
         );
@@ -764,12 +822,9 @@ export class HistoricalTranscriptPageTable {
                         request: admittedBoundary.request,
                       },
                     }
-                  : !removedFirst && admittedBoundary?.direction === 'newer'
+                  : !removedFirst
                     ? {
-                        newer: {
-                          kind: 'loadable' as const,
-                          request: admittedBoundary.request,
-                        },
+                        newer: requestBoundary(lastPage?.newerRequest),
                       }
                     : {}),
             })
@@ -790,7 +845,11 @@ export class HistoricalTranscriptPageTable {
     let bytes = 128;
     for (const page of pages.values()) bytes += page.retainedBytes;
     for (const range of ranges) {
-      bytes += 128 + range.id.length * 2 + range.pageIds.length * 24;
+      bytes +=
+        128 +
+        range.id.length * 2 +
+        range.anchorTurnId.length * 2 +
+        range.pageIds.length * 24;
       bytes += this.measureBoundaryBytes(range.id, 'older', range.older);
       bytes += this.measureBoundaryBytes(range.id, 'newer', range.newer);
     }
@@ -858,9 +917,32 @@ function requestBytes(
   request: FrozenTranscriptBoundaryRequest | undefined,
 ): number {
   if (!request) return 0;
+  if (request.kind === 'gap') {
+    return (
+      80 +
+      2 *
+        (request.anchorRecordId.length +
+          request.afterRecordId.length +
+          request.snapshot.length)
+    );
+  }
   return request.kind === 'older'
     ? 64 + request.beforeRecordId.length * 2 + request.snapshot.length * 2
     : 48 + request.cursor.length * 2;
+}
+
+function forwardRequest(
+  response: DaemonSessionTranscriptPage,
+): FrozenTranscriptBoundaryRequest | undefined {
+  return response.hasMore && response.nextCursor
+    ? { kind: 'cursor', cursor: response.nextCursor }
+    : undefined;
+}
+
+function requestBoundary(
+  request: FrozenTranscriptBoundaryRequest | undefined,
+): TranscriptBoundary {
+  return request ? { kind: 'loadable', request } : { kind: 'end' };
 }
 
 function releaseBoundary(boundary: TranscriptBoundary): TranscriptBoundary {

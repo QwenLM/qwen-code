@@ -5,12 +5,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { createDaemonTranscriptStore } from '@qwen-code/sdk/daemon';
 import type {
   DaemonEvent,
   DaemonSessionTranscriptPage,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import { HistoricalTranscriptPageTable } from './transcript-page-table.js';
+import {
+  HistoricalTranscriptPageTable,
+  HistoricalTranscriptPageTooLargeError,
+  HistoricalTranscriptWindowFullError,
+} from './transcript-page-table.js';
 
 function event(recordId: string): DaemonEvent {
   return {
@@ -69,6 +74,71 @@ function createTable(options?: { maxPages?: number; maxBytes?: number }) {
 }
 
 describe('HistoricalTranscriptPageTable', () => {
+  it('rejects an invalid page capacity at construction', () => {
+    expect(() => createTable({ maxPages: 0 })).toThrow(RangeError);
+  });
+
+  it('restores the retained forward cursor when an empty newer response evicts the tail', () => {
+    const populate = (table: HistoricalTranscriptPageTable) => {
+      const target = table.admitAnchor(
+        1,
+        'turn-1',
+        'snapshot-1',
+        response(['turn-1'], {
+          targetRecordId: 'turn-1',
+          hasMore: true,
+          nextCursor: 'after-1',
+        }),
+      );
+      table.beginBoundaryLoad(target.rangeId, 'newer');
+      table.admitBoundary(
+        target.rangeId,
+        'newer',
+        'snapshot-1',
+        response(['turn-2'], { hasMore: true, nextCursor: 'after-2' }),
+      );
+      return target;
+    };
+    const baseline = createTable();
+    populate(baseline);
+    const maxBytes = baseline.getSnapshot().retainedBytes + 10;
+    const table = createTable({ maxBytes });
+    const target = populate(table);
+    table.beginBoundaryLoad(target.rangeId, 'newer');
+    table.admitBoundary(
+      target.rangeId,
+      'newer',
+      'snapshot-1',
+      response(['turn-1', 'turn-2'], {
+        hasMore: true,
+        nextCursor: 'x'.repeat(1000),
+      }),
+    );
+    expect(table.getSnapshot().ranges[0]).toMatchObject({
+      pageIds: ['history-page-1'],
+      newer: {
+        kind: 'loadable',
+        request: { kind: 'cursor', cursor: 'after-1' },
+      },
+    });
+    expect(table.getSnapshot().retainedBytes).toBeLessThanOrEqual(maxBytes);
+    expect(table.beginBoundaryLoad(target.rangeId, 'newer')).toEqual({
+      kind: 'cursor',
+      cursor: 'after-1',
+    });
+    table.admitBoundary(
+      target.rangeId,
+      'newer',
+      'snapshot-1',
+      response(['turn-2']),
+    );
+    expect(
+      [...table.getSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['turn-1', 'turn-2']);
+  });
+
   it('admits an exact anchor with frozen older and newer boundaries', () => {
     const table = createTable();
     const target = table.admitAnchor(
@@ -666,7 +736,7 @@ describe('HistoricalTranscriptPageTable', () => {
         'snapshot-1',
         response(['turn-1'], { targetRecordId: 'turn-1' }),
       ),
-    ).toThrow('exceeds the cache budget');
+    ).toThrow(HistoricalTranscriptPageTooLargeError);
     expect(table.getSnapshot()).toMatchObject({
       retainedBytes: 0,
       ranges: [],
@@ -687,7 +757,7 @@ describe('HistoricalTranscriptPageTable', () => {
           nextCursor: 'x'.repeat(1000),
         }),
       ),
-    ).toThrow('exceeds the cache budget');
+    ).toThrow(HistoricalTranscriptPageTooLargeError);
     expect(table.getSnapshot()).toMatchObject({
       retainedBytes: 0,
       ranges: [],
@@ -730,13 +800,13 @@ describe('HistoricalTranscriptPageTable', () => {
           nextCursor: 'x'.repeat(1000),
         }),
       ),
-    ).toThrow('exceeds the cache budget');
+    ).toThrow(HistoricalTranscriptWindowFullError);
 
     expect(table.getSnapshot().retainedBytes).toBeLessThanOrEqual(maxBytes);
-    table.failBoundaryLoad(target.rangeId, 'newer', request, false);
+    table.failBoundaryLoad(target.rangeId, 'newer', request, true);
     expect(table.getSnapshot().ranges[0]?.newer).toMatchObject({
       kind: 'error',
-      retryable: false,
+      retryable: true,
       request,
     });
   });
@@ -779,18 +849,109 @@ describe('HistoricalTranscriptPageTable', () => {
           nextCursor: 'x'.repeat(1000),
         }),
       ),
-    ).toThrow('exceeds the cache budget');
+    ).toThrow(HistoricalTranscriptWindowFullError);
 
     expect(table.getSnapshot().ranges[0]?.pageIds).toEqual([
       'history-page-2',
       'history-page-1',
     ]);
     expect(table.findTurn('turn-3')).toEqual(target);
-    table.failBoundaryLoad(target.rangeId, 'older', request, false);
+    table.failBoundaryLoad(target.rangeId, 'older', request, true);
     expect(table.getSnapshot().ranges[0]?.older).toMatchObject({
       kind: 'error',
-      retryable: false,
+      retryable: true,
       request,
     });
+  });
+  it('remaps a historical child tool to its namespaced parent block', () => {
+    const transcript = createDaemonTranscriptStore();
+    transcript.dispatch([
+      {
+        type: 'user.text.delta',
+        text: 'Inspect files',
+        sourceRecordIds: ['turn-0'],
+      },
+      {
+        type: 'tool.update',
+        toolCallId: 'parent-call',
+        title: 'Delegate',
+        status: 'completed',
+      },
+      {
+        type: 'tool.update',
+        toolCallId: 'child-call',
+        parentToolCallId: 'parent-call',
+        title: 'Read file',
+        status: 'completed',
+      },
+    ]);
+    const original = transcript.getSnapshot();
+    const originalParent = original.blocks.find(
+      (block) => block.kind === 'tool' && block.toolCallId === 'parent-call',
+    )!;
+    const originalChild = original.blocks.find(
+      (block) => block.kind === 'tool' && block.toolCallId === 'child-call',
+    )!;
+    expect(originalChild).toMatchObject({ parentBlockId: originalParent.id });
+    const table = new HistoricalTranscriptPageTable({
+      maxPages: 5,
+      maxRetainedBytes: 1024 * 1024,
+      materialize: () => ({
+        blocks: original.blocks,
+        nextBlockOrdinal: original.nextOrdinal,
+        encounteredRecordIds: ['turn-0'],
+      }),
+    });
+    const target = table.admitAnchor(
+      0,
+      'turn-0',
+      'snapshot-1',
+      response(['turn-0'], { targetRecordId: 'turn-0' }),
+    );
+    const page = table.getSnapshot().pages.get(target.pageId)!;
+    const parent = page.blocks.find(
+      (block) => block.kind === 'tool' && block.toolCallId === 'parent-call',
+    )!;
+    const child = page.blocks.find(
+      (block) => block.kind === 'tool' && block.toolCallId === 'child-call',
+    )!;
+    expect(parent.id).toBe(`${page.id}:${originalParent.id}`);
+    expect(child).toMatchObject({
+      id: `${page.id}:${originalChild.id}`,
+      parentBlockId: parent.id,
+      parentToolCallId: 'parent-call',
+      toolCallId: 'child-call',
+    });
+    expect(originalChild).toMatchObject({ parentBlockId: originalParent.id });
+  });
+
+  it('preserves traversal through cached records overlapped by a new anchor', () => {
+    const table = createTable();
+    const cached = table.admitAnchor(
+      2,
+      'turn-2',
+      'snapshot-1',
+      response(['turn-2', 'turn-3'], { targetRecordId: 'turn-2' }),
+    );
+    const anchor = table.admitAnchor(
+      1,
+      'turn-1',
+      'snapshot-1',
+      response(['turn-1', 'turn-2', 'turn-3'], {
+        targetRecordId: 'turn-1',
+        hasMore: true,
+        nextCursor: 'after-3',
+      }),
+    );
+    const snapshot = table.getSnapshot();
+    const range = snapshot.ranges.find((item) => item.id === anchor.rangeId)!;
+    const records = range.pageIds.flatMap((pageId) => [
+      ...snapshot.pages.get(pageId)!.recordIds,
+    ]);
+    expect(
+      records.includes('turn-2') ||
+        (range.newer.kind === 'cached' &&
+          range.newer.rangeId === cached.rangeId),
+    ).toBe(true);
   });
 });

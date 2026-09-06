@@ -28,6 +28,7 @@ import {
   type HistoricalTranscriptPage,
   type HistoricalTranscriptRange,
   type MaterializedTranscriptPage,
+  type TranscriptGapResolution,
 } from './transcript-page-table.js';
 
 class TurnIndexPageTooLargeError extends Error {
@@ -180,6 +181,7 @@ export function createDaemonTurnNavigationStore(
   let liveLocations = new Map<string, DaemonTurnLocation>();
   let livePromptAliases = new Map<string, DaemonTurnLocation>();
   let liveRecordIds = new Set<string>();
+  let liveBlockIdByPromptId = new Map<string, string>();
   let lastLiveBlocks: readonly DaemonTranscriptBlock[] | undefined;
   let headRequest: Promise<void> | undefined;
   let headDirty = false;
@@ -211,10 +213,17 @@ export function createDaemonTurnNavigationStore(
   function publish(update: Partial<DaemonTurnNavigationSnapshot> = {}): void {
     const table = pageTable.getSnapshot();
     const error = 'error' in update ? update.error : snapshot.error;
-    const removedErrorRange =
-      (error?.operation === 'older' || error?.operation === 'newer') &&
-      error.rangeId !== undefined &&
-      !table.ranges.some((range) => range.id === error.rangeId);
+    const boundaryOperation =
+      error?.operation === 'older' || error?.operation === 'newer'
+        ? error.operation
+        : undefined;
+    const obsoleteBoundaryError =
+      boundaryOperation !== undefined &&
+      !table.ranges.some(
+        (range) =>
+          range.id === error?.rangeId &&
+          range[boundaryOperation].kind === 'error',
+      );
     const indexedTurnIds = new Set(
       [...indexedEntries(pages).values()].map((entry) => entry.turnId),
     );
@@ -247,7 +256,7 @@ export function createDaemonTurnNavigationStore(
     snapshot = Object.freeze({
       ...snapshot,
       ...update,
-      error: removedErrorRange ? undefined : error,
+      error: obsoleteBoundaryError ? undefined : error,
       sessionId,
       indexPages: new Map(
         [...pages.entries()].map(([start, page]) => [
@@ -278,6 +287,7 @@ export function createDaemonTurnNavigationStore(
     removedPromptIds.clear();
     liveLocations = new Map();
     livePromptAliases = new Map();
+    liveBlockIdByPromptId = new Map();
     liveRecordIds = new Set();
     lastLiveBlocks = undefined;
     headRequest = undefined;
@@ -435,18 +445,31 @@ export function createDaemonTurnNavigationStore(
       }
       if (block.kind !== 'user') continue;
       blockIds.add(block.id);
-      if (block.promptId) blockIdByPromptId.set(block.promptId, block.id);
+      const promptId = block.promptId ?? block.meta?.['promptId'];
+      if (typeof promptId === 'string')
+        blockIdByPromptId.set(promptId, block.id);
       for (const turnId of block.sourceRecordIds ?? []) {
         next.set(turnId, { turnId, blockId: block.id, view: 'live' });
       }
     }
     liveRecordIds = nextLiveRecordIds;
+    liveBlockIdByPromptId = blockIdByPromptId;
     const nextLivePromptAliases = new Map(
       [...livePromptAliases].filter(
         ([turnId, location]) =>
           !next.has(turnId) && blockIds.has(location.blockId),
       ),
     );
+    for (const entry of indexedEntries(pages).values()) {
+      const blockId = blockIdByPromptId.get(entry.promptId ?? '');
+      if (blockId && !next.has(entry.turnId)) {
+        nextLivePromptAliases.set(entry.turnId, {
+          turnId: entry.turnId,
+          blockId,
+          view: 'live',
+        });
+      }
+    }
     const nextProvisionals = provisionals.map((provisional) => {
       const exactBlockId = blockIdByPromptId.get(provisional.promptId);
       const blockId = blockIds.has(provisional.blockId ?? '')
@@ -480,19 +503,21 @@ export function createDaemonTurnNavigationStore(
 
   function recordPromptAdmitted(admission: DaemonPromptAdmission): void {
     if (removedPromptIds.has(admission.promptId)) return;
+    const blockId =
+      admission.blockId ?? liveBlockIdByPromptId.get(admission.promptId);
     const entries = [...indexedEntries(pages).values()];
     const promptEntry = entries.find(
       (entry) => entry.promptId === admission.promptId,
     );
     if (promptEntry) {
       if (
-        admission.blockId &&
+        blockId &&
         !liveLocations.has(promptEntry.turnId) &&
-        livePromptAliases.get(promptEntry.turnId)?.blockId !== admission.blockId
+        livePromptAliases.get(promptEntry.turnId)?.blockId !== blockId
       ) {
         livePromptAliases.set(promptEntry.turnId, {
           turnId: promptEntry.turnId,
-          blockId: admission.blockId,
+          blockId,
           view: 'live',
         });
         syncLiveRecordIds();
@@ -505,8 +530,8 @@ export function createDaemonTurnNavigationStore(
       provisionals.some((turn) => turn.promptId === admission.promptId) ||
       entries.some(
         (entry) =>
-          admission.blockId !== undefined &&
-          findLiveLocation(entry.turnId)?.blockId === admission.blockId,
+          blockId !== undefined &&
+          findLiveLocation(entry.turnId)?.blockId === blockId,
       )
     ) {
       return;
@@ -521,7 +546,7 @@ export function createDaemonTurnNavigationStore(
         provisionalId: `live:${admission.promptId}`,
         promptId: admission.promptId,
         label: compactLabel(admission.label),
-        ...(admission.blockId ? { blockId: admission.blockId } : {}),
+        ...(blockId ? { blockId } : {}),
       }),
     ];
     publish();
@@ -544,6 +569,7 @@ export function createDaemonTurnNavigationStore(
       liveLocations = new Map();
       livePromptAliases = new Map();
       liveRecordIds = new Set();
+      liveBlockIdByPromptId = new Map();
       lastLiveBlocks = undefined;
       resetChain();
       if (tooLarge) {
@@ -613,7 +639,7 @@ export function createDaemonTurnNavigationStore(
 
   async function loadOrdinal(
     ordinal: number,
-    generation?: number,
+    generation = selectionGeneration,
   ): Promise<void> {
     assertOrdinal(ordinal);
     if (findIndexEntry(ordinal)) return;
@@ -670,10 +696,7 @@ export function createDaemonTurnNavigationStore(
         error instanceof TurnIndexPageTooLargeError
       ) {
         enterTooLargeFallback();
-      } else if (
-        generation === undefined ||
-        generation === selectionGeneration
-      ) {
+      } else if (generation === selectionGeneration) {
         publish({
           error: navigationError(
             'index',
@@ -823,32 +846,95 @@ export function createDaemonTurnNavigationStore(
     publish(clearBoundaryError());
     const capturedSession = sessionEpoch;
     const capturedChain = chainEpoch;
-    try {
-      const response = await activeClient.getTranscriptPage(
-        request.kind === 'older'
-          ? {
-              beforeRecordId: request.beforeRecordId,
-              snapshot: request.snapshot,
-              limit: WEB_SHELL_HISTORY_PAGE_SIZE,
-            }
-          : { cursor: request.cursor, limit: WEB_SHELL_HISTORY_PAGE_SIZE },
+    const isCurrentBoundary = () => {
+      const boundary = pageTable
+        .getSnapshot()
+        .ranges.find((item) => item.id === rangeId)?.[direction];
+      return (
+        capturedSession === sessionEpoch &&
+        capturedChain === chainEpoch &&
+        isCurrentClient(activeClient) &&
+        boundary?.kind === 'loading' &&
+        boundary.request === request
       );
-      if (
-        capturedSession !== sessionEpoch ||
-        capturedChain !== chainEpoch ||
-        !isCurrentClient(activeClient)
-      ) {
-        return;
+    };
+    try {
+      let response: DaemonSessionTranscriptPage;
+      let recovery: TranscriptGapResolution | undefined;
+      if (request.kind === 'gap') {
+        response = await activeClient.getTranscriptPage({
+          atRecordId: request.anchorRecordId,
+          snapshot: request.snapshot,
+          limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+        });
+        let fromAnchor = true;
+        let newerCandidate: DaemonSessionTranscriptPage | undefined;
+        let candidateFromAnchor = false;
+        let previousFirstRecordId: string | undefined;
+        while (true) {
+          if (!isCurrentBoundary()) return;
+          validateHistoricalResponse(response, sessionId);
+          if (
+            fromAnchor &&
+            response.targetRecordId !== request.anchorRecordId
+          ) {
+            throw new Error('Gap recovery response did not contain its anchor');
+          }
+          const recordIds = activeClient.materializeTranscriptEvents(
+            response.events,
+            1,
+            new Set(),
+          ).encounteredRecordIds;
+          const edge = recordIds.indexOf(request.afterRecordId);
+          if (edge >= 0) {
+            if (edge < recordIds.length - 1) {
+              recovery = {
+                excludedRecordIds: recordIds.slice(0, edge + 1),
+                fromAnchor,
+              };
+            } else if (newerCandidate) {
+              response = newerCandidate;
+              recovery = {
+                excludedRecordIds: [],
+                fromAnchor: candidateFromAnchor,
+              };
+            } else {
+              recovery = { excludedRecordIds: recordIds, fromAnchor };
+            }
+            break;
+          }
+          const firstRecordId = recordIds[0];
+          if (!firstRecordId || firstRecordId === previousFirstRecordId) {
+            throw new Error(
+              'Gap recovery did not advance to the retained record',
+            );
+          }
+          previousFirstRecordId = firstRecordId;
+          newerCandidate = response;
+          candidateFromAnchor = fromAnchor;
+          response = await activeClient.getTranscriptPage({
+            beforeRecordId: firstRecordId,
+            snapshot: request.snapshot,
+            limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+          });
+          fromAnchor = false;
+        }
+      } else {
+        response = await activeClient.getTranscriptPage(
+          request.kind === 'older'
+            ? {
+                beforeRecordId: request.beforeRecordId,
+                snapshot: request.snapshot,
+                limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+              }
+            : { cursor: request.cursor, limit: WEB_SHELL_HISTORY_PAGE_SIZE },
+        );
       }
+      if (!isCurrentBoundary()) return;
       const table = pageTable.getSnapshot();
       const currentRange = table.ranges.find((item) => item.id === rangeId);
       if (!currentRange || currentRange[direction].kind !== 'loading') return;
-      validateTranscriptResponse(response, sessionId);
-      if (response.partial || response.replayError) {
-        throw new Error(
-          response.replayError ?? 'Historical transcript page was partial',
-        );
-      }
+      validateHistoricalResponse(response, sessionId);
       const firstPageId = currentRange.pageIds[0];
       const rangeSnapshot = firstPageId
         ? table.pages.get(firstPageId)?.snapshot
@@ -857,18 +943,13 @@ export function createDaemonTurnNavigationStore(
       pageTable.admitBoundary(
         rangeId,
         direction,
-        request.kind === 'older' ? request.snapshot : rangeSnapshot,
+        request.kind !== 'cursor' ? request.snapshot : rangeSnapshot,
         response,
+        recovery,
       );
       publish(clearBoundaryError());
     } catch (error) {
-      if (
-        capturedSession !== sessionEpoch ||
-        capturedChain !== chainEpoch ||
-        !isCurrentClient(activeClient)
-      ) {
-        return;
-      }
+      if (!isCurrentBoundary()) return;
       const currentRange = pageTable
         .getSnapshot()
         .ranges.find((item) => item.id === rangeId);
@@ -1024,8 +1105,17 @@ export function createDaemonTurnNavigationStore(
   function reconcileProvisionals(
     newEntries: readonly DaemonSessionTurnIndexEntry[] = [],
   ): void {
-    if (provisionals.length === 0) return;
     const entries = [...indexedEntries(pages).values(), ...newEntries];
+    for (const entry of entries) {
+      const blockId = liveBlockIdByPromptId.get(entry.promptId ?? '');
+      if (blockId && !liveLocations.has(entry.turnId)) {
+        livePromptAliases.set(entry.turnId, {
+          turnId: entry.turnId,
+          blockId,
+          view: 'live',
+        });
+      }
+    }
     provisionals = provisionals.filter((provisional) => {
       const promptEntry = entries.find(
         (entry) => entry.promptId === provisional.promptId,
@@ -1285,6 +1375,18 @@ function isRetryable(error: unknown): boolean {
     status === 429 ||
     status >= 500
   );
+}
+
+function validateHistoricalResponse(
+  response: DaemonSessionTranscriptPage,
+  sessionId: string | undefined,
+): void {
+  validateTranscriptResponse(response, sessionId);
+  if (response.partial || response.replayError) {
+    throw new Error(
+      response.replayError ?? 'Historical transcript page was partial',
+    );
+  }
 }
 
 function isTranscriptTooLarge(error: unknown): boolean {
