@@ -411,12 +411,13 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   # chain closes that surface: `[URGENT](https://evil.example/phish)` and
   # `![](https://evil.example/beacon.png)` sail through mention/entity/
   # comment-opener neutralization byte-identical and render as a live link or
-  # an auto-loading beacon inside bot-authored text maintainers read as
-  # trusted automation output. Worse, an unclosed `<details>` makes a real
-  # HTML5 parser nest the findings `<ul>` inside it — the whole human-facing
-  # surface collapses behind an unlabeled fold while the round still prints
-  # its clean success line, and because the dedupe corpus reads the RAW body
-  # the hidden items then count as already tracked and are never re-published.
+  # an attacker-chosen image (camo-proxied, so not a per-reader beacon)
+  # inside bot-authored text maintainers read as trusted automation output.
+  # Worse, an unclosed `<details>` makes a real HTML5 parser nest the
+  # findings `<ul>` inside it — the whole human-facing surface collapses
+  # behind GitHub's generic `Details` fold while the round still prints its
+  # clean success line, and because the dedupe corpus reads the RAW body the
+  # hidden items then count as already tracked and are never re-published.
   # The body copy bought nothing: `PR #${PR}` below auto-links on its own, and
   # the enriched issue title already says what the PR was about. Do NOT
   # re-add it; if a title ever has to appear in the body, put it in a code
@@ -505,11 +506,14 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
     -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")" || NUM=''
   if [[ -n "${NUM}" && "${ASSIGNABLE}" == 1 ]]; then
     # Assignment is a separate metadata call: it can never mint a second
-    # issue, and it is where GitHub puts it anyway — assignees on the create
-    # call are silently dropped for users without push access, so for the
-    # external contributors this branch exists for the create always returned
-    # 201 unassigned. Failure only warns (persistence already succeeded) and
-    # the body's cc mention is what actually reaches them.
+    # issue, and it cannot take the create down with it. Assignees passed
+    # on the create call are REJECTED for users without push access — a
+    # 422 that fails the whole create — which for the external
+    # contributors this branch exists for would lose the findings
+    # entirely. A genuine failure here only warns (persistence already
+    # succeeded); a non-assignable author accepts this call yet stays
+    # unassigned (exit 0, empty assignees), so the body's cc mention is
+    # what actually reaches them.
     gh_err_reset
     gh api "repos/${REPO}/issues/${NUM}/assignees" -f "assignees[]=${PR_AUTHOR}" \
       > /dev/null 2> "${GH_ERR:-/dev/null}" \

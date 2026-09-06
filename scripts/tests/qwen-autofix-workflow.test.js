@@ -14452,8 +14452,10 @@ exit 1
     // and the failures that reach a retry are the ambiguous ones (connection
     // reset, gateway 502, a read timeout after the server committed), so a
     // create-retry can mint a second tracking issue with the same marker that
-    // the next round's newest-first lookup orphans — restoring that retry
-    // shape must red the single-create assertion below.
+    // the next round's newest-first lookup orphans. This case does not pin
+    // that: its create SUCCEEDS, so a retry-on-create-failure branch never
+    // runs here — the failed-create half is pinned by the writeFail case's
+    // create-count assertion below.
     const assignFailed = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
       assignFail: true,
@@ -14486,8 +14488,9 @@ exit 1
     // (a live, clickable, attacker-chosen URL inside bot-authored text that
     // maintainers read as trusted automation output) and an unclosed
     // `<details>`, which makes a real HTML5 parser nest the findings `<ul>`
-    // inside it — the whole human-facing surface collapses behind an
-    // unlabeled fold while the round logs clean success, and since the dedupe
+    // inside it — the whole human-facing surface collapses behind GitHub's
+    // generic `Details` fold while the round logs clean success, and since
+    // the dedupe
     // corpus reads the RAW body, the hidden items count as already tracked and
     // are never re-published. Asserted per call on purpose: over the whole
     // log, a rendering could be coming from the other site.
@@ -14633,6 +14636,15 @@ exit 1
     expect(writeFail.out).toContain('watermark-gated');
     expect(writeFail.out).toContain('- rc:7 ');
     expect(writeFail.out).not.toContain('NOT persisted this round');
+    // The create is issued ONCE, never retried (rationale: the assignFailed
+    // comment above). Only the call log can see a retry here — with the
+    // create failing, both arms print the same LOST warning, so no output
+    // assertion can distinguish them. Split on the call head because the
+    // logged body argument contains newlines.
+    const writeCreates = writeFail.calls.split(
+      'api repos/o/r/issues -f title=',
+    );
+    expect(writeCreates).toHaveLength(2);
     // A failed create must not reach the assignment: with NUM empty, the
     // `-n "${NUM}" &&` half of the assign guard is the only thing keeping a
     // `repos/o/r/issues//assignees` POST off the log. Mirrors prFetchFailed's
