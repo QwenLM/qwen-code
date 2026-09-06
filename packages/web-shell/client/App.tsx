@@ -1,4 +1,5 @@
 import './styles/globals.css';
+import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import {
   forwardRef,
   memo,
@@ -3448,6 +3449,11 @@ export function App({
   const standaloneWorkingDirectory =
     effectiveStandaloneSession?.workingDirectory;
   const standaloneDirectoryErrorCode = effectiveStandaloneSession?.errorCode;
+  const standaloneWriterBlocked = Boolean(
+    connection.sessionId &&
+      connection.error &&
+      isSessionWriterBlockedCode(standaloneDirectoryErrorCode),
+  );
   const [standaloneRecoveryResolution, setStandaloneRecoveryResolution] =
     useState<StandaloneRecoveryResolution>('idle');
   const standaloneRecoveryRequestRef = useRef(0);
@@ -11139,7 +11145,7 @@ export function App({
   // forever (#10406).
   const lastReportedConnectionErrorRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!connection.error) {
+    if (!connection.error || standaloneWriterBlocked) {
       lastReportedConnectionErrorRef.current = undefined;
       return;
     }
@@ -11147,7 +11153,7 @@ export function App({
     if (!onError) return;
     lastReportedConnectionErrorRef.current = connection.error;
     onError(new Error(connection.error));
-  }, [connection.error, onError]);
+  }, [connection.error, onError, standaloneWriterBlocked]);
 
   const prevConnectionModelRef = useRef(connection.currentModel);
   useLayoutEffect(() => {
@@ -15045,6 +15051,7 @@ export function App({
 
   const standaloneInteractionBlocked = Boolean(
     standaloneCreationRecovery ||
+      standaloneWriterBlocked ||
       standaloneDirectoryErrorCode === 'working_directory_missing' ||
       standaloneDirectoryErrorCode === 'working_directory_compromised',
   );
@@ -17683,6 +17690,32 @@ export function App({
                             : styles.composer
                         }
                       >
+                        {standaloneWriterBlocked && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="alert"
+                            data-testid="standalone-writer-blocked"
+                          >
+                            <span className={styles.composerActionTipText}>
+                              {connection.sessionId?.slice(0, 8)}:{' '}
+                              {t('session.writerBlocked')}
+                            </span>
+                            <button
+                              type="button"
+                              className={styles.composerActionTipButton}
+                              onClick={() => {
+                                const id = connectionRef.current.sessionId;
+                                if (id) {
+                                  void loadSidebarSession(id, undefined, {
+                                    kind: 'standalone',
+                                  }).catch(() => undefined);
+                                }
+                              }}
+                            >
+                              {t('common.retry')}
+                            </button>
+                          </div>
+                        )}
                         {standaloneCreationRecovery && (
                           <div
                             className={styles.composerActionTip}

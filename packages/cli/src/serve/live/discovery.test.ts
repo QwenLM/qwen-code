@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   getLiveDiscoveryPath,
+  assertLiveDiscoveryPublisher,
   handoffLiveDiscoveryOwner,
   LiveDiscoveryOwnerActiveError,
   LiveDiscoveryStateError,
@@ -46,6 +47,51 @@ afterEach(async () => {
 });
 
 describe('Live discovery file', () => {
+  it('admits only the exact current publisher without modifying the locator', async () => {
+    const runtime = await temporaryRuntime();
+    const current = record('daemon_instance_nonce_admission');
+    await expect(
+      assertLiveDiscoveryPublisher(runtime, current),
+    ).rejects.toMatchObject({ code: 'conversation_runtime_unavailable' });
+    await expect(fs.readdir(runtime)).resolves.toEqual([]);
+    const file = await writeLiveDiscoveryFile(runtime, current);
+    const before = await fs.readFile(file, 'utf8');
+    await expect(
+      assertLiveDiscoveryPublisher(runtime, current),
+    ).resolves.toBeUndefined();
+    for (const foreign of [
+      { ...current, pid: current.pid + 1 },
+      { ...current, instanceNonce: 'daemon_instance_nonce_foreign' },
+    ]) {
+      await expect(
+        assertLiveDiscoveryPublisher(runtime, foreign),
+      ).rejects.toMatchObject({
+        code: 'conversation_runtime_in_use',
+        retryable: true,
+      });
+    }
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(before);
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        ...current,
+        protocolVersion: current.protocolVersion + 1,
+      }),
+    );
+    await expect(
+      assertLiveDiscoveryPublisher(runtime, current),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_ownership_compromised',
+      retryable: false,
+    });
+    await fs.writeFile(file, 'not-json');
+    await expect(
+      assertLiveDiscoveryPublisher(runtime, current),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_ownership_compromised',
+    });
+  });
+
   it('publishes an atomic mode-0600 record below the runtime directory', async () => {
     const runtime = await temporaryRuntime();
     const expected = record('daemon_instance_nonce_0001');

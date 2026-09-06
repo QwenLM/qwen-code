@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createConversationRuntimeOwnership,
+  checkLegacyConversationRuntimeOwner,
   getConversationRuntimeOwnerPath,
 } from './conversation-runtime-ownership.js';
 import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
@@ -170,6 +171,78 @@ function waitForWorkerMessage(
 }
 
 describe('Conversation runtime ownership', () => {
+  it('does not bootstrap or write an owner on the updated compatibility path', async () => {
+    const stableBaseDir = await temporaryStableBase();
+    await checkLegacyConversationRuntimeOwner({ stableBaseDir });
+    await expect(fs.lstat(stableBaseDir)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await fs.mkdir(
+      path.dirname(getConversationRuntimeOwnerPath(stableBaseDir)),
+      { recursive: true, mode: 0o700 },
+    );
+    await Promise.all([
+      checkLegacyConversationRuntimeOwner({ stableBaseDir }),
+      checkLegacyConversationRuntimeOwner({ stableBaseDir }),
+    ]);
+    await expect(
+      fs.lstat(getConversationRuntimeOwnerPath(stableBaseDir)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('retries a live legacy owner and retires the exact stale record without taking Live', async () => {
+    const stableBaseDir = await temporaryStableBase();
+    const file = await writeForeignRecord(stableBaseDir, 'ownership');
+    const original = await fs.readFile(file, 'utf8');
+    await expect(
+      checkLegacyConversationRuntimeOwner({
+        stableBaseDir,
+        isProcessAlive: () => true,
+      }),
+    ).rejects.toMatchObject({ code: 'conversation_runtime_in_use' });
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(original);
+    await writeLiveDiscoveryFile(stableBaseDir, {
+      url: 'http://127.0.0.1:3210',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+      pid: process.pid,
+      instanceNonce: currentNonce,
+    });
+    const wait = vi.fn(async () => {
+      await expect(
+        fs.lstat(path.join(path.dirname(file), '.runtime-owner.lock')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+    await checkLegacyConversationRuntimeOwner({
+      stableBaseDir,
+      isProcessAlive: () => false,
+      wait,
+    });
+    expect(wait).toHaveBeenCalledWith(1000);
+    await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.readFile(getLiveDiscoveryPath(stableBaseDir), 'utf8'),
+    ).resolves.toContain(currentNonce);
+  });
+
+  it('preserves malformed legacy state and maps uncertain reads without leaking paths', async () => {
+    const stableBaseDir = await temporaryStableBase();
+    const file = await writeForeignRecord(stableBaseDir, 'ownership');
+    failRecordReadOnce(file, 'open', 'EACCES');
+    await expect(
+      checkLegacyConversationRuntimeOwner({ stableBaseDir }),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      message: 'The Conversations runtime is temporarily unavailable.',
+    });
+    await fs.writeFile(file, 'not-json');
+    await expect(
+      checkLegacyConversationRuntimeOwner({ stableBaseDir }),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_ownership_compromised',
+    });
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('not-json');
+  });
+
   it('arbitrates real child processes and reclaims a crashed owner after grace', async () => {
     const stableBaseDir = await temporaryStableBase();
     const workerPath = path.join(

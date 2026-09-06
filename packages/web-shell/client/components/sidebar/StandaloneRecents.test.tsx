@@ -283,10 +283,14 @@ describe('StandaloneRecents', () => {
     ).toHaveLength(1);
   });
 
-  it('reports a failed standalone session open', async () => {
+  it('shows a failed standalone open locally with an explicit retry', async () => {
     const error = new Error('load failed');
+    const onLoadSession = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValue(undefined);
     const { onError } = await render({
-      onLoadSession: vi.fn().mockRejectedValue(error),
+      onLoadSession,
     });
     const sessionButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'Active chat',
@@ -294,7 +298,157 @@ describe('StandaloneRecents', () => {
 
     await act(async () => sessionButton?.click());
 
-    expect(onError).toHaveBeenCalledWith(error, 'session.loadFailed');
+    expect(onError).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'session.loadFailed',
+    );
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'common.retry')
+        ?.click(),
+    );
+    expect(onLoadSession).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('shows a list failure without a false empty state or host toast', async () => {
+    mocks.list.mockRejectedValueOnce(new Error('legacy owner in use'));
+    const { onError } = await render();
+    expect(container.textContent).toContain('sidebar.standaloneLoadFailed');
+    expect(container.textContent).not.toContain('sidebar.noRecents');
+    expect(onError).not.toHaveBeenCalled();
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'common.retry')
+        ?.click(),
+    );
+    expect(container.textContent).toContain('Active chat');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('retries the failed page without discarding already loaded rows', async () => {
+    mocks.list
+      .mockResolvedValueOnce({
+        sessions: [summary('first', 'First chat')],
+        nextCursor: 'page-two',
+      })
+      .mockRejectedValueOnce(new Error('page failed'))
+      .mockResolvedValueOnce({ sessions: [summary('second', 'Second chat')] });
+    const { onError } = await render();
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'sidebar.showAllSessions')
+        ?.click(),
+    );
+    expect(container.textContent).toContain('First chat');
+    expect(container.textContent).toContain('sidebar.standaloneLoadFailed');
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'common.retry')
+        ?.click(),
+    );
+    expect(mocks.list).toHaveBeenLastCalledWith({
+      archiveState: 'active',
+      cursor: 'page-two',
+      pageSize: 50,
+    });
+    expect(container.textContent).toContain('First chat');
+    expect(container.textContent).toContain('Second chat');
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('ignores an old open failure after a newer session was selected', async () => {
+    let rejectOld!: (error: Error) => void;
+    mocks.list.mockResolvedValue({
+      sessions: [summary('old', 'Old chat'), summary('new', 'New chat')],
+    });
+    const onLoadSession = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectOld = reject;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    const { onError } = await render({ onLoadSession });
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Old chat')
+        ?.click(),
+    );
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'New chat')
+        ?.click(),
+    );
+    await act(async () =>
+      rejectOld(
+        Object.assign(new Error('old writer'), {
+          body: { code: 'session_writer_conflict' },
+        }),
+      ),
+    );
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('closes a blocked rename dialog so its local retry is reachable', async () => {
+    mocks.rename.mockRejectedValueOnce(
+      Object.assign(new Error('writer conflict'), {
+        body: { code: 'session_writer_conflict' },
+      }),
+    );
+    const { onError } = await render();
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'sidebar.rename')
+        ?.click(),
+    );
+    expect(container.querySelector('form')).not.toBeNull();
+    await act(async () =>
+      container
+        .querySelector('form')
+        ?.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    expect(container.querySelector('form')).toBeNull();
+    expect(container.textContent).toContain('session.writerBlocked');
+    expect(onError).not.toHaveBeenCalled();
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'common.retry')
+        ?.click(),
+    );
+    expect(mocks.rename).toHaveBeenCalledTimes(2);
+    expect(mocks.rename).toHaveBeenLastCalledWith('active', 'Active chat');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('preserves writer classification inside a successful batch envelope', async () => {
+    mocks.archive.mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      errors: [
+        {
+          sessionId: 'active',
+          code: 'session_writer_conflict',
+          message: 'writer conflict',
+        },
+      ],
+    });
+    const { onError } = await render();
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'sidebar.archive')
+        ?.click(),
+    );
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'session.writerBlocked',
+    );
+    expect(container.textContent).toContain('Active chat');
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('keeps a row visible when a batch archive reports an item error', async () => {

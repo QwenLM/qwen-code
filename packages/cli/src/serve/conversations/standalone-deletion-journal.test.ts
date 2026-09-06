@@ -101,6 +101,62 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
+  it('bootstraps its state parent without an owner and accepts a historical 0755 base', async () => {
+    await fs.rmdir(ownerDirectory);
+    if (process.platform !== 'win32') await fs.chmod(stableBaseDir, 0o755);
+    const root = await workspace.getRoot();
+    await expect(journal.listSessionIds()).resolves.toEqual([]);
+    await journal.writePrepared(await makeRecord('prepared'), root);
+    await expect(
+      fs.lstat(path.join(ownerDirectory, 'runtime-owner.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(journal.hasRecord(SESSION_ID)).resolves.toBe(true);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(stableBaseDir)).mode & 0o777).toBe(0o755);
+      expect((await fs.stat(ownerDirectory)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it.each(['base', 'state'] as const)(
+    'rejects a replaced %s parent on every operation',
+    async (parent) => {
+      const root = await workspace.getRoot();
+      const record = await makeRecord('prepared');
+      await journal.writePrepared(record, root);
+      const directory = parent === 'base' ? stableBaseDir : ownerDirectory;
+      await fs.rename(directory, `${directory}.saved`);
+      await fs.mkdir(directory, { mode: 0o700 });
+      for (const operation of [
+        () => journal.hasRecord(SESSION_ID),
+        () => journal.listSessionIds(),
+        () => journal.read(SESSION_ID, root),
+        () => journal.clear(SESSION_ID, root),
+        () => journal.writePrepared(record, root),
+      ]) {
+        await expect(operation()).rejects.toMatchObject({
+          reason: 'compromised',
+        });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects an ancestor redirect even when the state inode is unchanged',
+    async () => {
+      const root = await workspace.getRoot();
+      const parent = path.join(homeDir, 'journal-parent');
+      const redirectedJournal = new StandaloneDeletionJournal(
+        path.join(parent, '.qwen'),
+      );
+      await redirectedJournal.writePrepared(await makeRecord('prepared'), root);
+      await fs.rename(parent, `${parent}.saved`);
+      await fs.symlink(`${parent}.saved`, parent);
+      await expect(
+        redirectedJournal.read(SESSION_ID, root),
+      ).rejects.toMatchObject({ reason: 'compromised' });
+    },
+  );
+
   it('reads the exact legacy V1 record without inventing parent proof', async () => {
     const root = await workspace.getRoot();
     const current = await makeRecord('prepared');
@@ -200,6 +256,20 @@ describe('StandaloneDeletionJournal', () => {
       await expect(journal.writePrepared(prepared, root)).rejects.toMatchObject(
         { reason: 'conflict' },
       );
+
+      await fs.rename(ownerDirectory, `${ownerDirectory}.saved`);
+      await fs.mkdir(ownerDirectory, { mode: 0o700 });
+      await expect(journal.hasRecord(SESSION_ID)).rejects.toMatchObject({
+        reason: 'compromised',
+      });
+      await expect(journal.read(SESSION_ID, root)).rejects.toMatchObject({
+        reason: 'compromised',
+      });
+      await expect(journal.clear(SESSION_ID, root)).rejects.toMatchObject({
+        reason: 'compromised',
+      });
+      await fs.rmdir(ownerDirectory);
+      await fs.rename(`${ownerDirectory}.saved`, ownerDirectory);
 
       await expect(journal.clear(SESSION_ID, root)).resolves.toBeUndefined();
       await expect(journal.hasRecord(SESSION_ID)).resolves.toBe(false);

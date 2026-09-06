@@ -34,6 +34,10 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Input } from '../ui/input';
+import {
+  getDaemonErrorCode,
+  isSessionWriterBlockedCode,
+} from '../../daemon/session/session-context';
 
 interface StandaloneRecentsProps {
   collapsed: boolean;
@@ -114,6 +118,8 @@ export function StandaloneRecents({
   const loadGenerationRef = useRef(0);
   const archivedLoadGenerationRef = useRef(0);
   const busySessionIdRef = useRef<string | undefined>(undefined);
+  const openGenerationRef = useRef(0);
+  const openingSessionIdRef = useRef<string | undefined>(undefined);
   const { t } = useI18n();
   const [active, setActive] = useState<DaemonStandaloneSessionSummary[]>([]);
   const activeRef = useRef(active);
@@ -130,6 +136,14 @@ export function StandaloneRecents({
   const [loadingArchived, setLoadingArchived] = useState(false);
   const [loadingMore, setLoadingMore] = useState<DaemonSessionArchiveState>();
   const [busySessionId, setBusySessionId] = useState<string>();
+  const [listErrors, setListErrors] = useState<
+    Partial<Record<DaemonSessionArchiveState, { cursor?: string }>>
+  >({});
+  const [sessionError, setSessionError] = useState<{
+    sessionId: string;
+    message: string;
+    retry: () => void;
+  }>();
   const [renameCandidate, setRenameCandidate] =
     useState<DaemonStandaloneSessionSummary>();
   const [renameValue, setRenameValue] = useState('');
@@ -163,14 +177,15 @@ export function StandaloneRecents({
             : activeSessions,
         );
         if (!preserveLoadedPages) setActiveCursor(activePage.nextCursor);
-      } catch (error) {
+        setListErrors((current) => ({ ...current, active: undefined }));
+      } catch {
         if (loadGenerationRef.current !== generation) return;
-        onError(error, t('sidebar.standaloneLoadFailed'));
+        setListErrors((current) => ({ ...current, active: {} }));
       } finally {
         if (loadGenerationRef.current === generation) setLoadingActive(false);
       }
     },
-    [onError, supported, t, workspace.client],
+    [supported, workspace.client],
   );
 
   const loadArchived = useCallback(
@@ -197,16 +212,17 @@ export function StandaloneRecents({
             : archivedSessions,
         );
         if (!preserveLoadedPages) setArchivedCursor(page.nextCursor);
-      } catch (error) {
+        setListErrors((current) => ({ ...current, archived: undefined }));
+      } catch {
         if (archivedLoadGenerationRef.current !== generation) return;
-        onError(error, t('sidebar.standaloneLoadFailed'));
+        setListErrors((current) => ({ ...current, archived: {} }));
       } finally {
         if (archivedLoadGenerationRef.current === generation) {
           setLoadingArchived(false);
         }
       }
     },
-    [onError, supported, t, workspace.client],
+    [supported, workspace.client],
   );
 
   const loadMore = useCallback(
@@ -238,7 +254,8 @@ export function StandaloneRecents({
           setArchived((current) => appendUnique(current, sessions));
           setArchivedCursor(page.nextCursor);
         }
-      } catch (error) {
+        setListErrors((current) => ({ ...current, [archiveState]: undefined }));
+      } catch {
         if (
           (archiveState === 'active'
             ? loadGenerationRef.current
@@ -246,7 +263,10 @@ export function StandaloneRecents({
         ) {
           return;
         }
-        onError(error, t('sidebar.standaloneLoadFailed'));
+        setListErrors((current) => ({
+          ...current,
+          [archiveState]: { cursor },
+        }));
       } finally {
         if (
           (archiveState === 'active'
@@ -257,8 +277,14 @@ export function StandaloneRecents({
         }
       }
     },
-    [loadingMore, onError, t, workspace.client],
+    [loadingMore, workspace.client],
   );
+
+  useEffect(() => {
+    setSessionError(undefined);
+    if (openingSessionIdRef.current !== currentSessionId)
+      ++openGenerationRef.current;
+  }, [currentSessionId]);
 
   useEffect(() => {
     void load(true);
@@ -285,14 +311,33 @@ export function StandaloneRecents({
       refresh = true,
     ): Promise<boolean> => {
       if (busySessionIdRef.current) return false;
+      const generation = openGenerationRef.current;
       busySessionIdRef.current = sessionId;
       setBusySessionId(sessionId);
+      setSessionError(undefined);
       try {
         await action();
         if (refresh) await refreshLists();
         return true;
       } catch (error) {
-        onError(error, t('sidebar.standaloneActionFailed'));
+        if (generation !== openGenerationRef.current) return false;
+        if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) {
+          setRenameCandidate((current) =>
+            current?.sessionId === sessionId ? undefined : current,
+          );
+          setDeleteCandidate((current) =>
+            current?.sessionId === sessionId ? undefined : current,
+          );
+          setSessionError({
+            sessionId,
+            message: t('session.writerBlocked'),
+            retry: () => {
+              void run(sessionId, action, refresh);
+            },
+          });
+        } else {
+          onError(error, t('sidebar.standaloneActionFailed'));
+        }
         return false;
       } finally {
         busySessionIdRef.current = undefined;
@@ -318,8 +363,9 @@ export function StandaloneRecents({
         const failure = result.errors.find(
           (entry) => entry.sessionId === session.sessionId,
         );
-        throw new Error(
-          failure?.message ?? t('sidebar.standaloneActionFailed'),
+        throw Object.assign(
+          new Error(failure?.message ?? t('sidebar.standaloneActionFailed')),
+          { body: failure },
         );
       });
     },
@@ -342,8 +388,9 @@ export function StandaloneRecents({
         const failure = result.errors.find(
           (entry) => entry.sessionId === session.sessionId,
         );
-        throw new Error(
-          failure?.message ?? t('sidebar.standaloneActionFailed'),
+        throw Object.assign(
+          new Error(failure?.message ?? t('sidebar.standaloneActionFailed')),
+          { body: failure },
         );
       });
     },
@@ -363,8 +410,9 @@ export function StandaloneRecents({
           const failure = result.errors.find(
             (entry) => entry.sessionId === session.sessionId,
           );
-          throw new Error(
-            failure?.message ?? t('sidebar.standaloneActionFailed'),
+          throw Object.assign(
+            new Error(failure?.message ?? t('sidebar.standaloneActionFailed')),
+            { body: failure },
           );
         }
         if (result.fileCleanupPending.includes(session.sessionId)) {
@@ -376,13 +424,27 @@ export function StandaloneRecents({
 
   const openSession = useCallback(
     async (sessionId: string) => {
+      const generation = ++openGenerationRef.current;
+      openingSessionIdRef.current = sessionId;
+      setSessionError(undefined);
       try {
         await onLoadSession(sessionId);
       } catch (error) {
-        onError(error, t('session.loadFailed'));
+        if (generation !== openGenerationRef.current) return;
+        setSessionError({
+          sessionId,
+          message: t(
+            isSessionWriterBlockedCode(getDaemonErrorCode(error))
+              ? 'session.writerBlocked'
+              : 'session.loadFailed',
+          ),
+          retry: () => {
+            void openSession(sessionId);
+          },
+        });
       }
     },
-    [onError, onLoadSession, t],
+    [onLoadSession, t],
   );
 
   if (!supported) return null;
@@ -408,6 +470,37 @@ export function StandaloneRecents({
           <span>{t('sidebar.recents')}</span>
           {loading && <span>{t('common.loading')}</span>}
         </div>
+        {sessionError && (
+          <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
+            <span>
+              {sessionError.sessionId.slice(0, 8)}: {sessionError.message}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!!busySessionId}
+              onClick={sessionError.retry}
+            >
+              {t('common.retry')}
+            </Button>
+          </div>
+        )}
+        {listErrors.active && (
+          <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
+            {t('sidebar.standaloneLoadFailed')}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loadingActive || loadingMore === 'active'}
+              onClick={() => {
+                const cursor = listErrors.active?.cursor;
+                void (cursor ? loadMore('active', cursor) : load(true));
+              }}
+            >
+              {t('common.retry')}
+            </Button>
+          </div>
+        )}
         <div className="flex flex-col gap-0.5">
           {active.map((session) => {
             const isCurrent = session.sessionId === currentSessionId;
@@ -446,7 +539,7 @@ export function StandaloneRecents({
             );
           })}
         </div>
-        {!loading && active.length === 0 && (
+        {!loading && !listErrors.active && active.length === 0 && (
           <div className="px-2 py-1 text-xs text-muted-foreground">
             {t('sidebar.noRecents')}
           </div>
@@ -472,11 +565,32 @@ export function StandaloneRecents({
           <ArchiveIcon size={13} />
           {t('sidebar.archivedTitle')}
         </button>
-        {archivedExpanded && archived.length === 0 && !loading && (
-          <div className="px-2 py-1 text-xs text-muted-foreground">
-            {t('sidebar.archivedEmpty')}
+        {archivedExpanded && listErrors.archived && (
+          <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
+            {t('sidebar.standaloneLoadFailed')}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loadingArchived || loadingMore === 'archived'}
+              onClick={() => {
+                const cursor = listErrors.archived?.cursor;
+                void (cursor
+                  ? loadMore('archived', cursor)
+                  : loadArchived(true));
+              }}
+            >
+              {t('common.retry')}
+            </Button>
           </div>
         )}
+        {archivedExpanded &&
+          !listErrors.archived &&
+          archived.length === 0 &&
+          !loading && (
+            <div className="px-2 py-1 text-xs text-muted-foreground">
+              {t('sidebar.archivedEmpty')}
+            </div>
+          )}
         {archivedExpanded &&
           archived.map((session) => (
             <StandaloneRow

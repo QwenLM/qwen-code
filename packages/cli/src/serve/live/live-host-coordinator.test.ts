@@ -114,6 +114,97 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it.each(['stop', 'deactivate', 'dispose', 'detach'] as const)(
+    'invalidates an admission pending before %s',
+    async (action) => {
+      let admit!: () => void;
+      const beforeStart = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            admit = resolve;
+          }),
+      );
+      const onStart = vi.fn();
+      const value = coordinator({ handlers: { beforeStart, onStart } });
+      const socket = connectReady(value);
+      const pending = value.requestStart('resume');
+      expect(beforeStart).toHaveBeenCalledOnce();
+      if (action === 'detach') socket.close();
+      else await value[action]();
+      admit();
+      await pending;
+      expect(onStart).not.toHaveBeenCalled();
+      expect(value.getStatus().callId).toBeUndefined();
+      expect(
+        socket
+          .messages()
+          .some((message) => message.type === 'host.capture_screen_context'),
+      ).toBe(false);
+    },
+  );
+
+  it.each(['toggle', 'new'] as const)(
+    'routes Host %s through admission and discards a superseded rejection',
+    async (action) => {
+      let reject!: (error: Error) => void;
+      const beforeStart = vi.fn(
+        () =>
+          new Promise<void>((_resolve, rejectPromise) => {
+            reject = rejectPromise;
+          }),
+      );
+      const onStart = vi.fn();
+      const value = coordinator({ handlers: { beforeStart, onStart } });
+      const socket = connectReady(value);
+      socket.receive({ type: 'host.action', action });
+      expect(beforeStart).toHaveBeenCalledOnce();
+      value.stop();
+      const messages = socket.sent.length;
+      reject(new Error('private locator details'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(onStart).not.toHaveBeenCalled();
+      expect(socket.sent).toHaveLength(messages);
+    },
+  );
+
+  it('cancels a delayed replacement when a later admission arrives', async () => {
+    let finishStop!: () => void;
+    let admitLatest!: () => void;
+    const onStart = vi.fn();
+    const beforeStart = vi
+      .fn<() => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const value = coordinator({
+      handlers: {
+        beforeStart,
+        onStart,
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    connectReady(value);
+    await value.requestStart('resume');
+    await value.requestStart('new');
+    beforeStart.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          admitLatest = resolve;
+        }),
+    );
+    const pending = value.requestStart('new');
+    finishStop();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onStart).toHaveBeenCalledOnce();
+    admitLatest();
+    await pending;
+    expect(onStart).toHaveBeenCalledTimes(2);
+    expect(onStart).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: 'new' }),
+    );
+  });
+
   it('routes one correlated Appshot only for the active Live session', async () => {
     const value = coordinator();
     const socket = connectReady(value);

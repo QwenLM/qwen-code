@@ -390,12 +390,8 @@ function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
     deps?.liveConversationWorkspace
       ? {
           ...deps,
-          conversationRuntimeOwnershipFactory:
-            deps.conversationRuntimeOwnershipFactory ??
-            (() => ({
-              acquire: vi.fn(async () => ({ reclaimed: false })),
-              release: vi.fn(async () => false),
-            })),
+          checkLegacyConversationOwner:
+            deps.checkLegacyConversationOwner ?? vi.fn(async () => undefined),
         }
       : deps,
   );
@@ -41740,8 +41736,17 @@ describe('Live Appshot server integration', () => {
       pushAudio: vi.fn(() => true),
       dispose: vi.fn(),
     } as unknown as LiveSessionCoordinator;
+    const stableBaseDir = path.join(tmp, 'stable');
+    const { writeLiveDiscoveryFile } = await import('./live/discovery.js');
+    await writeLiveDiscoveryFile(stableBaseDir, {
+      url: 'http://127.0.0.1:3210',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+      pid: process.pid,
+      instanceNonce: coordinator.daemonInstanceNonce,
+    });
     const app = createServeApp(baseOpts, undefined, {
       workspaceRegistry: registry,
+      liveDiscoveryStableBaseDir: stableBaseDir,
       liveConversationWorkspace: conversationWorkspace,
       liveCoordinator: coordinator,
       liveSessionCoordinator,
