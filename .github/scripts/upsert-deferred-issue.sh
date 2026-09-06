@@ -481,7 +481,15 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
     CC=" cc @${PR_AUTHOR}."
     ASSIGNABLE=1
   fi
-  BODY="${MARKER}"$'\n\n'"Verified review findings from ${CONTEXT} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up.${CC} Each rc: item links back to its original review comment. A maintainer or the PR author can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
+  # The ready-for-agent flow is pointed at the PER-ITEM issue, not at this
+  # tracking one. Once the assign call below lands, this issue carries an
+  # assignee, and the scheduled ready-for-agent scan filters `no:assignee`
+  # (AUTOFIX_ISSUE_EXCLUDES in qwen-autofix.yml) — so labelling it here would
+  # run without the scan that retries a label-event run cancelled by the
+  # per-issue concurrency group. A human-filed per-item issue is unassigned
+  # and keeps that backstop. Do not widen this back to "or apply the
+  # ready-for-agent flow" without re-checking that filter.
+  BODY="${MARKER}"$'\n\n'"Verified review findings from ${CONTEXT} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up.${CC} Each rc: item links back to its original review comment. A maintainer or the PR author can turn any item into its own issue/PR and apply the ready-for-agent flow to that issue — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
   gh_err_reset
   # ONE create call, never retried. POST /repos/{owner}/{repo}/issues is not
   # idempotent, and the failures that reach a retry are the ambiguous ones —

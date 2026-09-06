@@ -14325,6 +14325,17 @@ exit 1
     expect(created.calls).toContain(
       'https://github.com/o/r/pull/5#discussion_r7',
     );
+    // The ready-for-agent pointer attaches to the PER-ITEM issue, not to this
+    // tracking one: once the assign above lands this issue carries an assignee,
+    // and the scheduled ready-for-agent scan filters `no:assignee`
+    // (AUTOFIX_ISSUE_EXCLUDES in qwen-autofix.yml), so labelling it here would
+    // run without the scan that retries a label-event run cancelled by the
+    // per-issue concurrency group. Restoring the old ambiguous
+    // "(or apply the ready-for-agent flow)" parenthetical must red this.
+    expect(created.calls).toContain(
+      'apply the ready-for-agent flow to that issue',
+    );
+    expect(created.calls).not.toContain('(or apply the ready-for-agent flow)');
     // The fetch-failure warning is gated on the CALL status plus "both derived
     // strings came back empty" — never on a body FIELD's presence: this stub's
     // PR_JSON is a title/user object with no `.number`, so a `jq -e '.number'`
