@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import Anthropic from '@anthropic-ai/sdk';
 import {
   getRateLimitErrorDetails,
   getRateLimitRetryDelayMs,
@@ -82,6 +83,86 @@ describe('isRateLimitError — detection paths', () => {
     expect(isRateLimitError(null)).toBe(false);
     expect(isRateLimitError(undefined)).toBe(false);
     expect(isRateLimitError('500')).toBe(false);
+  });
+});
+
+describe('isRateLimitError — statusless provider errors', () => {
+  const throttleMessage = JSON.stringify({
+    message:
+      'Too many requests, please wait before trying again. You have sent too many requests.  Wait before trying again.',
+  });
+
+  it.each([
+    ['invalid_request_error', throttleMessage, true],
+    ['rate_limit_error', 'Rate limit reached', true],
+    ['overloaded_error', 'Overloaded', true],
+    ['invalid_request_error', 'Invalid messages parameter', false],
+    ['authentication_error', throttleMessage, false],
+    ['billing_error', throttleMessage, false],
+    ['invalid_request_error', 'Please try again with a valid model', false],
+    [
+      'invalid_request_error',
+      'Invalid prompt containing Too many requests',
+      false,
+    ],
+  ])(
+    'detects actual SDK SSE %s / %s as %s',
+    async (type, message, expected) => {
+      const response = new Response(
+        `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`,
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+      let error: unknown;
+      try {
+        const client = new Anthropic({
+          apiKey: 'test-key',
+          maxRetries: 0,
+          fetch: vi.fn().mockResolvedValue(response),
+        });
+        const stream = await client.messages.create({
+          model: 'test-model',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'test' }],
+          stream: true,
+        });
+        for await (const _chunk of stream) {
+          // This response contains only an error event.
+        }
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toHaveProperty('status', 429);
+      expect(isRateLimitError(error)).toBe(expected);
+    },
+  );
+
+  it.each(['rate_limit_error', 'overloaded_error'])(
+    'detects structured %s without a status',
+    (type) => {
+      expect(
+        isRateLimitError({
+          error: { type, message: 'Temporarily unavailable' },
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it('keeps explicit non-retryable numeric status authoritative', () => {
+    expect(
+      isRateLimitError({
+        status: 401,
+        error: { type: 'rate_limit_error', message: throttleMessage },
+      }),
+    ).toBe(false);
+  });
+
+  it('does not retry an unstructured message just because it mentions throttling', () => {
+    expect(
+      isRateLimitError(
+        new Error('Too many requests, please wait before trying again.'),
+      ),
+    ).toBe(false);
   });
 });
 

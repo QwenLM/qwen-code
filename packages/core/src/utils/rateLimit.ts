@@ -54,9 +54,39 @@ export function isRateLimitError(
   extraCodes?: readonly number[],
 ): boolean {
   const code = getErrorCode(error);
-  if (code === null) return false;
+  if (code === null) return isStatuslessThrottle(error);
   if (RATE_LIMIT_ERROR_CODES.has(code)) return true;
   if (extraCodes && extraCodes.includes(code)) return true;
+  return false;
+}
+
+function isStatuslessThrottle(error: unknown): boolean {
+  for (const payload of [error, ...getJsonPayloads(error)]) {
+    if (typeof payload !== 'object' || payload === null) continue;
+    const nested = (payload as { error?: unknown }).error;
+    const source = nested ?? payload;
+    if (typeof source !== 'object' || source === null) continue;
+    const { type, message } = source as { type?: unknown; message?: unknown };
+    if (type === 'rate_limit_error' || type === 'overloaded_error') return true;
+    if (type !== 'invalid_request_error' || typeof message !== 'string')
+      continue;
+
+    // Some gateways put a temporary throttle inside invalid_request_error,
+    // with another JSON-encoded message instead of a numeric status.
+    let detail: unknown = message;
+    try {
+      detail = (JSON.parse(message) as { message?: unknown })?.message;
+    } catch {
+      // The provider message can also be plain text.
+    }
+    if (
+      typeof detail === 'string' &&
+      /^too many requests\b/i.test(detail.trim()) &&
+      /\b(?:wait|try(?:ing)? again)\b/i.test(detail)
+    ) {
+      return true;
+    }
+  }
   return false;
 }
 

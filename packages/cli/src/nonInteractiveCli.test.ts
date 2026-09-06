@@ -590,6 +590,68 @@ describe('runNonInteractive', () => {
     }
   }
 
+  it.each([false, true])(
+    'discards failed-attempt tool requests on Retry (drain=%s)',
+    async (drain) => {
+      setupMetricsMock();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          if (cb)
+            cb(
+              'Monitor ready',
+              '<task-notification>ready</task-notification>',
+              {
+                monitorId: 'mon_retry',
+                toolUseId: 'tool_monitor',
+                status: 'running',
+                eventCount: 1,
+              },
+            );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'discarded-tool',
+                name: 'test-tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'retry-tools',
+              },
+            },
+            { type: LlmEventType.Retry },
+            { type: LlmEventType.Content, value: 'Recovered without tools' },
+            finished,
+          ]),
+        )
+        .mockImplementation(() => createStreamFromEvents([finished]));
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'unexpected tool execution' }],
+      });
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'retry-tools',
+      );
+      expect(exitCode).toBe(0);
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+        drain ? 2 : 1,
+      );
+    },
+  );
+
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
     mockLlmClient.sendMessageStream.mockImplementation(() =>

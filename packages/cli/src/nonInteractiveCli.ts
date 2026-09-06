@@ -2446,7 +2446,10 @@ export async function runNonInteractive(
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
-          if (event.type === LlmEventType.ModelFallback) {
+          if (
+            event.type === LlmEventType.Retry ||
+            event.type === LlmEventType.ModelFallback
+          ) {
             toolCallRequests.length = 0;
           }
           if (
@@ -2772,6 +2775,12 @@ export async function runNonInteractive(
                 adapter.processEvent(event);
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
+                }
+                if (
+                  event.type === LlmEventType.Retry ||
+                  event.type === LlmEventType.ModelFallback
+                ) {
+                  itemToolCallRequests.length = 0;
                 }
                 if (event.type === LlmEventType.LoopDetected) {
                   if (!loopDetected) {
