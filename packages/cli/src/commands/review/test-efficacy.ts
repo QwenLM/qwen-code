@@ -1312,9 +1312,15 @@ interface TestEfficacyArgs {
 // is cleaning: `core.hooksPath` (a `post-checkout` hook planted in the shared
 // common dir) and `core.fsmonitor` (a command git runs on checkout/status).
 // Disabling hooks does not cover filters and neutralising one checkout does not
-// cover the next — so every checkout in this file that rewrites files (the
-// restore and the revert alike) passes these, and none is hardened while a
-// sibling stays steerable.
+// cover the next — so the restore and the revert both pass these, and neither
+// is hardened while its sibling stays steerable.
+//
+// The two sites that pass it, NOT a census of this file's checkouts: the
+// `worktree add` that CREATES the probe tree materialises every file too, and
+// passes neither this nor a filter screen. It runs before any PR code has, so
+// what it would execute was planted by an EARLIER review, in the common dir
+// `discard` and `cleanup` never wipe — #10560, which wants a screen at run
+// entry rather than a fourth `-c` pair here.
 const CHECKOUT_INERT = [
   '-c',
   'core.hooksPath=/dev/null/no-hooks',
@@ -2282,7 +2288,9 @@ function probeRootIdentity(probeTree: string): string | null {
     // this identity never read — one plain write into the never-wiped common
     // dir retargets every restore that follows, and the guard reports success
     // over it. Read the same way as the gitfile, for the same reasons.
-    const adminHead = gitfileMarker(join(adminDirOf(probeTree, dotGit), 'HEAD'));
+    const adminHead = gitfileMarker(
+      join(adminDirOf(probeTree, dotGit), 'HEAD'),
+    );
     return [realpathSync(probeTree), st.dev, st.ino, marker, adminHead].join(
       '\u0000',
     );
@@ -3085,7 +3093,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               // two are the same) — and the control is the run that decides
               // whether ANY mutant verdict is trusted.
               worktree,
-                probeAnchor ?? undefined,
+              probeAnchor ?? undefined,
             );
             if (harnessValidated === null) {
               // The probe file could not be read, so no test was injected and
