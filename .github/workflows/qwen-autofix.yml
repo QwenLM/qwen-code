@@ -2647,8 +2647,9 @@ jobs:
             if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
               # Delay-window fallback: a review run parked BEFORE its job
               # starts (the 10-minute environment wait) has no review-pr
-              # check-run yet, but a push now would still cancel it via
-              # synchronize.
+              # check-run yet, but a push now would still supersede it
+              # (#10110: a parked or pre-threshold run yields to the push —
+              # its work is discarded exactly as a cancel did).
               # Full rationale → qwen-autofix.md#af-099
               REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
                 [ .workflow_runs[]?
@@ -3405,7 +3406,7 @@ jobs:
             # bot's own eval markers, and known non-actionable bot comments
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
-            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review-salvaged) '
             # Command-style comments (@qwen-code /takeover, /triage, /review …)
             # are INSTRUCTIONS to tooling, not review feedback on the diff:
             # counting them as actionable burns a full agent cycle to post a
@@ -4306,7 +4307,7 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review-salvaged) ") | not)
               | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
@@ -4394,7 +4395,7 @@ jobs:
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review-salvaged) ") | not)
                 | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
@@ -4840,7 +4841,7 @@ jobs:
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
-                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review-salvaged) ") | not)
                 | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | leading_critical) | not)
@@ -4964,7 +4965,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review-salvaged) ") | not)
               | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
@@ -6197,6 +6198,7 @@ jobs:
                 # generated checks complete after the conflict marker this
                 # same report posts — waking the very park it establishes.
                 # Full rationale → qwen-autofix.md#af-143
+                STALE_BASE_DEFERRED=false
                 if [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
                   # Convergence-break report guard (#10122): this job cannot
                   # see the scan's CONV_PARKED, and this round's inputs froze
@@ -6288,9 +6290,49 @@ jobs:
                     MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
                     if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
                       CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                      if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
-                        && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
-                        STALE_BASE_RETRY=true
+                      if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]]; then
+                        # Review-in-flight hold for the loop's OWN report-time
+                        # head move (#10110): same probe pair as the scan's
+                        # dispatch gate (#8888), fail-open on probe errors.
+                        # The probe sees LIFECYCLE runs only: a command run
+                        # executes against the base branch, so its review-pr
+                        # check never shows under this PR's rollup, and the
+                        # runs fallback is event-scoped exactly like the scan
+                        # gate's (af-099) — an in-flight command review does
+                        # NOT hold the refresh (af-155).
+                        # Full rationale → qwen-autofix.md#af-155
+                        ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
+                        REVIEW_LIVE_R="$(jq -r '
+                          [ .[]
+                            | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
+                          | length > 0
+                        ' <<< "${ROLLUP_R}" 2> /dev/null || echo '')"
+                        if [[ "${REVIEW_LIVE_R}" != 'true' ]]; then
+                          RWID_R="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
+                          LIVE_HEAD_R="$(jq -r '.headRefOid // ""' <<< "$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid 2> /dev/null || echo '{}')")"
+                          if [[ -n "${RWID_R}" ]]; then
+                            REVIEW_LIVE_R="$(gh api "repos/${REPO}/actions/workflows/${RWID_R}/runs?per_page=100" 2> /dev/null | jq -r --arg pr "${PR}" --arg head "${LIVE_HEAD_R}" '
+                              [ .workflow_runs[]?
+                                | select((.event // "") == "pull_request_target")
+                                | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
+                                | select((($head != "") and ((.head_sha // "") == $head)) or any(.pull_requests[]?; (.number | tostring) == $pr)) ]
+                              | length > 0
+                            ' 2> /dev/null || echo '')"
+                          fi
+                        fi
+                        # The deferral promises that the NEXT scan's round
+                        # performs the refresh, so it is honest only while a
+                        # next round exists: at the cap (MARK_ROUND ==
+                        # MAX_ROUNDS) the scan's round gate parks the PR
+                        # before any report step could run, so the hold
+                        # yields to the refresh there and the human inherits
+                        # a PR current with main — the pre-#10110 shape
+                        # (R32-1).
+                        if [[ "${REVIEW_LIVE_R}" == 'true' && "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                          STALE_BASE_DEFERRED=true
+                        elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                          STALE_BASE_RETRY=true
+                        fi
                       fi
                     fi
                   fi
@@ -6303,6 +6345,13 @@ jobs:
                   MARK_TS='9999-12-31T23:59:59Z'
                   HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
                   HEADLINE_ZH="🤖 AutoFix 更新了一个过期的 base —— 修复未通过验证，但本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，因此已通过 update-branch 合入当前 main，并将在下次扫描时重试。过期的 base（main 已改动的依赖或符号）可能让构建失败而并非修复本身的错；若 base 更新后仍然失败，将移交人工处理。"
+                elif [[ "${STALE_BASE_DEFERRED}" == 'true' ]]; then
+                  # Same sentinel semantics as the retry branch: feedback stays
+                  # live, the next round re-runs, and ITS report step performs
+                  # the base refresh once the review has landed.
+                  MARK_TS='9999-12-31T23:59:59Z'
+                  HEADLINE="🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind \`${DEFAULT_BRANCH:-main}\`, but a lifecycle review of this PR is still in flight, and merging main now would cancel it or invalidate its posting (#10110). Command-triggered reviews are invisible to this probe (af-155). The refresh and this item's retry move to the next scan."
+                  HEADLINE_ZH="🤖 AutoFix 暂缓了一次过期 base 刷新 —— 修复未通过验证且本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，但该 PR 上仍有一轮生命周期评审在运行，现在合入 main 会取消该评审或使其发布失效（#10110）。命令触发的评审对本探测不可见（af-155）。base 刷新与此项的重试推迟到下次扫描。"
                 else
                   # Say what actually happens next. The old "A human should
                   # take over this PR" read as a full release, but the loop
@@ -6359,7 +6408,7 @@ jobs:
 
             # Consecutive-failure circuit breaker, distinct from the round cap.
             # Full rationale → qwen-autofix.md#af-069
-            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && [[ "${STALE_BASE_RETRY:-false}" != 'true' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && [[ "${STALE_BASE_RETRY:-false}" != 'true' ]] && [[ "${STALE_BASE_DEFERRED:-false}" != 'true' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
               CONSEC_FAIL=1
               if [[ -f "${WORKDIR}/ic.json" ]]; then
                 COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
@@ -6381,7 +6430,7 @@ jobs:
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
-                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* ]]; then
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* || "${H}" == *"deferred a stale-base refresh"* ]]; then
                   CONSEC_FAIL=1
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))

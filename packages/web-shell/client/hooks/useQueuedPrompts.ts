@@ -1189,9 +1189,12 @@ export function useQueuedPrompts({
       store.appendLocalUserMessage(
         prompt.text,
         toStoreImages(prompt.images),
-        prompt.inputAnnotations?.length
-          ? { inputAnnotations: prompt.inputAnnotations }
-          : undefined,
+        {
+          promptId,
+          ...(prompt.inputAnnotations?.length
+            ? { inputAnnotations: prompt.inputAnnotations }
+            : {}),
+        },
         toStoreFiles(prompt.files),
       );
     },
@@ -1298,7 +1301,7 @@ export function useQueuedPrompts({
             )
           ) {
             displayedServerPromptIdsRef.current.add(promptId);
-            store.appendLocalUserMessage(eventText, undefined, undefined);
+            store.appendLocalUserMessage(eventText, undefined, { promptId });
           }
           if (!prompt?.serverPromptId) {
             pendingStartedByPromptIdRef.current.set(promptId, eventText);

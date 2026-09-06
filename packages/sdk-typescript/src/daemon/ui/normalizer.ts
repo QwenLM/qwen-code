@@ -948,7 +948,8 @@ function normalizeSessionUpdate(
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
-        meta?.['shellProgress'] !== undefined
+        (meta?.['shellProgress'] !== undefined ||
+          meta?.subagentProgress === true)
       ) {
         return [];
       }
@@ -990,6 +991,7 @@ function normalizeSessionUpdate(
     case 'plan':
       return [normalizePlanUpdate(update, base)];
     case 'current_mode_update':
+    case 'session_info_update':
     case 'usage_update':
       return [];
     default:
