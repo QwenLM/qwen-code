@@ -900,6 +900,24 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-2')?.status).toBe('running');
     });
 
+    it('does not count idle resident runtimes as claimed slots', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      for (const agentId of ['resident-1', 'resident-2', 'resident-3']) {
+        registry.register(makeRegistration(agentId));
+        registry.complete(agentId, 'done');
+        registry.registerResidentAgent(agentId, {
+          continue: vi.fn(() => 'continued' as const),
+          dispose: vi.fn(),
+        });
+      }
+
+      expect(registry.canStartBackgroundAgent()).toBe(true);
+      expect(() => registry.register(makeRegistration('next'))).not.toThrow();
+    });
+
     it('queues waiters until a background slot is released', async () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,
