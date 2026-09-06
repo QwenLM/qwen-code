@@ -240,7 +240,6 @@ export type BackgroundShellStatusChangeCallback = (entry?: ShellTask) => void;
 
 export class BackgroundShellRegistry {
   private readonly entries = new Map<string, ShellTask>();
-  private readonly notificationSuppressed = new WeakSet<ShellTask>();
 
   private registerCallback: BackgroundShellRegisterCallback | undefined;
   private notificationCallback: BackgroundShellNotificationCallback | undefined;
@@ -260,15 +259,14 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
-    // Best-effort replay for a transient unbind on this registry instance.
-    // Config replacement owns a different registry; the terminal cap applies.
+    // Best-effort replay for a transient unbind of THIS instance. No in-tree
+    // caller rebinds a registry that already holds entries — Session and the
+    // TUI hook each bind once against their own Config's fresh registry — so
+    // this serves out-of-tree consumers of the exported class. The terminal
+    // retention cap bounds what can be replayed.
     if (!cb) return;
     for (const entry of this.entries.values()) {
-      if (
-        entry.status !== 'running' &&
-        !entry.notified &&
-        !this.notificationSuppressed.has(entry)
-      ) {
+      if (entry.status !== 'running' && !entry.notified) {
         debugLogger.debug(
           `Redelivering retained terminal notification for shell ${entry.shellId}`,
         );
@@ -310,7 +308,6 @@ export class BackgroundShellRegistry {
     entry.outputFile = registration.outputPath;
     entry.outputOffset = 0;
     entry.notified = false;
-    this.notificationSuppressed.delete(entry);
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
@@ -624,7 +621,10 @@ export class BackgroundShellRegistry {
     for (const entry of Array.from(this.entries.values())) {
       if (entry.status !== 'running') continue;
       this.settleAsCancelled(entry, endTime);
-      this.notificationSuppressed.add(entry);
+      // Suppressed, not deferred: marking the entry notified is what keeps a
+      // later rebind from replaying a shutdown cancellation, and matches the
+      // sibling registries' `abortAll({ notify: false })` handling.
+      entry.notified = true;
       lastCancelled = entry;
     }
     if (!lastCancelled) return;
