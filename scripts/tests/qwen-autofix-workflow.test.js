@@ -21565,16 +21565,26 @@ exit 0
     }
     expect(writerModelCap).toBe(readerModelCap);
     expect(writerVersionCap).toBe(readerVersionCap);
-    const maxSentinelBytes = writerModelCap + writerVersionCap + 2;
+    // The windows bound BYTES while the caps count UTF-16 CODE UNITS, and
+    // writeFileSync encodes UTF-8: a BMP code unit occupies up to 3 bytes
+    // (surrogate pairs fold to 2 bytes per unit), so the largest sentinel
+    // the writer can emit is 3*(model+version)+2 bytes, not model+version+2
+    // — a one-byte-per-char figure would be ~3x too loose and let a window
+    // shrink below what line 1 actually needs. Bound each window against
+    // the line IT reads: the model read needs line 1 plus its LF, the
+    // version read needs the whole file for sed -n '2p' to see line 2.
+    // windows comes back in script order (model read first); the literal
+    // per-line pins in the footer test freeze that order.
     const windows = [
       ...pushAndReportScript.matchAll(
         /head -c (\d+) "\$\{WORKDIR\}\/agent-model"/g,
       ),
     ].map((m) => Number(m[1]));
     expect(windows).toHaveLength(2);
-    for (const window of windows) {
-      expect(window).toBeGreaterThanOrEqual(maxSentinelBytes);
-    }
+    const maxModelBytes = 3 * writerModelCap + 1;
+    const maxSentinelBytes = maxModelBytes + 3 * writerVersionCap + 1;
+    expect(windows[0]).toBeGreaterThanOrEqual(maxModelBytes);
+    expect(windows[1]).toBeGreaterThanOrEqual(maxSentinelBytes);
   });
 
   it('records the model even when the run dies before a verdict', () => {
