@@ -53,12 +53,13 @@
 - `workspace-lock.test.ts`: two `tsx` child processes allocate N `queueSequence` each; all 2N unique, each process strictly increasing.
 - `thread-actions.test.ts`: fixtures gain the new fields; message `sequence` monotonic; `queueSequence` increasing across two threads; outcomes persisted on the message; `queue_full` computed from disk.
 
-## 4. Dependencies on the runtime PRs — record, do not copy
+## 4. Runtime PRs are sub-PRs of the stack — merge, do not copy
 
 - #11200 (cumulative `USAGE_METADATA.round`): `usageByRound` is keyed on it. Without it the key collides across a `finishingInputs` segment.
 - #11202 (`deliveryId` on structured external input): step 5's `consumedMessageIds`.
 - #11204 (typed resident continuation): step 6's dispatcher branch.
-State these as "depends on" in #11206's description. The mesh branch must not contain their diffs; if step 5 cannot proceed before they merge, say so rather than duplicating them.
+
+All three are retargeted to base `codex/multi-agent-mesh-foundation` and merge into it in the order #11200 → #11204 → #11202 (the last conflicts with #11204 in the resident-continuation tests). Steps 2 and 3 do not need them; step 5 must not open until they are on the mesh branch. Never copy their diffs into a step branch; a sub-PR based on the mesh branch gets no unit-test or lint CI, so read #11206's run after each merge.
 
 ## 5. Test harness on a build-less box (observed)
 
