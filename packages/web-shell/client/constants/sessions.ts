@@ -29,7 +29,7 @@ export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
  *
  * Intentionally equal to the provider's `DEFAULT_MAX_BLOCKS`; the equality is
  * enforced by `sessions.test.ts` (importing the constant here instead of the
- * provider would pull the webui barrel into every importer's module graph and
+ * provider would pull the browser UI barrel into every importer's module graph and
  * break the enumerative `daemon-react-sdk` mocks in component tests). Bounding
  * the window keeps very long sessions responsive: the per-dispatch reducer
  * cost (a full block-array copy) and the full-list message normalization turn

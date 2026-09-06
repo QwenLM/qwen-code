@@ -34,6 +34,8 @@ import {
   DAEMON_TRACESTATE_META_KEY,
   INVOCATION_CONTEXT_META_KEY,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   SESSION_PR_LIST_LIMIT,
@@ -52,6 +54,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -1910,9 +1913,9 @@ export function extractErrorCode(err: unknown): string | undefined {
  * turn content except the idle bookkeeping subtypes skipped via
  * `isIdleBookkeepingSessionUpdate`: the user-shell output stream (its
  * history goes to the model conversation, not the persisted transcript
- * the refresh pages) and the latest-wins state snapshots
- * (`available_commands_update`, `current_mode_update`) that settings and
- * approval-mode refreshes fan out to idle sessions.
+ * the refresh pages) and latest-wins state metadata
+ * (`available_commands_update`, `current_mode_update`, and
+ * `session_info_update`).
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1962,7 +1965,8 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
  * the user-shell output stream (injected into the model conversation
  * history instead of the transcript the refresh pages) and the
  * latest-wins state snapshots (`available_commands_update` from a
- * skills/settings refresh, the legacy dual-emit `current_mode_update`).
+ * skills/settings refresh, the legacy dual-emit `current_mode_update`, and
+ * title metadata in `session_info_update`).
  */
 function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (event.type !== 'session_update') return false;
@@ -1975,7 +1979,8 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const subtype = updateRecord['sessionUpdate'];
   if (
     subtype === 'available_commands_update' ||
-    subtype === 'current_mode_update'
+    subtype === 'current_mode_update' ||
+    subtype === 'session_info_update'
   ) {
     return true;
   }
@@ -2866,6 +2871,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.childEnvOverrides
       ? Object.freeze({ ...opts.childEnvOverrides })
       : Object.freeze({});
+  // The mandatory-lease attestation is conjunctive: the frozen overrides must
+  // offer the exact Conversations marker AND the configured factory must be
+  // attested to forward overrides into the spawned child's environment. A
+  // marker-shaped override map paired with a factory that ignores its second
+  // argument does not attest, because the child would run unleased while the
+  // daemon believes the transcripts are fenced.
+  const mandatoryLeaseAttested =
+    childEnvOverrides[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+      PRIVATE_CONVERSATIONS_RUNTIME_ENABLE &&
+    channelFactoryForwardsChildEnv(channelFactory);
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
   if (!Number.isInteger(initTimeoutMs) || initTimeoutMs <= 0) {
     throw new TypeError(
@@ -6168,6 +6183,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return idle();
     }
+    const requestRuntimeEpoch = runtimeEpoch;
     return await withWorkspaceStatusRead(info, async () => {
       let response = await withTimeout(
         Promise.race([
@@ -6182,13 +6198,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       if (
         isRecord(response) &&
-        (method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
+        (method === SERVE_STATUS_EXT_METHODS.workspaceSkills ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
           method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources)
       ) {
         response = {
           ...response,
-          runtimeEpoch,
+          runtimeEpoch: requestRuntimeEpoch,
           ...(method === SERVE_STATUS_EXT_METHODS.workspaceMcp
             ? { source: 'live' }
             : {}),
@@ -9140,6 +9157,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     { dispatched: boolean }
   >();
   const bridgeApi: AcpSessionBridge = {
+    // Derived once from the frozen overrides and the configured channel
+    // factory; immutable for the bridge's lifetime.
+    mandatoryLeaseAttested,
     setLiveScreenContextCaptureHandler(handler) {
       liveScreenContextCaptureHandler = handler;
     },

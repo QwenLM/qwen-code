@@ -9,6 +9,7 @@ import { Text } from 'ink';
 import { act, useEffect, useRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import {
+  AgentStatus,
   ApprovalMode,
   type AgentInteractive,
   type Config,
@@ -32,6 +33,29 @@ function makeConfig(): Config {
     onArenaManagerChange: vi.fn(),
     getArenaManager: vi.fn(() => null),
   } as unknown as Config;
+}
+
+/**
+ * Minimal AgentInteractive stub. The provider mounts a per-agent queue
+ * flusher that derives streaming state via useAgentStreamingState, so the
+ * stub must cover that surface even in storage tests. Status stays
+ * undefined so the flusher never delivers here (delivery is covered by
+ * AgentComposer.queuedMessages.test.tsx).
+ */
+function makeInteractiveAgent(): AgentInteractive {
+  return {
+    getCore: () => ({
+      runtimeContext: {
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        setApprovalMode: vi.fn(),
+      },
+    }),
+    getStatus: () => undefined,
+    getPendingApprovals: () => new Map(),
+    getLastPromptTokenCount: () => 0,
+    getEventEmitter: () => undefined,
+    enqueueMessage: vi.fn(),
+  } as unknown as AgentInteractive;
 }
 
 describe('AgentViewProvider in-process bridges', () => {
@@ -59,11 +83,7 @@ describe('AgentViewProvider in-process bridges', () => {
 
   it('clears embedded shell focus when switching agent tabs', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     function Probe() {
       const state = useAgentViewState();
@@ -113,11 +133,7 @@ describe('AgentViewProvider in-process bridges', () => {
     // state change lands in its own commit (the production focus seed is
     // a keypress in a commit well after the tab switch).
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -174,11 +190,7 @@ describe('AgentViewProvider in-process bridges', () => {
 describe('AgentViewProvider per-agent message queues', () => {
   it('stores queues per agent and clears them when emptied or unregistered', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -237,11 +249,7 @@ describe('AgentViewProvider per-agent message queues', () => {
 
   it('appends queued messages without losing same-batch updates', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -287,11 +295,7 @@ describe('AgentViewProvider per-agent message queues', () => {
     // manager detaching while the user submits), the append must not
     // resurrect the queue entry the delete just removed.
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -334,11 +338,7 @@ describe('AgentViewProvider per-agent message queues', () => {
 
   it('clears all queued messages when all agents unregister', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -382,5 +382,102 @@ describe('AgentViewProvider per-agent message queues', () => {
     });
 
     expect(lastFrame()).toContain('a:[]');
+  });
+});
+
+describe('AgentQueueFlusher FAILED delivery gate (#10315 review)', () => {
+  /**
+   * Stub of an agent that has reached FAILED. `error` set models a fatal
+   * failure (chat never created / run loop threw — core sets `error`, not
+   * `lastRoundError`); `error` undefined models a recoverable round failure.
+   */
+  function makeFailedAgent(error: string | undefined): AgentInteractive {
+    return {
+      getCore: () => ({
+        runtimeContext: {
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+          setApprovalMode: vi.fn(),
+        },
+      }),
+      getStatus: () => AgentStatus.FAILED,
+      getError: () => error,
+      getLastRoundError: () => (error === undefined ? 'round boom' : undefined),
+      getPendingApprovals: () => new Map(),
+      getLastPromptTokenCount: () => 0,
+      getEventEmitter: () => undefined,
+      enqueueMessage: vi.fn(),
+    } as unknown as AgentInteractive;
+  }
+
+  function renderQueuedFailedAgent() {
+    const config = makeConfig();
+    const probeActions: {
+      registerAgent?: (
+        agentId: string,
+        a: AgentInteractive,
+        modelId: string,
+        color: string,
+        modelName?: string,
+      ) => void;
+      setAgentMessageQueue?: (agentId: string, queue: string[]) => void;
+    } = {};
+
+    function Probe() {
+      const state = useAgentViewState();
+      const actions = useAgentViewActions();
+      probeActions.registerAgent = actions.registerAgent;
+      probeActions.setAgentMessageQueue = actions.setAgentMessageQueue;
+      const queue = state.agentMessageQueues.get('agent-a') ?? [];
+      return <Text>a:[{queue.join(',')}]</Text>;
+    }
+
+    const app = render(
+      <AgentViewProvider config={config}>
+        <Probe />
+      </AgentViewProvider>,
+    );
+    return { app, probeActions };
+  }
+
+  const seedAndQueue = async (
+    probeActions: ReturnType<typeof renderQueuedFailedAgent>['probeActions'],
+    agent: AgentInteractive,
+  ) => {
+    await act(async () => {
+      probeActions.registerAgent?.('agent-a', agent, 'm', 'c', undefined);
+    });
+    await act(async () => {
+      probeActions.setAgentMessageQueue?.('agent-a', ['queued follow-up']);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  it('drops the queue without delivering when a chat-less FAILED agent (fatal error) settles', async () => {
+    // Chat-creation failure: enqueueMessage would restart a loop whose
+    // runOneRound early-returns on `!this.chat`, silently consuming the
+    // message and settling FAILED → IDLE (erasing the failure state).
+    const agent = makeFailedAgent('Failed to create chat session');
+    const { app, probeActions } = renderQueuedFailedAgent();
+    await seedAndQueue(probeActions, agent);
+
+    expect(agent.enqueueMessage).not.toHaveBeenCalled();
+    expect(app.lastFrame()).toContain('a:[]');
+  });
+
+  it('drops the queue without delivering when a FAILED agent whose round merely errored settles', async () => {
+    // Recoverable flavor (lastRoundError set, error undefined). Tempting to
+    // deliver — core's unguarded enqueueMessage does restart the run loop —
+    // but at the FAILED settle the backend's one-shot watcher already ran
+    // releaseAgentResources (monitor routing gone) and fired the exit
+    // callback, and ArenaManager discards FAILED → RUNNING, so the revived
+    // round would run outside every record (core InProcessBackend.ts /
+    // ArenaManager.ts).
+    const agent = makeFailedAgent(undefined);
+    const { app, probeActions } = renderQueuedFailedAgent();
+    await seedAndQueue(probeActions, agent);
+
+    expect(agent.enqueueMessage).not.toHaveBeenCalled();
+    expect(app.lastFrame()).toContain('a:[]');
   });
 });

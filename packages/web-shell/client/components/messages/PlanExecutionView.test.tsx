@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionAgentTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import {
   getActiveAgents,
   getAttentionAgentTool,
@@ -84,6 +85,31 @@ function task(
 }
 
 describe('PlanExecutionView', () => {
+  it('disables plan selection in document mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TranscriptRenderModeProvider value="document">
+            <PlanExecutionView todos={todos} tools={[]} tasks={[]} />
+          </TranscriptRenderModeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const planNodes = container.querySelectorAll<HTMLButtonElement>(
+      '[data-plan-node-id]',
+    );
+    expect(planNodes).toHaveLength(todos.length);
+    expect([...planNodes].every((button) => button.disabled)).toBe(true);
+    expect(container.querySelector('[data-plan-step-details]')).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('layers dependent todos in topological order', () => {
     expect(
       layerPlanTodos(todos).map((layer) => layer.map((todo) => todo.id)),

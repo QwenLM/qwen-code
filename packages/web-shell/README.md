@@ -181,9 +181,12 @@ export function App() {
 审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
 投影：
 
+> 只渲染 transcript 的宿主请从 `@qwen-code/web-shell/transcript` 子路径导入。包根会连带
+> `App`、daemon providers 和编辑器/终端相关代码，不要依赖 tree shaking 把它们摇掉。
+
 ```tsx
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import { WebShellTranscript } from '@qwen-code/web-shell';
+import { WebShellTranscript } from '@qwen-code/web-shell/transcript';
 
 const records = jsonl
   .split(/\r?\n/)
