@@ -729,6 +729,16 @@ describe('PlanExecutionView', () => {
     // rule selects on; dropping it keeps the word but silently loses the
     // attention tone the stylesheet derives from this state.
     expect(buildNode?.getAttribute('data-attention')).toBe('true');
+    // Colour alone cannot carry attention: on a paused node the
+    // data-attention rule re-declares the token paused already wears, so
+    // without a shape channel the two paint pixel-identical. The visible
+    // sigil lives in the meta row beside the status glyph; the words stay
+    // in the sr-only span above.
+    const attentionMark = buildNode?.querySelector(
+      `.${styles.nodeMeta} .${styles.nodeAttentionMark}`,
+    );
+    expect(attentionMark?.textContent).toBe('!');
+    expect(attentionMark?.getAttribute('aria-hidden')).toBe('true');
 
     act(() => root.unmount());
     container.remove();
@@ -1527,6 +1537,107 @@ describe('PlanExecutionView', () => {
     container.remove();
   });
 
+  it('states the dependency on the node when no panel can state it', () => {
+    // The drawn edge is aria-hidden and the cockpit passes
+    // showStepDetails={false}, so there the chip row is the dependency's
+    // only statement anywhere — restoring the bare !drawsDependencyEdges
+    // gate turns this red.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            showStepDetails={false}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[data-plan-step-details]')).toBeNull();
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('Depends on');
+    expect(buildNode?.textContent).toContain('Research');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('counts nested subagents in the node-face agent tally', () => {
+    // The chip counts agents, like the execution rows beneath it and the
+    // inspector's Subagents list — not just root executions. Reverting the
+    // count to executions.length reads "1 agent" here and goes red.
+    const rootTool: ACPToolCall = {
+      ...agentTool('build'),
+      subTools: [
+        {
+          callId: 'call-nested',
+          toolName: 'Agent',
+          title: 'Nested agent',
+          status: 'in_progress',
+        },
+      ],
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={todos} tools={[rootTool]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('2 agents');
+    // The same node renders both agent rows the tally names.
+    expect(buildNode?.textContent).toContain('Agent build');
+    expect(buildNode?.textContent).toContain('Nested agent');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('renders no agent tally for a non-agent tool tagged to the step', () => {
+    // Declaring todo_id does not make a tool an agent: the tally hides
+    // rather than printing "0 agents" beside the tool's row.
+    const editTool: ACPToolCall = {
+      callId: 'call-edit',
+      toolName: 'edit',
+      title: 'Edit package.json',
+      status: 'completed',
+      args: { todo_id: 'verify' },
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={todos} tools={[editTool]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+
+    const verifyNode = container
+      .querySelector('[data-plan-node-id="verify"]')
+      ?.closest('article');
+    expect(verifyNode?.textContent).toContain('Edit package.json');
+    expect(verifyNode?.textContent).not.toContain('agent');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('skips SVG edge materialization for an excessively dense plan', () => {
     const denseTodos = Array.from(
       { length: 33 },
@@ -1544,10 +1655,11 @@ describe('PlanExecutionView', () => {
             }),
       }),
     ).map((todo) =>
-      // blockedBy is model-authored and can repeat an id; the chip row must
-      // dedup it like the topology builder does.
+      // blockedBy is model-authored and can repeat an id — or name the todo
+      // itself; the chip row must dedup repeats and drop self-references
+      // like the topology builder does.
       todo.id === 'dense-1'
-        ? { ...todo, blockedBy: ['dense-0', 'dense-0'] }
+        ? { ...todo, blockedBy: ['dense-0', 'dense-0', 'dense-1'] }
         : todo,
     );
     const container = document.createElement('div');
@@ -1579,6 +1691,9 @@ describe('PlanExecutionView', () => {
     expect(denseNode?.textContent).toContain('Dense 0');
     // The repeated id renders one chip, not two.
     expect((denseNode?.textContent ?? '').split('Dense 0').length - 1).toBe(1);
+    // A self-reference never renders the step as its own blocker either: the
+    // node's own title is the only 'Dense 1' in its text.
+    expect((denseNode?.textContent ?? '').split('Dense 1').length - 1).toBe(1);
     // The truncation rule targets `.dependencyTitle`; pin the class wiring
     // so a dropped className cannot re-clip titles while text assertions
     // stay green.

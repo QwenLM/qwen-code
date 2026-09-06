@@ -121,6 +121,7 @@ export function SessionWorkflowInspector({
       <li key={todoId}>
         <button
           className={styles.dependencyLink}
+          data-plan-interactive
           data-testid={`workflow-dependency-${todoId}`}
           onClick={() => onSelectedTodoIdChange(todoId)}
           title={target?.content}
@@ -406,6 +407,7 @@ export function SessionWorkflowInspector({
             projection.activity.length > ACTIVITY_PREVIEW_COUNT && (
               <button
                 className={styles.showAllActivity}
+                data-plan-interactive
                 data-testid="workflow-activity-show-all"
                 onClick={() => setShowAllActivity(true)}
                 type="button"

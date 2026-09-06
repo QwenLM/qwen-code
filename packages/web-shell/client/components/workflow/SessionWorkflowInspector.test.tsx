@@ -188,6 +188,10 @@ describe('SessionWorkflowInspector', () => {
     expect(upstream).toBeTruthy();
     expect(upstream?.textContent).toContain('1');
     expect(upstream?.textContent).toContain('Prepare inputs');
+    // The host keyboard handlers isolate plan controls through this marker
+    // (TasksStatusMessage/ToolApproval early-return on it), so these
+    // controls must carry it like the graph's own buttons do.
+    expect(upstream?.hasAttribute('data-plan-interactive')).toBe(true);
 
     onSelectedTodoIdChange.mockClear();
     act(() => upstream?.click());
@@ -217,6 +221,7 @@ describe('SessionWorkflowInspector', () => {
     );
     expect(downstream?.textContent).toContain('2');
     expect(downstream?.textContent).toContain('Ship result');
+    expect(downstream?.hasAttribute('data-plan-interactive')).toBe(true);
     onSelectedTodoIdChange.mockClear();
     act(() => downstream?.click());
     expect(onSelectedTodoIdChange).toHaveBeenCalledWith('ship');
@@ -368,6 +373,8 @@ describe('SessionWorkflowInspector', () => {
     // an invitation rather than a silent truncation.
     expect(beforeExpand).toBe(6);
     expect(showAll?.textContent).toContain('8');
+    // Same host-keyboard isolation as the dependency links above.
+    expect(showAll?.hasAttribute('data-plan-interactive')).toBe(true);
 
     act(() => showAll?.click());
     expect(activityList().length).toBe(8);

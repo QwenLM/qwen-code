@@ -1258,6 +1258,24 @@ export function PlanExecutionView({
                     total + (taskForTool(tool, taskIndex)?.runtimeMs ?? 0),
                   0,
                 );
+                // Agents, not bare executions: a nested subagent counts too,
+                // matching the rows this node renders and the inspector's
+                // Subagents list for the same step. The runtime above stays
+                // on roots, so nested time is not summed twice.
+                const agentCount = executions.reduce(
+                  (count, tool) =>
+                    count +
+                    (isSubAgentToolCall(tool) ? 1 : 0) +
+                    nestedAgentToolsForTool(tool).length,
+                  0,
+                );
+                // blockedBy is model-authored and can repeat an id — or name
+                // the todo itself. Dedup and drop self-references like the
+                // topology builder; ghost ids stay, because above the edge
+                // budget this row is the dependency's only statement.
+                const faceDependencies = [
+                  ...new Set(todo.blockedBy ?? []),
+                ].filter((id) => id !== todo.id);
                 return (
                   <article
                     className={styles.node}
@@ -1351,10 +1369,22 @@ export function PlanExecutionView({
                         <i aria-hidden="true" className={styles.nodeGlyph}>
                           {PLAN_STATUS_GLYPH[state.status]}
                         </i>
-                        {executions.length > 0 && (
+                        {/* Attention's shape channel: on a paused node the
+                            data-attention rule re-declares the token paused
+                            already wears, so colour alone cannot tell it
+                            apart from healthy. */}
+                        {state.attention && (
+                          <i
+                            aria-hidden="true"
+                            className={styles.nodeAttentionMark}
+                          >
+                            !
+                          </i>
+                        )}
+                        {agentCount > 0 && (
                           <span>
                             {t('planExecution.agentCount', {
-                              count: executions.length,
+                              count: agentCount,
                             })}
                           </span>
                         )}
@@ -1362,19 +1392,20 @@ export function PlanExecutionView({
                           <span>{formatRuntime(nodeRuntimeMs)}</span>
                         )}
                       </div>
-                      {/* Only when no edge states it. Above
-                          MAX_RENDERED_PLAN_EDGES the graph draws no edges at
-                          all, and then this row is the dependency's only
-                          statement. */}
-                      {!drawsDependencyEdges &&
-                        (todo.blockedBy?.length ?? 0) > 0 && (
+                      {/* Rendered whenever nothing else states the
+                          dependency: drawn edges are aria-hidden, so they
+                          state it only visually. Above
+                          MAX_RENDERED_PLAN_EDGES no edges draw at all, and
+                          with the details panel off (the cockpit) or
+                          selection disabled (document mode) the panel never
+                          states it either. */}
+                      {(!drawsDependencyEdges ||
+                        !showStepDetails ||
+                        documentMode) &&
+                        faceDependencies.length > 0 && (
                           <div className={styles.dependencies}>
                             <span>{t('planExecution.dependsOn')}</span>
-                            {/* blockedBy is model-authored and can repeat an
-                                id; dedup like the topology builder so a
-                                repeated reference cannot emit a duplicate
-                                key or a second chip. */}
-                            {[...new Set(todo.blockedBy ?? [])].map((id) => (
+                            {faceDependencies.map((id) => (
                               <span className={styles.dependencyChip} key={id}>
                                 <span>
                                   {(stepNumberByTodo.get(id) ?? 0) || '?'}

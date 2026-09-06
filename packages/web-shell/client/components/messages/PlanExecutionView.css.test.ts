@@ -82,6 +82,21 @@ describe('PlanExecutionView stylesheet', () => {
     expect(clipped).toEqual([]);
   });
 
+  // The selected rule's `border-color` shorthand expands to
+  // border-left-color and outranks the base rule's
+  // `border-left: 3px solid var(--node-rule)` longhand (0,2,0 beats 0,1,0)
+  // while the 3px width survives — so a selected blocked/ready node, whose
+  // rule is deliberately transparent, grew a 3px muted left bar and
+  // selection read as a status change. jsdom computes no cascade, so the
+  // re-pin is asserted at the source.
+  it('keeps selection off the status rule', () => {
+    const selected = planCss.match(
+      /(^|\n)\.node\[data-selected='true'\]\s*\{[^}]*\}/,
+    )?.[0];
+    expect(selected).toBeTruthy();
+    expect(selected).toMatch(/border-left-color:\s*var\(--node-rule\)/);
+  });
+
   // `text-overflow` applies to a block container's own inline content, so
   // declaring it on the inline-flex chip did nothing: the title sat in an
   // anonymous flex item and was clipped with no ellipsis. jsdom computes no

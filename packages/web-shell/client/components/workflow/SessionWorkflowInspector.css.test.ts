@@ -55,4 +55,18 @@ describe('SessionWorkflowInspector stylesheet', () => {
     expect(inspectorCss).toMatch(/\.linkedAgents\s+button\s+small\.metrics/);
     expect(inspectorCss).toMatch(/\.deliverables\s+button\s+small\.metrics/);
   });
+
+  // The dependency chip's parent <li> is the flex item of .dependencyList;
+  // its default min-width: auto floored it at the title's full nowrap
+  // width, so the chip grew out of its column and the title's ellipsis
+  // never engaged. jsdom computes no layout, so the shrink floor is pinned
+  // at the source.
+  it('lets the dependency list item shrink so the chip ellipsis engages', () => {
+    const rule = inspectorCss.match(
+      /\.dependencyList\s*>\s*li\s*\{[^}]*\}/,
+    )?.[0];
+    expect(rule).toBeTruthy();
+    expect(rule).toMatch(/min-width:\s*0/);
+    expect(rule).toMatch(/max-width:\s*100%/);
+  });
 });

@@ -292,6 +292,15 @@
   list-style: none;
 }
 
+/* The chip's parent <li> is the flex item, and its default min-width: auto
+   floors it at the title's full nowrap width — the chip grew out of its
+   column and the title's ellipsis never engaged. The number badge is kept
+   out of the shrink by its own flex: none. */
+.dependencyList > li {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .dependencyLink {
   display: flex;
   max-width: 100%;

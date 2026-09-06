@@ -360,6 +360,10 @@
    strength and the ring echoes it, rather than introducing a second colour. */
 .node[data-selected='true'] {
   border-color: var(--node-ring);
+  /* The shorthand above expands to border-left-color too: on blocked/ready,
+     whose --node-rule stays transparent, it would repaint the 3px status
+     rule in the ring tone and selection would read as a status change. */
+  border-left-color: var(--node-rule);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-ring) 32%, transparent);
 }
 
@@ -751,6 +755,23 @@ button.nestedExecution:not(:disabled):focus-visible {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   font-style: normal;
+  line-height: 1;
+  text-align: center;
+}
+
+/* The attention sigil, muted like the status glyph: the left rule stays the
+   only carrier of tone, and this is the shape channel that survives forced
+   colours — the data-attention rule re-declares the very token paused
+   already wears, so without a mark a paused node needing attention paints
+   pixel-identical to a healthy one. */
+.nodeAttentionMark {
+  flex: 0 0 auto;
+  width: 13px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
   line-height: 1;
   text-align: center;
 }
