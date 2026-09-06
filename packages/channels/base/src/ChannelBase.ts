@@ -59,6 +59,7 @@ import {
 } from './sanitize.js';
 import type {
   AvailableCommand,
+  BackgroundResponseContext,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -91,6 +92,11 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
+
+interface BackgroundResponseDeliveryTarget {
+  target: SessionTarget;
+  sourceLabel?: string;
+}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -473,8 +479,9 @@ export abstract class ChannelBase {
   private readonly bridgeBackgroundResponseListener = (
     sessionId: string,
     text: string,
+    context?: BackgroundResponseContext,
   ): void => {
-    void this.dispatchBackgroundResponse(sessionId, text).catch(
+    void this.dispatchBackgroundResponse(sessionId, text, context).catch(
       (err: unknown) => {
         process.stderr.write(
           `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
@@ -542,15 +549,21 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
+    _context?: BackgroundResponseContext,
   ): Promise<void> {
-    let target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      text.trim().length === 0
-    ) {
+    if (text.trim().length === 0) return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
     }
+    await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected async resolveBackgroundResponseDelivery(
+    sessionId: string,
+  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
+    let target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
@@ -573,6 +586,15 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
+    return { target, sourceLabel };
+  }
+
+  protected async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: BackgroundResponseDeliveryTarget,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
@@ -1231,6 +1253,10 @@ export abstract class ChannelBase {
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
+
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
@@ -2484,6 +2510,7 @@ export abstract class ChannelBase {
       ]);
       if (!cancelled) {
         this.cancelBtw(sessionId);
+        this.onSessionRetiring(sessionId);
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
@@ -2668,6 +2695,8 @@ export abstract class ChannelBase {
     this.unattendedMemorySessions.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
+
+  protected onSessionRetiring(_sessionId: string): void {}
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
@@ -3635,7 +3664,10 @@ export abstract class ChannelBase {
           if (parts.length !== 1) break;
           const closing = await namedSessions.lookup(owner, parts[0]!);
           const result = await namedSessions.close(owner, parts[0]!);
-          if (closing) this.cancelBtw(closing.sessionId);
+          if (closing) {
+            this.cancelBtw(closing.sessionId);
+            this.onSessionRetiring(closing.sessionId);
+          }
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
@@ -3710,6 +3742,15 @@ export abstract class ChannelBase {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
       let removedIds: string[];
+      const retiringSessionId = this.namedSessions
+        ? undefined
+        : this.router.getSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+          );
+      if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
         try {
           const reset = await this.namedSessions.reset(
@@ -3732,6 +3773,7 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          if (id !== retiringSessionId) this.onSessionRetiring(id);
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
@@ -4657,6 +4699,8 @@ export abstract class ChannelBase {
     if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
       return false;
     }
+
+    this.forgetPendingGroupHistory(envelope);
 
     // Surface the drop — otherwise an unanswered queued message vanishes
     // silently, making "my message was never answered" undiagnosable.
@@ -5652,7 +5696,7 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
@@ -5704,12 +5748,28 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
       );
       return [];
+    }
+  }
+
+  private forgetPendingGroupHistory(envelope: Envelope): void {
+    if (envelope.messageId === undefined) return;
+    try {
+      this.groupHistory.forget(
+        this.groupHistoryKey(envelope),
+        truncateGroupHistoryField(envelope.messageId),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to forget group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -6183,6 +6243,7 @@ export abstract class ChannelBase {
         suppressSaveConfirmation: memorySaveIsSideEffect,
       });
       if (!memorySaveIsSideEffect) {
+        this.forgetPendingGroupHistory(envelope);
         return;
       }
     }
@@ -6193,7 +6254,10 @@ export abstract class ChannelBase {
       const handler = this.commands.get(parsed.command);
       if (handler) {
         const handled = await handler(envelope, parsed.args);
-        if (handled) return;
+        if (handled) {
+          this.forgetPendingGroupHistory(envelope);
+          return;
+        }
       }
       // Unrecognized commands fall through to the agent
       // Intercept /btw only where the bridge can answer it out of band. With no
@@ -6762,6 +6826,9 @@ export abstract class ChannelBase {
         recallRead?.generation === recallRead?.state.generation
           ? recallContext
           : undefined;
+      if (recognizedSlashCommand) {
+        this.forgetPendingGroupHistory(envelope);
+      }
       const groupHistoryEntries = recognizedSlashCommand
         ? []
         : this.drainPendingGroupHistory(envelope);
