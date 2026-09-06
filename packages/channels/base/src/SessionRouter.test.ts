@@ -4096,6 +4096,130 @@ describe('SessionRouter', () => {
       const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
       expect(persisted['ch:alice:chat1'].turns).toBe(4);
     });
+
+    it('does not resurrect a failed route over its mid-window replacement', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      (bridge.loadSession as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('session file gone'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>(() => {
+              // bob's load parks, holding the restore (and the persist
+              // suspension) open for the whole scenario.
+            }),
+        );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+
+      // The failed key was dropped; a new message creates a replacement on
+      // it while persistence is still suspended.
+      const replacement = await router.resolve('ch', 'alice', 'chat1');
+      router.releaseRoutingLease(replacement);
+
+      // A reconnect restore reads the same unflushed snapshot: the failed
+      // key is tombstoned, so it is skipped instead of resurrected over the
+      // replacement.
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(replacement);
+      expect(bridge.discardSession).not.toHaveBeenCalledWith(
+        replacement,
+        expect.anything(),
+      );
+      void first.catch(() => undefined);
+      void second.catch(() => undefined);
+      router.dispose();
+    });
+
+    it('does not resurrect a forgotten route when a second restore overlaps', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+
+      // The restored route is forgotten mid-window (bob's load still parks,
+      // so the removal's persist is suspended) and a reconnect restore reads
+      // the stale pre-forget snapshot.
+      router.forgetManagedSession('old-alice');
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+
+      loadResolvers[1]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[2]!('old-bob');
+      await drainMicrotasks();
+
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1']).toBeUndefined();
+      expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
+    });
   });
   describe('clearAll', () => {
     it('clears all in-memory state', async () => {

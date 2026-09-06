@@ -978,6 +978,10 @@ export class SessionRouter {
       if (mappedSessionId !== sessionId) continue;
       this.invalidateRouteOperation(key);
       this.toSession.delete(key);
+      // Same suspension protocol as the other removal paths: a restore
+      // overlapping the forget must not resurrect the forgotten route from
+      // its stale snapshot.
+      this.tombstoneSuspendedKey(key);
       changed = true;
     }
     changed = this.toTarget.delete(sessionId) || changed;
@@ -1295,6 +1299,14 @@ export class SessionRouter {
               options,
               operation,
             );
+            // A removal landed after this restore reserved the key (/clear,
+            // a rotation, a validation drop, or another restore's failed
+            // load of the same key) reaches disk only at the flush: the
+            // settle must not resurrect the route. Invalidating here routes
+            // through the same discard-and-reject path as a /clear.
+            if (this.suspendedDeletionKeys.has(key)) {
+              this.invalidateRouteOperation(key);
+            }
             try {
               this.assertOperationCurrent(operation);
             } catch (error) {
@@ -1404,6 +1416,11 @@ export class SessionRouter {
             this.wipedRouteState.delete(key);
             // The drop must reach disk even when an overlapping restore
             // flushes last: the last finisher only reads its own `changed`.
+            // Tombstone it too, or an overlapping restore reading the stale
+            // snapshot re-reserves the key and resurrects the session that
+            // just failed to load — wiping any replacement route created
+            // mid-window.
+            this.tombstoneSuspendedKey(key);
             this.persistRequestedWhileSuspended = true;
             // Session can't be loaded — will create fresh on next message
             failed++;
