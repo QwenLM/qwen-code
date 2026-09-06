@@ -51,6 +51,7 @@ import {
   type AgentStreamTextEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
+  type AgentUsageEvent,
 } from './agent-events.js';
 import type {
   ModelConfig,
@@ -659,6 +660,42 @@ describe('subagent.ts', () => {
           { kind: 'notification', text: 'monitor fired' },
         ]);
         expect(scope.getExecutionSummary()).toMatchObject({ rounds: 2 });
+      });
+
+      it('should keep usage rounds unique across finishing input segments', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [{ content: { parts: [{ text: 'Done.' }] } }],
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const usageRounds: number[] = [];
+        scope
+          .getEventEmitter()
+          .on(AgentEventType.USAGE_METADATA, (event: AgentUsageEvent) => {
+            usageRounds.push(event.round);
+          });
+
+        await scope.execute(new ContextState());
+        await scope.executeExternalInputs(['late correction'], undefined, {
+          resetStats: false,
+        });
+
+        expect(usageRounds).toEqual([1, 2]);
       });
 
       it('should preserve statistics for continuation work in the same logical turn', async () => {
