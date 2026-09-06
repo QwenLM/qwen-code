@@ -2002,9 +2002,21 @@ export class WebViewProvider {
         );
         const viewSessionId = this.isViewHost
           ? getRestorableDaemonSessionId(
+              // Ids persisted before this canonicalization are keyed by the
+              // folder's raw (symlinked) spelling. Read that once so upgrading
+              // does not silently start a fresh sidebar conversation. The
+              // canonical key stays the only one written —
+              // `webShellSessionChanged` keys off the payload below — and the
+              // raw spelling is consulted only when the canonical key is
+              // empty, so an id can never be restored into another folder.
               this.context.workspaceState.get<string>(
                 webShellSessionStateKey(canonicalWorkspaceCwd),
-              ),
+              ) ??
+                (canonicalWorkspaceCwd !== workspaceCwd
+                  ? this.context.workspaceState.get<string>(
+                      webShellSessionStateKey(workspaceCwd),
+                    )
+                  : undefined),
             )
           : undefined;
         const restoredSessionId = this.isViewHost
@@ -2016,6 +2028,15 @@ export class WebViewProvider {
             ...runtime,
             clientId: this.daemonClientId,
             workspaceCwd: canonicalWorkspaceCwd,
+            // The daemon matches workspaces by canonical path, but every
+            // `activeEditorChanged` sender posts VS Code's raw
+            // `editor.document.uri.fsPath`, which keeps the folder's symlinked
+            // spelling. The webview needs both to relativize the active file:
+            // with only the canonical one the prefix strip misses and the
+            // prompt silently degrades from `@src/foo.ts` to `@foo.ts`.
+            ...(canonicalWorkspaceCwd !== workspaceCwd
+              ? { editorWorkspaceCwd: workspaceCwd }
+              : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
           },

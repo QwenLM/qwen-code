@@ -2291,6 +2291,40 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     };
   }
 
+  /** A view-host context whose Memento only answers the keys it is seeded with. */
+  function createSessionStateContext(entries: Record<string, string>) {
+    return {
+      subscriptions: [],
+      workspaceState: {
+        get: vi.fn((key: string) => entries[key]),
+        update: vi.fn(() => Promise.resolve()),
+      },
+    };
+  }
+
+  const WEB_SHELL_SESSION_KEY_PREFIX = 'qwenCode.webShellSessionId:';
+
+  /** Run `body` against a folder reachable only through a symlink. */
+  async function withSymlinkedWorkspace<T>(
+    body: (paths: { alias: string; canonical: string }) => Promise<T>,
+  ): Promise<T> {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const target = path.join(root, 'workspace');
+    const alias = path.join(root, 'workspace-link');
+    mkdirSync(target);
+    symlinkSync(
+      target,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    try {
+      setWorkspaceFolders([alias]);
+      return await body({ alias, canonical: realpathSync.native(target) });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockMessageHandlerInstances.length = 0;
@@ -2310,35 +2344,63 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
   });
 
   it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
-    const target = path.join(root, 'workspace');
-    const alias = path.join(root, 'workspace-link');
-    mkdirSync(target);
-    symlinkSync(
-      target,
-      alias,
-      process.platform === 'win32' ? 'junction' : 'dir',
-    );
-
-    try {
-      setWorkspaceFolders([alias]);
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Seed a restorable id ONLY under the canonical key. The write side keys
+      // off the canonical payload, so a read still keyed off the raw alias
+      // would split the very identity this PR exists to unify.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'session-restored-1',
+      });
       const setup = await setupAttachedProvider({
         captureMessageHandler: true,
-        context: createSharedContext(),
+        context,
       });
       await setup.messageHandler?.({ type: 'webShellReady' });
 
-      const canonical = realpathSync.native(target);
       expect(daemonMocks.instances[0].boundCwd).toBe(canonical);
+      expect(context.workspaceState.get).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+      );
       expect(setup.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'webShellBootstrap',
-          data: expect.objectContaining({ workspaceCwd: canonical }),
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            // Every `activeEditorChanged` sender posts VS Code's raw
+            // `uri.fsPath`, which keeps the alias spelling; the webview needs
+            // it to relativize the active file.
+            editorWorkspaceCwd: alias,
+            sessionId: 'session-restored-1',
+          }),
         }),
       );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
+  });
+
+  it('restores a session id persisted under the pre-canonicalization key', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Someone who chatted in this folder before the state key was
+      // canonicalized has their id under the raw spelling. Without a legacy
+      // read the upgrade silently opens a fresh sidebar conversation.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            sessionId: 'pre-upgrade-session-id',
+          }),
+        }),
+      );
+    });
   });
 
   it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
