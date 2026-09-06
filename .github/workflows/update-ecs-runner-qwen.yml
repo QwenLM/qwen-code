@@ -150,18 +150,36 @@ jobs:
             install_qwen_named_spec() {
               "$@" npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
             }
-            # Whether the arm that just ran reached npm at all: the only thing
-            # that tells a sudo refusal from an npm failure, since both end in
-            # a non-zero exit. npm prefixes every diagnostic it prints
-            # (`npm error`, `npm warn`, `npm notice`) while sudo prints nothing
-            # on npm's behalf, so the arm's own output answers it without
-            # depending on sudo's wording — which a `sudo -n -l` gate would,
+            # Whether this mode's failure is its own to retry, or a refusal
+            # saying the mode cannot run here at all: the only thing that
+            # tells a sudo refusal from an npm failure, since both end in a
+            # non-zero exit. The arm's own output answers it, so nothing here
+            # depends on sudo's wording the way a `sudo -n -l` gate would —
             # and this step selects no mode by probe.
-            # Residual: an npm killed by a signal prints nothing, so it reads
-            # as a refusal and does advance. On hk-4/hk-5 that lands the
-            # unpinned root install the pin exists to prevent, and
-            # `Verify version` then fails the leg loudly — the pool keeps
-            # resolving /usr/local/bin/qwen, so it cannot pass silently.
+            #
+            # The polarity is the property, not the instance: only a refusal
+            # this arm can positively identify may advance. Classifying by
+            # the *absence* of `npm `-prefixed output instead reads every npm
+            # death that prints nothing of its own — an OOM-killer SIGKILL on
+            # a machine every runner job of the region shares, or V8's
+            # `FATAL ERROR: Reached heap limit` while unpacking the tarball —
+            # as a refusal, and escalates to the unpinned arm. hk-4/hk-5's
+            # generic sudoers allows that argv, so root installs into the
+            # custom Node prefix the pool never resolves and this step exits
+            # 0: a false certification, which also spends the retry below and
+            # leaves a root-owned tree the PKG_DIR cleanup glob never reaches.
+            # `^sudo:` is sudo's program-name prefix rather than a wording
+            # enumeration, so the message after it may vary or be localised.
+            # The refusal this fleet actually produces is `sudo: a password
+            # is required` (run 33754421601: hk-1 and hk-2, all three
+            # attempts), and an unrecognised failure now retries its own mode
+            # and fails loudly instead of installing where the pool cannot
+            # see it.
+            # Residual: a refusal that is not `sudo:`-prefixed — sudo absent
+            # rather than unauthorized, which bash reports as `command not
+            # found` under its own prefix — does not advance, so that mode
+            # retries and the leg reds instead of reaching the runner-user
+            # mode. It cannot install into the wrong prefix.
             arm_ran_npm=0
             run_install_arm() {
               local out err status
@@ -170,10 +188,12 @@ jobs:
               "$@" >"${out}" 2>"${err}" && status=0 || status=$?
               cat "${out}"
               cat "${err}" >&2
-              if grep -q '^npm ' "${out}" "${err}"; then
-                arm_ran_npm=1
-              else
+              # Advance only when sudo itself refused; npm's own error, a
+              # crash, or a kill is this mode's failure to retry.
+              if grep -q '^sudo:' "${err}"; then
                 arm_ran_npm=0
+              else
+                arm_ran_npm=1
               fi
               rm -f "${out}" "${err}"
               return "${status}"
@@ -192,8 +212,9 @@ jobs:
                     run_install_arm install_qwen env
                     ;;
                 esac && exit 0
-                # npm ran, so this pool can install through this mode and the
-                # failure is npm's own — the rename race, a registry blip.
+                # No refusal this arm could identify, so this pool can install
+                # through this mode and the failure is the mode's own — the
+                # rename race, a registry blip, an npm killed mid-unpack.
                 # Retry that same mode below; do not escalate to the next one.
                 if (( arm_ran_npm )); then
                   break

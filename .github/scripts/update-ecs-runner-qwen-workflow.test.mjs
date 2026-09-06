@@ -177,12 +177,15 @@ describe('ECS runner qwen update workflow', () => {
     // pinned mode falls through to the unpinned arm — which hk-4/hk-5's
     // generic sudoers allows, turning a retryable npm blip into a root
     // install into the prefix the pool never resolves. Only a sudo refusal
-    // (npm never ran) may advance; an npm failure goes back to the retry
-    // loop. Asserted here too because the replay arm below is skipped on the
-    // Windows lane.
+    // may advance, and it has to be one the arm positively identifies: an
+    // npm failure — including one npm dies without announcing, which is what
+    // classifying by the absence of `npm ` output would misread as a
+    // refusal — goes back to the retry loop. Asserted here too because the
+    // replay arm below is skipped on the Windows lane.
     assert.ok(!updateCode.includes('NPM_CONFIG_PREFIX ||'));
     assert.ok(updateCode.includes('arm_ran_npm'));
-    assert.ok(updateCode.includes("grep -q '^npm '"));
+    assert.ok(updateCode.includes("grep -q '^sudo:'"));
+    assert.ok(!updateCode.includes("grep -q '^npm '"));
     // Each install argv appears exactly once: the pin cannot drift between
     // the two modes that share it, and neither mode can lose the registry
     // pin or grow a flag the authorized spec does not name.
@@ -509,6 +512,12 @@ function runVerify({
 //                output before letting them succeed — a transient npm failure
 //                (the ENOTEMPTY rename race this step retries through), which
 //                is NOT a sudo refusal and must not advance the mode chain.
+//   npmFailureStyle: 'npm'    — failures speak with npm's own prefix (default)
+//                    'signal' — every install dies without announcing itself,
+//                               the way an OOM-killer SIGKILL or V8 heap
+//                               exhaustion does. A separate axis from
+//                               npmFailures, whose premise is that npm always
+//                               speaks for itself.
 // The npm stub records every install it is asked to run tagged with the
 // effective user, so a test can assert *which mode* installed rather than
 // only that the step exited 0 — a fallback that succeeds after a wasted
@@ -518,6 +527,7 @@ function runUpdate({
   prefixOwner = 'root',
   version = '0.22.3',
   npmFailures = 0,
+  npmFailureStyle = 'npm',
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ecs-install-'));
   try {
@@ -585,12 +595,21 @@ function runUpdate({
         'if [[ " $* " == *" install -g "* ]]; then',
         `  install_attempt=$(( $(cat ${installAttempts} 2>/dev/null || echo 0) + 1 ))`,
         `  echo "$install_attempt" > ${installAttempts}`,
-        '  # npm reached this point, so sudo authorized the argv: the failure',
-        "  # below is npm's own, and npm always says so with its own prefix.",
+        '  # npm reached this point, so sudo authorized the argv. A failure',
+        "  # npm reports for itself always carries npm's own prefix:",
         `  if (( install_attempt <= ${npmFailures} )); then`,
         "    echo 'npm error code ENOTEMPTY' >&2",
         "    echo 'npm error syscall rename' >&2",
         '    exit 1',
+        '  fi',
+        `  if [[ "${npmFailureStyle}" == 'signal' ]]; then`,
+        '    # The other axis: a death npm never announces. SIGKILL from the',
+        '    # OOM killer on a machine every runner job of the region shares,',
+        '    # or V8 exhausting its heap while unpacking the tarball. Neither',
+        '    # leaves an `npm `-prefixed line behind, so a discriminator keyed',
+        '    # on that absence misreads it as a sudo refusal and escalates.',
+        '    kill -KILL $$',
+        '    exit 137',
         '  fi',
         '  if [[ "${STUB_EFFECTIVE_USER:-runner}" == "root" ]]; then',
         "    echo 'changed 16 packages in 5s'",
@@ -841,6 +860,35 @@ describe('ECS runner qwen update replay', { skip: !replayable }, () => {
       assert.ok(install.includes('install -g --prefix /usr/local'));
     }
     // The retry loop absorbed it, and says so.
+    assert.ok(
+      updated.stdout.includes(
+        '::warning::npm install attempt 1 failed; retrying',
+      ),
+    );
+  });
+
+  it('retries the same mode when npm dies without announcing it', () => {
+    // The other half of the advance condition, and why its polarity is the
+    // property rather than the instance: a SIGKILL from the OOM killer, or V8
+    // exhausting its heap while unpacking the tarball, leaves no `npm `-
+    // prefixed line behind. Keying the discriminator on that absence reads
+    // the death as a sudo refusal and escalates to the unpinned arm, which
+    // generic sudoers allows — root installs into the custom Node prefix the
+    // pool never resolves, and the step exits 0 certifying an update that did
+    // not happen, having spent the retry that would have absorbed it and left
+    // a root-owned tree the PKG_DIR cleanup glob never reaches. Only a
+    // refusal the arm can positively identify may advance.
+    const updated = runUpdate({
+      sudoers: 'generic',
+      npmFailureStyle: 'signal',
+    });
+    assert.equal(updated.status, 1);
+    // Every attempt stayed in mode 1: no escalation to the unpinned argv.
+    assert.deepEqual(updated.modes, ['root', 'root', 'root']);
+    for (const install of updated.calls.trim().split('\n')) {
+      assert.ok(install.includes('install -g --prefix /usr/local'));
+    }
+    // Announced and retried, not certified as a success.
     assert.ok(
       updated.stdout.includes(
         '::warning::npm install attempt 1 failed; retrying',
