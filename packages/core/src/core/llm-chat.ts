@@ -1647,12 +1647,24 @@ class SystemReminderEchoFilter {
   /**
    * Passthrough scan: emit everything that cannot be part of a trigger and
    * keep an ambiguous tail in `carry` for the next chunk.
+   *
+   * `startsAtLineStart` re-anchors `text` at a line start when the anchor
+   * would otherwise be lost — the caller has already consumed the newline
+   * that made it one. The post-strip rescan in `resolveHeld` needs it:
+   * everything this filter consumed sits ahead of the outer scan's
+   * bookkeeping (`atStreamStart`/`carryAnchored`), so without the flag a
+   * remainder that begins exactly at a line start is scanned as mid-line and
+   * a second consecutive echoed reminder line leaks verbatim. The fail-open
+   * release path must NOT pass it: the released buffer begins with the very
+   * candidate we just decided to emit, and re-anchoring it would re-trigger
+   * a hold-release loop over the same bytes.
    */
-  private scan(text: string): string {
+  private scan(text: string, startsAtLineStart = false): string {
     if (!text) return '';
     // `text` may begin with the previous carry, which was held precisely
     // because it starts at a line start (or at the absolute stream start).
-    const startIsLineStart = this.atStreamStart || this.carryAnchored;
+    const startIsLineStart =
+      startsAtLineStart || this.atStreamStart || this.carryAnchored;
     this.carry = '';
     this.carryAnchored = false;
     let emit = '';
@@ -1745,7 +1757,10 @@ class SystemReminderEchoFilter {
           const remainder = this.buffer.slice(end);
           this.holding = false;
           this.buffer = '';
-          emitted += this.scan(remainder);
+          // The consumed newline leaves `remainder` at a line start; carry
+          // that anchor into the rescan or a following echoed reminder line
+          // would be scanned as mid-line and leak.
+          emitted += this.scan(remainder, true);
           continue;
         }
       }

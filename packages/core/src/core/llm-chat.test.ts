@@ -13398,6 +13398,82 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  it('strips two consecutive echoed reminder lines without leaking the second (#10797)', async () => {
+    const response =
+      '`<system-reminder>\nThe current task still has unfinished todo items:\n' +
+      '- [ ] write tests\n' +
+      '</system-reminder>`\n' +
+      '`<system-reminder>\nAnother stale reminder arrived meanwhile.\n' +
+      '</system-reminder>`\n' +
+      'Now updating the todo list.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-consecutive-system-reminder-echo-strip',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('Now updating the todo list.');
+    expect(emittedText).not.toContain('system-reminder');
+    expect(chat.getLastModelMessageText()).toBe('Now updating the todo list.');
+  });
+
+  it('retries an echo-only reply that strips to empty instead of leaking it (#10797)', async () => {
+    // An echo-only reply (no tool call, no thought part) strips to an empty
+    // response, fails closed through NO_RESPONSE_TEXT, and burns one
+    // transient retry — pinned here because the PR description's
+    // "never retries the turn" only holds for echoes paired with a tool
+    // call. Failing closed with a retry is the intended behaviour.
+    const echo =
+      '`<system-reminder>\nThe current task still has unfinished todo items:\n' +
+      '- [ ] write tests\n' +
+      '</system-reminder>`\n';
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: echo }])),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'All done.' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-echo-only-reply-empty-strip',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('All done.');
+    expect(emittedText).not.toContain('system-reminder');
+    expect(chat.getLastModelMessageText()).toBe('All done.');
+  });
+
   it('retries leaked JSON before a structured tool call', async () => {
     vi.useFakeTimers();
     try {
