@@ -150,6 +150,12 @@ export function getBuiltInOutputStyle(
  * single source of truth for that rule: the system prompt and the per-turn
  * reminder consult it together, so a session is never reminded about a style
  * its prompt does not carry.
+ *
+ * The rule keys on the definition, not the display name. A style file may
+ * take the name of a built-in and shadow it, and a user's own `Learning.md`
+ * carries none of the built-in's wait-for-a-reply instruction -- dropping it
+ * would leave a headless run with no style at all, silently, because the name
+ * resolved and nothing warns.
  */
 export function resolveEffectiveOutputStyle(
   style: OutputStyleDefinition | null | undefined,
@@ -158,7 +164,11 @@ export function resolveEffectiveOutputStyle(
   if (!style) {
     return undefined;
   }
-  if (interactionMode === 'headless' && style.name === 'Learning') {
+  if (
+    interactionMode === 'headless' &&
+    style.source === 'built-in' &&
+    style.name === 'Learning'
+  ) {
     return undefined;
   }
   return style;

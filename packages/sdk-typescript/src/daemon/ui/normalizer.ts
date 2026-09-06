@@ -21,6 +21,7 @@ import type {
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import { createDaemonToolResultTextPreview } from './toolPreview.js';
 import {
   capDetails,
   getFirstString,
@@ -44,6 +45,7 @@ type NormalizedEventBase = Pick<
   | 'eventId'
   | 'serverTimestamp'
   | 'sourceRecordIds'
+  | 'segmentId'
   | 'promptId'
   | 'branchRecordId'
   | 'originatorClientId'
@@ -651,11 +653,13 @@ function createBase(
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
   const sourceRecordIds = extractSourceRecordIds(event);
+  const segmentId = extractTranscriptSegmentId(event);
   const branchRecordId = extractBranchRecordId(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(segmentId ? { segmentId } : {}),
     ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
@@ -665,6 +669,19 @@ function createBase(
       ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
       : {}),
   };
+}
+
+function extractTranscriptSegmentId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const segmentId = getString(transcript, 'segmentId');
+  return segmentId && segmentId.length <= 512 ? segmentId : undefined;
 }
 
 function extractBranchRecordId(event: DaemonEvent): string | undefined {
@@ -805,12 +822,18 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
+            const contentRecord = isRecord(content) ? content : undefined;
+            const attachmentId =
+              typeof contentRecord?.['attachmentId'] === 'string'
+                ? (contentRecord['attachmentId'] as string)
+                : undefined;
             return [
               {
                 ...base,
                 type: 'user.image.delta',
                 data,
                 mimeType,
+                ...(attachmentId ? { attachmentId } : {}),
                 ...(meta ? { meta } : {}),
               },
             ];
@@ -1057,6 +1080,13 @@ function normalizeToolUpdate(
   base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    metadata && isRecord(metadata['qwenTranscript'])
+      ? metadata['qwenTranscript']
+      : undefined;
+  const resultPreview = createDaemonToolResultTextPreview(
+    getString(transcript, 'resultPreviewText') ?? '',
+  );
   const toolName =
     getString(update, 'toolName') ??
     getString(update, 'name') ??
@@ -1140,6 +1170,7 @@ function normalizeToolUpdate(
     ...(subagentType ? { subagentType } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
+    ...(resultPreview ? { resultPreview } : {}),
     ...(rawInput !== undefined
       ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
@@ -1171,6 +1202,7 @@ function normalizePlanUpdate(
   const todoPlan =
     meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
   const planId = getString(todoPlan, 'id');
+  const sessionWorkflow = meta?.['qwenSessionWorkflow'] === true;
   return {
     ...base,
     type: 'tool.update',
@@ -1189,6 +1221,7 @@ function normalizePlanUpdate(
       entries,
       ...(stats ? { stats } : {}),
       ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
     },
   };
 }

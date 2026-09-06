@@ -37,7 +37,7 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 
 | Level    | What runs                                                                                                                                                   | Findings cap        | Verdict                             | Posts to PR      |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------- | ---------------- |
-| `low`    | 3-6 directed inline angles over the diff (scaled by diff size) plus a gap sweep — no subagents, no build/test, no project rules                             | 10 (unverified)     | None                                | Never            |
+| `low`    | 3-6 directed inline angles over the diff (scaled by diff size) plus a gap sweep and an under-floor re-pass — no subagents, no build/test, no project rules  | 10 (unverified)     | None                                | Never            |
 | `medium` | The high pipeline minus its most expensive passes: the parallel finder fan-out over a reduced dimension set, plus build/test and a single verification pass | Uncapped (verified) | Approve capped at Comment           | Never            |
 | `high`   | Full pipeline: up to 16 parallel agents → sharded verification → iterative reverse audit                                                                    | Uncapped (verified) | Approve / Request changes / Comment | With `--comment` |
 
@@ -51,7 +51,8 @@ The `/review` command runs a multi-stage pipeline:
 Step 1:  Determine scope + effort level (local diff / PR worktree / file)
          Capture the diff to a file + partition it into chunks
 Step 2:  Load project review rules (medium/high)
-Step 3C: low effort: 3-6 inline angles + gap sweep     [0 subagent calls]
+Step 3C: low effort: 3-6 inline angles + gap sweep + under-floor re-pass
+                                                               [0 subagent calls]
 Step 3A: high, <=500 src AND <=3200 total: up to 16 agents  [16+ LLM calls]
            |-- Agent 0: Issue Fidelity & Root-Cause Ownership
            |-- Agent 1a: Correctness — line-by-line scan
@@ -433,16 +434,17 @@ For large diffs (>10 modified symbols), the caller-direction analysis prioritize
 
 The parts of the pipeline that are elastic in diff size are scaled from it, and the scaling is written into the diff plan so every stage reads one number rather than each deciding for itself:
 
-| Budget field    | What it scopes                      | How it scales                                                      |
-| --------------- | ----------------------------------- | ------------------------------------------------------------------ |
-| `inlineAngles`  | How many `low` angles run (Step 3C) | 3, plus one per 60 source lines, capped at the 6 angles that exist |
-| `sweep`         | Whether `low`'s gap sweep runs      | Off below 25 source lines                                          |
-| `specialistCap` | The Agent 8 ceiling                 | 0 below 80 source lines, otherwise 2                               |
-| `verifyShard`   | Findings per verification agent     | Flat at 8 — a property of the verifier, not of the diff            |
+| Budget field     | What it scopes                                   | How it scales                                                      |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------------------ |
+| `inlineAngles`   | How many `low` angles run (Step 3C)              | 3, plus one per 60 source lines, capped at the 6 angles that exist |
+| `candidateFloor` | When `low` owes one deterministic recall re-pass | `min(changed files, 4)`                                            |
+| `sweep`          | Whether `low`'s gap sweep runs                   | Off below 25 source lines                                          |
+| `specialistCap`  | The Agent 8 ceiling                              | 0 below 80 source lines, otherwise 2                               |
+| `verifyShard`    | Findings per verification agent                  | Flat at 8 — a property of the verifier, not of the diff            |
 
 Two things it deliberately does not do. It **never scales a dimension away**: which agents a review owes is decided by the roster, which reads the effort level, so a small diff still gets its security pass and its test-coverage pass. And it reads **source** lines, not diff lines — a 40-line production change shipping 900 lines of new tests is a small change, and the same reasoning already governs the territory-fan-out gate.
 
-Why the floors are where they are: on a nine-line typo fix, six inline walks are five walks over nothing, and the sweep — a fresh reader hunting what the first pass did not get to — has nothing to hunt when the first pass got to all of it. Agent 8's floor is the substantive one: "one domain dominates the diff" is a judgement, and a judgement made about forty lines finds a dominant domain every time, because forty lines are usually all one thing.
+Why the floors are where they are: on a nine-line typo fix, six inline walks are five walks over nothing, and the sweep — a fresh reader hunting what the first pass did not get to — has nothing to hunt when the first pass got to all of it. When a low-effort pass stays below `candidateFloor`, it takes one deterministic second look at every coverable hunk in the largest changed source file (falling back to the largest coverable file of any kind) and every coverable removed block. Files touching an uncoverable chunk are excluded from the target selection, and the pass always emits a receipt naming its target, new-candidate count, and any uncoverable chunks; when no file is coverable, it still checks the coverable removed blocks and discloses the missing target. The floor is a stopping signal, not a quota: a clean diff can still report no findings after that re-pass. Agent 8's floor is the substantive one: "one domain dominates the diff" is a judgement, and a judgement made about forty lines finds a dominant domain every time, because forty lines are usually all one thing.
 
 ## Token Efficiency
 

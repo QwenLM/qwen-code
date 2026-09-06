@@ -61,8 +61,11 @@ export interface DaemonMessageToolCall {
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
+  wasCancelled?: boolean;
   subContent?: string;
   subTools?: DaemonMessageToolCall[];
+  /** Transcript blocks folded into this tool presentation. */
+  sourceBlockIds?: string[];
 }
 
 export interface DaemonMessageTodoItem {
@@ -85,13 +88,20 @@ export interface DaemonMessageMeta {
    * that have no backing block.
    */
   timestamp?: number;
+  /** Stable transcript blocks folded into this rendered message. */
+  sourceBlockIds?: string[];
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {
   id: string;
   role: 'user';
   content: string;
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+    /** Present when the image is a session attachment; keeps it re-fetchable. */
+    attachmentId?: string;
+  }>;
   files?: Array<{
     name: string;
     mimeType: string;

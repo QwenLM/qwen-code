@@ -14,6 +14,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
+import {
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 
 const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
@@ -235,6 +239,7 @@ interface SessionWriterOwnerRecord {
   owner_id: string;
   pid: number;
   process_start_identity?: string;
+  pid_namespace_id?: number;
   hostname: string;
   process_kind: SessionWriterProcessKind;
   acquired_at: string;
@@ -417,6 +422,9 @@ function hasValidOwnerFields(
     (record['process_start_identity'] === undefined ||
       (typeof record['process_start_identity'] === 'string' &&
         record['process_start_identity'].length > 0)) &&
+    (record['pid_namespace_id'] === undefined ||
+      (Number.isSafeInteger(record['pid_namespace_id']) &&
+        (record['pid_namespace_id'] as number) > 0)) &&
     typeof record['hostname'] === 'string' &&
     record['hostname'].length > 0 &&
     typeof processKind === 'string' &&
@@ -480,11 +488,38 @@ function isActiveLockRecord(
   );
 }
 
+function parseLinuxProcessStartBootId(
+  identity: string | undefined,
+): string | null {
+  if (!identity) return null;
+  const match = /^linux:([0-9a-f-]+):\d+$/i.exec(identity);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
 async function lockStateForRecord(
   record: ActiveLockRecord,
   raw: string,
 ): Promise<ExistingLockState> {
   if (record.hostname !== os.hostname()) return { kind: 'live', record, raw };
+  if (process.platform === 'linux') {
+    // Reclaim only inside the same local identity domain. The boot ID and
+    // PID namespace must both be recorded and match this reader: a record
+    // without them, or from another boot or namespace, may belong to a live
+    // writer sharing this filesystem (same-hostname machines, mounted homes,
+    // sibling containers), so it is fenced rather than reclaimed.
+    const localBootId = readLocalBootId()?.toLowerCase() ?? null;
+    const localNamespaceId = readPidNamespaceId();
+    if (
+      localBootId === null ||
+      localNamespaceId === null ||
+      parseLinuxProcessStartBootId(record.process_start_identity) !==
+        localBootId ||
+      record.pid_namespace_id === undefined ||
+      record.pid_namespace_id !== localNamespaceId
+    ) {
+      return { kind: 'live', record, raw };
+    }
+  }
   if (!isProcessAlive(record.pid)) return { kind: 'stale', record, raw };
   if (!record.process_start_identity) return { kind: 'live', record, raw };
   const currentStartIdentity = await readProcessStartIdentity(record.pid);
@@ -1661,6 +1696,7 @@ export class SessionWriterLease {
     }
 
     const processStartIdentity = await readProcessStartIdentity(process.pid);
+    const pidNamespaceId = readPidNamespaceId();
     const lockRecord: ActiveSessionWriterLockRecord = {
       schema_version: LOCK_SCHEMA_VERSION,
       state: 'active',
@@ -1670,6 +1706,7 @@ export class SessionWriterLease {
       ...(processStartIdentity
         ? { process_start_identity: processStartIdentity }
         : {}),
+      ...(pidNamespaceId !== null ? { pid_namespace_id: pidNamespaceId } : {}),
       hostname: os.hostname(),
       process_kind: normalizedOptions.processKind ?? 'unknown',
       acquired_at: new Date().toISOString(),

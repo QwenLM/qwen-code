@@ -9,6 +9,8 @@ import {
   Config,
   ApprovalMode,
   deriveWorktreeConfig,
+  installSessionWorkflowRevisionWriteThrough,
+  type SessionWorkflowPlanRevision,
 } from '../../config/config.js';
 import { isPlanModeBlocked } from '../../core/permissionFlow.js';
 import type { ToolCallConfirmationDetails } from '../tools.js';
@@ -236,6 +238,44 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
     expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+  });
+
+  // AgentTool's isolation path layers the approval override above a
+  // deriveWorktreeConfig wrapper; both layers sit between the subagent's
+  // tools and the root Config. Without the worktree layer forwarding
+  // revision mutations (as AgentTool installs it), the approval
+  // override's write-through would land as an OWN property on the
+  // worktree wrapper and shadow the session-global revision.
+  it('forwards Session Workflow revision mutations through a worktree wrapper beneath the approval override', async () => {
+    const parent = new Config({
+      ...baseParams,
+      sessionWorkflowEnabled: true,
+    });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+    const worktree = deriveWorktreeConfig(parent, '/tmp/worktree');
+    installSessionWorkflowRevisionWriteThrough(worktree, parent);
+    const { config: child } = await createApprovalModeOverride(
+      worktree,
+      ApprovalMode.DEFAULT,
+    );
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-isolated',
+      sourceCallId: 'call-isolated',
+      todoIds: ['t1'],
+    };
+    child.setSessionWorkflowPlanRevision(sentinel);
+    expect(parent.getSessionWorkflowPlanRevision()).toEqual(sentinel);
+    expect(Object.hasOwn(child, 'sessionWorkflowPlanRevision')).toBe(false);
+    expect(Object.hasOwn(worktree, 'sessionWorkflowPlanRevision')).toBe(false);
+
+    child.clearSessionWorkflowPlanRevision();
+    expect(parent.getSessionWorkflowPlanRevision()).toBeUndefined();
+    expect(Object.hasOwn(worktree, 'sessionWorkflowPlanRevision')).toBe(false);
   });
 
   it('stops plan-mode blocking exec tools after a child override exits plan mode', async () => {

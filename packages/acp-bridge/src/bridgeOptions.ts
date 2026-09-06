@@ -99,6 +99,11 @@ export interface BridgeRuntimeEpochSource {
   allocate(): number;
 }
 
+export type BridgeMcpAuthenticationAdmission = (
+  workspaceCwd: string,
+  serverName: string,
+) => (() => void) | undefined;
+
 /**
  * Trusted child-to-daemon request made immediately before a tool executor.
  * `sessionId` and `promptId` are revalidated by BridgeClient against its
@@ -256,6 +261,8 @@ export interface BridgeOptions {
   channelFactory?: ChannelFactory;
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
+  /** Daemon-global admission for the process-wide MCP OAuth callback port. */
+  acquireMcpAuthentication?: BridgeMcpAuthenticationAdmission;
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
