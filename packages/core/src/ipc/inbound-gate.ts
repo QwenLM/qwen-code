@@ -13,16 +13,18 @@
  *
  * The explicit `crossSessionInbound` setting wins when set. When it is
  * unset the policy is derived from **approval-mode parity**, which
- * encodes one idea: a message may auto-deliver only when acting on it
- * cannot do more than the sender could already have done itself.
+ * encodes one idea: a message auto-delivers only between sessions of
+ * the same review class. Every approval mode falls in one of two
+ * classes — `prompting`, where a person still inspects each action, and
+ * `bypass`, where some actions can be applied with no one looking — and
+ * the sender asserts its class on the frame.
  *
  *   sender is a process this session started → accept
- *   receiver not fully reviewed + sender bypass     → accept
- *   receiver not fully reviewed + sender prompting  → hold
- *   receiver not fully reviewed + sender unasserted → hold
- *   receiver fully reviewed     + anything          → accept
- *   receiver mode unknown/unrecognized      → hold  (fail closed)
- *   policy setting unreadable               → hold  (fail closed)
+ *   receiver mode unknown/unrecognized        → hold  (fail closed)
+ *   sender asserts no class                   → hold
+ *   sender class equals receiver class        → accept
+ *   sender class differs from receiver class  → hold
+ *   policy setting unreadable                 → hold  (fail closed)
  *
  * The first row is the one case where the sender is known: a connection
  * that authenticated with the child token was opened by a script or hook
@@ -31,14 +33,24 @@
  * weigh there. The explicit setting still wins over it — a user who said
  * `hold` reviews everything, own processes included.
  *
- * A fully reviewed receiver can accept freely because every consequential
- * action still faces its own gate; the message is a suggestion, not an
- * execution. A receiver that can apply any action without review lacks that
- * universal backstop, which is why an unverified sender has to be reviewed
- * first. These modes are YOLO, AUTO_EDIT, and AUTO:
- * auto-edit approves every edit-shaped tool call outright, while AUTO's
- * in-workspace edit fast path runs before its classifier. In either mode,
- * a peer can ask for a file change that no human or classifier sees.
+ * The rule holds in both directions on purpose. A bypassing receiver has
+ * to be careful about a prompting sender because a peer can ask it for a
+ * file change that no human or classifier sees: auto-edit approves every
+ * edit-shaped tool call outright, and AUTO's in-workspace edit fast path
+ * runs before its classifier. A prompting receiver has a per-action
+ * backstop, but that backstop guards single actions, not the session's
+ * agenda: a message from a session nobody is watching is model-authored
+ * input, and a user who chose to review everything did not choose to
+ * have their model steered by it one benign-looking step at a time.
+ * Per-action prompts are also exactly the surface that fatigue turns
+ * into rubber stamps. So the prompting receiver holds it too, and the
+ * user releases it from `/peers` if they want it.
+ *
+ * A frame that asserts no class comes from a script, an older build, or
+ * an external process. The receiver has nothing to pair it with, so it
+ * is held for every receiver; an external process the user wants driving
+ * their session earns delivery through explicit trust, not through the
+ * receiver guessing.
  *
  * A hold is not open-ended. The sender is blocked on a decision that
  * only a person can give, so a parked message expires after
@@ -113,6 +125,26 @@ export function receiverReviewsActions(mode: ApprovalMode): boolean {
   );
 }
 
+/**
+ * The two review classes the parity rule compares. This is the vocabulary
+ * of `fromMode` on the wire, and the one predicate above decides both
+ * sides of the comparison, so two sessions in the same mode always land
+ * in the same class.
+ */
+export type ModeClass = 'prompting' | 'bypass';
+
+export function modeClass(mode: ApprovalMode): ModeClass {
+  return receiverReviewsActions(mode) ? 'prompting' : 'bypass';
+}
+
+/**
+ * Which settings scope produced the explicit policy. Only used to word the
+ * hold cause: "your setting" is wrong when the repository or the machine
+ * set it, and a user who never touched the key should be told where to
+ * look.
+ */
+export type PolicyScope = 'user' | 'workspace' | 'system';
+
 /** Narrow an untyped setting value; anything else is unreadable. */
 function isInboundPolicy(value: unknown): value is InboundPolicy {
   return value === 'accept' || value === 'hold' || value === 'refuse';
@@ -127,7 +159,7 @@ function isInboundPolicy(value: unknown): value is InboundPolicy {
  * messages that sailed straight through on mode parity.
  */
 export type PolicyDecision =
-  | { policy: 'hold'; cause: HoldCause }
+  | { policy: 'hold'; cause: HoldCause; scope?: PolicyScope }
   | { policy: 'accept' | 'refuse' };
 
 /**
@@ -152,6 +184,8 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 export interface HeldMessage {
   frame: PeerUserFrame;
   cause: HoldCause;
+  /** For the setting-driven causes: which scope set the policy, if known. */
+  policyScope?: PolicyScope;
   heldAt: number;
   /**
    * Monotonic counterpart of `heldAt`, from `performance.now()`.
@@ -179,6 +213,12 @@ export interface InboundGateOptions {
   getApprovalMode: () => ApprovalMode | null;
   /** Explicit user setting, if any. */
   getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * Which scope the explicit setting came from, when the host can tell.
+   * Read only to word a hold cause; absent or throwing means the cause is
+   * worded without a scope.
+   */
+  getPolicyScope?: () => PolicyScope | undefined;
   /** Deliver an accepted message into the session's input queue. */
   deliver: (frame: PeerUserFrame, origin: PeerOrigin) => void;
   /** Report a terminal outcome back to the sender. Best-effort. */
@@ -340,7 +380,7 @@ export class InboundGate {
             configured,
           )}`,
         );
-        return { policy: 'hold', cause: 'policy-unreadable' };
+        return this.hold('policy-unreadable', this.policyScope());
       }
       explicit = configured;
     } catch (error) {
@@ -351,8 +391,11 @@ export class InboundGate {
       );
       return { policy: 'hold', cause: 'policy-unreadable' };
     }
+    if (explicit === 'hold') {
+      return this.hold('explicit-setting', this.policyScope());
+    }
     if (explicit !== undefined) {
-      return { policy: explicit, cause: 'explicit-setting' };
+      return { policy: explicit };
     }
 
     // Known sender: parity compares what two sessions may do, and a
@@ -379,18 +422,39 @@ export class InboundGate {
       return { policy: 'hold', cause: 'mode-unknown' };
     }
 
-    if (receiverReviewsActions(mode)) {
-      return { policy: 'accept' };
-    }
-
-    // Not every action this session takes is reviewed from here down.
+    // Same class, either class, auto-delivers; anything else waits for
+    // the user. A sender that says nothing gives the receiver nothing to
+    // compare, so it waits too.
     const sender = frame?.fromMode;
     if (sender === undefined) {
       return { policy: 'hold', cause: 'no-mode-asserted' };
     }
-    return sender === 'bypass'
+    return sender === modeClass(mode)
       ? { policy: 'accept' }
       : { policy: 'hold', cause: 'mode-mismatch' };
+  }
+
+  private hold(
+    cause: HoldCause,
+    scope: PolicyScope | undefined,
+  ): PolicyDecision {
+    return scope === undefined
+      ? { policy: 'hold', cause }
+      : { policy: 'hold', cause, scope };
+  }
+
+  /** The scope is decoration on a cause; a broken getter must not change the verdict. */
+  private policyScope(): PolicyScope | undefined {
+    try {
+      return this.options.getPolicyScope?.();
+    } catch (error) {
+      debugLogger.debug(
+        `policy-scope getter threw (ignored): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -484,9 +548,11 @@ export class InboundGate {
     }
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
+    const scope = decision.policy === 'hold' ? decision.scope : undefined;
     this.held.push({
       frame,
       cause,
+      ...(scope === undefined ? {} : { policyScope: scope }),
       heldAt: Date.now(),
       monotonicAt: performance.now(),
       ...(origin.selfSent ? { selfSent: true } : {}),
@@ -591,8 +657,7 @@ export class InboundGate {
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
-        const cause = decision.policy === 'hold' ? decision.cause : entry.cause;
-        stillHeld.push(cause === entry.cause ? entry : { ...entry, cause });
+        stillHeld.push(withCause(entry, decision));
       }
     }
 
@@ -861,19 +926,56 @@ function originOf(entry: HeldMessage): PeerOrigin {
   return { selfSent: entry.selfSent === true };
 }
 
-/** One-line explanation of why a message is parked, for the UI. */
-export function describeHoldCause(cause: HoldCause): string {
+/**
+ * The same entry with the cause a fresh evaluation gave it, keeping the
+ * object identity when nothing changed so observers can compare by
+ * reference.
+ */
+function withCause(entry: HeldMessage, decision: PolicyDecision): HeldMessage {
+  if (decision.policy !== 'hold') return entry;
+  const { cause, scope } = decision;
+  if (cause === entry.cause && scope === entry.policyScope) return entry;
+  const { policyScope: _dropped, ...rest } = entry;
+  return scope === undefined
+    ? { ...rest, cause }
+    : { ...rest, cause, policyScope: scope };
+}
+
+/**
+ * One-line explanation of why a message is parked, for the UI.
+ *
+ * The scope, when known, names who set the policy: a user who never
+ * touched the key should not read "your setting".
+ */
+export function describeHoldCause(
+  cause: HoldCause,
+  scope?: PolicyScope,
+): string {
   switch (cause) {
     case 'explicit-setting':
-      return 'your crossSessionInbound setting is "hold"';
+      switch (scope) {
+        case 'workspace':
+          return 'this repository\'s settings hold messages from other sessions (agents.crossSessionInbound is "hold" in workspace settings)';
+        case 'system':
+          return 'a system setting holds messages from other sessions (agents.crossSessionInbound is "hold" in system settings)';
+        default:
+          return 'your crossSessionInbound setting is "hold"';
+      }
     case 'mode-mismatch':
-      return 'this session can apply some actions without per-action review and the sender does not';
+      return 'the sender and this session are in different review modes: one reviews each action and the other can apply some without per-action review';
     case 'no-mode-asserted':
-      return 'this session can apply some actions without per-action review and the sender did not say whether it does';
+      return 'the sender did not say whether it reviews each action';
     case 'mode-unknown':
       return "this session's approval mode could not be determined";
     case 'policy-unreadable':
-      return 'your crossSessionInbound setting could not be read';
+      switch (scope) {
+        case 'workspace':
+          return "the agents.crossSessionInbound value in this repository's workspace settings could not be read";
+        case 'system':
+          return 'the agents.crossSessionInbound value in system settings could not be read';
+        default:
+          return 'your crossSessionInbound setting could not be read';
+      }
     default: {
       const exhaustive: never = cause;
       return exhaustive;

@@ -299,6 +299,19 @@ export function createDaemonWorkspaceService(
     workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
   };
 
+  const getWorkspaceSkillsConfigStatus = async () => {
+    if (workspaceSkillsStatusProvider) {
+      try {
+        return await workspaceSkillsStatusProvider(boundWorkspace);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: getWorkspaceSkillsConfigStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return createIdleWorkspaceSkillsStatus(boundWorkspace);
+  };
+
   const readWorkspaceSkillsStatus = async (
     generation: number,
   ): Promise<ServeWorkspaceSkillsStatus> => {
@@ -441,6 +454,17 @@ export function createDaemonWorkspaceService(
       // so `/rev` stops autocompleting `/review`. `initialized` cleanly
       // separates a real child answer (always `true`) from the placeholder.
       return getWorkspaceSkillsStatus();
+    },
+
+    async getWorkspaceSkillsRuntimeStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceSkillsConfigStatus(_ctx: WorkspaceRequestContext) {
+      return getWorkspaceSkillsConfigStatus();
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
@@ -816,6 +840,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       requestedSkillName: string,
       enabled: boolean,
+      opts?: { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillToggleResult> {
       assertActiveGeneration();
       const skillName = requestedSkillName.trim();
@@ -827,15 +852,18 @@ export function createDaemonWorkspaceService(
       );
       assertActiveGeneration();
       const channelLive = isChannelLive?.() ?? false;
+      const refreshRuntime = opts?.refreshRuntime !== false;
       let activation: WorkspaceSkillToggleResult['activation'] = channelLive
-        ? 'applied'
+        ? persisted.changed && !refreshRuntime
+          ? 'reconciling'
+          : 'applied'
         : 'deferred';
       let sessionsRefreshed = 0;
       let sessionsFailed = 0;
 
       if (persisted.changed) {
         invalidateWorkspaceSkillsSnapshot();
-        if (channelLive) {
+        if (channelLive && refreshRuntime) {
           try {
             const refreshed =
               await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
@@ -1014,6 +1042,7 @@ export function createDaemonWorkspaceService(
     async installWorkspaceSkill(
       _ctx: WorkspaceRequestContext,
       request: WorkspaceSkillInstallRequest,
+      opts?: { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const result = await installWorkspaceSkill(
@@ -1023,7 +1052,8 @@ export function createDaemonWorkspaceService(
         assertGenerationOpen,
       );
       assertActiveGeneration();
-      await refreshWorkspaceSkillsAfterMutation();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      else await refreshWorkspaceSkillsAfterMutation();
       assertActiveGeneration();
       return result;
     },
@@ -1032,31 +1062,64 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       requestedSkillName: string,
       scope: WorkspaceSkillScope,
+      opts?: { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
-      const skill = status.skills.find(
+      const exactName = requestedSkillName.trim();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      const status =
+        opts?.refreshRuntime === false
+          ? await getWorkspaceSkillsConfigStatus()
+          : await getWorkspaceSkillsStatus();
+      if (
+        opts?.refreshRuntime === false &&
+        (!status.initialized || status.errors?.length)
+      ) {
+        throw new WorkspaceSkillManagementError(
+          'skills_config_unavailable',
+          'Skills configuration could not be enumerated',
+          503,
+        );
+      }
+      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
+      const matches = status.skills.filter(
         (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
       );
-      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
-      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
-      if (skill.level !== expectedLevel || !skill.installedPath) {
+      const scopedMatches = matches.filter(
+        (candidate) => candidate.level === expectedLevel,
+      );
+      const skill =
+        scopedMatches.find((candidate) => candidate.name === exactName) ??
+        (scopedMatches.length === 1 ? scopedMatches[0] : undefined);
+      if (!skill && matches.length === 0) {
+        throw new WorkspaceSkillNotFoundError(requestedSkillName);
+      }
+      if (!skill?.installedPath) {
         throw new WorkspaceSkillManagementError(
           'skill_not_managed',
           'Skill is not managed in the requested scope',
           409,
         );
       }
-      const result = await deleteWorkspaceSkill(
-        boundWorkspace,
-        scope,
-        skill.name,
-        skill.installedPath,
-        assertGenerationOpen,
-      );
+      let result: WorkspaceSkillMutationResult;
+      try {
+        result = await deleteWorkspaceSkill(
+          boundWorkspace,
+          scope,
+          skill.name,
+          skill.installedPath,
+          assertGenerationOpen,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new WorkspaceSkillNotFoundError(requestedSkillName);
+        }
+        throw error;
+      }
       assertActiveGeneration();
-      await refreshWorkspaceSkillsAfterMutation();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      else await refreshWorkspaceSkillsAfterMutation();
       assertActiveGeneration();
       return result;
     },
