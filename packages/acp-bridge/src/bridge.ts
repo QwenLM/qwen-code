@@ -181,6 +181,7 @@ import {
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
+  activeWorkCloseRetryDelayMs,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
@@ -1163,6 +1164,25 @@ interface SessionEntry {
    */
   activeWorkCloseInFlight: boolean;
   /**
+   * Consecutive conditional-close probes that produced no answer. A run
+   * counter, not a lifetime total. Cleared whenever the daemon learns the
+   * world moved on — the child answering a probe either way, a snapshot
+   * reporting held work, or a snapshot omitting the Session because the child
+   * has let go of it — so a Session that recovers visibly is probed again on
+   * the next snapshot with no memory of the earlier failures. One that
+   * recovers silently produces none of those and is probed again when the
+   * rung expires instead; see `activeWorkCloseRetryAt`.
+   */
+  activeWorkCloseFailures: number;
+  /**
+   * Epoch ms before which `entryIsAutoCloseCandidate` suppresses a probe.
+   * Derived from `activeWorkCloseFailures` via `activeWorkCloseRetryDelayMs`;
+   * `null` while probing stays immediate. Gated at the candidacy check rather
+   * than inside the probe so the reaper's own log line stops firing too —
+   * a suppressed probe that still announced itself would read as progress.
+   */
+  activeWorkCloseRetryAt: number | null;
+  /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
    * carries its `promptId`, summary, and an `abortController` so the
    * `removePendingPrompt` API can cancel specific items. The currently
@@ -1913,9 +1933,9 @@ export function extractErrorCode(err: unknown): string | undefined {
  * turn content except the idle bookkeeping subtypes skipped via
  * `isIdleBookkeepingSessionUpdate`: the user-shell output stream (its
  * history goes to the model conversation, not the persisted transcript
- * the refresh pages) and the latest-wins state snapshots
- * (`available_commands_update`, `current_mode_update`) that settings and
- * approval-mode refreshes fan out to idle sessions.
+ * the refresh pages) and latest-wins state metadata
+ * (`available_commands_update`, `current_mode_update`, and
+ * `session_info_update`).
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1965,7 +1985,8 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
  * the user-shell output stream (injected into the model conversation
  * history instead of the transcript the refresh pages) and the
  * latest-wins state snapshots (`available_commands_update` from a
- * skills/settings refresh, the legacy dual-emit `current_mode_update`).
+ * skills/settings refresh, the legacy dual-emit `current_mode_update`, and
+ * title metadata in `session_info_update`).
  */
 function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (event.type !== 'session_update') return false;
@@ -1978,7 +1999,8 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const subtype = updateRecord['sessionUpdate'];
   if (
     subtype === 'available_commands_update' ||
-    subtype === 'current_mode_update'
+    subtype === 'current_mode_update' ||
+    subtype === 'session_info_update'
   ) {
     return true;
   }
@@ -3154,10 +3176,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const capability = owner?.activeWork;
     if (
       capability &&
-      !channelIsCondemned(owner) &&
+      childCloseNeedsRoundTrip(owner) &&
       ACTIVE_WORK_HOLD_CATEGORIES.some(
         (category) => !capability.categories.includes(category),
       )
+    ) {
+      return false;
+    }
+    // A probe the child could not answer is retried on the next snapshot, but
+    // not on every snapshot forever: a Session the child can never settle
+    // would otherwise be re-probed at the report cadence for the lifetime of
+    // the daemon, each probe spending a full drain budget and each one holding
+    // this Session closed to admission while it runs. The delay is derived
+    // from a run of consecutive failures and cleared whenever the daemon
+    // learns the Session moved on — an answer, a hold report, or the child
+    // dropping it from a snapshot — so a wedge that resolves visibly costs one
+    // deferral rather than being stranded. One that resolves silently is
+    // re-probed when the delay expires, bounded by the ladder's ceiling.
+    //
+    // A channel that needs no round trip is exempt: there is no probe to back
+    // off from, and deferring would leave the escape hatch unreachable while
+    // the retained Session keeps the channel non-empty, so a channel already
+    // given up on could never drain.
+    if (
+      childCloseNeedsRoundTrip(owner) &&
+      entry.activeWorkCloseRetryAt !== null &&
+      Date.now() < entry.activeWorkCloseRetryAt
     ) {
       return false;
     }
@@ -3368,7 +3412,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }).catch((err) => {
         writeStderrLine(
           `qwen serve: deferred close (${opts.trigger}) failed for ` +
-            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : extractErrorMessage(err)}`,
         );
       });
     } finally {
@@ -3425,6 +3469,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
         SERVE_CONTROL_EXT_METHODS.sessionClose,
       );
+      // The child answered, so the run of unanswered probes is over — granted
+      // or refused. Hoisted above the `closed` branch because a granted close
+      // can still fail its local teardown and leave the entry registered and
+      // usable, and it must not carry a stale count into the next probe.
+      entry.activeWorkCloseFailures = 0;
+      entry.activeWorkCloseRetryAt = null;
       if (response['closed'] === true) {
         // The child is done with it; only local teardown remains.
         return true;
@@ -3457,10 +3507,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return false;
     } catch (err) {
+      entry.activeWorkCloseFailures++;
+      const delayMs = activeWorkCloseRetryDelayMs(
+        entry.activeWorkCloseFailures,
+      );
+      entry.activeWorkCloseRetryAt =
+        delayMs === null ? null : Date.now() + delayMs;
       writeStderrLine(
         `qwen serve: close-if-unheld for session ${JSON.stringify(entry.sessionId)} ` +
-          `did not resolve (${err instanceof Error ? err.message : String(err)}); ` +
-          `leaving it in place for the next snapshot to settle`,
+          `did not resolve (${extractErrorMessage(err)}); ` +
+          (delayMs === null
+            ? `leaving it in place for the next snapshot to settle`
+            : `leaving it in place and deferring the next probe by ${delayMs}ms ` +
+              `after ${entry.activeWorkCloseFailures} consecutive failures`),
       );
       return false;
     }
@@ -3514,10 +3573,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         touchActivity();
       }
       if (holds.size === 0) {
+        // Absence is the one recovery signal that cannot be misread: the child
+        // has let go of the Session entirely, so a probe can only answer
+        // `closed`, and it answers an unknown id from `closeStoredSession`'s
+        // early return without ever entering the drain. A backoff earned
+        // against a Session the child was still holding no longer applies, and
+        // keeping it would suppress exactly the reconciliation described above
+        // and strand a ghost entry the child has already destroyed.
+        //
+        // Deliberately not extended to `child_idle`: named with no holds is the
+        // wedge the backoff exists for, and clearing there pins the run at a
+        // single failure forever.
+        if (!reported.has(sessionId)) {
+          entry.activeWorkCloseFailures = 0;
+          entry.activeWorkCloseRetryAt = null;
+        }
         void maybeCloseIdleSession(
           entry,
           reported.has(sessionId) ? 'child_idle' : 'child_dropped',
         );
+      } else {
+        // Reporting held work is an answer, so a run of unanswered close
+        // probes is over: once this Session goes idle again the daemon may
+        // probe it on the next snapshot instead of waiting out a backoff that
+        // was earned against a different state of the world.
+        entry.activeWorkCloseFailures = 0;
+        entry.activeWorkCloseRetryAt = null;
       }
     }
   }
@@ -3773,6 +3854,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.overdueAbandonedRestores.size > 0 ||
       ci.newSessionCleanupFailed ||
       ci.overdueAbandonedNewSessions.size > 0
+    );
+  }
+
+  /**
+   * Whether a conditional close on this channel has to ask the child at all.
+   *
+   * The mirror of `confirmChildUnheld`'s two authorize-locally short-circuits:
+   * a channel that never negotiated active-work, and one the session lifecycle
+   * has condemned, are both closed locally with no round trip. Guards that back
+   * off a *probe* must consult this rather than re-derive the pair by hand, or
+   * they keep deferring an entry whose teardown needs nobody's permission — and
+   * for a condemned channel that teardown is the only thing that can release a
+   * request nobody is going to answer, while the retained Session is what keeps
+   * the channel non-empty and its drain from ever completing.
+   *
+   * `confirmChildUnheld`'s third non-round-trip exit, `isDying`, deliberately
+   * does not belong here: it retains the Session rather than authorizing its
+   * close, and it sits ahead of the condemned check, so folding it in would
+   * flip a dying-and-condemned channel from retain to authorize.
+   */
+  function childCloseNeedsRoundTrip(owner: ChannelInfo | undefined): boolean {
+    return (
+      owner !== undefined &&
+      owner.activeWork !== undefined &&
+      !channelIsCondemned(owner)
     );
   }
 
@@ -6925,6 +7031,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       childHolds: null,
       childHoldsAt: null,
       activeWorkCloseInFlight: false,
+      activeWorkCloseFailures: 0,
+      activeWorkCloseRetryAt: null,
       retryAllowed: false,
       promptSettledAt: null,
       promptSettledCloseTimer: undefined,

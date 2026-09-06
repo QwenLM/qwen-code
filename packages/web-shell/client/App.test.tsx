@@ -10,6 +10,7 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import {
   DaemonHttpError,
+  GOAL_PAUSE_REASON_COMMAND,
   type DaemonInputAnnotation,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
@@ -241,6 +242,8 @@ const {
   sessionCatalogController,
   mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
+  mockUseWorkspaceSessionLiveState,
+  mockUseDaemonActivePromptBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -307,6 +310,7 @@ const {
       events: [],
       hasMore: false,
     }),
+    getWorkspaceSessionLiveState: vi.fn(),
     sessionTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -351,6 +355,7 @@ const {
     mockCollectSystemInfo,
     mockConnection: connection,
     mockSessionActions: {
+      setDaemonActivePrompt: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
       generateSessionContent: vi.fn(async function* () {}),
@@ -672,6 +677,8 @@ const {
     },
     mockReleaseWebTerminal: vi.fn(),
     mockReleaseDetachedWebTerminal: vi.fn(),
+    mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
+    mockUseDaemonActivePromptBridge: vi.fn(),
   };
 });
 
@@ -759,6 +766,7 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
   return {
     ...actual,
     DaemonHttpError,
+    GOAL_PAUSE_REASON_COMMAND: 'Paused with /goal pause.',
     DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
     STANDALONE_SESSIONS_CAPABILITY: 'standalone_sessions_v1',
     isDaemonTurnError: (error: unknown) =>
@@ -786,6 +794,10 @@ vi.mock('./hooks/useMessages', () => ({
   projectStreamingTailMessages: () => testState.streamingTailMessages,
   useMessages: () => testState.messages,
   useMessagesFromBlocks: () => testState.messages,
+}));
+
+vi.mock('./session-catalog/workspace-session-live-state', () => ({
+  useWorkspaceSessionLiveState: mockUseWorkspaceSessionLiveState,
 }));
 
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
@@ -1499,7 +1511,11 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
 
 vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
-  useSessionHasActivePrompt: () => testState.sessionHasActivePrompt,
+  useSessionActivePromptState: () => ({
+    hasActivePrompt: testState.sessionHasActivePrompt,
+    authoritative: true,
+  }),
+  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -8401,6 +8417,11 @@ beforeEach(() => {
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
+  mockUseWorkspaceSessionLiveState.mockClear();
+  mockUseDaemonActivePromptBridge.mockReset();
+  mockUseDaemonActivePromptBridge.mockImplementation(
+    () => testState.sessionHasActivePrompt,
+  );
   mockWorkspace.status = 'connected';
   mockWorkspace.refreshCapabilities.mockReset();
   mockWorkspace.refreshCapabilities.mockResolvedValue(
@@ -10008,6 +10029,92 @@ describe('App composer footer renderer', () => {
 });
 
 describe('App conversation indicator keep-alive (#9487)', () => {
+  it('bridges a Live session through its resolved workspace owner', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+
+    renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseDaemonActivePromptBridge).toHaveBeenCalledWith(
+      mockWorkspace.client,
+      '/tmp/live',
+      'session-1',
+    );
+  });
+
+  it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+
+    const { rerender } = renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        workspaceCwds: ['/tmp/project', '/tmp/live'],
+        groupWorkspaceCwds: [],
+      },
+    );
+
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: false,
+        },
+      ],
+    };
+    rerender({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: false,
+        workspaceCwds: [],
+        groupWorkspaceCwds: [],
+      },
+    );
+  });
+
   it('keeps the indicator mounted and composer running through a silent gap', async () => {
     const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
     const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
@@ -26260,6 +26367,7 @@ describe('App session callbacks', () => {
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+    expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
   });
 
   it('forces the compact session drawer from the external shell ref', async () => {
@@ -31975,6 +32083,7 @@ describe('App /goal command', () => {
         action: 'pause',
         expectedGoalId: 'goal-1',
         expectedRevision: 5,
+        reason: GOAL_PAUSE_REASON_COMMAND,
       });
     });
 

@@ -12,14 +12,12 @@
 
 import { Box, Text, Static } from 'ink';
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
-import {
-  AgentStatus,
-  AgentEventType,
-  getGitBranch,
-  type AgentCore,
-  type AgentInteractive,
-  type AgentStatusChangeEvent,
-} from '@qwen-code/qwen-code-core';
+import type { AgentCore } from '@qwen-code/qwen-code-core/agents/runtime/agent-core.js';
+import { AgentEventType } from '@qwen-code/qwen-code-core/agents/runtime/agent-events.js';
+import type { AgentStatusChangeEvent } from '@qwen-code/qwen-code-core/agents/runtime/agent-events.js';
+import type { AgentInteractive } from '@qwen-code/qwen-code-core/agents/runtime/agent-interactive.js';
+import { AgentStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import { getGitBranch } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
