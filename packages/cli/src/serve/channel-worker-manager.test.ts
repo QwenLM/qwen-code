@@ -199,6 +199,145 @@ describe('createChannelWorkerManager', () => {
     expect(manager.committedChannelNames()).toEqual(['secondary-bot']);
   });
 
+  it('prunes a permanently removed workspace before starting another channel', async () => {
+    const test = setup();
+    let secondaryRemoved = false;
+    test.resolveGroups.mockImplementation(async (selection) => {
+      if (
+        secondaryRemoved &&
+        selection.mode === 'names' &&
+        selection.names.includes('secondary-bot')
+      ) {
+        throw new Error(
+          'Channel "secondary-bot" is not configured in any registered workspace, or its "cwd" points outside them.',
+        );
+      }
+      return splitWorkspaceGroups(selection);
+    });
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['primary-bot', 'secondary-bot'],
+    });
+    secondaryRemoved = true;
+
+    await test.manager.removeWorkspace(SECONDARY, { permanent: true });
+
+    expect(test.manager.committedChannelNames()).toEqual(['primary-bot']);
+    await expect(
+      test.manager.setChannelEnabled(
+        { name: 'new-bot', workspaceCwd: PRIMARY },
+        true,
+      ),
+    ).resolves.toMatchObject({ changed: true });
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['primary-bot', 'new-bot'] },
+      'set',
+    );
+  });
+
+  it('preserves committed channels for a temporary workspace removal', async () => {
+    const test = setup();
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['primary-bot', 'secondary-bot'],
+    });
+
+    await test.manager.removeWorkspace(SECONDARY);
+    await test.manager.restoreWorkspace(SECONDARY);
+
+    expect(test.manager.committedChannelNames()).toEqual([
+      'primary-bot',
+      'secondary-bot',
+    ]);
+    expect(test.group.removeWorkspace).toHaveBeenCalledOnce();
+    expect(vi.mocked(test.group.removeWorkspace).mock.calls[0]![0]).toBe(
+      SECONDARY,
+    );
+    expect(test.group.restoreWorkspace).toHaveBeenCalledWith(SECONDARY);
+  });
+
+  it('releases the lease when permanent removal clears the final channel', async () => {
+    const test = setup();
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['secondary-bot'],
+    });
+
+    await test.manager.removeWorkspace(SECONDARY, { permanent: true });
+
+    expect(test.manager.state()).toMatchObject({
+      enabled: false,
+      selection: null,
+      workers: [],
+    });
+    expect(test.releaseLease).toHaveBeenCalledOnce();
+  });
+
+  it('releases the lease when final channel removal reports a failure', async () => {
+    const group = fakeGroup({
+      removeWorkspace: vi.fn(async () => {
+        throw new Error('worker cleanup failed');
+      }),
+    });
+    const test = setup(group);
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['secondary-bot'],
+    });
+
+    await expect(
+      test.manager.removeWorkspace(SECONDARY, { permanent: true }),
+    ).rejects.toThrow('worker cleanup failed');
+
+    expect(test.manager.state()).toMatchObject({
+      enabled: false,
+      selection: null,
+      workers: [],
+    });
+    expect(group.stop).toHaveBeenCalledOnce();
+    expect(test.releaseLease).toHaveBeenCalledOnce();
+  });
+
+  it('prunes permanent state even when worker removal reports a failure', async () => {
+    const group = fakeGroup({
+      removeWorkspace: vi.fn(async () => {
+        throw new Error('worker cleanup failed');
+      }),
+    });
+    const test = setup(group);
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['primary-bot', 'secondary-bot'],
+    });
+
+    await expect(
+      test.manager.removeWorkspace(SECONDARY, { permanent: true }),
+    ).rejects.toThrow('worker cleanup failed');
+
+    expect(test.manager.committedChannelNames()).toEqual(['primary-bot']);
+    expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['primary-bot'] },
+      [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['primary-bot'] },
+        },
+      ],
+    );
+  });
+
   it('enables a disabled manager and makes an equal healthy PUT idempotent', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {

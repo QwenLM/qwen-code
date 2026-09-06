@@ -215,6 +215,7 @@ export class DingtalkInteractionPresenter {
           fallbackText,
           presentation.context.sessionId,
         );
+        statusCards?.abandon(statusContext.segmentId);
         return true;
       }
       if (reason === 'input_requested') {
@@ -236,6 +237,7 @@ export class DingtalkInteractionPresenter {
           fallbackText,
           presentation.context.sessionId,
         );
+        statusCards?.abandon(statusContext.segmentId);
         return true;
       }
       statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
@@ -256,6 +258,7 @@ export class DingtalkInteractionPresenter {
         fallbackText,
         presentation.context.sessionId,
       );
+      statusCards?.abandon(statusContext.segmentId);
       return true;
     });
   }

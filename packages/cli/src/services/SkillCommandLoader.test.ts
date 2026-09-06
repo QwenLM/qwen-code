@@ -60,6 +60,7 @@ describe('SkillCommandLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -269,6 +270,48 @@ describe('SkillCommandLoader', () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  describe('project skill allowedTools require a trusted folder', () => {
+    async function runProjectSkill(): Promise<void> {
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Bash(curl *)', 'Write'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/my-skill', args: '' } } as never,
+        '',
+      );
+    }
+
+    it('grants no session allow rules in an untrusted folder', async () => {
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+      await runProjectSkill();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('grants them in a trusted folder — marked trust-gated for the live revocation check', async () => {
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(true);
+      await runProjectSkill();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      // Exactly `{ trustGated: true }`: suspension keys solely off the
+      // flag, so a `/my-skill`-invoked project skill whose grants shipped
+      // ungated would silently escape the mid-session revocation.
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(curl *)',
+        { trustGated: true },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Write', {
+        trustGated: true,
+      });
+    });
   });
 
   it('should submit skill body as prompt', async () => {
@@ -489,8 +532,16 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(git *)',
+        {
+          trustGated: false,
+        },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
+        trustGated: false,
+      });
     });
 
     it('does not grant when the skill declares no allowedTools', async () => {

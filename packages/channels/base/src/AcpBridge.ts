@@ -17,11 +17,13 @@ import type {
 import {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
+  type ChannelBtwResult,
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
@@ -227,14 +229,39 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     void this.registerChannelLoopMcpServer();
   }
 
+  private async applySessionApprovalMode(
+    conn: ClientSideConnection,
+    sessionId: string,
+    approvalMode: string | undefined,
+  ): Promise<void> {
+    if (!approvalMode) return;
+    try {
+      await conn.setSessionMode({ sessionId, modeId: approvalMode });
+    } catch (error) {
+      await conn
+        .extMethod('qwen/control/session/close', { sessionId })
+        .catch((closeError: unknown) => {
+          process.stderr.write(
+            `[AcpBridge] Failed to close session ${sanitizeLogText(sessionId, 128)} after approval mode error: ${sanitizeLogText(closeError instanceof Error ? closeError.message : String(closeError), 512)}\n`,
+          );
+        });
+      throw error;
+    }
+  }
+
   async newSession(
     cwd: string,
-    _options?: ChannelAgentBridgeSessionOptions,
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
+    await this.applySessionApprovalMode(
+      conn,
+      response.sessionId,
+      options?.approvalMode,
+    );
     this.knownSessionIds.add(response.sessionId);
     this.sessionBindingTokens.set(response.sessionId, bindingToken);
     return response.sessionId;
@@ -243,7 +270,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   async loadSession(
     sessionId: string,
     cwd: string,
-    _options?: ChannelAgentBridgeSessionOptions,
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
@@ -253,6 +280,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       cwd,
       mcpServers: [],
     });
+    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
@@ -313,6 +341,36 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
 
     return chunks.join('') || slashCommandOutput;
+  }
+
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    if (!this.knownSessionIds.has(sessionId)) {
+      throw new Error(`Unknown ACP session ${sessionId}`);
+    }
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    const response = await withAbortSignal(
+      this.ensureConnection().extMethod(CHANNEL_BTW_METHOD, {
+        sessionId,
+        question,
+      }),
+      signal,
+    );
+    if (
+      response['sessionId'] !== sessionId ||
+      (response['answer'] !== null && typeof response['answer'] !== 'string')
+    ) {
+      throw new Error('Invalid BTW response from ACP agent');
+    }
+    return {
+      sessionId,
+      answer: response['answer'] as string | null,
+    };
   }
 
   async cancelSession(sessionId: string): Promise<void> {
@@ -678,6 +736,30 @@ async function withTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function withAbortSignal<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) throw createAbortError();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(createAbortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function createAbortError(): Error {
+  const error = new Error('BTW request aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 function isSkippedMcpRegistration(result: unknown): boolean {

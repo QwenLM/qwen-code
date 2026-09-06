@@ -49,6 +49,23 @@ describe('workflow file size', () => {
     expect(bytes).toBeLessThan(gateBytes);
   });
 
+  it('fails fast: the size gate precedes the dependency install', () => {
+    // In the pre-split test job the gate deliberately ran right after the
+    // profile step — dependency-free bash, seconds into the job. The split
+    // initially parked it after `npm ci`, which delays the verdict by ~6
+    // minutes warm and ~15 cold, and (worse) hides a size violation behind
+    // any unrelated install failure since the step has no always() gate.
+    const lintJob = ciWorkflow.match(
+      /^ {2}lint_and_static:[\s\S]*?(?=^ {2}[a-z_]+:)/m,
+    )?.[0];
+    expect(lintJob).toBeDefined();
+    const gate = lintJob.indexOf("- name: 'Check workflow file size'");
+    const install = lintJob.indexOf("- name: 'Install dependencies'");
+    expect(gate).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(install);
+  });
+
   it('runs the gate on every CI profile, not just full', () => {
     // A .github-only PR classifies as `github_ci_only`; gating the check on the
     // `full` profile would skip it for exactly the changes that can trip it.

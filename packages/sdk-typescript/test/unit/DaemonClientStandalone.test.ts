@@ -11,6 +11,7 @@ import {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
   isStandaloneCreationOutcomeUnknown,
+  parseStandaloneSession,
 } from '../../src/daemon/standalone-sessions.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -31,12 +32,47 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-function capabilityResponse(enabled = true): Response {
+function capabilityResponse(
+  enabled = true,
+  optionsEnabled = enabled,
+): Response {
   return jsonResponse(200, {
     v: 1,
     mode: 'serve',
-    features: enabled ? ['standalone_sessions_v1'] : [],
+    features: [
+      ...(enabled ? ['standalone_sessions_v1'] : []),
+      ...(optionsEnabled ? ['standalone_session_options_v1'] : []),
+    ],
   });
+}
+
+function standaloneOptions() {
+  return {
+    v: 1,
+    initialized: true,
+    current: { authType: 'openai', modelId: 'qwen-test' },
+    approvalMode: 'default',
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen-test',
+            baseModelId: 'qwen-test',
+            name: 'Qwen Test',
+            contextLimit: 131072,
+            modalities: { image: true },
+            isCurrent: true,
+            isRuntime: false,
+            configOptions: [],
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function standaloneSummary(sessionId = SESSION_ID) {
@@ -99,6 +135,98 @@ function recordingFetch(
 }
 
 describe('DaemonClient standalone sessions', () => {
+  it('gates standalone options with their dedicated capability', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      capabilityResponse(true, false),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.getStandaloneSessionOptions()).rejects.toMatchObject({
+      name: 'DaemonCapabilityMissingError',
+      capability: 'standalone_session_options_v1',
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/capabilities',
+    ]);
+  });
+
+  it('reads and validates standalone options', async () => {
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, standaloneOptions()),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.getStandaloneSessionOptions()).resolves.toEqual(
+      standaloneOptions(),
+    );
+    expect(calls[1]).toMatchObject({
+      url: 'http://daemon/standalone/session-options',
+      method: 'GET',
+    });
+  });
+
+  it.each([
+    [
+      { ...standaloneOptions(), workspaceCwd: '/conversations' },
+      'workspace internals',
+    ],
+    [{ ...standaloneOptions(), acpChannelLive: true }, 'workspace internals'],
+    [{ ...standaloneOptions(), v: 2 }, 'expected v=1'],
+    [{ ...standaloneOptions(), providers: null }, 'expected providers[]'],
+    [{ ...standaloneOptions(), errors: {} }, 'expected errors[]'],
+    [
+      {
+        ...standaloneOptions(),
+        errors: [{ kind: 'a', status: 'degraded' }],
+      },
+      'invalid status',
+    ],
+    [
+      { ...standaloneOptions(), approvalMode: 'yolo-plus' },
+      'invalid approvalMode',
+    ],
+    [
+      {
+        ...standaloneOptions(),
+        current: { modelId: 'q', visionModelId: 7 },
+      },
+      'expected visionModelId string',
+    ],
+    [
+      {
+        ...standaloneOptions(),
+        providers: [
+          {
+            ...standaloneOptions().providers[0],
+            models: [
+              {
+                ...standaloneOptions().providers[0]!.models[0],
+                isCurrent: 'yes',
+              },
+            ],
+          },
+        ],
+      },
+      'expected isCurrent boolean',
+    ],
+  ])('rejects malformed standalone options: %s', async (body, detail) => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, body),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.getStandaloneSessionOptions()).rejects.toEqual(
+      expect.objectContaining<Partial<DaemonStandaloneProtocolError>>({
+        name: 'DaemonStandaloneProtocolError',
+        message: expect.stringContaining(detail),
+      }),
+    );
+  });
+
   it('gates standalone operations before calling their routes', async () => {
     const { fetch, calls } = recordingFetch(() => capabilityResponse(false));
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -176,6 +304,39 @@ describe('DaemonClient standalone sessions', () => {
     expect(body).not.toHaveProperty('cwd');
     expect(body).not.toHaveProperty('workspaceCwd');
     expect(created.sessionId).toBe(body['sessionId']);
+  });
+
+  it('exposes modelApplied from the create response', async () => {
+    const { fetch } = recordingFetch((request) => {
+      if (request.url.endsWith('/capabilities')) return capabilityResponse();
+      const body = JSON.parse(request.body ?? '{}') as { sessionId: string };
+      return jsonResponse(200, {
+        ...standaloneSession(body.sessionId),
+        modelApplied: false,
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const created = await client.createStandaloneSession({
+      modelServiceId: 'qwen-prod',
+    });
+
+    expect(created.modelApplied).toBe(false);
+  });
+
+  it('rejects a create response with a non-boolean modelApplied', () => {
+    expect(() =>
+      parseStandaloneSession(
+        { ...standaloneSession(), modelApplied: 'yes' },
+        'POST /standalone/sessions',
+      ),
+    ).toThrow(DaemonStandaloneProtocolError);
+    expect(() =>
+      parseStandaloneSession(
+        { ...standaloneSession(), modelApplied: 'yes' },
+        'POST /standalone/sessions',
+      ),
+    ).toThrow(/expected modelApplied boolean/);
   });
 
   it('canonicalizes a caller UUID and exercises the complete route family', async () => {

@@ -89,6 +89,9 @@ export class ModelRegistry {
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
 
+  /** Raw providers config this registry was last built from. */
+  private modelProvidersConfig?: ModelProvidersConfig;
+
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
@@ -106,6 +109,7 @@ export class ModelRegistry {
   ) {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
+    this.modelProvidersConfig = modelProvidersConfig;
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -375,5 +379,11 @@ export class ModelRegistry {
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
+    this.modelProvidersConfig = reloaded.modelProvidersConfig;
+  }
+
+  /** The raw providers config this registry was last built from. */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelProvidersConfig;
   }
 }
