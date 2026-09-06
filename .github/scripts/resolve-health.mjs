@@ -186,8 +186,13 @@ function headline(body) {
 // on, and a fork author granted write would retroactively enter it. The
 // watch therefore judges once — the first tick to see a request records the
 // association in the state marker (stateOf's `requests`), and a later tick
-// reads the record, never the live field, so a mid-window permission change
-// moves nothing in either direction.
+// reads the record, never the live field. The judgment reaches a trusted
+// comment on the filing tick itself (apply posts the record with the
+// create) and on any later tick that sights a new request, so a mid-window
+// permission change moves nothing the watch has recorded. The bound: a
+// request sighted only while no issue is open has nowhere to be recorded,
+// and a triage user deleting the newest state comments rewinds the record
+// to the first one — those are still judged live.
 export const ANSWERABLE_ASSOCIATIONS = new Set([
   'OWNER',
   'MEMBER',
@@ -455,6 +460,19 @@ function sameState(previous, current) {
   );
 }
 
+// The record's own write key, for the change no other key sees: a first
+// sighting moves neither the streak, nor the roster membership, nor — for a
+// request the lane would refuse — the barrier, so a tick whose only change
+// is one writes nothing under those keys and the judgment is thrown away,
+// to be re-derived from the live field after it drifts. Keyed on the record
+// GAINING an id, never on the record changing: the write carries the id, so
+// the next tick gains nothing and stays quiet — one comment per newly
+// sighted request, never one per tick.
+function recordGained(previous, carried) {
+  const known = new Set((previous?.requests ?? []).map(([id]) => id));
+  return carried.some(([id]) => !known.has(id));
+}
+
 // The shape the watch writes, and the only shape it will read back. A marker
 // is text on a GitHub issue, so a payload of the wrong TYPE is as reachable as
 // one of the wrong value — and type confusion defeats the close gate's checks
@@ -597,12 +615,15 @@ export function renderUpdate(assessment, options = {}, previous = null) {
   ].join('\n');
 }
 
-// The first alarming tick after the issue is filed: the body is what FINDS
-// the issue, never what the watch believes, so `texts` is empty, `previous` is
-// null, and `sameState` cannot compare anything. The write is required — it is
-// how state first reaches a comment the watch trusts, and suppressing it puts
-// the barrier back where a deleted comment can take it — but it must not claim
-// a change it never saw.
+// The picture as the filing tick saw it. apply() posts it with the create,
+// so the first-sight judgments reach a comment the watch trusts in the same
+// run — the body is what FINDS the issue, never what the watch believes,
+// and a later first write would freeze whatever the live field drifted to
+// meanwhile. It is also decide()'s write when an open issue carries no
+// readable state (`texts` empty, `previous` null, `sameState` with nothing
+// to compare): required then too — suppressing it puts the barrier back
+// where a deleted comment can take it — but it must not claim a change it
+// never saw.
 function renderFirstRecord(assessment, options = {}) {
   return [
     HEALTH_MARKER,
@@ -665,6 +686,12 @@ export function decide(assessment, existing, options = {}) {
         type: 'create',
         title: `/resolve is failing: ${assessment.streak} consecutive failures, ${assessment.unanswered.length} unanswered requests`,
         body: renderIssueBody(assessment, options),
+        // apply() posts this with the create: the filing tick's record, in
+        // a comment the watch trusts. The body's own marker is never read
+        // back (findOpenIssue returns only comments as state), so without
+        // it the judgments wait for a later write and freeze whatever the
+        // live field drifted to.
+        record: renderFirstRecord(assessment, options),
       });
     } else {
       const previous = readState(existing.texts);
@@ -677,22 +704,28 @@ export function decide(assessment, existing, options = {}) {
             ? renderUpdate(assessment, options, previous)
             : renderFirstRecord(assessment, options),
         });
-      } else if (
-        (stateOf(assessment, previous).newestRequest ?? '') >
-        (previous.newestRequest ?? '')
-      ) {
-        // A request can arrive without moving the picture `sameState`
-        // compares: below `staleHours` it is not on the roster yet, and it
-        // changes neither the streak nor the latest attempt. The quiet
-        // branch's rise-keyed refresh is unreachable while the alarm fires,
-        // so without this the request lives only in the live scan and its
-        // deletion takes the barrier with it. Keyed on the rise, never on
-        // every tick, so an unchanged picture still writes nothing.
-        actions.push({
-          type: 'comment',
-          number: existing.number,
-          body: renderRequestRecord(assessment, options, previous),
-        });
+      } else {
+        const carried = stateOf(assessment, previous);
+        if (
+          (carried.newestRequest ?? '') > (previous.newestRequest ?? '') ||
+          recordGained(previous, carried.requests)
+        ) {
+          // A request can arrive without moving the picture `sameState`
+          // compares: below `staleHours` it is not on the roster yet, and
+          // it changes neither the streak nor the latest attempt. The quiet
+          // branch's rise-keyed refresh is unreachable while the alarm
+          // fires, so without this the request lives only in the live scan
+          // and its deletion takes the barrier with it. The record key
+          // covers the sighting that moves nothing at all — a request the
+          // lane would refuse raises not even the barrier. Keyed on the
+          // rise and the gained id, never on every tick, so an unchanged
+          // picture still writes nothing.
+          actions.push({
+            type: 'comment',
+            number: existing.number,
+            body: renderRequestRecord(assessment, options, previous),
+          });
+        }
       }
     }
   } else if (existing) {
@@ -763,16 +796,20 @@ export function decide(assessment, existing, options = {}) {
       actions.push({ type: 'close', number: existing.number });
     } else if (
       !previous ||
-      (carried.newestRequest ?? '') > (previous.newestRequest ?? '')
+      (carried.newestRequest ?? '') > (previous.newestRequest ?? '') ||
+      recordGained(previous, carried.requests)
     ) {
       // Persist the barrier while the alarm is quiet. The live scan only
       // reads requests still in the window whose comments still exist, so a
       // request recorded nowhere is a request the gate above will later
       // lose — falling back to the creation-time floor and closing on a push
-      // that predates it. Keyed on the barrier that RISES, never on the
-      // creation-time floor, which is constant and would say nothing; it
-      // rises only when a new request appears, so a quiet lane gets one
-      // comment per request and never chatters.
+      // that predates it. The gained id is the same persistence for the
+      // first-sight judgment: a request the lane would refuse raises no
+      // barrier, so only the record key writes it down. Keyed on the
+      // barrier that RISES or the record that GAINS, never on the
+      // creation-time floor, which is constant and would say nothing;
+      // either moves only when a new request appears, so a quiet lane gets
+      // one comment per request and never chatters.
       actions.push({
         type: 'comment',
         number: existing.number,
@@ -951,14 +988,35 @@ export function findOpenIssue(gh, repo, label) {
 export function apply(gh, repo, actions, label) {
   for (const action of actions) {
     if (action.type === 'create') {
-      gh(
-        ['api', '-X', 'POST', `repos/${repo}/issues`, '--input', '-'],
-        JSON.stringify({
-          title: action.title,
-          body: action.body,
-          labels: [label],
-        }),
+      const created = JSON.parse(
+        gh(
+          ['api', '-X', 'POST', `repos/${repo}/issues`, '--input', '-'],
+          JSON.stringify({
+            title: action.title,
+            body: action.body,
+            labels: [label],
+          }),
+        ),
       );
+      if (action.record) {
+        // The filing tick's judgments must reach a trusted comment in the
+        // same run: the body is never read back as state, so the next tick
+        // would otherwise re-judge every request by the live field, and the
+        // first comment it wrote would freeze whatever the field drifted
+        // to. The number comes from the create response — the only way to
+        // address the issue that was just filed.
+        gh(
+          [
+            'api',
+            '-X',
+            'POST',
+            `repos/${repo}/issues/${created.number}/comments`,
+            '--input',
+            '-',
+          ],
+          JSON.stringify({ body: action.record }),
+        );
+      }
     } else if (action.type === 'comment') {
       gh(
         [

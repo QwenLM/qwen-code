@@ -785,7 +785,10 @@ describe('resolve-health: assessment', () => {
     assert.equal(first.alarm, true);
     const filed = decide(first, null)[0];
     assert.equal(filed.type, 'create');
-    const recorded = readState([filed.body]).requests;
+    // Read the way production's next tick reads it: the record comment
+    // apply() posts with the create is what findOpenIssue returns as
+    // `texts`; the body never feeds state.
+    const recorded = readState([filed.record]).requests;
     assert.equal(recorded.length, 3);
     // The next tick: one requester's membership lapsed, so the live field
     // reads NONE. Judged live the roster drops below the threshold; judged
@@ -826,8 +829,10 @@ describe('resolve-health: assessment', () => {
     assert.equal(first.unanswered.length, 0, 'the lane refused this request');
     const filed = decide(first, null)[0];
     assert.equal(filed.type, 'create');
-    // The refusal is in the record...
-    const recorded = readState([filed.body]).requests;
+    // The refusal is in the record — read the way production's next tick
+    // reads it, from the record comment apply() posts with the create, not
+    // the body.
+    const recorded = readState([filed.record]).requests;
     assert.deepEqual(recorded, [
       [asked.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR'],
     ]);
@@ -1116,12 +1121,13 @@ describe('resolve-health: decisions', () => {
   });
 
   it('does not claim a change on the first tick that reads no state', () => {
-    // Production's second tick of every incident: the issue body carries the
-    // marker but findOpenIssue never reads it back as state, so `texts` is
-    // empty and `previous` is null. The write must happen — it is how state
-    // first reaches a comment the watch trusts — but the picture has not
-    // changed, and the comment must not say it has. Every other decide() test
-    // seeds `texts` with the creation body, a shape production never makes.
+    // The issue body carries the marker but findOpenIssue never reads it
+    // back as state, so when the record comment apply() posts with the
+    // create is lost or never landed, `texts` is empty and `previous` is
+    // null. The write must happen — it is how state reaches a comment the
+    // watch trusts again — but the picture has not changed, and the comment
+    // must not say it has. Every other decide() test seeds `texts` with the
+    // creation body, a shape production never makes.
     const first = decide(failing, {
       number: 42,
       createdAt: FILED_AT,
@@ -1381,6 +1387,11 @@ describe('resolve-health: decisions', () => {
     // stays in the window. Two entrances: their PRs close without ever
     // receiving a result (assess() drops closed-PR requests by design), or
     // enough of them get answered to fall below the threshold.
+    // Hoisted, so the record membership the write key compares is made of
+    // the same comment ids on every tick, as production's stable ids are.
+    const asked = [0, 1, 2].map((i) =>
+      request(`2026-08-2${5 + i}T01:00:00Z`, 25 + i),
+    );
     const prsWith = (states) => [
       {
         number: 24,
@@ -1390,7 +1401,7 @@ describe('resolve-health: decisions', () => {
       ...states.map((state, i) => ({
         number: 25 + i,
         state,
-        comments: [request(`2026-08-2${5 + i}T01:00:00Z`, 25 + i)],
+        comments: [asked[i]],
       })),
     ];
     const opened = assess(prsWith(['open', 'open', 'open']), { now });
@@ -1944,6 +1955,97 @@ describe('resolve-health: decisions', () => {
       [56, '2026-08-25T00:00:00Z', 'CONTRIBUTOR'],
       [fresh.id, '2026-08-27T06:00:00Z', 'COLLABORATOR'],
     ]);
+  });
+
+  it('records a newly sighted refused request on an unchanged quiet picture', () => {
+    // The record's own write key. A request the lane would have refused
+    // moves neither the roster, nor the streak, nor the request barrier,
+    // so a tick whose only change is sighting one writes nothing under
+    // those keys — and the refusal is re-derived from the live field on a
+    // later tick, after a promotion drifted it, frozen as the first sight.
+    const seeded =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestRequest":null,"latest":null,"requests":[]} -->';
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const refused = request(
+      '2026-08-27T06:00:00Z',
+      31,
+      'fork-author',
+      '2026-08-27T06:00:00Z',
+      'CONTRIBUTOR',
+    );
+    const quiet = assess([{ number: 31, state: 'open', comments: [refused] }], {
+      now,
+    });
+    assert.equal(quiet.alarm, false);
+    assert.equal(
+      quiet.newestRequest,
+      null,
+      'a refused request raises no barrier to key the write on',
+    );
+    const actions = decide(quiet, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(actions[0].body, /State refresh:/);
+    assert.deepEqual(readState([actions[0].body]).requests, [
+      [refused.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR'],
+    ]);
+    // One per newly sighted id, never one per tick: the marker now carries
+    // the judgment, so the same picture again writes nothing.
+    assert.deepEqual(
+      decide(quiet, { ...existing, texts: [actions[0].body] }),
+      [],
+    );
+  });
+
+  it('records a newly sighted refused request while the alarm holds its picture', () => {
+    // The alarm branch's half of the key: with the picture unchanged the
+    // rise leg keys the write, but a refused request raises no barrier, so
+    // only the gained id keys it here. Without the write the refusal is
+    // judged live again next tick — and a mid-window promotion would be
+    // frozen as the first sight.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 39),
+    );
+    const refused = request(
+      '2026-08-27T10:00:00Z',
+      50,
+      'fork-author',
+      '2026-08-27T10:00:00Z',
+      'CONTRIBUTOR',
+    );
+    const steady = assess(
+      [
+        { number: 39, state: 'open', comments: failures },
+        { number: 50, state: 'open', comments: [refused] },
+      ],
+      { now },
+    );
+    assert.equal(steady.alarm, true);
+    assert.equal(steady.unanswered.length, 0);
+    const seeded = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: steady.streak,
+      unanswered: [],
+      newestRequest: null,
+      latest: steady.latestAttempt.id,
+      requests: [],
+    })} -->`;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const actions = decide(steady, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(actions[0].body.includes('the same picture'), actions[0].body);
+    assert.deepEqual(readState([actions[0].body]).requests, [
+      [refused.id, '2026-08-27T10:00:00Z', 'CONTRIBUTOR'],
+    ]);
+    // The write carries the id, so the same tick again writes nothing.
+    assert.deepEqual(
+      decide(steady, { ...existing, texts: [actions[0].body] }),
+      [],
+    );
   });
 
   it('records the request it saw, so a later deletion cannot certify recovery', () => {
@@ -2775,7 +2877,86 @@ describe('resolve-health: end to end against a recording gh', () => {
           )
           .join('');
       }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'POST') {
+        // The create response carries the new number; apply() addresses
+        // the record comment to it.
+        return '{"number":500}';
+      }
       if (args[2] === 'POST' || args[2] === 'PATCH') {
+        return '{}';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+  }
+
+  // A stateful gh for multi-tick scenarios: whatever apply() writes — the
+  // created issue, the comments — is what the next main() call reads back,
+  // as production's GitHub does. `store` is the test's to mutate between
+  // ticks: `prs` in fetchPrs' input shape, `issues` the filed issues,
+  // `comments` each issue's comment feed, `now` the timestamp new writes
+  // are stamped with.
+  function statefulGh(store) {
+    return (args, input) => {
+      const path = args[3];
+      if (path === 'search/issues') {
+        return store.prs.map((pr) => `${pr.number}\t${pr.state}\n`).join('');
+      }
+      const feed = path.match(
+        /^repos\/QwenLM\/qwen-code\/issues\/(\d+)\/comments$/,
+      );
+      if (feed && args[2] === 'GET') {
+        const pr = store.prs.find((x) => String(x.number) === feed[1]);
+        if (pr) {
+          return pr.comments
+            .map(
+              (c) =>
+                `${[
+                  c.id,
+                  c.user,
+                  c.author_association ?? 'COLLABORATOR',
+                  c.created_at,
+                  c.updated_at ?? c.created_at,
+                  c.html_url,
+                  b64(c.body),
+                ].join('\t')}\n`,
+            )
+            .join('');
+        }
+        return (store.comments[feed[1]] ?? [])
+          .map(
+            (c) =>
+              `${[c.user, c.created_at, c.updated_at, b64(c.body)].join('\t')}\n`,
+          )
+          .join('');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return store.issues
+          .map(
+            (i) =>
+              `${i.number}\tgithub-actions[bot]\t${i.created_at}\t${b64(i.body)}\n`,
+          )
+          .join('');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'POST') {
+        const number = (store.next += 1);
+        store.issues.push({
+          number,
+          created_at: store.now,
+          body: JSON.parse(input).body,
+        });
+        return JSON.stringify({ number });
+      }
+      if (feed && args[2] === 'POST') {
+        const comments = (store.comments[feed[1]] ??= []);
+        comments.push({
+          user: 'github-actions[bot]',
+          created_at: store.now,
+          updated_at: store.now,
+          body: JSON.parse(input).body,
+        });
+        return '{}';
+      }
+      if (args[2] === 'PATCH') {
         return '{}';
       }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
@@ -2919,6 +3100,61 @@ describe('resolve-health: end to end against a recording gh', () => {
     assert.equal(assessment.unanswered.length, 1);
     assert.equal(assessment.unanswered[0].id, asked.id);
     assert.equal(assessment.alarm, true);
+  });
+
+  it('persists the judgments of the filing tick in a comment the next tick reads', () => {
+    // Production lifecycle across two ticks, against a stateful gh: the
+    // filing tick's record used to reach a trusted comment only on a LATER
+    // write, so a requester demoted between the two ticks was re-judged by
+    // the live field — the roster dropped below the threshold, the alarm
+    // went quiet, and that tick's refresh froze the demotion as the first
+    // sight. apply() now posts the record with the create, so the next
+    // tick judges by it.
+    const asks = [0, 1, 2].map((h) =>
+      request(`2026-08-27T0${h}:00:00Z`, 60 + h, `writer${h}`),
+    );
+    const lane = (comments) =>
+      comments.map((req, i) => ({
+        number: 60 + i,
+        state: 'open',
+        comments: [req],
+      }));
+    const store = {
+      prs: lane(asks),
+      issues: [],
+      comments: {},
+      next: 500,
+      now: '2026-08-27T06:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const env = { REPO: 'QwenLM/qwen-code' };
+    const tick1 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick1.actions.map((a) => a.type),
+      ['create'],
+    );
+    // The create and the record comment land in the same run.
+    assert.equal(store.issues.length, 1);
+    const filed = store.issues[0];
+    assert.equal(store.comments[filed.number]?.length, 1);
+    const record = readState(store.comments[filed.number].map((c) => c.body));
+    assert.deepEqual(
+      record.requests,
+      asks.map((r) => [r.id, r.created_at, 'COLLABORATOR']),
+    );
+    // Tick 2: one requester's membership lapsed, so the live field reads
+    // NONE. Judged live the roster drops below the threshold; judged by
+    // the record nothing moved — and an unchanged picture writes nothing.
+    store.prs = lane([
+      { ...asks[0], author_association: 'NONE' },
+      asks[1],
+      asks[2],
+    ]);
+    store.now = '2026-08-27T12:00:00Z';
+    const tick2 = main({ gh, env, now: new Date(store.now) });
+    assert.equal(tick2.assessment.unanswered.length, 3);
+    assert.equal(tick2.assessment.alarm, true);
+    assert.deepEqual(tick2.actions, []);
   });
 
   it('recovers even when a stranger forged the state marker', () => {
