@@ -105,6 +105,32 @@ you edit other fields.
 
 Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
 
+### Background Agent Responses
+
+Background Agent output is sent as soon as each response segment is available.
+Every message is labeled with the Agent name so concurrent work remains
+attributable.
+
+To buffer each Agent's notification turn and send it as one labeled message,
+enable aggregation for the DingTalk channel in `settings.json`:
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "aggregateBackgroundAgentResponses": true
+    }
+  }
+}
+```
+
+Aggregation is disabled by default. A partial labeled message is sent if the
+Agent turn is interrupted, fails before producing a final response, or does
+not finish within ten minutes.
+
 ## Running
 
 ```bash
