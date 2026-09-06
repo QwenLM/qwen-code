@@ -81,10 +81,64 @@ export interface PermissionResolvedEvent {
   outcome?: RequestPermissionResponse['outcome'];
 }
 
+export interface BackgroundResponseContext {
+  taskId: string;
+  status: string;
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  toolUseId?: string;
+  label?: string;
+  turnId?: string;
+  turnComplete?: boolean;
+  partial?: boolean;
+}
+
+export function parseBackgroundResponseContext(
+  value: unknown,
+): BackgroundResponseContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const taskId = record['taskId'];
+  const status = record['status'];
+  const kind = record['kind'];
+  if (
+    typeof taskId !== 'string' ||
+    !taskId ||
+    typeof status !== 'string' ||
+    !status ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow')
+  ) {
+    return undefined;
+  }
+
+  const context: BackgroundResponseContext = { taskId, status, kind };
+  for (const field of ['toolUseId', 'label', 'turnId'] as const) {
+    const fieldValue = record[field];
+    if (typeof fieldValue === 'string' && fieldValue) {
+      context[field] = fieldValue;
+    }
+  }
+  if (typeof record['turnComplete'] === 'boolean') {
+    context.turnComplete = record['turnComplete'];
+  }
+  if (typeof record['partial'] === 'boolean') {
+    context.partial = record['partial'];
+  }
+  return context;
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
-  backgroundResponse: [sessionId: string, text: string];
+  backgroundResponse: [
+    sessionId: string,
+    text: string,
+    context?: BackgroundResponseContext,
+  ];
   responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];
