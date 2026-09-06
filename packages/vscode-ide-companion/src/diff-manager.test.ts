@@ -244,3 +244,91 @@ describe('DiffManager permission diff dismissal', () => {
     expect(closed).not.toHaveBeenCalled();
   });
 });
+
+// R3-9: the request-id binding was landed without a witness for any of its three
+// halves — stored by showDiff, read back by getPermissionRequestId/hasDiff, and
+// used by closeDiff to refuse a diff owned by a different approval.
+describe('DiffManager permission request id binding', () => {
+  beforeEach(() => {
+    executeCommand.mockClear();
+  });
+
+  function createManager(): InstanceType<typeof DiffManager> {
+    return new DiffManager(() => {}, new DiffContentProvider());
+  }
+
+  function lastOpenedRightUri(): { toString(): string } {
+    const call = executeCommand.mock.calls.find(
+      ([command]) => command === 'vscode.diff',
+    );
+    if (!call) throw new Error('no diff was opened');
+    return call[2] as { toString(): string };
+  }
+
+  it('reads back the request id the diff was opened for', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+
+    expect(manager.hasDiff(rightUri as never)).toBe(true);
+    expect(manager.getPermissionRequestId(rightUri as never)).toBe('req-1');
+  });
+
+  it('leaves the request id undefined for a diff no approval owns', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+    const rightUri = lastOpenedRightUri();
+
+    expect(manager.hasDiff(rightUri as never)).toBe(true);
+    expect(manager.getPermissionRequestId(rightUri as never)).toBeUndefined();
+  });
+
+  it('refuses to close a diff owned by a different approval', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+
+    await manager.closeDiff('/workspace/foo.ts', true, 'req-other');
+
+    // Same path, different owner: the diff the other approval is waiting on
+    // must survive.
+    expect(manager.hasDiff(rightUri as never)).toBe(true);
+  });
+
+  it('closes the bound diff when the ids match', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+
+    await manager.closeDiff('/workspace/foo.ts', true, 'req-1');
+
+    expect(manager.hasDiff(rightUri as never)).toBe(false);
+  });
+
+  it('closes by path alone when no request id is given', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+
+    await manager.closeDiff('/workspace/foo.ts', true);
+
+    expect(manager.hasDiff(rightUri as never)).toBe(false);
+  });
+});

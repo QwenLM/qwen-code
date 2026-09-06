@@ -845,6 +845,33 @@ describe('web shell permission decision messages', () => {
     expect(respondToPendingPermission).not.toHaveBeenCalled();
   });
 
+  // R3-5: the host-side binding gates the vote on the id the host believes is
+  // pending. Only the matching-id path was exercised, so a regression that
+  // dropped the comparison would have gone unnoticed.
+  it('ignores a decision bound to a different request id', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props, 'req-1');
+
+    await dispatchDecision('allow', window.parent, 'req-stale');
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  // R3-6: 'reject' is half the decision vocabulary and had no forwarding
+  // witness; the guard admits exactly 'allow' and 'reject'.
+  it('forwards a host-relayed reject', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    await dispatchDecision('reject', window.parent);
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'reject');
+  });
+
   it('surfaces a notice when the shell resolves the vote to false', async () => {
     const props = await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(false);
@@ -990,5 +1017,76 @@ describe('EmbeddedApp permission diff dismissal', () => {
     await dismiss('req-stale');
 
     expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+  });
+});
+
+describe('EmbeddedApp permission diff request-id wiring', () => {
+  function permission(requestId: string, path: string) {
+    return {
+      id: `block-${requestId}`,
+      kind: 'permission',
+      requestId,
+      title: `Edit ${path}`,
+      resolved: false,
+      options: [],
+      preview: { kind: 'key_value', rows: [] },
+      toolCall: {
+        content: [{ type: 'diff', path, oldText: 'before', newText: 'after' }],
+      },
+    };
+  }
+
+  // R3-16: the host used to open a native diff for every pending permission.
+  // Only the first one gets a tab now, and nothing asserted the count.
+  it('opens a native diff only for the first pending permission', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        permission('req-a', '/workspace/a.txt'),
+        permission('req-b', '/workspace/b.txt'),
+      ]);
+      await Promise.resolve();
+    });
+
+    const opened = postMessagesOfType('openDiff');
+    expect(opened).toHaveLength(1);
+    expect((opened[0]?.data as { requestId?: string })?.requestId).toBe(
+      'req-a',
+    );
+  });
+
+  // R3-4: the cleanup loop closes by (path, requestId) rather than by path, so
+  // a resolved approval cannot close a diff another request owns.
+  it('closes the diff scoped to the request that no longer needs it', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permission('req-a', '/workspace/a.txt')]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await act(async () => {
+      onTranscriptChange([
+        { ...permission('req-a', '/workspace/a.txt'), resolved: true },
+      ]);
+      await Promise.resolve();
+    });
+
+    const closed = postMessagesOfType('closeDiff');
+    expect(closed).toHaveLength(1);
+    expect(closed[0]).toEqual({
+      type: 'closeDiff',
+      data: { path: '/workspace/a.txt', requestId: 'req-a' },
+    });
   });
 });
