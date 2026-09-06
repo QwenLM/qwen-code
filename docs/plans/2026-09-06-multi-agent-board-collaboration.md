@@ -1,157 +1,148 @@
-# Route B — multi-agent collaboration on a shared board
+# Multi-agent collaboration on a shared thread
 
-> Status: Plan — design only, no implementation
+> Status: Design settled — ready to implement
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Supersedes the Agent-Team-first direction in [`2026-09-06-agent-team-webshell-gap.md`](./2026-09-06-agent-team-webshell-gap.md) §6
-> Related: #9402 (board storage), #10078 (session boundary), #10247 §5, #11072
+> Related: #9402 (board storage), #10078 (session boundary), #10247 §5, #11072, #11140
 
-## 0. Decision
+## 0. What this is
 
-Build the Multica-shaped model: **durable agent identities, a shared thread that
-several agents read and write, and a dispatcher that wakes the addressed agent's
-session.** Agent Team is not the vehicle; it stays available as an *inner* loop
-inside a single run.
+Durable agent identities that collaborate on a shared thread. A person opens a
+thread, assigns an agent, and the agents take it from there — reading, posting,
+`@`-ing each other, splitting sub-threads, and handing work back for review,
+while the person can interject at any moment.
 
-The reason is a correction, not a preference. An earlier reading of Multica
-concluded its agents "don't talk in real time". Verified against its source,
-that is wrong on two counts:
+This is the Multica model, built on machinery Qwen Code already has. Agent Team
+is untouched and stays the inner loop for sub-turn collaboration inside a single
+run.
 
-- `server/internal/daemon/types.go:110` and `daemon/prompt.go:58` — Multica
-  **resumes the agent CLI's prior session** (`PriorSessionID`), and explicitly
-  works to keep the prompt cache across resumes. Context is not rebuilt from the
-  thread; the same conversation continues.
-- `server/internal/daemon/wakeup.go` — dispatch is a **WebSocket push** from
-  server to daemon, not polling. An `@` to an agent that is not currently
-  running starts it within about a second.
+### 0.1 The correction this rests on
 
-So `@`-based coordination in Multica *is* live collaboration. The only thing it
+An earlier reading concluded Multica's agents "don't talk in real time". Verified
+against its source, that is wrong twice over:
+
+- `server/internal/daemon/types.go:110`, `daemon/prompt.go:58` — Multica
+  **resumes the agent CLI's prior session** (`PriorSessionID`) and works to keep
+  the prompt cache across resumes. Context is not rebuilt from the thread.
+- `server/internal/daemon/wakeup.go` — dispatch is a **WebSocket push**, not
+  polling. An `@` to an idle agent starts it within about a second.
+
+`@`-based coordination in Multica *is* live collaboration. The one thing it
 cannot do is deliver into a run that is already executing:
 `server/internal/handler/comment.go:2313` returns `DispatchDeferred` /
-`ReasonAlreadyActive` for that case — "its reconcile covers the comment".
+`ReasonAlreadyActive` — "its reconcile covers the comment".
 
-Agent Team's one advantage is exactly that gap: `agent-core.ts:1140` drains
-external messages at each tool-round boundary and appends them to the next model
-turn, so a running teammate can be corrected mid-task. Every other axis —
-durability, replay, shared visibility, restartability, cross-machine — favours
-the board model. A private inbox that dies with the process is the wrong
-substrate for the product described.
+Qwen Code does not have that limitation. `resumeBackgroundAgent`
+(`core/src/agents/background-agent-resume.ts:600`) queues a message into a
+**running** agent via `registry.queueMessage`. So this design takes the durable,
+observable, shared-thread model *and* keeps mid-run steering — better than either
+Agent Team or Multica alone on the axis each of them loses.
 
-## 1. The three pillars, and what we already have
+## 1. Execution model
 
-| Pillar | Multica | Qwen Code today |
-| --- | --- | --- |
-| Resumable per-agent session whose transcript is the run log | `PriorSessionID` + resume | **Have it.** `POST /session/:id/resume`, transcripts persist after the idle reaper closes a session (`serve/create-sub-session.ts`) |
-| Wake the addressed agent | WebSocket push → daemon claims → run | **Half.** `create_sub_session` spawns a fresh top-level session and can notify the parent on completion; `scheduled-task-keepalive.ts` already keeps a bound session resident and *revives* one the reaper closed. No addressing layer. |
-| Shared, durable work surface everyone reads | Issues + comments in Postgres | **Design only.** #9402's board (`~/.qwen/boards/`, task/ask/decision, cross-process locks) is deliberately storage-and-CLI only: "Pull is the contract. Nothing is delivered into a running agent process." |
-| Agent identity bound to a runtime | Agent + Runtime records | **No.** Only definitions (`.qwen/agents/*.md`, `SubagentManager`, `/workspace/agents`). |
+An agent is **one long-lived background agent per workspace**, not a daemon
+session. This was the design's biggest correction: the persona machinery
+(`subagent-manager.ts:868` → `{promptConfig, modelConfig, runConfig, toolConfig}`)
+targets the agent runtime, not ACP sessions, and there is no per-session persona
+hook. Building one would be new work on a hot path with no precedent.
 
-The single most useful piece of prior art is the durable scheduled task. It
-already is, structurally, what a Route B "assignment" needs:
-`DurableCronTask` (`core/src/services/cronTasksFile.ts:76`) carries an id, a
-prompt, an `enabled` switch, a **bound `sessionId` whose transcript is the run
-history**, and a bounded `runs[]` history — with `scheduled-task-keepalive.ts`
-handling residency and revival and `scheduled-task-session-lifecycle.ts`
-handling archive/delete coupling. Route B's dispatcher is the same shape with a
-different trigger.
+Everything the execution layer needs already exists:
 
-## 2. Entities
-
-**Agent** — a durable identity in a workspace.
-`id`, `name`, `color`, `description`, `agentType` (an existing definition,
-supplying prompt/tools/MCP/skills), optional `model` and approval mode,
-`maxConcurrentRuns`, `enabled`/`archived`. Persisted per workspace, next to the
-durable-tasks file.
-
-**Thread** — the shared surface; Multica's issue.
-`id`, `title`, `body`, `status`, optional `assigneeAgentId`, and an append-only
-`messages[]` of `{id, from: agentId | 'user', text, mentions[], at}`.
-
-**Run** — one agent turn against one thread.
-`id`, `agentId`, `threadId`, bound `sessionId`, `status`, timings, token usage,
-error. The bound session's transcript is the log — no second log format.
-
-## 3. The dispatch loop
-
-A new message lands on a thread (from a person, from an agent, from a channel,
-from a schedule). Then:
-
-1. **Resolve targets** — explicit `@mentions`, else the assignee.
-2. **Admit** — agent exists, enabled, workspace trusted, concurrency slot free.
-   Fail closed: an unresolvable check never enqueues.
-3. **Coalesce / defer** — the rules Multica learned the hard way:
-   - target has a *queued, unstarted* run on this thread → merge the message into it;
-   - target has an *active* run → defer; its completion re-checks the thread;
-   - an agent's own message never wakes itself;
-   - an explicit `@` to someone else suppresses the assignee's automatic wake.
-4. **Ensure a session** — look up `(agentId, threadId) → sessionId`. Missing →
-   create one in the workspace carrying the agent's persona. Present but not
-   resident → `POST /session/:id/resume`.
-5. **Prompt** — thread title/body, the messages since this agent's last run, the
-   agent's own instructions, and the reply protocol.
-6. **The agent replies through tools** — `thread_post`, `thread_assign`,
-   `thread_status`; the qwen equivalent of Multica's `multica` CLI. A
-   `thread_post` re-enters step 1, which is what makes agent-to-agent
-   conversation work.
-7. **Record and re-check** — write the run record; re-evaluate anything deferred
-   at step 3.
-
-**Loop safety is not optional.** Two agents that `@` each other will ping-pong
-until the budget runs out. Multica's self-trigger guard plus dedup is necessary
-but not sufficient; this needs a hard per-thread auto-turn budget and a
-per-agent concurrency cap, both visible in the UI and both refusing rather than
-silently stopping.
-
-## 4. New vs reused
-
-New: the agent registry (+REST +UI), the thread store (+REST +UI), the
-dispatcher service, the three thread tools, and session persona binding.
-
-Reused: session create/resume/transcript, the keepalive-and-revive pattern, the
-durable-record and bounded-run-history shapes, agent definitions as persona,
-the existing permission dialog, the Web Shell transcript panel, channels as an
-external trigger, and Agent Team as an optional inner loop when one run wants
-tight sub-turn collaboration.
-
-## 5. Decisions needed before implementation
-
-1. **Thread storage** — new `threads/` store, or adopt #9402's board files?
-   *Recommend new store*; leave the board CLI as the foreign-process interop
-   surface, since it deliberately refuses addressing and delivery.
-2. **Persona binding** — extend `POST /session` with `agentType`, or inject the
-   persona in the first prompt? *Recommend extending the route*; prompt
-   injection cannot give the agent its definition's tools and MCP servers.
-3. **Scope** — threads per workspace (like durable tasks) or global?
-   *Recommend per workspace.*
-4. **Working directory** — v1 agents share the workspace cwd; per-agent
-   worktrees later. *Recommend deferring worktrees.*
-5. **Guardrails** — per-thread auto-turn budget and per-agent concurrency
-   defaults. Numbers to pick, but they must exist in v1.
-6. **Gating** — new experimental flag, or reuse `experimental.agentTeam`?
-   *Recommend a separate flag*; this is not Agent Team.
-
-## 6. Module map
-
-Landed on this branch (storage and rules only — nothing starts a session yet):
-
-| File | Responsibility |
+| Need | Existing machinery |
 | --- | --- |
-| `core/src/agents/mesh/types.ts` | `MeshAgent`, `Thread`, `ThreadMessage`, `ThreadRun`, and the three limits |
-| `core/src/agents/mesh/mesh-store.ts` | Paths, validation, locking, CRUD for agents and threads |
-| `core/src/agents/mesh/mentions.ts` | `@name` → agent ids |
-| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure, one decision per (post, target) |
-| `core/src/agents/mesh/thread-actions.ts` | `postMessage` — append and book runs under one lock; run state transitions |
+| Agent loop | `AgentCore` / `AgentInteractive` |
+| Persona: prompt, restricted tools, private MCP | `convertToRuntimeConfig` |
+| Durable log | `attachJsonlTranscriptWriter` |
+| Reading that log in Web Shell | virtual subagent sessions + the existing panel |
+| Wake with a message, into a **running** agent | `resumeBackgroundAgent` → `registry.queueMessage` |
+| Wake a finished agent from its transcript, across a process restart | `reviveCompletedBackgroundAgent` |
+| Context growth | auto-compaction, already in the runtime (`agent-core.ts:559`, `:977`) |
+| Approvals | the background-agent approval path |
+| Keeping a bound session resident, and reviving one the reaper closed | `scheduled-task-keepalive.ts` |
 
-Still to build:
+So the work is the **orchestration layer**, which does not exist yet. Nothing
+underneath needs rewriting, and none of the reuse goes through Agent Team — it
+goes through the background-agent layer that Agent Team and ordinary subagents
+both sit on.
 
-| Piece | Where | Note |
+## 2. Settled decisions
+
+Nineteen decisions, all confirmed with the product owner. Recorded so
+implementation does not relitigate them.
+
+### Scope and safety
+
+| # | Decision | Consequence |
 | --- | --- | --- |
-| Thread tools (`thread_post`, `thread_assign`, `thread_status`, `thread_read`) | `core/src/tools/` | How an agent participates; the qwen equivalent of Multica's `multica` CLI |
-| Session persona binding | `serve/routes/session.ts` + core config | `POST /session` accepts `agentType`; without it an agent session has the definition's prompt but not its tools and MCP |
-| Dispatcher service | `cli/src/serve/mesh-dispatcher.ts` | Consumes `postMessage`'s bookings: ensure session → resume or create → prompt → `startRun`/`finishRun` |
-| REST | `cli/src/serve/routes/mesh.ts` | Agents CRUD, threads CRUD, post, run listing |
-| Web Shell | `web-shell/client/` | Agents page, thread list, thread view with attributed posts and run state |
+| 1 | **v1 agents are read-only.** No file writes, no worktrees, no branches. | Removes all concurrent-write design. The deliverable of a thread is a conclusion, not a diff. |
+| 2 | Read-only means **files + read-only shell**, against a **built-in allowlist**. | `run_shell_command` can write, so "no writes but any command" is a false boundary. The allowlist is the hard ceiling; agent definitions may narrow it, never widen it. |
+| 3 | Tool sets otherwise **follow the agent definition**. | No second permission model. Who can do what is decided where agents are defined. |
+| 4 | Agents are **scoped to one workspace**. | Trust and permissions follow the workspace. Five repos means five rosters. |
 
-## 7. The end-to-end sequence
+### Identity and memory
+
+| # | Decision | Consequence |
+| --- | --- | --- |
+| 5 | **One long-lived execution body per agent**, with memory continuous across threads. | Like a colleague who remembers last week. Requires compaction, and makes the agent a serial worker. |
+| 6 | Context growth is handled by **auto-compaction**, reusing the runtime's existing mechanism. | Verified to exist. Lossy over long horizons; accepted. |
+| 7 | The **host session is hidden** — pure infrastructure, absent from the session list. | The user's model stays "agents and threads". Troubleshooting goes through logs. |
+| 8 | **Disabling keeps memory; deleting clears it.** | Matches the durable scheduled task's `enabled` semantics. |
+
+### Conversation
+
+| # | Decision | Consequence |
+| --- | --- | --- |
+| 9 | A message **can enter a running agent** — but **only for the thread it is currently working on**. | Keeps steering, prevents an unrelated thread's message landing inside the current one's reasoning. |
+| 10 | An agent is **serial across threads**, and a waiting thread **says so explicitly** ("busy on <thread>"). | One slow thread blocks that agent's other work; the UI makes it legible rather than mysterious. |
+| 11 | Each agent has a **bounded pending queue**; a full queue **refuses and says so**. | Forces the real throughput to be visible instead of accumulating a backlog nobody will reach. |
+| 12 | Agents may **post, `@` any existing workspace agent, change thread status, and create sub-threads**. They may not create agents. | Sub-tasks are expressible; the roster stays human-owned. |
+| 13 | A sub-thread reaching `in_review` **posts back to its parent automatically**. | The hand-off chain cannot silently break. |
+| 14 | Blocked agents **post the question and set the thread to `blocked`**, ending the run. | Costs nothing while waiting. A human reply wakes the agent again. `@user` is not supported in v1 — `blocked` plus a channel notification is how a person is found. |
+| 15 | An agent may set `in_review`; **only a person sets `done`**. | Nothing is archived without a human having seen it. |
+
+### Cost and failure
+
+| # | Decision | Consequence |
+| --- | --- | --- |
+| 16 | Three gates: **12 auto turns / 200k tokens / 30 minutes wall-clock**, per thread tree. | Whichever trips first stops dispatch and says why in the thread. |
+| 17 | **A sub-thread shares its root's budget.** | Closes the hole where creating threads mints new budget. |
+| 18 | A run is stuck when **N minutes pass with no activity** — not by total duration. | A legitimate two-hour investigation is never killed for being slow. |
+| 19 | A stuck run, and any run still `running` after a **daemon restart**, is **revived and continued**, told it timed out. Failing again marks it `failed`. | One recovery path for both. Cheap — completed work is not repeated — and the agent can report its own progress. |
+
+### Surfaces
+
+| # | Decision | Consequence |
+| --- | --- | --- |
+| 20 | The entry point **folds into the existing Agents page**; #11140's sidebar change is absorbed here and that PR is closed. | One PR, no dependency ordering, and the "Agents" entry finally means runnable agents. |
+| 21 | Creating a thread with an assignee **starts it**; creating one without leaves it idle for a later `@`. | Assignment is the trigger, as in Multica. |
+| 22 | Channel notifications (Lark/Slack/…) fire on **blocked, in_review, gate tripped, and run failed after retry**. | The four things that need a person. Reuses the existing channel workers. |
+
+## 3. Data model
+
+```
+MeshAgent           id, name, description, color, agentType, model,
+                    maxConcurrentRuns, queueLimit, enabled, createdAt,
+                    backgroundAgentId, hostSessionId          ← execution binding
+
+Thread              id, title, body, status, assigneeAgentId, createdAt,
+                    createdBy, messages[], runs[],
+                    parentThreadId, rootThreadId,             ← budget is on the root
+                    autoTurnsUsed, tokensUsed, firstDispatchedAt
+
+ThreadMessage       id, from, text, mentions[], at
+ThreadRun           id, agentId, sessionId, status, triggerMessageIds[],
+                    queuedAt, startedAt, endedAt, attempts, error
+
+ThreadStatus        open | in_progress | blocked | in_review | done
+```
+
+Stored under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/mesh/`),
+not the working tree — the reasoning the durable scheduled-tasks file records,
+plus one more: thread text is written by one agent and fed to another, so it is
+a prompt-injection surface and must never be committed, pulled, or reviewed as
+if it were code.
+
+## 4. The dispatch loop
 
 ```
 person or agent posts
@@ -161,10 +152,6 @@ postMessage()  ── one thread lock ──────────────
   append message                                                │
   resolveTargets: explicit @mentions, else assignee             │
   for each target → decideDispatch                              │
-      dispatch  → book a queued run, charge the budget          │
-      coalesce  → add the message to an unstarted run           │
-      defer     → nothing now; the active run re-checks later   │
-      skip      → recorded with a reason, visible in the UI     │
         │                                                       │
         ▼                                                       │
 returns { outcomes, dispatched[] } ─────────────────────────────┘
@@ -172,24 +159,25 @@ returns { outcomes, dispatched[] } ───────────────
         ▼
 dispatcher (daemon)
   for each booked run:
-    session = binding(agentId, threadId)
-      missing      → POST /session with the agent's persona
-      not resident → POST /session/:id/resume
-    startRun(runId, sessionId)
-    prompt = thread context + posts since this agent's last run + reply protocol
-    send prompt
+    agent busy on THIS thread   → queueMessage into the running agent
+    agent busy on ANOTHER thread→ leave queued; the waiting thread shows why
+    agent idle                  → revive its background agent, or launch it
+    startRun(runId) · prompt = thread context + posts since its last run
         │
         ▼
-agent answers by calling thread_post ─────► re-enters postMessage
+agent answers via thread_post ─────────────────────────────────► re-enters postMessage
         │
         ▼
-turn ends → finishRun → re-evaluate anything deferred
+turn ends → finishRun → re-evaluate anything queued
+        │
+sweeper: run with no activity for N minutes, or `running` at daemon start
+        → revive and continue, telling it what happened; second failure → failed
 ```
 
 The loop closes because an agent's reply is itself a post. That is the whole
 mechanism, and it is why the guards are not optional.
 
-## 8. Dispatch decisions in full
+### Decision table
 
 | Outcome | When | Why it exists |
 | --- | --- | --- |
@@ -198,94 +186,111 @@ mechanism, and it is why the guards are not optional.
 | `skip: thread_done` | thread is finished | a late post must not silently restart spend |
 | `skip: self_trigger` | the target wrote the post | otherwise one "I'm done" becomes an infinite self-conversation |
 | `skip: explicit_routing` | post names others, target is only the assignee | an explicit `@` *is* the routing decision |
-| `skip: budget_exhausted` | agent-authored post, thread's auto-turn budget spent | the loop breaker; a human post resets it |
-| `coalesce` | target has a queued, unstarted run | one run answers both posts instead of two racing |
-| `defer: active_run` | target is already executing on this thread | mid-run delivery is not possible; its completion re-checks |
-| `defer: agent_at_capacity` | agent is at `maxConcurrentRuns` | spend and contention control; resolves by waiting |
+| `skip: budget_exhausted` | agent-authored post, the thread tree's gate has tripped | the loop breaker; a human post resets the turn counter |
+| `skip: queue_full` | the agent's pending queue is at its limit | makes real throughput visible instead of accruing a backlog |
+| `coalesce: queued_run` | target has a queued, unstarted run | one run answers both posts instead of two racing |
+| `coalesce: running_same_thread` | target is executing **this** thread | mid-run steering — the thing Multica cannot do |
+| `defer: busy_elsewhere` | target is executing **another** thread | serial per agent; the waiting thread says which thread it is on |
+| `defer: agent_at_capacity` | agent is at `maxConcurrentRuns` | resolves by waiting |
 | `dispatch` | none of the above | book a run |
 
 Budget is charged at **booking**, not completion, so a pair of agents that keep
-failing still runs out.
+failing still runs out. A human post resets `autoTurnsUsed`; the token and
+wall-clock gates are not reset, because those measure real spend.
 
-## 9. What reviewers should push on
+## 5. Module map
 
-These are the choices most likely to be wrong. Listed so a reviewer does not
-have to find them.
+Landed on this branch (storage and rules; nothing starts an agent yet):
 
-1. **Session-per (agent, thread).** The binding is one durable session per pair.
-   That gives each agent a warm, resumable context per work item — but a
-   long-lived thread grows one session per participant indefinitely, and
-   nothing reclaims them. Alternative: one session per agent, with thread
-   context re-supplied each turn. Cheaper to reclaim, colder per turn.
-2. **The auto-turn budget is per thread, not per agent pair.** Two agents in a
-   tight loop and five agents doing real hand-offs consume the same counter.
-   A pair-scoped budget would be more precise and more state.
-3. **`defer` has no wake-up of its own.** A deferred target is re-evaluated when
-   the blocking run finishes. If that run dies without reporting, the deferred
-   work is stranded. The scheduled-task keepalive has the same hazard and
-   solves it with a periodic sweep; this needs the equivalent, and does not
-   have one yet.
-4. **Concurrency counting is best effort.** `countActiveRuns` reads sibling
-   threads without holding their locks, so a simultaneous booking elsewhere can
-   overshoot the limit by one. Making it exact needs a workspace-wide lock on
-   every post. Is one-over acceptable?
-5. **Thread text is untrusted input.** A post written by agent A is fed to agent
-   B. Prompt injection between agents is in scope by construction, and the only
-   mitigations here are keeping the store out of the working tree and bounding
-   turns. Should posts be framed to the model as data with an explicit
-   provenance envelope?
-6. **Retention is lossy.** `MAX_THREAD_MESSAGES` / `MAX_THREAD_RUNS` trim the
-   oldest. A thread that hits either bound has arguably outgrown one work item,
-   but the trim is silent.
-7. **No cancellation path yet.** `finishRun(cancelled)` exists; nothing calls
-   it. Stopping a thread's agents from the UI is unbuilt.
+| File | Responsibility |
+| --- | --- |
+| `core/src/agents/mesh/types.ts` | Entities and limits |
+| `core/src/agents/mesh/mesh-store.ts` | Paths, validation, locking, CRUD |
+| `core/src/agents/mesh/mentions.ts` | `@name` → agent ids |
+| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure |
+| `core/src/agents/mesh/thread-actions.ts` | `postMessage` — append and book under one lock |
 
-## 10. Demo, and how it will be shown
+### Changes the settled decisions require in that code
 
-Two agents and a person on one thread:
+1. `types.ts` — add `blocked` to `ThreadStatus`; add `parentThreadId`,
+   `rootThreadId`, `tokensUsed`, `firstDispatchedAt` to `Thread`; add `attempts`
+   to `ThreadRun`; add `backgroundAgentId`, `hostSessionId`, `queueLimit` to
+   `MeshAgent`.
+2. `dispatch-policy.ts` — split `defer: active_run` into
+   `coalesce: running_same_thread` and `defer: busy_elsewhere` (decision 9); add
+   `skip: queue_full` (11); evaluate the budget against the **root** thread (17);
+   add the token and wall-clock gates (16).
+3. `mesh-store.ts` — parent/root linkage and its cycle check.
+4. `thread-actions.ts` — charge tokens and stamp `firstDispatchedAt`; reset only
+   the turn counter on a human post.
 
-1. Declare `planner` (definition: a research agent) and `builder` (a coding
-   agent) in the workspace.
+Still to build:
+
+| Piece | Where |
+| --- | --- |
+| Thread tools: `thread_post`, `thread_assign`, `thread_status`, `thread_create`, `thread_read` | `core/src/tools/` |
+| Programmatic agent launcher (extracted from the `agent` tool's teammate path) | `core/src/agents/` |
+| Dispatcher, sweeper, and host-session keepalive | `cli/src/serve/mesh/` |
+| REST: agents, threads, posts, runs | `cli/src/serve/routes/mesh.ts` |
+| Read-only shell allowlist | `core/src/agents/mesh/` |
+| Channel notifications for the four events | reuse the channel workers |
+| Web Shell: roster, thread list, thread view, run transcripts | `web-shell/client/` |
+| #11140's sidebar entry, absorbed | `web-shell/client/components/sidebar/` |
+
+## 6. Demo
+
+Two agents investigating a real problem, with a person steering.
+
+1. Declare two agents in the workspace — one that reads CI logs, one that reads
+   code — each on an existing read-only agent definition.
 2. Open a thread: *"The web-shell smoke test is flaky. Find out why."*, assign
-   `planner`.
-3. `planner` wakes, investigates, posts findings and `@builder` with a proposed
-   fix — `builder` wakes from that post, not from anything the person did.
-4. The person interjects mid-thread: "check the retry logic first" — `@`-free,
-   so it goes to the assignee, and it resets the loop budget.
-5. Both agents' runs are visible with state and elapsed time; each opens to its
-   own transcript.
-6. Show the budget refusing a synthetic ping-pong, so the guard is visible
-   rather than theoretical.
+   the log reader. Assignment starts it.
+3. It investigates, posts findings, and `@`s the code reader with a hypothesis.
+   The second agent wakes from that post — not from anything the person did.
+4. The person interjects mid-run: "check the retry logic first". It lands in the
+   running agent's next turn, and resets the turn counter.
+5. The code reader posts a conclusion and sets the thread to `in_review`; the
+   person marks it `done`.
+6. Separately: show a synthetic ping-pong tripping the turn gate, and an agent
+   posting a question and setting `blocked`. Both guards visible, not theoretical.
 
 Captured with the web-shell Playwright visuals config, which renders real
-screenshots in CI and locally.
+screenshots locally and in CI.
 
-## 11. Scope
+## 7. What remains genuinely open
 
-In: agent registry, thread store, dispatch rules, the four thread tools,
-session persona binding, the dispatcher, and a Web Shell surface for all of it.
+Everything from the earlier risk list is now decided except these:
 
-Out, deliberately: real OS-process isolation and cross-machine agents (that is
-#10078's session-boundary decision, and #10247 §5's stalled wiring choice);
-durable history after a thread is deleted; remote/cloud runtimes; multi-user
-permissions. Agent Team is untouched and remains the inner loop for sub-turn
-collaboration within a single run.
+1. **Agent-to-agent prompt injection.** A post written by agent A is fed to agent
+   B, and B has tools. Decisions 2 and 3 bound the blast radius (read-only, a
+   built-in shell ceiling), and decision 16 bounds the duration, but there is no
+   trust boundary. Open question: should posts reach the model inside an explicit
+   provenance envelope that marks them as data rather than instruction?
+2. **Retention is lossy and silent.** `MAX_THREAD_MESSAGES` / `MAX_THREAD_RUNS`
+   trim the oldest without saying so.
+3. **Cancellation.** `finishRun(cancelled)` exists; no UI or API calls it.
+4. **Concurrency counting is best effort** — sibling threads are read without
+   their locks, so the limit can overshoot by one. Made less pressing by decision
+   10 (serial per agent) but not eliminated.
+
+## 8. Out of scope
+
+Real OS-process isolation and cross-machine agents (#10078's session-boundary
+decision and #10247 §5's stalled wiring choice); durable history after a thread
+is deleted; remote and cloud runtimes; multi-user permissions; and agents that
+write code, which decision 1 defers until isolation is settled.
 
 <details>
 <summary>中文说明</summary>
 
-**结论**：走 Multica 形态——持久的 Agent 身份、多个 Agent 共读共写的线程、以及一个「谁被 @ 就唤醒谁的会话」的派发器。Agent Team 不是载体，但保留为单次 run 内部的紧耦合协作手段。
+**这是什么**：持久的 Agent 身份在共享线程上协作。人开一个线程、指派一个 agent，之后 agent 们自己读、发帖、互相 @、拆子线程、干完交回验收，人随时可以插话。就是 Multica 那套形态，但建立在 qwen 已有的机器上。Agent Team 原封不动保留，作为单次 run 内部的紧耦合协作手段。
 
-**这是一次纠错**：之前说「Multica 的 agent 不实时沟通」是错的。核对源码后确认两点——它会 resume agent CLI 的上一次会话（`daemon/types.go:110`，并且明确在意保住 prompt cache），派发是 WebSocket 推送而非轮询（`daemon/wakeup.go`）。所以 @ 一个没在跑的 agent，秒级就起来了。唯一做不到的是「往正在执行的 run 里塞消息」（`handler/comment.go:2313` 返回 deferred）。而这恰好是 Agent Team 唯一的优势（`agent-core.ts:1140` 在每个工具轮边界注入外部消息）。除此之外，持久性、可回放、共享可见、可重启、跨机器，全都是看板模型更好。
+**两处纠错**（都已核对源码）：一是 Multica 的 agent **确实实时沟通**——它 resume 上一次会话并保住 prompt cache，派发走 WebSocket 推送，@ 一个空闲 agent 秒级起来；它唯一做不到的是往正在执行的 run 里送消息。二是 qwen **没有这个限制**——`resumeBackgroundAgent` 会把消息塞进正在跑的 agent。所以本方案拿到的是「持久可观察的共享线程」**加上**「中途可纠偏」，在两者各自输的那个维度上都不输。
 
-**最有价值的复用**：`DurableCronTask`（`cronTasksFile.ts:76`）已经是本方案需要的结构——绑定的 sessionId、其 transcript 即运行历史、有界的 runs；`scheduled-task-keepalive.ts` 已经处理了「保持会话常驻、被回收后复活」。派发器是同一形状，触发源从 cron 换成 @。
+**执行模型的关键修正**：agent 是**每工作空间一个长期后台 agent**，不是 daemon session。因为人格装配那套机器是喂给 agent 运行时的，ACP Session 没有任何 per-session 人格钩子，造一个是热路径上的新工作且无先例。而后台 agent 这条路上，人格、落盘日志、日志展示、唤醒、跨重启复活、自动压缩、审批——全部现成。**所以要写的只有编排层，底下不需要重写任何东西。**
 
-**本分支已落地**（仅存储与规则，还不会启动任何会话）：`types.ts`、`mesh-store.ts`、`mentions.ts`、`dispatch-policy.ts`、`thread-actions.ts`。**尚未实现**：四个线程工具、会话人格绑定（`POST /session` 接受 `agentType`）、派发器服务、REST 路由、WebShell 界面。
+**22 条已定决策**见第 2 节，覆盖范围与安全（v1 只读、内置只读命令白名单为硬上限、工具跟随定义、按工作空间）、身份与记忆（一个长期执行体、自动压缩、宿主会话隐藏、停用留记忆删除清干净）、对话（同线程可中途插话、跨线程串行且明示在忙、队列封顶、可拆子线程但不能造 agent、子线程进 in_review 自动回报父线程、阻塞时发帖提问并标 blocked、agent 可标 in_review 但只有人能标 done）、成本与失败（12 轮/200k token/30 分钟三重闸门且子线程共享根线程预算、按「距上次活动」判定卡死、卡死与重启统一走复活并继续）、界面（吸收 #11140 并关掉它、指派即启动、四类事件推渠道）。
 
-**派发规则十种结局**见第 8 节。其中四条抄自 Multica 踩出来的经验，第五条（每线程自动轮次预算）是我们加的——Multica 不需要它是因为它的 run 会自然结束且有人类持有 issue，而两个 mesh agent 互相回复没有任何东西能停下来。预算在**入队时**扣，不是完成时，所以一直失败的一对 agent 也会耗尽。
-
-**第 9 节列了 7 个最可能错的设计选择**，请评审重点打这些：会话按 (agent, thread) 绑定会无限增长且无回收；预算是按线程而非按 agent 对；`defer` 没有自己的唤醒机制，阻塞的 run 若异常死亡会导致工作滞留；并发计数是尽力而为，可能超一个；线程文本是 agent 之间的注入面；保留策略是静默有损的；取消路径尚未接通。
-
-**第 10 节是 demo 脚本**，第 11 节是明确不做的部分。
+**第 5 节列出了已写代码需要按决策修改的 4 处**，以及还没建的 8 块。**第 7 节是仍然开放的 4 个问题**，其中第 1 个（agent 之间的 prompt 注入要不要加来源信封）需要决定。
 
 </details>
