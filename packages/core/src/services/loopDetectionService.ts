@@ -6,7 +6,10 @@
 
 import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
-import type { ServerLlmStreamEvent } from '../core/turn.js';
+import type {
+  ServerLlmStreamEvent,
+  ToolCallRequestInfo,
+} from '../core/turn.js';
 import { LlmEventType } from '../core/turn.js';
 import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
@@ -20,6 +23,7 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
@@ -31,6 +35,27 @@ import {
 // toolCallIdUtils can share it without an import cycle through this
 // service's turn.js dependency.
 export { getToolCallRepeatKey };
+
+function getLoopDetectionToolCall(
+  toolCall: ToolCallRequestInfo,
+): ToolCallRequestInfo {
+  if (toolCall.name !== ToolNames.TOOL_CALL) return toolCall;
+
+  const targetName = toolCall.args['name'];
+  if (typeof targetName !== 'string') return toolCall;
+
+  const targetArgs = toolCall.args['arguments'];
+  return {
+    ...toolCall,
+    name: targetName,
+    args:
+      typeof targetArgs === 'object' &&
+      targetArgs !== null &&
+      !Array.isArray(targetArgs)
+        ? (targetArgs as Record<string, unknown>)
+        : {},
+  };
+}
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -606,12 +631,13 @@ export class LoopDetectionService {
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
 
-        this.trackToolCall(event.value);
-        const toolCallKey = this.getToolCallKey(event.value);
+        const toolCall = getLoopDetectionToolCall(event.value);
+        this.trackToolCall(toolCall);
+        const toolCallKey = this.getToolCallKey(toolCall);
         // Stateful read tools are counted post-execution in
         // recordToolResult, on consecutive identical results instead of
         // args alone (issue #9450).
-        const globalDup = this.isStatefulReadTool(event.value.name)
+        const globalDup = this.isStatefulReadTool(toolCall.name)
           ? false
           : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
@@ -756,17 +782,18 @@ export class LoopDetectionService {
     // Hash the (tool,args) key once and share it across the guards that need
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
-    const key = this.getToolCallKey(event.value);
-    const stateful = this.isStatefulReadTool(event.value.name);
+    const toolCall = getLoopDetectionToolCall(event.value);
+    const key = this.getToolCallKey(toolCall);
+    const stateful = this.isStatefulReadTool(toolCall.name);
 
     // Pair requests with their later results (recordToolResultByCallId).
     // Only stateful read tools participate: recordToolResult rejects every
     // other tool, so tracking them would just accumulate full args objects
     // (write_file args can carry whole file contents) until eviction.
-    if (event.value.callId && stateful) {
-      this.requestByCallId.set(event.value.callId, {
-        name: event.value.name,
-        args: event.value.args,
+    if (toolCall.callId && stateful) {
+      this.requestByCallId.set(toolCall.callId, {
+        name: toolCall.name,
+        args: toolCall.args,
       });
       if (this.requestByCallId.size > MAX_TRACKED_TOOL_REQUESTS) {
         const oldest = this.requestByCallId.keys().next().value;
@@ -792,12 +819,12 @@ export class LoopDetectionService {
     // #5019) far below the per-turn cap, so the gated default left users
     // unprotected. For stateful read tools the guard additionally requires
     // the observed results to be unchanged (issue #9450).
-    if (this.checkToolCallLoop(event.value, key)) {
+    if (this.checkToolCallLoop(toolCall, key)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (this.checkShellCommandStagnation(event.value)) {
+    if (this.checkShellCommandStagnation(toolCall)) {
       this.loopDetected = true;
       return true;
     }

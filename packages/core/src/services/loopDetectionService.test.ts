@@ -21,6 +21,7 @@ import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -2122,6 +2123,44 @@ describe('LoopDetectionService', () => {
         );
         expect(isLoop).toBe(false);
       }
+    });
+
+    it('tracks bridged target names instead of the shared wrapper name', () => {
+      service.reset('');
+
+      for (let i = 0; i < 8; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+            name: `mcp__service_${i}__read`,
+            arguments: { id: i },
+          }),
+        );
+        expect(isLoop).toBe(false);
+      }
+    });
+
+    it('still detects eight bridged calls to the same target', () => {
+      service.reset('');
+
+      for (let i = 0; i < 7; i++) {
+        expect(
+          service.addAndCheck(
+            createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+              name: 'mcp__github__get_issue',
+              arguments: { number: i },
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.addAndCheck(
+          createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+            name: 'mcp__github__get_issue',
+            arguments: { number: 7 },
+          }),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.ACTION_STAGNATION);
     });
   });
 

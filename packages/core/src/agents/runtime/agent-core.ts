@@ -1810,7 +1810,10 @@ export class AgentCore {
       }
       currentApprovalDeliveries.clear();
     };
-    const emitToolCallStart = (request: ToolCallRequestInfo) => {
+    const emitToolCallStart = (
+      request: ToolCallRequestInfo,
+      invokePreToolUse = true,
+    ) => {
       const { callId, name: toolName, args } = request;
       const modelFacingRequest = request as ToolCallRequestInfo & {
         modelFacingName?: string;
@@ -1833,13 +1836,15 @@ export class AgentCore {
         timestamp: Date.now(),
       } as AgentToolCallEvent);
 
-      void this.hooks?.preToolUse?.({
-        subagentId: this.subagentId,
-        name: this.name,
-        toolName,
-        args,
-        timestamp: Date.now(),
-      });
+      if (invokePreToolUse) {
+        void this.hooks?.preToolUse?.({
+          subagentId: this.subagentId,
+          name: this.name,
+          toolName,
+          args,
+          timestamp: Date.now(),
+        });
+      }
     };
     const deliverApproval = (state: ApprovalDeliveryState) => {
       if (
@@ -2176,11 +2181,14 @@ export class AgentCore {
         for (const req of requests) {
           if (emittedCallIds.has(req.callId)) continue;
           emittedCallIds.add(req.callId);
-          // The synthesized cancelled TOOL_RESULT below already went out for
-          // this callId; drop any pending bridge start so a later scheduler
-          // update cannot emit TOOL_CALL *after* the result (and fire
-          // preToolUse for a call that never runs).
-          pendingToolCallStarts.delete(req.callId);
+          // A deferred bridge start has not been emitted yet. Pair the
+          // synthetic cancellation with its model-facing wrapper call before
+          // the result, but do not run preToolUse for a call that never ran.
+          // Deleting first also prevents a later scheduler update from
+          // emitting a second, resolved-target start after cancellation.
+          if (pendingToolCallStarts.delete(req.callId)) {
+            emitToolCallStart(req, false);
+          }
 
           const executionRequest = executionRequestByCallId.get(req.callId);
           const toolName = executionRequest?.name ?? req.name;

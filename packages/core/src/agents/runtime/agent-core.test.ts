@@ -581,20 +581,21 @@ describe('AgentCore approval response deduplication', () => {
     );
   });
 
-  it('does not emit a bridged TOOL_CALL start after abort reported its cancellation', async () => {
-    // Abort variant of the test above: the abort lands BEFORE the
-    // scheduler's first update, so onAbort already emitted the synthetic
-    // cancelled TOOL_RESULT for the bridge callId. The later scheduler
-    // update must not emit a TOOL_CALL start after that result (and must
-    // not fire preToolUse for a call that never runs).
+  it('emits a wrapper TOOL_CALL before a bridge cancellation on abort', async () => {
+    // The abort lands BEFORE the scheduler resolves the target. Persist the
+    // model-facing wrapper call before its synthetic cancellation, then ignore
+    // the scheduler's late resolved-target update.
     const { core } = buildApprovalCore();
     const toolCallEvents: AgentToolCallEvent[] = [];
     const toolResultEvents: AgentToolResultEvent[] = [];
+    const eventOrder: string[] = [];
     core.getEventEmitter().on(AgentEventType.TOOL_CALL, (event) => {
       toolCallEvents.push(event);
+      eventOrder.push(`call:${event.name}`);
     });
     core.getEventEmitter().on(AgentEventType.TOOL_RESULT, (event) => {
       toolResultEvents.push(event);
+      eventOrder.push(`result:${event.name}`);
     });
 
     const targetRequest = {
@@ -648,7 +649,19 @@ describe('AgentCore approval response deduplication', () => {
     await processing;
     scheduleSpy.mockRestore();
 
-    // The cancelled TOOL_RESULT is emitted, but no TOOL_CALL start follows.
+    expect(eventOrder).toEqual([
+      `call:${ToolNames.TOOL_CALL}`,
+      `result:${ToolNames.TOOL_CALL}`,
+    ]);
+    expect(toolCallEvents).toHaveLength(1);
+    expect(toolCallEvents[0]).toMatchObject({
+      callId: targetRequest.callId,
+      name: ToolNames.TOOL_CALL,
+      args: {
+        name: targetRequest.name,
+        arguments: targetRequest.args,
+      },
+    });
     expect(toolResultEvents).toHaveLength(1);
     expect(toolResultEvents[0]).toMatchObject({
       callId: targetRequest.callId,
@@ -657,7 +670,6 @@ describe('AgentCore approval response deduplication', () => {
     expect(toolResultEvents[0].responseParts?.[0]?.functionResponse?.name).toBe(
       ToolNames.TOOL_CALL,
     );
-    expect(toolCallEvents).toHaveLength(0);
   });
 
   it('passes the execution allowlist to the scheduler for bridged targets', async () => {
