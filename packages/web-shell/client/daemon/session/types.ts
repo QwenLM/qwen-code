@@ -424,8 +424,8 @@ export interface DaemonSessionActions {
    * finished turn, so without this the pane settles a still-running turn to
    * `idle` after a few seconds of silence and the loading indicator drops
    * mid-turn (#9487). While this reports `true`, silence-based settling is
-   * suppressed; a `true` -> `false` transition settles the turn as a backstop
-   * for terminal events that never arrive.
+   * suppressed. A fresh `false` settles a restored prompt, and losing a known
+   * `true` settles an observed turn when its terminal event never arrives.
    */
   setDaemonActivePrompt(
     active: boolean | undefined,

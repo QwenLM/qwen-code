@@ -213,11 +213,17 @@ export class SessionCatalogStore {
     Map<string, number>
   >();
   private readonly liveStateFailureStreaks = new Map<string, number>();
+  private liveSessionRevision = 0;
+  private readonly liveSessionRevisions = new Map<string, number>();
   private readonly liveSessionsByWorkspace = new Map<
     string,
     ReadonlyMap<string, DaemonSessionLiveState>
   >();
   private readonly liveSessionListeners = new Map<string, Set<() => void>>();
+  private readonly liveSessionObservationListeners = new Map<
+    string,
+    Set<() => void>
+  >();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -637,6 +643,10 @@ export class SessionCatalogStore {
     return this.liveSessionsByWorkspace.has(workspaceCwd);
   }
 
+  getLiveSessionRevision(workspaceCwd: string): number | undefined {
+    return this.liveSessionRevisions.get(workspaceCwd);
+  }
+
   /**
    * Drop the retained live-state snapshot after its channel has failed for
    * long enough that the snapshot can no longer be called current. Readers
@@ -666,6 +676,24 @@ export class SessionCatalogStore {
       listeners.delete(listener);
       if (listeners.size === 0) {
         this.liveSessionListeners.delete(workspaceCwd);
+      }
+    };
+  }
+
+  subscribeLiveSessionObservations(
+    workspaceCwd: string,
+    listener: () => void,
+  ): () => void {
+    const existing = this.liveSessionObservationListeners.get(workspaceCwd);
+    const listeners = existing ?? new Set<() => void>();
+    if (!existing) {
+      this.liveSessionObservationListeners.set(workspaceCwd, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.liveSessionObservationListeners.delete(workspaceCwd);
       }
     };
   }
@@ -770,8 +798,15 @@ export class SessionCatalogStore {
       next.set(session.sessionId, session);
     }
     const previous = this.liveSessionsByWorkspace.get(workspaceCwd);
-    if (previous && liveSessionSnapshotsEqual(previous, next)) return;
-    this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    const changed = !previous || !liveSessionSnapshotsEqual(previous, next);
+    if (changed) this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    this.liveSessionRevisions.set(workspaceCwd, ++this.liveSessionRevision);
+    const observationListeners =
+      this.liveSessionObservationListeners.get(workspaceCwd);
+    if (observationListeners) {
+      for (const listener of [...observationListeners]) listener();
+    }
+    if (!changed) return;
     const listeners = this.liveSessionListeners.get(workspaceCwd);
     if (listeners) {
       for (const listener of [...listeners]) listener();
@@ -780,6 +815,12 @@ export class SessionCatalogStore {
 
   private clearLiveSessions(workspaceCwd: string): void {
     if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
+    this.liveSessionRevisions.delete(workspaceCwd);
+    const observationListeners =
+      this.liveSessionObservationListeners.get(workspaceCwd);
+    if (observationListeners) {
+      for (const listener of [...observationListeners]) listener();
+    }
     const listeners = this.liveSessionListeners.get(workspaceCwd);
     if (listeners) {
       for (const listener of [...listeners]) listener();
@@ -961,8 +1002,10 @@ export class SessionCatalogStore {
     this.liveStateWorkspaceRefreshRequests.clear();
     this.liveStatePendingActivity.clear();
     this.liveStateFailureStreaks.clear();
+    this.liveSessionRevisions.clear();
     this.liveSessionsByWorkspace.clear();
     this.liveSessionListeners.clear();
+    this.liveSessionObservationListeners.clear();
     this.entries.clear();
     this.queue.length = 0;
     this.removeVisibilityListener();

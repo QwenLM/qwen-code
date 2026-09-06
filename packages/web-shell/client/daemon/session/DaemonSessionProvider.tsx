@@ -1337,7 +1337,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     turnNavigationSupported,
   ]);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
-  const settleCurrentSessionRestoredPromptRef = useRef<() => void>(() => {});
+  const settleCurrentSessionRestoredPromptRef = useRef<() => boolean>(
+    () => false,
+  );
   // Apply the buffered transcript batch from outside the connect closure. The
   // action layer must settle against a committed store, not one that is still
   // 16ms behind (#9487).
@@ -2301,8 +2303,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // Once a terminal event consumes it, keep it consumed across SSE
             // reconnects for the same client; later prompts from this page are
             // still tracked independently in activePromptsRef.
+            if (!restoredActivePrompt) return false;
             settledRestoredActivePromptSessionsRef.current.add(activeSession);
             restoredActivePrompt = false;
+            return true;
           };
           const hasSessionActivePrompt = () =>
             restoredActivePrompt ||
@@ -3129,7 +3133,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
-            settleCurrentSessionRestoredPromptRef.current = () => {};
+            settleCurrentSessionRestoredPromptRef.current = () => false;
             setConnection((current) => ({
               ...current,
               status: 'connecting',
@@ -3481,7 +3485,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
-                  settleCurrentSessionRestoredPromptRef.current = () => {};
+                  settleCurrentSessionRestoredPromptRef.current = () => false;
                   setConnection((current) => ({
                     ...current,
                     status: 'connecting',
@@ -3586,7 +3590,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
-            settleCurrentSessionRestoredPromptRef.current = () => {};
+            settleCurrentSessionRestoredPromptRef.current = () => false;
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
@@ -4010,7 +4014,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         hasCurrentSessionActivePromptRef.current = () => false;
-        settleCurrentSessionRestoredPromptRef.current = () => {};
+        settleCurrentSessionRestoredPromptRef.current = () => false;
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
@@ -4248,7 +4252,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         flushTranscript: () => flushCurrentTranscriptRef.current(),
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
-          settleCurrentSessionRestoredPromptRef.current = () => {};
+          settleCurrentSessionRestoredPromptRef.current = () => false;
         },
         restartEventStream: (sessionId: string) => {
           const eventStream = eventStreamRef.current;

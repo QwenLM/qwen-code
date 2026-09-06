@@ -11430,6 +11430,89 @@ describe('DaemonSessionProvider', () => {
       expect(streamingState).not.toBe('idle');
     });
 
+    it('settles a restored prompt from the first fresh idle observation', async () => {
+      const pendingLoad = createDeferred<MockSession>();
+      sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+        async () => pendingLoad.promise,
+      );
+
+      let switched: Promise<void> | undefined;
+      act(() => {
+        switched = requireActions(actions).loadSession('session-b');
+      });
+      if (!switched) throw new Error('Session switch was not started');
+      await act(async () => {
+        await flushPromises();
+        actions?.setDaemonActivePrompt(undefined, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-b',
+        });
+        pendingLoad.resolve(
+          createMockSession({
+            sessionId: 'session-b',
+            hasActivePrompt: true,
+          }),
+        );
+        await switched;
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+      expect(streamingState).not.toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(false, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-b',
+        });
+        await flushPromises();
+      });
+
+      expect(promptStatus).toBe('idle');
+      expect(streamingState).toBe('idle');
+    });
+
+    it('does not reuse stale idle authority after returning to a session', async () => {
+      sdkMocks.sessions.push(createMockSession({ sessionId: 'session-b' }));
+      await renderWithProvider(<Harness />, { autoConnect: true });
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(false, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-b',
+        });
+        sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+        await requireActions(actions).loadSession('session-a');
+        await flushPromises();
+      });
+
+      const pendingLoad = createDeferred<MockSession>();
+      sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+        async () => pendingLoad.promise,
+      );
+      let switched: Promise<void> | undefined;
+      act(() => {
+        switched = requireActions(actions).loadSession('session-b');
+      });
+      if (!switched) throw new Error('Session switch was not started');
+      await act(async () => {
+        pendingLoad.resolve(
+          createMockSession({
+            sessionId: 'session-b',
+            hasActivePrompt: true,
+          }),
+        );
+        await switched;
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+      expect(streamingState).not.toBe('idle');
+    });
+
     it('settles authority that starts before the session finishes loading', async () => {
       const pendingLoad = createDeferred<MockSession>();
       const streamEnd = createDeferred<void>();

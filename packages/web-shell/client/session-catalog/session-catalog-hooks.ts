@@ -175,24 +175,26 @@ export function useSessionCatalogQueries(
  * Whether the daemon reports a prompt in flight for `sessionId`, together with
  * whether that answer is allowed to *settle* a running turn.
  *
- * Only a live-state response is `authoritative`. It lists every live session
- * regardless of paging, so its silence about a session genuinely means "not
- * running". The catalog-page fallback cannot say that: the page is bounded, so
- * a running session may simply have fallen off a fresher first page, and any
- * invalidation refetches it. Lighting an indicator from the page is fine;
- * settling a turn from it would end a turn that is still going — the failure
- * this whole signal exists to prevent (#9487).
+ * Only a live-state response observed after this session became the target is
+ * `authoritative`. A cached response can still light the indicator, but cannot
+ * settle a newer `/load` snapshot. The catalog-page fallback cannot settle
+ * either: the page is bounded, so a running session may simply have fallen off
+ * a fresher first page (#9487).
  */
 export function useSessionActivePromptState(
   client: DaemonClient,
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
-): { hasActivePrompt: boolean; authoritative: boolean } {
+): {
+  hasActivePrompt: boolean;
+  authoritative: boolean;
+  observationRevision: number | undefined;
+} {
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
-  const subscribeLiveSessions = useCallback(
+  const subscribeLiveSessionObservations = useCallback(
     (listener: () => void) =>
       workspaceCwd
-        ? store.subscribeLiveSessions(workspaceCwd, listener)
+        ? store.subscribeLiveSessionObservations(workspaceCwd, listener)
         : () => undefined,
     [store, workspaceCwd],
   );
@@ -203,19 +205,45 @@ export function useSessionActivePromptState(
   // reader would keep serving whatever it last happened to render (#9487).
   // `undefined` distinguishes "no live-state response covers this workspace"
   // from "covered, and this session has no prompt in flight".
-  const getLiveActivePrompt = useCallback((): boolean | undefined => {
-    if (!workspaceCwd || !store.hasLiveSessions(workspaceCwd)) return undefined;
-    if (!sessionId) return false;
-    return (
-      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
-    );
-  }, [sessionId, store, workspaceCwd]);
-  const liveActivePrompt = useSyncExternalStore(
-    subscribeLiveSessions,
-    getLiveActivePrompt,
+  const getLiveSessionRevision = useCallback(
+    () =>
+      workspaceCwd ? store.getLiveSessionRevision(workspaceCwd) : undefined,
+    [store, workspaceCwd],
+  );
+  const liveSessionRevision = useSyncExternalStore(
+    subscribeLiveSessionObservations,
+    getLiveSessionRevision,
     () => undefined,
   );
+  const liveActivePrompt =
+    liveSessionRevision === undefined
+      ? undefined
+      : sessionId !== undefined &&
+        store.getLiveSession(workspaceCwd!, sessionId)?.hasActivePrompt ===
+          true;
   const hasLiveSessions = liveActivePrompt !== undefined;
+  const authorityBaselineRef = useRef<
+    | {
+        workspaceCwd: string | undefined;
+        sessionId: string | undefined;
+        revision: number | undefined;
+      }
+    | undefined
+  >(undefined);
+  if (
+    !authorityBaselineRef.current ||
+    authorityBaselineRef.current.workspaceCwd !== workspaceCwd ||
+    authorityBaselineRef.current.sessionId !== sessionId
+  ) {
+    authorityBaselineRef.current = {
+      workspaceCwd,
+      sessionId,
+      revision: liveSessionRevision,
+    };
+  }
+  const liveAnswerIsFreshForTarget =
+    liveSessionRevision !== undefined &&
+    liveSessionRevision !== authorityBaselineRef.current.revision;
   // The live-state response is authoritative and independent of catalog
   // paging. Arm the full-catalog fallback only when nothing tracks live-state
   // for this workspace — i.e. the daemon lacks workspace_session_live_state.
@@ -245,10 +273,18 @@ export function useSessionActivePromptState(
     autoLoad: true,
   });
   if (!workspaceCwd || !sessionId) {
-    return { hasActivePrompt: false, authoritative: false };
+    return {
+      hasActivePrompt: false,
+      authoritative: false,
+      observationRevision: undefined,
+    };
   }
   if (liveActivePrompt !== undefined) {
-    return { hasActivePrompt: liveActivePrompt, authoritative: true };
+    return {
+      hasActivePrompt: liveActivePrompt,
+      authoritative: liveAnswerIsFreshForTarget,
+      observationRevision: liveSessionRevision,
+    };
   }
   const row = page
     ? sessions.find((session) => session.sessionId === sessionId)
@@ -260,6 +296,7 @@ export function useSessionActivePromptState(
     // whose turn ended, and treating that as "the turn ended" is exactly the
     // bug this signal exists to prevent.
     authoritative: false,
+    observationRevision: undefined,
   };
 }
 
@@ -280,11 +317,8 @@ export function useDaemonActivePromptBridge(
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
 ): boolean {
-  const { hasActivePrompt, authoritative } = useSessionActivePromptState(
-    client,
-    workspaceCwd,
-    sessionId,
-  );
+  const { hasActivePrompt, authoritative, observationRevision } =
+    useSessionActivePromptState(client, workspaceCwd, sessionId);
   // Idempotent, so the main view and its ChatPane sharing one provider both
   // publishing the same value is harmless; a split pane, which renders a
   // ChatPane without an App around it, needs its own.
@@ -295,8 +329,21 @@ export function useDaemonActivePromptBridge(
   // settles. A genuine loss of live-state coverage still does.
   const daemonActivePrompt = authoritative ? hasActivePrompt : undefined;
   useEffect(() => {
+    // A retained snapshot from before this session became the target may still
+    // render its status, but publishing it would let old `false` consume a
+    // newer `/load` snapshot. Leave the provider's current owner-scoped value
+    // untouched until a fresh response arrives. No revision means coverage was
+    // actually lost, so `undefined` must still be published.
+    if (!authoritative && observationRevision !== undefined) return;
     setDaemonActivePrompt(daemonActivePrompt, { workspaceCwd, sessionId });
-  }, [daemonActivePrompt, sessionId, setDaemonActivePrompt, workspaceCwd]);
+  }, [
+    authoritative,
+    daemonActivePrompt,
+    observationRevision,
+    sessionId,
+    setDaemonActivePrompt,
+    workspaceCwd,
+  ]);
   return hasActivePrompt;
 }
 

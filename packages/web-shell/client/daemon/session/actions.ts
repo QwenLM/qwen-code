@@ -199,9 +199,9 @@ export interface CreateDaemonSessionActionsArgs {
    * flag `/load` returned). A restored prompt has no terminal handling in this
    * browser — it can only be settled by the event stream — so the
    * `setDaemonActivePrompt` backstop settles it when the daemon reports the
-   * turn finished. No-op when nothing is restored.
+   * turn finished. Returns whether a restored prompt was settled.
    */
-  settleRestoredActivePrompt: () => void;
+  settleRestoredActivePrompt: () => boolean;
   /**
    * Apply the provider's buffered transcript batch (`TRANSCRIPT_DISPATCH_BATCH_MS`)
    * so a read of the store sees every event delivered so far. Every
@@ -781,6 +781,7 @@ export function createDaemonSessionActions({
     if (currentSessionId) {
       activePromptsRef.current.delete(currentSessionId);
     }
+    daemonActivePromptRef.current = undefined;
     resetCurrentSessionActivePrompt();
     const reloadingCurrentSession =
       mode === 'load' &&
@@ -897,24 +898,26 @@ export function createDaemonSessionActions({
       const previous = daemonActivePromptRef.current;
       daemonActivePromptRef.current = { active, ...owner };
       const backstopSession = sessionRef.current;
-      // Losing `true` is the settle signal — whether the daemon reported the
-      // turn finished, or the authority itself went unknown because its
-      // channel stopped answering. Either way nothing vouches for the turn any
-      // more, and an uncovered pane's pre-existing behaviour is to settle.
+      // A fresh `false` is a settle signal even when this provider has not seen
+      // the preceding `true`; that is how a restored prompt is released after
+      // the first post-attach live-state poll. The bridge withholds cached
+      // answers until that fresh poll. `undefined` settles only when it loses a
+      // previously known `true` authority.
       // Gaining `true` never revives a finished turn: the live-state poll
       // trails the event stream, so reviving would flash the indicator back on
       // for one poll interval after every turn_complete. A turn that really is
       // still running is revived by its next event, as it was before this
       // signal existed.
+      const lostAuthority =
+        previous?.active === true &&
+        previous.workspaceCwd === owner.workspaceCwd &&
+        previous.sessionId === owner.sessionId;
       if (
-        previous === undefined ||
-        previous.workspaceCwd !== owner.workspaceCwd ||
-        previous.sessionId !== owner.sessionId ||
-        previous.active !== true ||
         backstopSession === undefined ||
         backstopSession.workspaceCwd !== owner.workspaceCwd ||
         backstopSession.sessionId !== owner.sessionId ||
-        active === true
+        active === true ||
+        (!lostAuthority && active !== false)
       ) {
         return;
       }
@@ -935,7 +938,8 @@ export function createDaemonSessionActions({
       ) {
         return;
       }
-      settleRestoredActivePrompt();
+      const settledRestoredPrompt = settleRestoredActivePrompt();
+      if (!lostAuthority && !settledRestoredPrompt) return;
       // Commit the buffered batch before reading the store. Without this the
       // read races the 16ms window: a chunk burst still buffered at flip time
       // lands *after* the `assistant.done` below, and the reducer mints a fresh

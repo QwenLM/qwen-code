@@ -452,36 +452,54 @@ describe('useSessionActivePromptState (#9487)', () => {
     });
 
     act(() => {
-      store.applyLiveState('/work', [
-        {
-          sessionId: 'sess-1',
-          clientCount: 1,
-          hasActivePrompt: true,
-          isWaitingForPermission: false,
-          isWaitingForUserQuestion: false,
-        },
-        {
-          sessionId: 'sess-2',
-          clientCount: 1,
-          hasActivePrompt: true,
-          isWaitingForPermission: false,
-          isWaitingForUserQuestion: false,
-        },
-      ]);
-    });
-    await act(async () => {
-      root.render(<BridgeProbe sessionId="sess-2" />);
-      await Promise.resolve();
-    });
-    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(true, {
-      workspaceCwd: '/work',
-      sessionId: 'sess-2',
-    });
-
-    act(() => {
       store.applyLiveState('/work', []);
     });
     expect(container.textContent).toBe('false');
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(false, {
+      workspaceCwd: '/work',
+      sessionId: 'sess-1',
+    });
+  });
+
+  it('withholds a cached idle answer until a fresh poll covers the new session', async () => {
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+    const live = [
+      {
+        sessionId: 'sess-1',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+      {
+        sessionId: 'sess-2',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+    ];
+
+    function BridgeProbe({ sessionId }: { sessionId: string }) {
+      useDaemonActivePromptBridge(client, '/work', sessionId);
+      return null;
+    }
+
+    act(() => root.render(<BridgeProbe sessionId="sess-1" />));
+    act(() => store.applyLiveState('/work', live));
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(false, {
+      workspaceCwd: '/work',
+      sessionId: 'sess-1',
+    });
+
+    const callsBeforeSwitch = mocks.setDaemonActivePrompt.mock.calls.length;
+    act(() => root.render(<BridgeProbe sessionId="sess-2" />));
+    expect(mocks.setDaemonActivePrompt).toHaveBeenCalledTimes(
+      callsBeforeSwitch,
+    );
+
+    act(() => store.applyLiveState('/work', live));
     expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(false, {
       workspaceCwd: '/work',
       sessionId: 'sess-2',

@@ -340,8 +340,8 @@ describe('createDaemonSessionActions', () => {
     it('never revives a settled turn', () => {
       // The live-state poll trails the event stream, so a stale `true`
       // arriving after turn_complete must not flash the indicator back on.
-      // Only losing `true` is a signal; gaining it, or never having had it,
-      // is not.
+      // Gaining `true` is not a signal, and `false` with no restored prompt is
+      // also inert.
       const { actions, setPromptStatus } = createActionsHarness({
         session: createMockSession('session-1'),
       });
@@ -400,7 +400,7 @@ describe('createDaemonSessionActions', () => {
       // daemon reports the turn finished, the backstop must settle the prompt
       // instead of deferring to a terminal event that never arrived (#9487).
       const session = createMockSession('session-restored');
-      const settleRestoredActivePrompt = vi.fn();
+      const settleRestoredActivePrompt = vi.fn(() => true);
       const { actions, setPromptStatus } = createActionsHarness({
         session,
         hasSessionActivePrompt: () => true,
@@ -4307,7 +4307,8 @@ function createActionsHarness(
       current: PendingSessionLoad | undefined;
     });
   const setPromptStatus = vi.fn();
-  const settleRestoredActivePrompt = opts.settleRestoredActivePrompt ?? vi.fn();
+  const settleRestoredActivePrompt =
+    opts.settleRestoredActivePrompt ?? vi.fn(() => false);
   const passiveAssistantDoneTimerRef =
     opts.passiveAssistantDoneTimerRef ??
     ({ current: undefined } as {

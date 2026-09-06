@@ -3254,9 +3254,19 @@ export function App({
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
   // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const trustedLiveWorkspaces = workspaces.filter(
+    (entry) =>
+      entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+  );
+  const activePromptWorkspaceCwd =
+    connection.sessionContext?.kind === 'live'
+      ? trustedLiveWorkspaces.length === 1
+        ? trustedLiveWorkspaces[0]?.cwd
+        : undefined
+      : connection.workspaceCwd;
   const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
-    connection.workspaceCwd,
+    activePromptWorkspaceCwd,
     connection.sessionId,
   );
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
