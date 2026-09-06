@@ -236,6 +236,15 @@ export interface CreateDaemonSessionActionsArgs {
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
   clearLiveJournalRepair?: () => void;
+  onPromptAdmitted?: (
+    owner: DaemonSessionClient,
+    admission: {
+      promptId: string;
+      label: string;
+      blockId?: string;
+    },
+  ) => void;
+  onPromptRemoved?: (owner: DaemonSessionClient, promptId: string) => void;
 }
 
 export function getWorkspaceModelsAfterSessionClear(
@@ -383,6 +392,8 @@ export function createDaemonSessionActions({
   setAttachSessionNonce,
   setNewSessionNonce,
   clearLiveJournalRepair = () => undefined,
+  onPromptAdmitted,
+  onPromptRemoved,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
   let noticeOwner = sessionRef.current;
@@ -973,6 +984,7 @@ export function createDaemonSessionActions({
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
           displayedFiles.length === 0;
+        let optimisticBlockId: string | undefined;
         if (optimisticMessageAppended) {
           store.appendLocalUserMessage(
             text,
@@ -980,6 +992,9 @@ export function createDaemonSessionActions({
             inputAnnotations ? { inputAnnotations } : undefined,
             [],
           );
+          if (onPromptAdmitted) {
+            optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
+          }
         }
         let uploaded: Awaited<
           ReturnType<typeof promptContentWithUploadedAttachments>
@@ -1058,7 +1073,15 @@ export function createDaemonSessionActions({
             inputAnnotations ? { inputAnnotations } : undefined,
             promptFilesForTranscript(displayedFiles, uploaded.fileReferences),
           );
+          if (onPromptAdmitted) {
+            optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
+          }
         }
+        onPromptAdmitted?.(session, {
+          promptId: accepted.promptId,
+          label: text,
+          ...(optimisticBlockId ? { blockId: optimisticBlockId } : {}),
+        });
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
@@ -1135,6 +1158,7 @@ export function createDaemonSessionActions({
         shouldAppendOptimisticMessage &&
         displayedImages.length === 0 &&
         displayedFiles.length === 0;
+      let optimisticBlockId: string | undefined;
       if (optimisticMessageAppended) {
         store.appendLocalUserMessage(
           text,
@@ -1142,6 +1166,9 @@ export function createDaemonSessionActions({
           inputAnnotations ? { inputAnnotations } : undefined,
           [],
         );
+        if (onPromptAdmitted) {
+          optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
+        }
       }
       let uploaded: Awaited<
         ReturnType<typeof promptContentWithUploadedAttachments>
@@ -1207,11 +1234,20 @@ export function createDaemonSessionActions({
           inputAnnotations ? { inputAnnotations } : undefined,
           promptFilesForTranscript(displayedFiles, uploaded.fileReferences),
         );
+        if (onPromptAdmitted) {
+          optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
+        }
       }
+      onPromptAdmitted?.(session, {
+        promptId: accepted.promptId,
+        label: text,
+        ...(optimisticBlockId ? { blockId: optimisticBlockId } : {}),
+      });
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
           if (removal.removed) {
+            onPromptRemoved?.(session, accepted.promptId);
             await removeUploadedAttachments(session, uploaded.references);
             return { promptId: accepted.promptId, removedAfterAbort: true };
           }
@@ -2354,7 +2390,9 @@ export function createDaemonSessionActions({
           promptId,
         );
       }
-      return await session.removePendingPrompt(promptId);
+      const result = await session.removePendingPrompt(promptId);
+      if (result.removed) onPromptRemoved?.(session, promptId);
+      return result;
     },
 
     async sendShellCommand(command: string) {
