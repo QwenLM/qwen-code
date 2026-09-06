@@ -39,6 +39,7 @@ import {
 } from '../shared/ScrollableList.js';
 import { TextSelectionController } from '../../selection/use-text-selection.js';
 import { ContentMouseController } from '../../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 
 // Virtual-viewport item wrapper for the VP scroll path. `pending` preserves
 // the committed/live split: items from an executing/confirming tool group
@@ -106,6 +107,12 @@ export const AgentChatContent = ({
   // but the tool side never received it — so a truncated args row could
   // advertise `(ctrl+o)` for a key that did nothing here.
   const { allExpanded: fullDetail } = useThoughtExpanded();
+  // An open right-click menu owns the pointer and keyboard: the viewport goes
+  // quiet so scroll keys and wheel ticks don't leak into the content under it.
+  // The selection controller only PAUSES — deactivating clears the selection
+  // the menu's Copy Selection offers. The mouse controller itself stays
+  // ungated: it owns the open menu's pointer interaction and closes it.
+  const { menu: contextMenuOpen } = useContextMenu();
   const contentWidth = terminalWidth - 4;
   const scrollRef = useRef<ScrollableListRef<AgentVpItem>>(null);
 
@@ -349,7 +356,9 @@ export const AgentChatContent = ({
       <>
         <ScrollableList
           ref={scrollRef}
-          hasFocus={!dialogsVisible && !embeddedShellFocused}
+          hasFocus={
+            !dialogsVisible && !embeddedShellFocused && contextMenuOpen === null
+          }
           data={virtualItems}
           renderItem={renderVirtualItem}
           estimatedItemHeight={agentVpEstimatedHeight}
@@ -361,6 +370,7 @@ export const AgentChatContent = ({
         />
         <TextSelectionController
           isActive={!dialogsVisible && !embeddedShellFocused}
+          eventsPaused={contextMenuOpen !== null}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           getScrollState={() =>
             scrollRef.current?.getScrollState() ?? {

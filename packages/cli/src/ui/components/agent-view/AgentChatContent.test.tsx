@@ -27,6 +27,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type React from 'react';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Text } from 'ink';
@@ -34,6 +35,11 @@ import { AgentChatContent } from './AgentChatContent.js';
 import { UIStateContext, type UIState } from '../../contexts/UIStateContext.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { ThoughtExpandedProvider } from '../../contexts/ThoughtExpandedContext.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+  type ContextMenuContextValue,
+} from '../../context-menu/ContextMenuContext.js';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import type { AgentMessage } from '@qwen-code/qwen-code-core';
 
@@ -96,9 +102,35 @@ vi.mock('../RespondingSpinner.js', () => ({
   RespondingSpinner: () => <Text>SPINNER</Text>,
 }));
 
+// Props spy that still renders the real viewport: the scrolling cases need
+// genuine Page Up behavior, the context-menu case needs the wiring.
+const scrollableListSpy = vi.hoisted(() => vi.fn());
+vi.mock('../shared/ScrollableList.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../shared/ScrollableList.js')>();
+  const { createElement, forwardRef } = await import('react');
+  const RealList = actual.ScrollableList as unknown as React.ComponentType<
+    Record<string, unknown>
+  >;
+  const ScrollableListSpy = forwardRef(
+    (props: Record<string, unknown>, ref: React.Ref<unknown>) => {
+      scrollableListSpy(props);
+      return createElement(RealList, { ...props, ref });
+    },
+  );
+  return { ...actual, ScrollableList: ScrollableListSpy };
+});
+
+/** Props of the most recent ScrollableList render. */
+const latestScrollableListProps = (): { hasFocus?: boolean } =>
+  scrollableListSpy.mock.calls.at(-1)![0] as { hasFocus?: boolean };
+
 const textSelectionControllerSpy = vi.hoisted(() => vi.fn());
 vi.mock('../../selection/use-text-selection.js', () => ({
-  TextSelectionController: (props: { isActive: boolean }) => {
+  TextSelectionController: (props: {
+    isActive: boolean;
+    eventsPaused?: boolean;
+  }) => {
     textSelectionControllerSpy(props);
     return null;
   },
@@ -275,6 +307,16 @@ const makeInteractiveAgent = () =>
 // AppContainer flips and HistoryItemDisplay consumes as `fullDetail`.
 // Default it to ON so the forwarded value is observable (a dropped prop
 // reads as `undefined`, not `false`).
+//
+// The tree is wrapped in the real ContextMenuProvider (as DefaultAppLayout
+// does in the app) and `MenuProbe` captures its API so a case can open the
+// menu the way ContentMouseController does on a right-click.
+let menuApi: ContextMenuContextValue | null = null;
+const MenuProbe = () => {
+  menuApi = useContextMenu();
+  return null;
+};
+
 const renderContent = (
   uiState: UIState,
   core: unknown,
@@ -282,22 +324,25 @@ const renderContent = (
 ) =>
   render(
     <KeypressProvider kittyProtocolEnabled={false}>
-      <UIStateContext.Provider value={uiState}>
-        <ThoughtExpandedProvider
-          value={{
-            allExpanded,
-            expandedHeadIds: new Set<number>(),
-            toggle: () => {},
-          }}
-        >
-          <AgentChatContent
-            core={core as never}
-            interactiveAgent={makeInteractiveAgent()}
-            instanceKey="teammate@team"
-            modelName="teammate"
-          />
-        </ThoughtExpandedProvider>
-      </UIStateContext.Provider>
+      <ContextMenuProvider>
+        <UIStateContext.Provider value={uiState}>
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded,
+              expandedHeadIds: new Set<number>(),
+              toggle: () => {},
+            }}
+          >
+            <AgentChatContent
+              core={core as never}
+              interactiveAgent={makeInteractiveAgent()}
+              instanceKey="teammate@team"
+              modelName="teammate"
+            />
+            <MenuProbe />
+          </ThoughtExpandedProvider>
+        </UIStateContext.Provider>
+      </ContextMenuProvider>
     </KeypressProvider>,
   );
 
@@ -324,6 +369,8 @@ describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
     textSelectionControllerSpy.mockClear();
     contentMouseControllerSpy.mockClear();
     historyItemDisplaySpy.mockClear();
+    scrollableListSpy.mockClear();
+    menuApi = null;
   });
 
   it('VP mode: Page Up scrolls the teammate transcript back to earlier output', async () => {
@@ -440,6 +487,44 @@ describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
     renderContent(createUIState(), makeCore(makeMessages(40)));
     await settle();
 
+    expect(contentMouseControllerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: true }),
+    );
+  });
+
+  it('VP mode: an open context menu quiets the viewport and pauses selection', async () => {
+    // Mounting ContentMouseController makes the right-click menu openable on
+    // this tab for the first time, so the menu's quiescence has to come with
+    // it (MainContent's VP path gates both). Without it Page Up slides the
+    // transcript under a pinned menu — the highlight row then labels content
+    // the user is not looking at — and a press/drag on a menu item anchors or
+    // clears a transcript selection under the overlay.
+    renderContent(createUIState(), makeCore(makeMessages(40)));
+    await settle();
+
+    // Baseline: the viewport owns the keys and selection handling is live.
+    expect(latestScrollableListProps().hasFocus).toBe(true);
+    expect(textSelectionControllerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: true, eventsPaused: false }),
+    );
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'copy-link', label: 'Copy Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    await settle();
+    expect(menuApi?.menu).not.toBeNull();
+
+    expect(latestScrollableListProps().hasFocus).toBe(false);
+    // Paused, not deactivated: deactivating clears the selection the menu's
+    // Copy Selection offers.
+    expect(textSelectionControllerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: true, eventsPaused: true }),
+    );
+    // The mouse controller owns the open menu's pointer interaction and its
+    // deactivate effect closes the menu, so it must stay active here.
     expect(contentMouseControllerSpy).toHaveBeenCalledWith(
       expect.objectContaining({ isActive: true }),
     );
