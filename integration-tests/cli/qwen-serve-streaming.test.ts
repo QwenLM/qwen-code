@@ -74,6 +74,10 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
+// The 10s production handshake budget is a desktop budget, not a shared-runner
+// one: macOS E2E shards died on it in #11030 and reddened again in #11034.
+// Match qwen-serve-routes.test.ts.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -318,6 +322,7 @@ beforeAll(async () => {
     path.join(qwenHome, 'settings.json'),
     JSON.stringify({
       experimental: { todoStopGuard: true },
+      tools: { todoWrite: { enabled: true } },
       ui: { enableFollowupSuggestions: false },
     }),
   );
@@ -346,11 +351,13 @@ beforeAll(async () => {
       // tests below would all silently 404. A scratch workspace (not
       // the checkout) also keeps sessions hermetic: the daemon merges
       // the workspace's `.qwen/settings.json` into every session, and
-      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or
-      // a `tools.core` allowlist missing `todo_write`) silently breaks
+      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or a
+      // disabled `tools.todoWrite` setting) silently breaks
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],

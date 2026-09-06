@@ -183,6 +183,49 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('rejects worktree creation before calling an unsupported daemon factory', async () => {
+    const factory = vi.fn();
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreePersistence: false,
+    });
+
+    await expect(bridge.newSession('/repo', { worktree: {} })).rejects.toThrow(
+      'does not support durable Channel worktree sessions',
+    );
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('forwards and lists an attested worktree session', async () => {
+    const events = new EventQueue();
+    const session = {
+      ...createFakeSession(events),
+      worktree: { slug: 'task', path: '/repo-wt', branch: 'task' },
+      worktreeState: 'persisted-v1' as const,
+    };
+    const factory = vi.fn().mockResolvedValue(session);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreePersistence: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', { worktree: {} });
+
+    expect(factory).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/repo', worktree: {} }),
+    );
+    expect(bridge.listSessions()[0]).toMatchObject({
+      sessionId: 'session-1',
+      worktree: session.worktree,
+      worktreeState: 'persisted-v1',
+    });
+    events.close();
+    bridge.stop();
+  });
+
   it('deletes an internal session through its owning workspace', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

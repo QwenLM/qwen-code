@@ -7,6 +7,7 @@
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   recordDaemonBridgeError,
   recordDaemonError,
   SessionIdCaseConflictError,
@@ -428,6 +429,14 @@ export function sendBridgeError(
     res.status(400).json({
       error: err.message,
       code: 'invalid_transcript_cursor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionTranscriptTurnAnchorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_turn_anchor',
       ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
     });
     return;
@@ -971,6 +980,13 @@ export function sendBridgeError(
         res.status(400).json({
           error: errorMessage(err),
           code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'invalid_turn_anchor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_turn_anchor',
         });
         return;
       }
