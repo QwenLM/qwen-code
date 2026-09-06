@@ -14,6 +14,7 @@ export const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 export const SESSION_LIVE_STATE_FEATURE = 'workspace_session_live_state';
 export const SESSION_TRANSCRIPT_PAGINATION_FEATURE =
   'session_transcript_pagination';
+export const SESSION_TURN_NAVIGATION_FEATURE = 'session_turn_navigation';
 export const SESSION_MONITOR_TOOL_CORRELATION_FEATURE =
   'session_monitor_tool_correlation';
 export const SESSION_SIDE_TASK_FEATURE = 'session_side_task';
@@ -21,6 +22,11 @@ export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';
 export const WEB_SHELL_SIDE_TASK_SOURCE_TYPE = 'side_task';
 export const WEB_SHELL_HISTORY_PAGE_SIZE = 200;
 export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
+export const WEB_SHELL_TURN_INDEX_PAGE_SIZE = 200;
+export const WEB_SHELL_TURN_INDEX_MAX_PAGES = 16;
+export const WEB_SHELL_TURN_INDEX_MAX_BYTES = 4 * 1024 * 1024;
+export const WEB_SHELL_HISTORICAL_MAX_PAGES = 5;
+export const WEB_SHELL_HISTORICAL_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * Upper bound on transcript blocks retained in memory per Web Shell session
@@ -29,7 +35,7 @@ export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
  *
  * Intentionally equal to the provider's `DEFAULT_MAX_BLOCKS`; the equality is
  * enforced by `sessions.test.ts` (importing the constant here instead of the
- * provider would pull the webui barrel into every importer's module graph and
+ * provider would pull the browser UI barrel into every importer's module graph and
  * break the enumerative `daemon-react-sdk` mocks in component tests). Bounding
  * the window keeps very long sessions responsive: the per-dispatch reducer
  * cost (a full block-array copy) and the full-list message normalization turn

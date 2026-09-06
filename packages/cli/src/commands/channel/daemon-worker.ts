@@ -1,6 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
+  CHANNEL_WORKER_KILL_GRACE_MS,
+  CHANNEL_WORKER_STOP_GRACE_MS,
+} from '@qwen-code/acp-bridge/channelControlTimeouts';
+import {
   addChannelMemoryEntries,
   clearChannelMemory,
   getChannelMemoryRevision,
@@ -69,7 +73,11 @@ import {
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
@@ -96,6 +104,7 @@ import {
   createChannelLoopController,
   isChannelCronEnabled,
 } from './loop-runtime.js';
+import { disconnectChannels } from './disconnect-channels.js';
 
 // Typed against the registry so renaming a capability key fails the build here
 // instead of silently degrading the worker to the pre-capability behavior.
@@ -103,8 +112,26 @@ const SESSION_SHELL_COMMAND_FEATURE: ServeFeature = 'session_shell_command';
 const SESSION_ATTACHMENTS_FEATURE: ServeFeature = 'session_attachments';
 const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
 const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
+const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
+  'session_worktree_persistence_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
-const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
+const WORKER_CHANNEL_DISCONNECT_DRAIN_MS =
+  CHANNEL_WORKER_STOP_GRACE_MS - CHANNEL_WORKER_KILL_GRACE_MS;
+const WORKER_STARTUP_ROLLBACK_DRAIN_MS = 1_500;
+
+async function disconnectWorkerChannels(
+  channels: Iterable<ChannelBase>,
+  timeoutMs = WORKER_CHANNEL_DISCONNECT_DRAIN_MS,
+): Promise<void> {
+  await disconnectChannels(channels, {
+    timeoutMs,
+    onTimeout: () => {
+      writeStderrLineSafe(
+        `[Channel] disconnect drain exceeded ${timeoutMs}ms; continuing worker shutdown.`,
+      );
+    },
+  });
+}
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -142,6 +169,7 @@ interface DaemonSessionClientStaticLike {
       approvalMode?: string;
       sourceType?: string;
       sourceId?: string;
+      worktree?: Record<string, never>;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -182,7 +210,7 @@ export interface ChannelDaemonWorkerHandle {
     task: ChannelWebhookTask,
     options?: ChannelWebhookRunOptions,
   ): Promise<void>;
-  close(): Promise<void>;
+  close(disconnectDrainMs?: number): Promise<void>;
 }
 
 export interface RunChannelDaemonWorkerOptions {
@@ -234,7 +262,10 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      daemonReq,
+      {
+        ...daemonReq,
+        ...(req.worktree ? { worktree: req.worktree } : {}),
+      },
       clientId,
     );
   };
@@ -545,6 +576,9 @@ export async function runChannelDaemonWorker(
     sessionPermissionVote: capabilities.features.includes(
       SESSION_PERMISSION_VOTE_FEATURE,
     ),
+    sessionWorktreePersistence: capabilities.features.includes(
+      SESSION_WORKTREE_PERSISTENCE_FEATURE,
+    ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
       : {}),
@@ -578,18 +612,6 @@ export async function runChannelDaemonWorker(
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: process.env,
   };
-  const disconnectAll = async (): Promise<void> => {
-    const disconnections: Array<Promise<void>> = [];
-    for (const channel of channels.values()) {
-      try {
-        disconnections.push(Promise.resolve(channel.disconnect()));
-      } catch {
-        // best-effort
-      }
-    }
-    await Promise.allSettled(disconnections);
-  };
-
   let router: SessionRouter | undefined;
   try {
     await abortableStartup(bridge.start(), startupSignal);
@@ -813,27 +835,28 @@ export async function runChannelDaemonWorker(
           await channel.runWebhookTask(task);
         }
       },
-      async close() {
+      async close(disconnectDrainMs) {
         scheduler?.stop();
-        const disconnecting = disconnectAll();
+        await disconnectWorkerChannels(channels.values(), disconnectDrainMs);
         try {
           bridge.stop();
         } finally {
           createdRouter.dispose();
-          await disconnecting;
         }
       },
     };
   } catch (err) {
     scheduler?.stop();
-    const disconnecting = disconnectAll();
+    await disconnectWorkerChannels(
+      channels.values(),
+      WORKER_STARTUP_ROLLBACK_DRAIN_MS,
+    );
     try {
       bridge.stop();
     } catch {
       // best-effort during startup rollback
     } finally {
       router?.dispose();
-      await disconnecting;
     }
     throw err;
   }
@@ -1220,6 +1243,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.exit(1);
         } else {
           shuttingDown = true;
+          const shutdownDeadline =
+            Date.now() + WORKER_CHANNEL_DISCONNECT_DRAIN_MS;
           clearHeartbeat();
           unsubscribeMessage();
           try {
@@ -1242,12 +1267,15 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
                   ...activeWebhookTasks.values(),
                 ]),
                 new Promise<void>((resolve) => {
-                  const timer = setTimeout(resolve, WORKER_SHUTDOWN_DRAIN_MS);
+                  const timer = setTimeout(
+                    resolve,
+                    Math.max(0, shutdownDeadline - Date.now()),
+                  );
                   timer.unref();
                 }),
               ]);
             }
-            await handle.close();
+            await handle.close(Math.max(0, shutdownDeadline - Date.now()));
           } catch (err) {
             exitCode = 1;
             const safeReason = sanitizeLogText(reason, 128);

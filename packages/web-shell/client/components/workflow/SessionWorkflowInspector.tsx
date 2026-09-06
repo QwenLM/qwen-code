@@ -46,7 +46,7 @@ export function SessionWorkflowInspector({
   onOpenArtifact,
   canvasMode = false,
 }: SessionWorkflowInspectorProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const projection = useMemo(
     () => buildSessionWorkflowProjection(todos, tools, tasks),
     [tasks, todos, tools],
@@ -82,8 +82,12 @@ export function SessionWorkflowInspector({
   const upstream = selectedTodo?.blockedBy?.filter((id) =>
     projection.todosById.has(id),
   );
+  // The projection already derives this for the graph's edges; recomputing it
+  // here rescanned every todo's `blockedBy` for the same answer. It also drops
+  // a todo that lists itself in `blockedBy`, which the previous filter kept as
+  // its own downstream step.
   const downstream = selectedTodo
-    ? todos.filter((todo) => todo.blockedBy?.includes(selectedTodo.id))
+    ? (projection.dependentsByTodo.get(selectedTodo.id) ?? [])
     : [];
 
   const detail = selectedTodo && selectedState && (
@@ -304,7 +308,7 @@ export function SessionWorkflowInspector({
             const content = (
               <>
                 <time dateTime={at ? new Date(at).toISOString() : undefined}>
-                  {workflowClock(at)}
+                  {workflowClock(at, language)}
                 </time>
                 <span className={styles.activityAvatar}>
                   {workflowInitials(task.subagentType || task.label)}

@@ -59,6 +59,7 @@ import {
 } from './sanitize.js';
 import type {
   AvailableCommand,
+  BackgroundResponseContext,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -70,6 +71,7 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
+import { applyMessagePrefix } from './message-prefix.js';
 import {
   buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
@@ -90,6 +92,11 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
+
+interface BackgroundResponseDeliveryTarget {
+  target: SessionTarget;
+  sourceLabel?: string;
+}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -429,6 +436,9 @@ export abstract class ChannelBase {
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
+  private readonly messagePrefix?: string;
+  private readonly messagePrefixCheckedEnvelopes = new WeakSet<Envelope>();
+  private readonly messagePrefixRejectedEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private unattendedMemorySessions: Set<string> = new Set();
   private channelMemoryReads = new Map<string, ChannelMemoryReadState>();
@@ -471,8 +481,9 @@ export abstract class ChannelBase {
   private readonly bridgeBackgroundResponseListener = (
     sessionId: string,
     text: string,
+    context?: BackgroundResponseContext,
   ): void => {
-    void this.dispatchBackgroundResponse(sessionId, text).catch(
+    void this.dispatchBackgroundResponse(sessionId, text, context).catch(
       (err: unknown) => {
         process.stderr.write(
           `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
@@ -540,15 +551,21 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
+    _context?: BackgroundResponseContext,
   ): Promise<void> {
-    let target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      text.trim().length === 0
-    ) {
+    if (text.trim().length === 0) return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
     }
+    await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected async resolveBackgroundResponseDelivery(
+    sessionId: string,
+  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
+    let target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
@@ -571,6 +588,15 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
+    return { target, sourceLabel };
+  }
+
+  protected async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: BackgroundResponseDeliveryTarget,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
@@ -617,7 +643,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not resolve the current task for /btw.',
+        `Could not resolve the current task for ${this.prefixedCommand('/btw')}.`,
         sourceLabel,
       );
       return;
@@ -1141,8 +1167,17 @@ export abstract class ChannelBase {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
+    if (
+      config.messagePrefix !== undefined &&
+      typeof config.messagePrefix !== 'string'
+    ) {
+      throw new Error(
+        `Channel "${name}" field "messagePrefix" must be a string.`,
+      );
+    }
     this.name = name;
     this.config = config;
+    this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
@@ -1220,6 +1255,10 @@ export abstract class ChannelBase {
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void | Promise<void>;
+
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
@@ -2473,6 +2512,7 @@ export abstract class ChannelBase {
       ]);
       if (!cancelled) {
         this.cancelBtw(sessionId);
+        this.onSessionRetiring(sessionId);
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
@@ -2657,6 +2697,8 @@ export abstract class ChannelBase {
     this.unattendedMemorySessions.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
+
+  protected onSessionRetiring(_sessionId: string): void {}
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
@@ -3055,13 +3097,13 @@ export abstract class ChannelBase {
       ? { approve: '          ', always: '   ', deny: '             ' }
       : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
+      `${this.prefixedCommand(`/approve${requestSuffix}`)}${replyPadding.approve}${approveLabel}`,
       ...(alwaysOption
         ? [
-            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
+            `${this.prefixedCommand(`/approve-always${requestSuffix}`)}${replyPadding.always}${alwaysOption.label}`,
           ]
         : []),
-      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
+      `${this.prefixedCommand(`/deny${requestSuffix}`)}${replyPadding.deny}${denyLabel}`,
     ];
     return [
       'Permission required to run a tool',
@@ -3074,6 +3116,14 @@ export abstract class ChannelBase {
       'Reply with:',
       ...replies,
     ].join('\n');
+  }
+
+  protected prefixedCommand(command: string): string {
+    return this.messagePrefix ? `${this.messagePrefix} ${command}` : command;
+  }
+
+  protected configuredMessagePrefix(): string | undefined {
+    return this.messagePrefix;
   }
 
   private permissionTitle(
@@ -3267,7 +3317,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Multiple permission requests are pending for this chat. Reply with /${decision} <request-id>.\n${requestList}`,
+        `Multiple permission requests are pending for this chat. Reply with ${this.prefixedCommand(`/${decision} <request-id>`)}.\n${requestList}`,
       );
       return true;
     }
@@ -3300,7 +3350,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+        `Submit this question through its interactive card, or use ${this.prefixedCommand('/deny [request-id]')} to cancel it.`,
         pending.sourceLabel,
       );
       return true;
@@ -3495,6 +3545,11 @@ export abstract class ChannelBase {
     envelope: Envelope,
     error: unknown,
   ): Promise<void> {
+    if (error instanceof Error && error.cause !== undefined) {
+      process.stderr.write(
+        `[${sanitizeLogText(this.name, 64)}] named-session operation failed: ${this.lifecycleError(error)} | cause: ${this.lifecycleError(error.cause)}\n`,
+      );
+    }
     const message =
       error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
@@ -3517,7 +3572,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /sessions [all]',
+        `Usage: ${this.prefixedCommand('/sessions [all]')}`,
       );
       return true;
     }
@@ -3570,25 +3625,30 @@ export abstract class ChannelBase {
             envelope.threadId,
             current
               ? `Current task: ${current.name} (${current.isolation})`
-              : 'No task is currently selected. Use /session new <name> or /session use <name>.',
+              : `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
           );
           return true;
         }
         case 'new': {
-          if (parts.includes('--worktree')) {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              'Worktree tasks are planned for Part 4. Create a shared task with /session new <name>.',
-            );
-            return true;
+          const isolation =
+            parts.length === 2 && parts[1] === '--worktree'
+              ? 'worktree'
+              : 'shared';
+          if (
+            (isolation === 'shared' && parts.length !== 1) ||
+            (isolation === 'worktree' && parts.length !== 2)
+          ) {
+            break;
           }
-          if (parts.length !== 1) break;
-          const created = await namedSessions.create(owner, parts[0]!);
+          const created = await namedSessions.create(
+            owner,
+            parts[0]!,
+            isolation,
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Created and selected task "${created.name}" (shared workspace).`,
+            `Created and selected task "${created.name}" (${created.isolation} workspace).`,
           );
           return true;
         }
@@ -3606,7 +3666,10 @@ export abstract class ChannelBase {
           if (parts.length !== 1) break;
           const closing = await namedSessions.lookup(owner, parts[0]!);
           const result = await namedSessions.close(owner, parts[0]!);
-          if (closing) this.cancelBtw(closing.sessionId);
+          if (closing) {
+            this.cancelBtw(closing.sessionId);
+            this.onSessionRetiring(closing.sessionId);
+          }
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
@@ -3671,7 +3734,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+      `Usage: ${this.prefixedCommand('/session current')} | ${this.prefixedCommand('/session new <name> [--worktree]')} | ${this.prefixedCommand('/session use <name>')} | ${this.prefixedCommand('/session close <name>')} | ${this.prefixedCommand('/session cancel [<name>]')}`,
     );
     return true;
   }
@@ -3681,6 +3744,15 @@ export abstract class ChannelBase {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
       let removedIds: string[];
+      const retiringSessionId = this.namedSessions
+        ? undefined
+        : this.router.getSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+          );
+      if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
         try {
           const reset = await this.namedSessions.reset(
@@ -3703,6 +3775,7 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          if (id !== retiringSessionId) this.onSessionRetiring(id);
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
@@ -3840,7 +3913,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. ${this.prefixedCommand('/clear confirm')}) to proceed.`,
         );
         return true;
       }
@@ -3928,24 +4001,24 @@ export abstract class ChannelBase {
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
-        '/help — Show this help',
+        `${this.prefixedCommand('/help')} — Show this help`,
         this.isSharedSession(envelope)
-          ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
-          : '/clear — Clear your session (aliases: /reset, /new)',
-        '/who — Show current session & workspace',
-        '/status — Show session info',
-        '/approve [request-id] — Approve a pending permission request',
-        '/approve-always [request-id] — Always approve a pending permission request',
-        '/deny [request-id] — Deny a pending permission request',
+          ? `${this.prefixedCommand('/clear confirm')} — Clear the shared session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`
+          : `${this.prefixedCommand('/clear')} — Clear your session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`,
+        `${this.prefixedCommand('/who')} — Show current session & workspace`,
+        `${this.prefixedCommand('/status')} — Show session info`,
+        `${this.prefixedCommand('/approve [request-id]')} — Approve a pending permission request`,
+        `${this.prefixedCommand('/approve-always [request-id]')} — Always approve a pending permission request`,
+        `${this.prefixedCommand('/deny [request-id]')} — Deny a pending permission request`,
         ...(this.bridge.btw
           ? [
-              '/btw <question> — Ask a side question without interrupting the current task',
+              `${this.prefixedCommand('/btw <question>')} — Ask a side question without interrupting the current task`,
             ]
           : []),
         ...(this.namedSessions
           ? [
-              '/sessions [all] — List your named tasks',
-              '/session current|new|use|close|cancel — Manage your named tasks',
+              `${this.prefixedCommand('/sessions [all]')} — List your named tasks`,
+              `${this.prefixedCommand('/session current|new|use|close|cancel')} — Manage your named tasks`,
             ]
           : []),
       ];
@@ -3973,7 +4046,7 @@ export abstract class ChannelBase {
       );
       if (platformCmds.length > 0) {
         for (const cmd of platformCmds) {
-          lines.push(`/${cmd}`);
+          lines.push(this.prefixedCommand(`/${cmd}`));
         }
       }
 
@@ -3993,11 +4066,18 @@ export abstract class ChannelBase {
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
-          lines.push(`/${cmd.name} — ${cmd.description}`);
+          lines.push(
+            `${this.prefixedCommand(`/${cmd.name}`)} — ${cmd.description}`,
+          );
         }
       }
 
-      lines.push('', 'Send any text to chat with the agent.');
+      lines.push(
+        '',
+        this.messagePrefix
+          ? `Start each message with ${this.messagePrefix} to chat with the agent.`
+          : 'Send any text to chat with the agent.',
+      );
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
@@ -4085,7 +4165,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
+          `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')} | ${this.prefixedCommand('/loop list')} | ${this.prefixedCommand('/loop inspect <id>')} | ${this.prefixedCommand('/loop cancel <id>')}`,
         );
         return true;
     }
@@ -4118,7 +4198,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop add "<cron>" <prompt>',
+        `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')}`,
       );
       return true;
     }
@@ -4345,7 +4425,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop inspect <id>',
+        `Usage: ${this.prefixedCommand('/loop inspect <id>')}`,
       );
       return true;
     }
@@ -4425,7 +4505,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop cancel <id>',
+        `Usage: ${this.prefixedCommand('/loop cancel <id>')}`,
       );
       return true;
     }
@@ -4621,6 +4701,8 @@ export abstract class ChannelBase {
     if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
       return false;
     }
+
+    this.forgetPendingGroupHistory(envelope);
 
     // Surface the drop — otherwise an unanswered queued message vanishes
     // silently, making "my message was never answered" undiagnosable.
@@ -5616,11 +5698,15 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
     }
+    // An adapter placeholder is not something a member typed, so quoting it
+    // back as history would inject `(image)` into the next prompt as user
+    // text.
+    if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
@@ -5664,12 +5750,28 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
       );
       return [];
+    }
+  }
+
+  private forgetPendingGroupHistory(envelope: Envelope): void {
+    if (envelope.messageId === undefined) return;
+    try {
+      this.groupHistory.forget(
+        this.groupHistoryKey(envelope),
+        truncateGroupHistoryField(envelope.messageId),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to forget group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -5722,6 +5824,23 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    // Ahead of both pairing gates on purpose: a pairing request is a reply,
+    // and replying to every unprefixed message would be exactly the traffic
+    // the prefix exists to suppress. First contact carries the prefix too.
+    if (this.messagePrefixRejectedEnvelopes.has(envelope)) return false;
+    if (!this.messagePrefixCheckedEnvelopes.has(envelope)) {
+      this.messagePrefixCheckedEnvelopes.add(envelope);
+      if (!applyMessagePrefix(envelope, this.messagePrefix)) {
+        this.messagePrefixRejectedEnvelopes.add(envelope);
+        if (
+          !(envelope.isGroup && !envelope.isMentioned && !envelope.isReplyToBot)
+        ) {
+          this.logPreflightRejected('message_prefix_mismatch');
+        }
+        return false;
+      }
+    }
+
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -5814,6 +5933,10 @@ export abstract class ChannelBase {
         80,
       )}\n`,
     );
+  }
+
+  protected wasMessagePrefixRejected(envelope: Envelope): boolean {
+    return this.messagePrefixRejectedEnvelopes.has(envelope);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {
@@ -6122,6 +6245,7 @@ export abstract class ChannelBase {
         suppressSaveConfirmation: memorySaveIsSideEffect,
       });
       if (!memorySaveIsSideEffect) {
+        this.forgetPendingGroupHistory(envelope);
         return;
       }
     }
@@ -6132,7 +6256,10 @@ export abstract class ChannelBase {
       const handler = this.commands.get(parsed.command);
       if (handler) {
         const handled = await handler(envelope, parsed.args);
-        if (handled) return;
+        if (handled) {
+          this.forgetPendingGroupHistory(envelope);
+          return;
+        }
       }
       // Unrecognized commands fall through to the agent
       // Intercept /btw only where the bridge can answer it out of band. With no
@@ -6144,7 +6271,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Only authorized members can use /btw in this shared session.',
+            `Only authorized members can use ${this.prefixedCommand('/btw')} in this shared session.`,
           );
           return;
         }
@@ -6153,7 +6280,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Usage: /btw <question>',
+            `Usage: ${this.prefixedCommand('/btw <question>')}`,
           );
           return;
         }
@@ -6169,7 +6296,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            '/btw supports text-only questions.',
+            `${this.prefixedCommand('/btw')} supports text-only questions.`,
           );
           return;
         }
@@ -6271,7 +6398,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'No task is currently selected. Use /session new <name> or /session use <name>.',
+          `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
         );
         return;
       }
@@ -6293,7 +6420,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not identify the selected task. Use /sessions, select it again, and retry.',
+        `Could not identify the selected task. Use ${this.prefixedCommand('/sessions')}, select it again, and retry.`,
       );
       return;
     }
@@ -6701,6 +6828,9 @@ export abstract class ChannelBase {
         recallRead?.generation === recallRead?.state.generation
           ? recallContext
           : undefined;
+      if (recognizedSlashCommand) {
+        this.forgetPendingGroupHistory(envelope);
+      }
       const groupHistoryEntries = recognizedSlashCommand
         ? []
         : this.drainPendingGroupHistory(envelope);

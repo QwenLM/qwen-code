@@ -28,7 +28,7 @@
  * and the keyboard; it delegates every decision here.
  */
 
-import { escapePath } from '@qwen-code/qwen-code-core';
+import { escapePath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { Fzf, type FzfResultItem } from 'fzf';
 import type { Suggestion } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
@@ -563,6 +563,26 @@ export function isPerfectSlashMatch(parsed: CommandParseResult): boolean {
     );
   }
   return false;
+}
+
+/**
+ * {@link isPerfectSlashMatch} for a target detected from the buffer as it
+ * stands right now, so a caller holding a key event can answer without the
+ * published completion state — that state is render-derived and trails the
+ * buffer by a render, and reading it on Enter accepts the row of an earlier
+ * keystroke instead of submitting what was typed.
+ */
+export function isPerfectMatchForTarget(
+  target: CompletionTarget,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  if (target.mode !== CompletionMode.SLASH) return false;
+  return isPerfectSlashMatch(
+    parseSlashCommandQuery(
+      target.query,
+      slashCommandPool(target, slashCommands),
+    ),
+  );
 }
 
 /**

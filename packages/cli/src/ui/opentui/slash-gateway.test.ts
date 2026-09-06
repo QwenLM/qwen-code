@@ -12,7 +12,10 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { OpenTuiSlashGateway } from './slash-gateway.js';
+import {
+  normalizeQuitSubmission,
+  OpenTuiSlashGateway,
+} from './slash-gateway.js';
 import type {
   OpenTuiDispatchOutcome,
   OpenTuiSlashDispatcher,
@@ -152,4 +155,27 @@ describe('OpenTuiSlashGateway', () => {
     });
     expect(second.handle).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('normalizeQuitSubmission', () => {
+  it.each([
+    'exit',
+    'quit',
+    ':q',
+    ':q!',
+    ':wq',
+    ':wq!',
+    '/exit',
+    '/quit',
+    '  exit  ',
+  ])('routes the bare quit token %s to /quit', (text) => {
+    expect(normalizeQuitSubmission(text)).toBe('/quit');
+  });
+
+  it.each(['exit the maze', 'quit smoking', '/compress', ':qn', 'EXIT'])(
+    'leaves %s untouched',
+    (text) => {
+      expect(normalizeQuitSubmission(text)).toBe(text);
+    },
+  );
 });

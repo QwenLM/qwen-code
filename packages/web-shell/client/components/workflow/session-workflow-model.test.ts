@@ -6,7 +6,10 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
-import { buildSessionWorkflowProjection } from './session-workflow-model';
+import {
+  buildSessionWorkflowProjection,
+  workflowClock,
+} from './session-workflow-model';
 
 const todos: TodoItem[] = [
   { id: 'prepare', content: 'Prepare', status: 'completed' },
@@ -120,5 +123,48 @@ describe('buildSessionWorkflowProjection', () => {
     expect(projection.tasksByTool.get(childB)).toBe(taskB);
     expect(projection.toolsByTaskId.get('child-a')).toBe(childA);
     expect(projection.toolsByTaskId.get('child-b')).toBe(childB);
+  });
+
+  it('derives dependents once for every step that unblocks another', () => {
+    const projection = buildSessionWorkflowProjection(todos, [], []);
+
+    expect(projection.dependentsByTodo.get('prepare')).toEqual([todos[1]]);
+    expect(projection.dependentsByTodo.get('build')).toBeUndefined();
+  });
+
+  it('ignores self-references and unknown ids when deriving dependents', () => {
+    const selfBlocked: TodoItem[] = [
+      { id: 'a', content: 'A', status: 'pending', blockedBy: ['a', 'ghost'] },
+      { id: 'b', content: 'B', status: 'pending', blockedBy: ['a', 'a'] },
+    ];
+    const projection = buildSessionWorkflowProjection(selfBlocked, [], []);
+
+    // 'a' unblocks 'b' exactly once despite the duplicate edge, and never
+    // itself; 'ghost' is not in the plan so it contributes no entry.
+    expect(projection.dependentsByTodo.get('a')).toEqual([selfBlocked[1]]);
+    expect(projection.dependentsByTodo.has('ghost')).toBe(false);
+  });
+
+  it('files a tool pointing at an unknown step as unassigned', () => {
+    const projection = buildSessionWorkflowProjection(
+      todos,
+      [agentTool('call-ghost', 'ghost')],
+      [],
+    );
+
+    // The graph routes these into its "unassigned" bucket; the projection
+    // must not file them under a key nothing ever reads.
+    expect(projection.toolsByTodo.has('ghost')).toBe(false);
+    expect(projection.agentToolsByTodo.has('ghost')).toBe(false);
+  });
+});
+
+describe('workflowClock', () => {
+  it('formats in the app language rather than the browser default', () => {
+    const at = Date.UTC(2026, 0, 2, 15, 4);
+
+    // en-US renders a 12-hour clock with a day period; de-DE renders 24-hour.
+    expect(workflowClock(at, 'en-US')).not.toEqual(workflowClock(at, 'de-DE'));
+    expect(workflowClock(undefined, 'en-US')).toBe('--:--');
   });
 });
