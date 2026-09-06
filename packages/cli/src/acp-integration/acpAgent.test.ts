@@ -17110,6 +17110,73 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('does not barrier cursor or record-anchor transcript pages', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    recording.runWithWriteBarrier.mockRejectedValue(
+      new Error('recorder not accepting writes'),
+    );
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-1',
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        beforeRecordId: 'record-1',
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        atRecordId: 'u1',
+        snapshot: 'snapshot-1',
+      }),
+    ).resolves.toMatchObject({ hasMore: false });
+
+    expect(recording.runWithWriteBarrier).not.toHaveBeenCalled();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(readPage).toHaveBeenNthCalledWith(1, VALID_SESSION_ID, {
+      cursor: 'cursor-1',
+      limit: 50,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(readPage).toHaveBeenNthCalledWith(2, VALID_SESSION_ID, {
+      beforeRecordId: 'record-1',
+      limit: 50,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(readPage).toHaveBeenNthCalledWith(3, VALID_SESSION_ID, {
+      atRecordId: 'u1',
+      snapshot: 'snapshot-1',
+      maxBytes: 4 * 1024 * 1024,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('flushes latest but not frozen turn-index pages', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
     const recording = innerConfig.getChatRecordingService();

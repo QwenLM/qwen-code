@@ -9050,8 +9050,11 @@ class QwenAgent implements Agent {
                 maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
               });
             };
+            // Barrier only the latest tail (#9704). Cursor/anchor pages
+            // never consulted writer health; the barrier would 503 them
+            // after a write failure or during handoff.
             const page =
-              recording !== undefined
+              recording !== undefined && rawDirection === 'backward'
                 ? await recording.runWithWriteBarrier(readPersistedPage)
                 : await readPersistedPage();
             const config = await this.getTranscriptReplayConfig(cwd, settings);
