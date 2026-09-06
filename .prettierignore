@@ -28,3 +28,8 @@ Thumbs.db
 packages/vscode-ide-companion/schemas/settings.schema.json
 packages/cli/src/services/insight/templates/insightTemplate.ts
 packages/cua-driver/
+# Vendored from mobile-next/mobile-mcp and carries its own eslint config, so
+# reformatting it to house style only widens the diff against upstream on the
+# next sync. eslint.config.js already ignores packages/mobile-mcp/** for the
+# same reason; .prettierignore had cua-driver but not its sibling.
+packages/mobile-mcp/
