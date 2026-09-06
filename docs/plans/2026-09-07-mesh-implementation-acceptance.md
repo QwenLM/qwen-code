@@ -30,6 +30,9 @@ Gate: a table-driven test enumerates every registered tool name in core and asse
 Deferred to step 4/5: proving the refusal happens in the tool layer. `executionAllowedTools` is name-level, so a per-command predicate needs an invocation-time hook that arrives with the launcher (see the steps 2-3 brief §2).
 Evidence: the classification table, committed as data, not prose.
 
+Supporting local observation: `capability.test.ts`, 10 tests passed. The step
+is not complete until #11206 CI passes after the child PR merges.
+
 ### Step 3 — Versioned storage protocol
 
 Lands: `schemaVersion` on every file; fail-closed on unknown version; migration under the workspace lock with the old file retained until the new one validates; the workspace mutation lock; lock-issued `queueSequence` and message `sequence`; `runs[].usageByRound` on the run record; outbox for parent reports and notifications only; deletion refusal for non-terminal runs, descendants, and unacknowledged outbox events.
@@ -80,13 +83,14 @@ Evidence: the channel transcript.
 
 ## 3. Product decisions the implementer must not make
 
-Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, definition read at revive only.
+Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), persona drift policy (§9.4), and runtime as a first-class concept (§9.12). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, definition read at revive only, and a local background-agent binding only.
 
-The relationship to the Agent Board (#9402) is now recorded in the design's §7.1: separate stores in v1, distinct names, no imports from `board-*.ts` in step 3, and a convergence path that depends on §9.12 (runtime as a first-class concept). What remains the owner's call is §9.12 itself.
+The relationship to the Agent Board (#9402) also remains the owner's call. Until it is decided, §7.1's conservative default keeps separate stores and distinct names, imports nothing from `board-*.ts` in step 3, and records a convergence path that depends on §9.12. MCP names likewise fail closed until the owner approves a policy that can preserve the read-only ceiling.
 
-## 4. Working in one PR
+## 4. Working through stacked step PRs
 
-- #11206 is the only implementation PR and the only PR that merges to `main`. Each numbered step is committed directly to `codex/multi-agent-mesh-foundation` and pushed for #11206's whole-branch CI gate.
+- #11206 is the only PR that merges to `main`. Each numbered step gets one child PR whose base is `codex/multi-agent-mesh-foundation`; merge one child at a time, then use #11206's whole-branch CI as that step's gate before opening or merging the next.
+- Child PRs do not run the repository's unit-test or lint jobs. Their named local tests are supporting evidence only; the required CI signal appears after merge on #11206.
 - Runtime preparation was merged in the order #11200 → #11204 → #11202. The expected final conflict keeps both contracts: structured external input and typed continuation outcomes. GitHub automatically records those draft PRs as merged because their base is this branch; no PR was merged separately to `main` or manually closed.
 - Merge `main` into the mesh branch when it falls behind; never rebase (repo policy, and the force-push bot).
 - Keep the design doc and this file current in the same commit as the code that changes them.
@@ -99,7 +103,7 @@ Ordered by how much damage a miss does. Each item names the step where it is pro
 2. **Step 3 is where later bugs get blamed.** Sequence counter written before the thread file; outbox persisted before apply and acknowledged after; migration keeps the `.v0.json` backup until the migrated file reads back through the validator. Each has a crash-injection test in step 3's gate; do not weaken them to make the step land sooner.
 3. **Ambient binding lives inside `runBody`, and mutating tools re-check it.** The per-turn `runWithMeshRunContext` frame is the only hard boundary against wrong-thread actions; the prompt frame is advisory. Every mutating tool reads the ambient triple and then verifies the run is still `running` on that thread before writing (step 5).
 4. **No silent path.** Every admission result is persisted on the message and rendered; a quiescent thread with nothing runnable becomes `blocked`, never idle `in_progress`. Round 2 found more defects of this class than any other.
-5. **Runtime hot paths change in isolated commits.** `agent-core.ts`, `background-tasks.ts`, `background-agent-resume.ts`, `agent-headless.ts`, `agent.ts` are shared with Agent Team and every subagent. Keep each such change minimal, pair it with its own tests, and land it directly in #11206 rather than opening another delivery PR.
+5. **Runtime hot paths change in isolated child PRs.** `agent-core.ts`, `background-tasks.ts`, `background-agent-resume.ts`, `agent-headless.ts`, `agent.ts` are shared with Agent Team and every subagent. Keep each such change minimal, pair it with its own tests, and merge it into the foundation without creating another PR to `main`.
 6. **Trust labels are not boundaries.** Until §9.9 is decided, no prompt heading is called "trusted" and no code treats one as a policy input. Provenance is derived from the ambient run, never from model or HTTP input.
 7. **Product decisions stay open until decided.** §9.4, §9.5, §9.9, §9.10, §9.11, §9.12 and the #9402 relationship; the conservative defaults in §3 above apply meanwhile.
 8. **Read the CI of #11206 after every numbered step.** Local and source-branch tests are supporting evidence; only the whole delivery branch is the gate.

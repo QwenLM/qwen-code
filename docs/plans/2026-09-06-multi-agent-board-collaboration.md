@@ -111,7 +111,7 @@ Nearly everything the execution layer needs already exists:
 | Need                                                                 | Existing machinery                                                    |
 | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | Agent loop                                                           | `AgentCore` / `AgentInteractive`                                      |
-| Persona: prompt, restricted tools, private MCP                       | `convertToRuntimeConfig`                                              |
+| Persona: prompt and restricted tools                                | `convertToRuntimeConfig`                                              |
 | Durable log                                                          | `attachJsonlTranscriptWriter`                                         |
 | Reading that log in Web Shell                                        | virtual subagent sessions + the existing panel                        |
 | Deliver into a **running** agent                                     | `BackgroundTaskRegistry.queueExternalInput` (boolean acknowledgement) |
@@ -153,6 +153,11 @@ Recorded so implementation does not relitigate them.
 | 2   | Read-only means **files + read-only shell**, against a **built-in allowlist**. `save_memory`, context-file writes, and every other persistent-write tool are outside that ceiling. | `run_shell_command` can write, so "no writes but any command" is a false boundary. The allowlist is the hard ceiling; agent definitions may narrow it, never widen it. |
 | 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                        | No second permission model. An enabled mesh agent with a missing definition is unavailable, never silently replaced by a generic persona.                              |
 | 4   | Agents are **scoped to one workspace**.                                                                                                                                            | Trust and permissions follow the workspace. Five repos means five rosters.                                                                                             |
+
+Until the owner decides the MCP policy, the capability boundary fails
+closed for every unlisted name, including MCP tools. This is a conservative
+implementation default, not a settled decision that mesh agents can never use
+private MCP servers.
 
 ### Identity and memory
 
@@ -539,8 +544,10 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    booking. It still has no launcher or dispatcher.
 2. **Capability boundary** — built-in read-only shell allowlist intersected
    with the agent definition. Explicitly exclude `save_memory`, context-file
-   writes, and every persistent-write tool. Prove disallowed commands cannot
-   reach execution.
+   writes, and every persistent-write tool. This step proves the classification
+   and shell predicate. Step 4/5 wires the predicate at invocation time and
+   proves refused commands cannot execute, because the existing name-level
+   execution allowlist cannot inspect command arguments.
 3. **Versioned storage protocol** — add `schemaVersion`, the workspace mutation
    lock, lock-issued run queue sequence, atomic same-thread booking, parent/
    notification outbox replay, and fail-closed migration before any new process
@@ -589,6 +596,15 @@ npx vitest run src/agents/mesh/mentions.test.ts \
 # 3 files, 38 tests passed
 ```
 
+Supporting local evidence for step 2; the step gate is #11206 CI after the
+child PR merges:
+
+```bash
+cd packages/core
+npx vitest run src/agents/mesh/capability.test.ts
+# 1 file, 10 tests passed
+```
+
 Targeted lint and core typecheck also pass on this branch. They establish
 compile/style health only; they do not validate the design or the unbuilt
 execution path. Update the test count above if the foundation changes.
@@ -618,7 +634,7 @@ Still to build:
 
 | Piece                                                                                                       | Where                                  |
 | ----------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Read-only shell boundary                                                                                    | `core/src/agents/mesh/`                |
+| Invocation-time enforcement of the read-only shell predicate                                                | launcher/tool hook in steps 4-5        |
 | Versioned workspace record, migration, workspace lock, and cross-file outbox protocol                       | `core/src/agents/mesh/`                |
 | Hidden host-session owner and programmatic launcher                                                         | `core/src/agents/`                     |
 | Run envelope, delivery state, prompt assembler, ambient run context                                         | `core/src/agents/mesh/`                |
@@ -807,9 +823,11 @@ does host**. Making one the storage of the other fails in both directions:
   mesh REST surface (§5.2 step 9) and be admitted as a *runtime*. That is
   exactly §9.12, and it is a v2 question, not a v1 storage choice.
 
-**Decision for v1: separate, with the convergence path fixed now.**
+**Conservative v1 default while the owner decision remains open: separate
+stores, with the convergence path recorded.**
 
-1. The two stores stay separate. Neither imports the other. The user-facing
+1. Unless the owner chooses otherwise before step 3, the two stores stay
+   separate and neither imports the other. The user-facing
    names stay distinct: *board* is the foreign-process surface, *threads*
    (with *agents*) is the orchestrated one. Do not call mesh threads a board.
 2. The Board does not ship as a standalone user surface while this design is
