@@ -23,20 +23,6 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(scriptDirectory, '..');
-const computerUseSkillSource = path.resolve(
-  packageRoot,
-  '..',
-  'core',
-  'src',
-  'skills',
-  'bundled',
-  'computer-use',
-  'SKILL.md',
-);
-const expectedComputerUseInstructions = readFileSync(
-  computerUseSkillSource,
-  'utf8',
-);
 const npmRegistry = 'https://registry.npmjs.org';
 
 function valueAfter(flag) {
@@ -94,7 +80,6 @@ for (const required of [
   'dist/index.d.ts',
   'dist/kernel-manager.js',
   'dist/mcp-server.js',
-  'dist/computer-use-skill.md',
   'dist/runtime/kernel.mjs',
   'dist/runtime/module-loader.mjs',
   'dist/runtime/tree-sitter-javascript.wasm',
@@ -197,16 +182,6 @@ try {
   if (!existsSync(serverEntry)) {
     throw new Error('clean install is missing the Node REPL entry point');
   }
-  const installedComputerUseInstructions = readFileSync(
-    path.join(installedRoot, 'dist', 'computer-use-skill.md'),
-    'utf8',
-  );
-  if (installedComputerUseInstructions !== expectedComputerUseInstructions) {
-    throw new Error(
-      'packed Computer Use instructions differ from the source skill',
-    );
-  }
-
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverEntry],
@@ -218,16 +193,22 @@ try {
   });
   try {
     await client.connect(transport);
-    if (client.getInstructions() !== expectedComputerUseInstructions) {
+    const instructions = client.getInstructions() ?? '';
+    if (
+      instructions.length === 0 ||
+      instructions.length >= 2048 ||
+      !instructions.includes('session-persistent JavaScript kernel') ||
+      instructions.includes('Computer Use')
+    ) {
       throw new Error(
-        'MCP initialize instructions differ from the source skill',
+        'MCP initialize instructions are not the minimal Node REPL contract',
       );
     }
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
     if (
       names.join(',') !==
-      'node_repl,node_repl_add_node_module_dir,node_repl_reset'
+      'node_repl,node_repl_add_node_module_dir,node_repl_cancel,node_repl_reset,node_repl_wait'
     ) {
       throw new Error(`unexpected MCP tools: ${names.join(',')}`);
     }

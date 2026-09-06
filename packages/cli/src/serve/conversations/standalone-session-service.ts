@@ -20,6 +20,7 @@ import type {
   BridgeSessionSummary,
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
 import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
   readSessionPrs,
@@ -34,6 +35,7 @@ import {
   type SessionArchiveState,
   type SessionListItem,
   type SessionService,
+  type SessionWriterErrorKind,
   type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -118,6 +120,11 @@ export interface CreatedStandaloneSession {
   workingDirectory: { state: 'ready' };
 }
 
+export type StandaloneSessionOptions = Omit<
+  ServeWorkspaceProvidersStatus,
+  'workspaceCwd' | 'acpChannelLive'
+>;
+
 export interface StandaloneSessionDirectoryResult {
   sessionId: string;
   projectlessOutputDirectory: string;
@@ -134,7 +141,7 @@ export interface StandaloneSessionMetadataResult {
 
 export interface StandaloneBatchError {
   sessionId: string;
-  code: StandaloneSessionServiceErrorCode;
+  code: StandaloneSessionServiceErrorCode | SessionWriterErrorKind;
   message: string;
 }
 
@@ -377,6 +384,9 @@ function toStandaloneSummary(
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     ...(displayName ? { displayName } : {}),
+    ...(item.customTitle && item.titleSource
+      ? { titleSource: item.titleSource }
+      : {}),
     sourceType: STANDALONE_SESSION_SOURCE_TYPE,
     context: { kind: 'standalone' },
     ...(source.metadata.parentSessionId !== undefined
@@ -482,6 +492,38 @@ export class StandaloneSessionService {
   private terminal = false;
 
   constructor(private readonly options: StandaloneSessionServiceOptions) {}
+
+  async getOptions(): Promise<StandaloneSessionOptions> {
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      this.options.assertRuntimeCurrent(runtime);
+      const status = await runtime.workspaceService.getWorkspaceProvidersStatus(
+        {
+          route: 'GET /standalone/session-options',
+          workspaceCwd: runtime.workspaceCwd,
+        },
+      );
+      this.options.assertRuntimeCurrent(runtime);
+      if (status.workspaceCwd !== runtime.workspaceCwd) {
+        throw new ConversationRuntimeOwnershipError(
+          'conversation_runtime_ownership_compromised',
+          false,
+        );
+      }
+      return {
+        v: status.v,
+        initialized: status.initialized,
+        ...(status.current !== undefined ? { current: status.current } : {}),
+        ...(status.approvalMode !== undefined
+          ? { approvalMode: status.approvalMode }
+          : {}),
+        providers: status.providers,
+        ...(status.errors !== undefined ? { errors: status.errors } : {}),
+      };
+    });
+  }
 
   freezeForTerminalQuarantine(runtime: WorkspaceRuntime): void {
     this.terminal = true;
@@ -1353,9 +1395,12 @@ export class StandaloneSessionService {
         message: 'A previous session writer lease is still being released.',
       });
     }
+    // Parent-side lifecycle and maintenance acquisitions on the
+    // Conversations runtime share the ACP writer's hardened local policy so a
+    // provably dead same-domain writer does not fence recovery forever.
     const leaseOptions = {
       processKind: 'daemon' as const,
-      reclaimPolicy: 'never' as const,
+      reclaimPolicy: 'local' as const,
       takeoverPolicy: 'certified' as const,
     };
     try {
@@ -1513,6 +1558,11 @@ export class StandaloneSessionService {
   private batchError(sessionId: string, error: unknown): StandaloneBatchError {
     if (error instanceof StandaloneSessionServiceError) {
       return { sessionId, code: error.code, message: error.message };
+    }
+    // Preserve the session-writer protocol kind so a batch caller can
+    // distinguish a fenced same-session conflict from a storage failure.
+    if (error instanceof SessionWriterError) {
+      return { sessionId, code: error.errorKind, message: error.message };
     }
     const mapped = serviceError(
       'standalone_session_operation_failed',
@@ -1857,7 +1907,10 @@ export class StandaloneSessionService {
           await service.getSessionTranscriptParentIdentityForLifecycle(
             locked.location,
           );
-        const pinned = this.directoryStates.get(sessionId)?.pinned;
+        // The local session was closed above and the lifecycle lease is now
+        // held, so capture the directory identity fresh rather than trusting
+        // a pin that may predate another participant's legitimate recreation.
+        const pinned = this.effectiveDirectoryPin(runtime, sessionId);
         const paths =
           await this.options.workspace.inspectStandaloneDeletionPaths(
             sessionId,
@@ -2201,6 +2254,7 @@ export class StandaloneSessionService {
               throw serviceError('standalone_session_conflict', sessionId);
             }
             const prepared = await this.prepareRestoreDirectory(
+              runtime,
               sessionId,
               async () => {
                 if (!existing) return;
@@ -2824,20 +2878,57 @@ export class StandaloneSessionService {
     return result;
   }
 
+  /**
+   * A pin is authoritative only while its matching local bridge session
+   * generation remains resident. A bare pin left by a terminal close, an
+   * entry whose session an idle reap dropped, or a replaced event epoch is
+   * daemon-local history: discard it rather than condemning a directory
+   * another participant may have legitimately recreated. An indeterminate
+   * bridge probe fails closed by propagating.
+   */
+  private effectiveDirectoryPin(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): ConversationDirectoryIdentity | undefined {
+    const state = this.directoryStates.get(sessionId);
+    if (!state) return undefined;
+    const bound = state.agentBound;
+    if (!bound) {
+      this.directoryStates.delete(sessionId);
+      return undefined;
+    }
+    let eventEpoch: string;
+    try {
+      eventEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        this.directoryStates.delete(sessionId);
+        return undefined;
+      }
+      throw error;
+    }
+    if (eventEpoch !== bound.eventEpoch) {
+      this.directoryStates.delete(sessionId);
+      return undefined;
+    }
+    return state.pinned;
+  }
+
   private async prepareRestoreDirectory(
+    runtime: WorkspaceRuntime,
     sessionId: string,
     beforeRecreate?: () => Promise<void>,
   ): Promise<PreparedRestoreDirectory> {
-    const previous = this.directoryStates.get(sessionId);
+    const expected = this.effectiveDirectoryPin(runtime, sessionId);
     const inspected = await this.options.workspace.inspectStandaloneDirectory(
       sessionId,
-      previous?.pinned,
+      expected,
     );
     if (inspected.status === 'compromised') {
       throw serviceError('working_directory_compromised', sessionId);
     }
     if (inspected.status === 'ready') {
-      if (!previous) {
+      if (!this.directoryStates.get(sessionId)) {
         this.directoryStates.set(sessionId, { pinned: inspected.identity });
       }
       return { identity: inspected.identity, state: 'ready' };
@@ -2846,7 +2937,7 @@ export class StandaloneSessionService {
     await beforeRecreate?.();
     const ensured = await this.options.workspace.ensureStandaloneDirectory(
       sessionId,
-      previous?.pinned,
+      expected,
     );
     if (ensured.status === 'compromised') {
       throw serviceError('working_directory_compromised', sessionId);

@@ -100,6 +100,16 @@ jobs:
         run: |-
           npm ci
 
+      - name: 'Verify published export renderer'
+        run: |-
+          renderer_version=$(node -p "require('./package.json').version")
+          published_renderer=$(mktemp)
+          trap 'rm -f "${published_renderer}"' EXIT
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://unpkg.com/@qwen-code/qwen-code@${renderer_version}/export-transcript-document.js" \
+            --output "${published_renderer}"
+          cmp packages/web-templates/src/export-html/dist/export-transcript-document.js "${published_renderer}"
+
       - name: 'Get the version'
         id: 'version'
         working-directory: 'packages/vscode-ide-companion'
@@ -151,12 +161,6 @@ jobs:
         env:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
-
-      - name: 'Build webui dependency'
-        if: |-
-          ${{ github.event.inputs.force_skip_tests != 'true' }}
-        run: |
-          npm run build --workspace=@qwen-code/webui
 
       - name: 'Run Tests'
         if: |-
@@ -231,6 +235,8 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         shell: 'bash'
         run: |-
+          # Keep the verified, prebuilt export renderer reference pinned to the
+          # published CLI version from the selected source ref.
           npm run release:version -- "${RELEASE_VERSION}"
 
       - name: 'Prepare VSCode Extension'

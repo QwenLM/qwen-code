@@ -43,7 +43,7 @@ describe('classifyPath', () => {
     const paths = [
       'packages/channels/qqbot/src/events.test.ts',
       'src/foo.spec.tsx',
-      'packages/webui/src/__tests__/App.tsx',
+      'packages/browser-ui/src/__tests__/App.tsx',
       'integration-tests/foo.ts',
       'pkg/server/handler_test.go',
       'app/tests/test_views.py',

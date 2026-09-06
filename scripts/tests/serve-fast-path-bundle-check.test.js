@@ -255,6 +255,20 @@ describe('serve fast-path bundle check', () => {
     ]);
   });
 
+  it('keeps leaf core imports from pulling the core barrel into serve', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/no-follow-open.js')],
+      }),
+      'dist/chunks/no-follow-open.js': output({
+        inputs: ['packages/core/src/utils/no-follow-open.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
   it('matches normalized source suffixes without accepting partial names', () => {
     const metafile = makeMetafile({
       'dist\\chunks\\run-qwen-serve.js': output({

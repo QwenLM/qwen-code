@@ -81,7 +81,11 @@ function makeFakeBridge(opts?: {
   }> = [];
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
-  const names: Array<{ sessionId: string; displayName?: string }> = [];
+  const names: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const closes: string[] = [];
   const relocations: Array<{
     sessionId: string;
@@ -131,9 +135,12 @@ function makeFakeBridge(opts?: {
     },
     updateSessionMetadata: (
       sessionId: string,
-      metadata: { displayName?: string },
+      metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      },
     ) => {
-      names.push({ sessionId, displayName: metadata.displayName });
+      names.push({ sessionId, ...metadata });
       return metadata;
     },
     getSessionLastEventId: () => 0,
@@ -339,6 +346,7 @@ describe('sub-session launcher', () => {
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
     expect(fake.names[0]!.displayName).toContain('my task');
+    expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
     // stays meaningful). The subscription is fire-and-forget — the launch
@@ -386,6 +394,7 @@ describe('sub-session launcher', () => {
       sourceId: 'scheduled_task_run:task-1',
     });
     expect(fake.names[0]?.displayName).toBe('Hourly review');
+    expect(fake.names[0]?.titleSource).toBe('auto');
   });
 
   it('rejects a scheduled-task run when prompt admission fails', async () => {

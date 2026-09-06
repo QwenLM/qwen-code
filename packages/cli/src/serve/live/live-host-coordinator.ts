@@ -292,6 +292,18 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
       };
     }
   }
+  if (
+    value['type'] === 'host.playback_started' &&
+    typeof value['epoch'] === 'number'
+  ) {
+    return { type: 'host.playback_started', epoch: value['epoch'] };
+  }
+  if (
+    value['type'] === 'host.playback_completed' &&
+    typeof value['epoch'] === 'number'
+  ) {
+    return { type: 'host.playback_completed', epoch: value['epoch'] };
+  }
   return undefined;
 }
 
@@ -981,6 +993,15 @@ export class LiveHostCoordinator {
     }
     if (message.type === 'host.shortcut_result') {
       this.handleShortcutResult(message);
+      return;
+    }
+    // v7 playback receipts: accepted but not forwarded to the built-in
+    // Live session coordinator (which uses byte estimation). The
+    // standalone qwen-live daemon wires these to its injector.
+    if (
+      message.type === 'host.playback_started' ||
+      message.type === 'host.playback_completed'
+    ) {
       return;
     }
     this.handleAction(message);

@@ -101,14 +101,11 @@ export function ModelDialog({
 }: ModelDialogProps) {
   const connection = useConnection();
   const currentModel = currentModelId ?? connection.currentModel ?? '';
-  const availableModels = useMemo(
-    () => {
-      const candidates =
-        models ?? ((connection.models ?? []) as ModelDialogModel[]);
-      return filterModel ? candidates.filter(filterModel) : candidates;
-    },
-    [models, connection.models, filterModel],
-  );
+  const availableModels = useMemo(() => {
+    const candidates =
+      models ?? ((connection.models ?? []) as ModelDialogModel[]);
+    return filterModel ? candidates.filter(filterModel) : candidates;
+  }, [models, connection.models, filterModel]);
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';
