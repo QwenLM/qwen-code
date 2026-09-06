@@ -521,6 +521,8 @@ export interface DaemonSessionActions {
     opts?: { signal?: AbortSignal; sessionId?: string },
   ): Promise<DaemonSessionAttachmentReference>;
   readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  /** List every attachment currently stored for the session, upload order. */
+  listAttachments(): Promise<DaemonSessionAttachmentReference[]>;
   removeAttachment(
     attachmentId: string,
     opts?: { sessionId?: string },

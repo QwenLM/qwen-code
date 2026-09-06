@@ -23,6 +23,15 @@ import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 
+// A hung-runner bound, not a performance budget, so it rides the suite's own
+// knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
+// quiet machine. Release run 33957952281: this harness's heaviest case costs
+// 0.9s idle, the pool ran it past a hardcoded 30s, and the kill truncated the
+// stub's recording — so a timeout surfaced as a content mismatch.
+const subprocessTimeoutMs = Number(
+  process.env.QWEN_SCRIPTS_TEST_TIMEOUT_MS ?? 90_000,
+);
+
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
@@ -2064,7 +2073,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  }, 30000);
+  });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -10021,7 +10030,7 @@ exit 1
         ],
         // spawnSync blocks the event loop, so vitest's async timeout can't
         // fire — bound each subprocess directly against a hung runner.
-        { encoding: 'utf8', timeout: 10_000 },
+        { encoding: 'utf8', timeout: subprocessTimeoutMs },
       );
     withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
@@ -12643,7 +12652,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  }, 30000);
+  });
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -13674,7 +13683,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  }, 30000);
+  });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -14174,7 +14183,7 @@ exit 1
           encoding: 'utf8',
           // spawnSync blocks the event loop, so vitest's async timeout cannot
           // fire — bound each subprocess directly against a hung runner.
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
@@ -17513,7 +17522,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  }, 30000);
+  });
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -21277,7 +21286,7 @@ exit 0
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  }, 30000);
+  });
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -23960,10 +23969,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
     // Eight runGate arms, each a fixture repo plus a full gate-script
-    // replay under bash — this outgrows the 5s default on slow runners
-    // (it timed out at ~6.4s on the PR head); the suite's convention is
-    // an explicit per-test budget for tests that spawn subprocesses.
-  }, 30000);
+    // replay under bash — this outgrows vitest's 5s default on slow runners
+    // (it timed out at ~6.4s on the PR head), so it runs on the suite
+    // ceiling in scripts/tests/vitest.config.ts rather than a per-test one.
+  });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside
@@ -24562,7 +24571,7 @@ describe('run-agent idle watchdog', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -24805,7 +24814,7 @@ describe('stale sandbox container cleanup', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,

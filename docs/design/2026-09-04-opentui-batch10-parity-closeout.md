@@ -477,7 +477,9 @@ in `live-session-model.test.ts`; `input-prompt.test.tsx` gains three tests
 restore). The submit routing lives in the shell harness where submit cannot
 run (same boundary as Decisions 8/9) and is review-pinned against
 AppContainer. No e2e leg drives a real `!` command. `npm run typecheck` and
-eslint clean on the touched files; 146 tests green across the four suites.
+eslint clean on the touched files; 181 tests green across the five suites
+(shell-mode 8, item-projection 39, live-session-model 43, input-prompt 56,
+opentui-app-shell 35).
 
 ## Coverage boundary
 

@@ -56,7 +56,7 @@ export enum HookEventName {
   SessionDelete = 'SessionDelete',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
-  // When a tool call is denied before a permission dialog is displayed
+  // When AUTO-mode classification denies a tool call
   PermissionDenied = 'PermissionDenied',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',

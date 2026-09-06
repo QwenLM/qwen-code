@@ -3,6 +3,7 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../utils/clipboard';
+import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useCopiedFlash } from '../hooks/useCopiedFlash';
 import styles from './MessageTimestamp.module.css';
 
@@ -30,6 +31,7 @@ export function MessageTimestamp({
   copyText,
   copyTitle = 'Copy',
 }: MessageTimestampProps) {
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
     if (!copyText) return;
@@ -39,6 +41,7 @@ export function MessageTimestamp({
       })
       .catch(warnClipboardWriteFailure);
   }, [copyText, flashCopied]);
+  if (documentMode) return <>{children}</>;
   if (timestamp === undefined && !copyText && !toolGroupSpacing) {
     return <>{children}</>;
   }

@@ -23,6 +23,8 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
   DaemonSessionAttachmentData,
   DaemonSessionAttachmentReference,
   DaemonSessionTranscriptPage,
@@ -676,6 +678,17 @@ export class DaemonSessionClient {
     );
   }
 
+  async listAttachments(
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentReference[]> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.listSessionAttachments(this.sessionId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+  }
+
   async removeAttachment(
     attachmentId: string,
     signal?: AbortSignal,
@@ -1025,6 +1038,19 @@ export class DaemonSessionClient {
 
   tasks(): Promise<DaemonSessionTasksStatus> {
     return this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  agents(signal?: AbortSignal): Promise<DaemonSessionAgentsStatus> {
+    return this.client.sessionAgents(this.sessionId, this.clientId, signal);
+  }
+
+  agentTrace(
+    opts: { rootAgentId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonAgentTrace> {
+    return this.client.sessionAgentTrace(this.sessionId, {
+      ...opts,
+      clientId: this.clientId,
+    });
   }
 
   workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
@@ -1378,6 +1404,10 @@ export class DaemonSessionClient {
         type: 'image',
         data: attachment.data,
         mimeType: attachment.mimeType,
+        // Keep the reference id on the hydrated block so message images stay
+        // re-fetchable after a reload (Web Shell previews persist the id
+        // instead of the data URL).
+        attachmentId: block.attachmentId,
       };
     } catch (err) {
       // 404/410 means the daemon no longer holds the blob, so pin the

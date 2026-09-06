@@ -581,6 +581,29 @@ class FakeBridge {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
+  async getSessionAgentsStatus(sessionId: string) {
+    return { sessionId, tasks: [] };
+  }
+  async getSessionAgentTrace(sessionId: string, rootAgentId?: string) {
+    return {
+      v: 1 as const,
+      sessionId,
+      nodes: [],
+      rootAgentIds: rootAgentId ? [rootAgentId] : [],
+      warnings: [],
+    };
+  }
+  async listSessionAttachments() {
+    return [
+      {
+        type: 'resource' as const,
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ];
+  }
+
   lastCancelledTask:
     | {
         sessionId: string;
@@ -8890,6 +8913,81 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastWorkflowAction).toBeUndefined();
     });
 
+    it('_qwen/session/agents returns agents', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/agents',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('_qwen/session/agent_trace returns persisted lineage', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/agent_trace',
+        params: { sessionId: 'sess-1', rootAgentId: 'root-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          sessionId: 'sess-1',
+          rootAgentIds: ['root-1'],
+          nodes: [],
+        },
+      });
+    });
+
+    it('_qwen/session/attachments returns attachments', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/attachments',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          attachments: [{ attachmentId: 'notes.txt', size: 5 }],
+        },
+      });
+    });
+
     it('_qwen/session/lsp returns status', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -12244,11 +12342,7 @@ describe('ACP WebSocket transport security', () => {
     ws.close();
   });
 
-  it('classifies _qwen/session/saved_workflow as a WS read method', async () => {
-    // Definition reads share a bucket with real mutations if this is
-    // missing from WS_READ_METHODS: ~30 reads a minute (browsing the Saved
-    // tab, reopening details after a timeout) then exhaust the tier and the
-    // user's next pause/stop/cancel is rejected as rate-limited.
+  it('classifies session definition reads as WS read methods', async () => {
     const tiers: string[] = [];
     await startServer({
       checkRate: (_key, tier) => {
@@ -12266,11 +12360,17 @@ describe('ACP WebSocket transport security', () => {
     await sendRpc(ws, {
       jsonrpc: '2.0',
       id: 2,
+      method: '_qwen/session/attachments',
+      params: { sessionId: 'session-1' },
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 3,
       method: '_qwen/session/saved_workflow',
       params: { sessionId: 'missing-session', name: 'deep-review' },
     });
 
-    expect(tiers).toEqual(['read']);
+    expect(tiers).toEqual(['read', 'read']);
     ws.close();
   });
 

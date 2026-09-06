@@ -16,6 +16,7 @@ import {
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 const mocks = vi.hoisted(() => {
+  const loadSessionOutputStyles = vi.fn();
   const state = {
     inputHandlers: [] as Array<(sequence: string) => boolean>,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
@@ -53,7 +54,7 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { state, renderer, buildJsxRuntime };
+  return { state, renderer, buildJsxRuntime, loadSessionOutputStyles };
 });
 
 vi.mock('@opentui/react', () => ({
@@ -69,6 +70,14 @@ vi.mock('./key-map.js', () => ({
 }));
 vi.mock('./theme.js', () => ({
   C: new Proxy({}, { get: () => '#ffffff' }),
+}));
+// The dialog loads the style catalog from disk; stub just that so the test
+// never depends on the developer's own ~/.qwen/output-styles.
+vi.mock('../commands/output-style-utils.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../commands/output-style-utils.js')
+  >()),
+  loadSessionOutputStyles: mocks.loadSessionOutputStyles,
 }));
 
 import { OpenTuiOutputStyleDialog } from './dialogs-modes.js';
@@ -136,10 +145,86 @@ describe('OpenTuiOutputStyleDialog', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
+    mocks.loadSessionOutputStyles.mockReset();
+    mocks.loadSessionOutputStyles.mockResolvedValue(BUILT_IN_OUTPUT_STYLES);
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('lists a custom style and pre-selects the active one', async () => {
+    // Startup style resolution is renderer-independent, so a custom style can
+    // be live here. A list of built-ins alone leaves it unfound, and the
+    // `-1 -> 0` clamp then highlights `default` -- one Enter persists that
+    // over the user's own setting.
+    const custom: OutputStyleDefinition = {
+      name: 'Reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      custom,
+    ]);
+    const harness = createHarness({ current: custom });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('Reviewer')).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+        '● Reviewer',
+      ),
+    );
+    // Labelled with its source, as the ink picker does.
+    expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+      '(user)',
+    );
+    expect(
+      screen.getByText('default').parentElement?.textContent,
+    ).not.toContain('● default');
+  });
+
+  it('labels a project style with its own source and leaves built-ins unlabelled', async () => {
+    // The row's source is the picker's only trust-relevant provenance: a
+    // prompt read from the workspace must not read as the user's own.
+    const project: OutputStyleDefinition = {
+      name: 'TeamVoice',
+      description: 'Team style from the workspace',
+      source: 'project',
+      prompt: 'Speak for the team.',
+      keepCodingInstructions: true,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      project,
+    ]);
+    const harness = createHarness();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('TeamVoice')).not.toBeNull());
+    expect(screen.getByText('TeamVoice').parentElement?.textContent).toContain(
+      '(project)',
+    );
+    expect(
+      screen.getByText('Concise').parentElement?.textContent,
+    ).not.toContain('(');
   });
 
   it('keeps the configured style selected while a system prompt override is active', async () => {
@@ -158,8 +243,10 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '● Concise',
+    await waitFor(() =>
+      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+        '● Concise',
+      ),
     );
     press('return');
 
@@ -191,6 +278,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('down');
     press('return');
 
@@ -212,8 +300,10 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '● Concise',
+    await waitFor(() =>
+      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+        '● Concise',
+      ),
     );
     press('return');
 
@@ -243,6 +333,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('up');
     press('return');
 
@@ -276,6 +367,70 @@ describe('OpenTuiOutputStyleDialog', () => {
     expect(harness.setValue).not.toHaveBeenCalled();
   });
 
+  it('does not mount selectable rows before the catalog is ready', async () => {
+    const custom: OutputStyleDefinition = {
+      name: 'Reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    let releaseLoad: (() => void) | undefined;
+    mocks.loadSessionOutputStyles.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = () => resolve([...BUILT_IN_OUTPUT_STYLES, custom]);
+        }),
+    );
+    const harness = createHarness({ current: custom });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText('Loading output styles…')).not.toBeNull();
+    expect(mocks.state.keyboardHandlers).toHaveLength(0);
+    expect(screen.queryByText('default')).toBeNull();
+
+    await act(async () => {
+      releaseLoad?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+        '● Reviewer',
+      ),
+    );
+    expect(harness.setOutputStyle).not.toHaveBeenCalled();
+    expect(harness.setValue).not.toHaveBeenCalled();
+  });
+
+  it('closes and notifies when the catalog cannot be read', async () => {
+    mocks.loadSessionOutputStyles.mockRejectedValue(new Error('EACCES'));
+    const harness = createHarness();
+    const onClose = vi.fn();
+    const notify = vi.fn();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={onClose}
+        notify={notify}
+      />,
+    );
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+    expect(screen.queryByText('default')).toBeNull();
+    expect(harness.setOutputStyle).not.toHaveBeenCalled();
+    expect(harness.setValue).not.toHaveBeenCalled();
+  });
+
   it('notifies when persistence fails', async () => {
     const setValue = vi.fn(() => {
       throw new Error('disk full');
@@ -291,10 +446,137 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('return');
 
     await waitFor(() => expect(notify).toHaveBeenCalledWith('disk full'));
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
     expect(harness.refreshSystemInstruction).not.toHaveBeenCalled();
+  });
+
+  it('keeps the navigated row when the shell re-renders with new callbacks', async () => {
+    // The mount site passes `onClose`/`notify` as fresh inline closures on
+    // every shell render. If the catalog effect depended on them, the reload
+    // would land a new style array and re-derive the selection -- Enter would
+    // then apply the previously active style instead of the navigated row.
+    mocks.loadSessionOutputStyles.mockImplementation(async () => [
+      ...BUILT_IN_OUTPUT_STYLES,
+    ]);
+    const harness = createHarness();
+    const view = render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    press('down');
+    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+      '● Concise',
+    );
+
+    await act(async () => {
+      view.rerender(
+        <OpenTuiOutputStyleDialog
+          config={harness.config}
+          settings={harness.settings}
+          onClose={vi.fn()}
+          notify={vi.fn()}
+        />,
+      );
+      // Let a reload, were one started, resolve and re-derive the selection.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mocks.loadSessionOutputStyles).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+      '● Concise',
+    );
+    press('return');
+    await waitFor(() =>
+      expect(harness.setOutputStyle).toHaveBeenCalledWith(CONCISE),
+    );
+  });
+
+  it('lists the active style the reloaded catalog no longer carries', async () => {
+    // The catalog is re-read on every open and skips a file it cannot parse,
+    // so the live style can be missing from it. Snapping to index 0 would mark
+    // `default` as active and one Enter would persist that over the setting.
+    const custom: OutputStyleDefinition = {
+      name: 'Reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+    ]);
+    const harness = createHarness({ current: custom });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+        '● Reviewer',
+      ),
+    );
+    expect(
+      screen.getByText('default').parentElement?.textContent,
+    ).not.toContain('● default');
+
+    press('return');
+    await waitFor(() =>
+      expect(harness.setOutputStyle).toHaveBeenCalledWith(custom),
+    );
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.outputStyle',
+      'Reviewer',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('does not duplicate a catalog entry that differs only in case', async () => {
+    // The catalog dedupes and looks styles up case-insensitively, so an
+    // exact-equality membership test would append a second row here.
+    const listed: OutputStyleDefinition = {
+      name: 'reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      listed,
+    ]);
+    const harness = createHarness({ current: { ...listed, name: 'Reviewer' } });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText('reviewer').parentElement?.textContent).toContain(
+        '● reviewer',
+      ),
+    );
+    expect(screen.getAllByText('reviewer')).toHaveLength(1);
+    expect(screen.queryByText('Reviewer')).toBeNull();
   });
 });

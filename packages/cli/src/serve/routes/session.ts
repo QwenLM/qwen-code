@@ -531,6 +531,21 @@ function parseTranscriptCursorQuery(
   return rawCursor;
 }
 
+function parseTranscriptDirectionQuery(
+  rawDirection: unknown,
+  res: Response,
+): 'backward' | undefined | null {
+  if (rawDirection === undefined) return undefined;
+  if (rawDirection !== 'backward') {
+    res.status(400).json({
+      error: '`direction` must be `backward`',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawDirection;
+}
+
 function parseTranscriptSnapshotQuery(
   rawSnapshot: unknown,
   res: Response,
@@ -4765,6 +4780,11 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const direction = parseTranscriptDirectionQuery(
+      req.query['direction'],
+      res,
+    );
+    if (direction === null) return;
     const beforeRecordId = parseTranscriptRecordBoundaryQuery(
       req.query['beforeRecordId'],
       res,
@@ -4778,6 +4798,11 @@ export function registerSessionRoutes(
     const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
     if (snapshot === null) return;
     if (
+      (direction !== undefined &&
+        (cursor !== undefined ||
+          beforeRecordId !== undefined ||
+          atRecordId !== undefined ||
+          snapshot !== undefined)) ||
       (cursor !== undefined &&
         (beforeRecordId !== undefined ||
           atRecordId !== undefined ||
@@ -4826,6 +4851,7 @@ export function registerSessionRoutes(
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
+            ...(direction !== undefined ? { direction } : {}),
             ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
             ...(atRecordId !== undefined ? { atRecordId } : {}),
             ...(snapshot !== undefined ? { snapshot } : {}),
@@ -4871,6 +4897,11 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const direction = parseTranscriptDirectionQuery(
+      req.query['direction'],
+      res,
+    );
+    if (direction === null) return;
     const beforeRecordId = parseTranscriptRecordBoundaryQuery(
       req.query['beforeRecordId'],
       res,
@@ -4884,6 +4915,11 @@ export function registerSessionRoutes(
     const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
     if (snapshot === null) return;
     if (
+      (direction !== undefined &&
+        (cursor !== undefined ||
+          beforeRecordId !== undefined ||
+          atRecordId !== undefined ||
+          snapshot !== undefined)) ||
       (cursor !== undefined &&
         (beforeRecordId !== undefined ||
           atRecordId !== undefined ||
@@ -4943,21 +4979,49 @@ export function registerSessionRoutes(
               runtime.workspaceCwd,
               codec,
             );
-            const hasActivePrompt = (): boolean => {
+            const getLivePromptState = (): {
+              live: boolean;
+              activePrompt: boolean;
+            } => {
               try {
-                return runtime.bridge.getSessionSummary(sessionId)
-                  .hasActivePrompt;
+                return {
+                  live: true,
+                  activePrompt:
+                    runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
+                };
               } catch (error) {
-                if (error instanceof SessionNotFoundError) return false;
+                if (error instanceof SessionNotFoundError) {
+                  return { live: false, activePrompt: false };
+                }
                 throw error;
               }
             };
-            const activePromptBeforeRead = hasActivePrompt();
+            const promptStateBeforeRead = getLivePromptState();
+            if (
+              cursor === undefined &&
+              direction === 'backward' &&
+              promptStateBeforeRead.live
+            ) {
+              try {
+                if (runtime.bridge.flushSessionTranscript) {
+                  await runtime.bridge.flushSessionTranscript(sessionId);
+                } else {
+                  await runtime.bridge.getSessionTranscriptPage({
+                    sessionId,
+                    direction,
+                    limit: 1,
+                  });
+                }
+              } catch (error) {
+                if (!(error instanceof SessionNotFoundError)) throw error;
+              }
+            }
             let page;
             try {
               page = await reader.readPage(sessionId, {
                 ...(limit !== undefined ? { limit } : {}),
                 ...(cursor !== undefined ? { cursor } : {}),
+                ...(direction !== undefined ? { direction } : {}),
                 ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
                 ...(atRecordId !== undefined ? { atRecordId } : {}),
                 ...(snapshot !== undefined ? { snapshot } : {}),
@@ -4982,12 +5046,12 @@ export function registerSessionRoutes(
             if (page.records.some((record) => record.sessionId !== sessionId)) {
               throw new SessionTranscriptSnapshotUnavailableError(sessionId);
             }
-            const activePromptAfterRead = hasActivePrompt();
+            const activePromptAfterRead = getLivePromptState().activePrompt;
             const replay = await replayTranscriptRecordPage({
               sessionId,
               page,
               finalizeDangling:
-                !activePromptBeforeRead && !activePromptAfterRead,
+                !promptStateBeforeRead.activePrompt && !activePromptAfterRead,
               encodeCursor: (state) => codec.encode(state),
             });
             assertRuntimeGenerationOpen?.();
@@ -5356,6 +5420,45 @@ export function registerSessionRoutes(
               runtime.trusted && req.query['includeWorkflows'] === 'true',
           }),
         );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/agents',
+    withOwnerReadSession(
+      'GET /session/:id/agents',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionAgentsStatus(sessionId));
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/agent-trace',
+    withOwnerReadSession(
+      'GET /session/:id/agent-trace',
+      async (req, res, sessionId, runtime) => {
+        const rootAgentId = req.query['rootAgentId'];
+        if (
+          rootAgentId !== undefined &&
+          (typeof rootAgentId !== 'string' ||
+            rootAgentId.length === 0 ||
+            rootAgentId.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH)
+        ) {
+          res.status(400).json({
+            error: '`rootAgentId` must be a non-empty agent id',
+            code: 'invalid_root_agent_id',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionAgentTrace(sessionId, rootAgentId),
+          );
       },
     ),
   );
@@ -5776,6 +5879,22 @@ export function registerSessionRoutes(
           }
           throw error;
         }
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/attachments',
+    withOwnerReadSession(
+      'GET /session/:id/attachments',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const attachments = await runtime.bridge.listSessionAttachments(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ attachments });
       },
     ),
   );

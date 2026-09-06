@@ -346,10 +346,10 @@ jobs:
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}' 9>&-
+            npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}' 9>&-
           else
             run_shard() {
-              QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+              QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'
             }
             # One bounded retry: pool runners' sandbox:none shards die under
             # shared-host pressure with every test green and no vitest FAIL
@@ -454,7 +454,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env QWEN_E2E_RENDERER=ink VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
+        run: 'npx cross-env QWEN_E2E_RENDERER=ink VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/chat-transcript-document.test.ts" --shard="${{ matrix.shard }}"'
 
   e2e-interactive-opentui:
     name: 'E2E Interactive - OpenTUI renderer (bun)'
@@ -618,7 +618,15 @@ jobs:
           npm ci --prefer-offline --no-audit --progress=false
 
       - name: 'Install Playwright Chromium'
-        run: 'npx playwright install --with-deps chromium'
+        run: |-
+          node node_modules/playwright/cli.js install --with-deps chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
+
+      - name: 'Run transcript document browser gate'
+        run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser regression'
         run: 'npm run test:e2e --workspace=packages/web-shell'
