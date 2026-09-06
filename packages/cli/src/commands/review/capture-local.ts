@@ -32,10 +32,9 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
-  assertUnredirectedParent,
+  ensureReviewTmpDir,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
-  REVIEW_TMP_DIR,
   tmpFile,
 } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
@@ -111,13 +110,15 @@ type CaptureLocalResult = PlanReport & {
    */
   cacheCandidatePath?: string;
   /**
-   * The written candidate's own `stateId`, for Step 8 to CHECK before
-   * promoting. The candidate path is stable per target and local/file
-   * reviews take no lease, so a concurrent same-target run overwrites the
-   * file mid-round — indistinguishable by path, mtime or shape. A candidate
-   * whose stateId no longer matches this field is another run's: treat it
-   * exactly like a withheld candidate and say so (R17-4). Absent when the
-   * candidate was withheld.
+   * The written candidate's own `stateId`, for Step 8 to pass as
+   * `cache-commit --state-id`. The candidate path is stable per target and
+   * local/file reviews take no lease, so a concurrent same-target run
+   * overwrites the file mid-round — indistinguishable by path, mtime or
+   * shape — and the command refuses a candidate whose stateId is not this
+   * one at the read it promotes from (a check the orchestrator made earlier
+   * would not bind that read). The refusal is treated exactly like a
+   * withheld candidate (R17-4, R24-2). Absent when the candidate was
+   * withheld.
    */
   cacheCandidateStateId?: string;
   /**
@@ -528,6 +529,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   const target =
     sourcePath !== undefined ? safeTarget(sourcePath) : args.target;
 
+  // The scratch directory, refused outright when the workspace redirected
+  // it — before the capture, so nothing is computed for a round that
+  // cannot write (see `ensureReviewTmpDir`).
+  ensureReviewTmpDir('capture-local');
+
   // Visibility-bit sample 0 — BEFORE the first capture. The oracle rides the
   // same both-endpoints discipline as the diffs and hashes below: sampled
   // only after the loop, a bit set through every diff pass and cleared just
@@ -544,11 +550,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     includeUntracked: args.untracked,
   });
 
-  // Two directories, and they are not the same one. The diff always lands in
-  // `.qwen/tmp` (its path is ours to choose), but `--out` is the caller's — and
-  // `--out reports/plan.json` is a legal request that answering with the temp
-  // dir turned into an ENOENT from `writeFileSync`.
-  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+  // `--out` is the caller's directory, not the scratch one: `--out
+  // reports/plan.json` is a legal request that answering with the temp dir
+  // turned into an ENOENT from `writeFileSync`.
   mkdirSync(dirname(resolve(out)), { recursive: true });
 
   const fullPlan = buildDiffPlan(capture.diff.toString('utf8'));
@@ -674,6 +678,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // candidate on every round holding a pending deletion — the same
     // conflation that made the convergence stop unreachable.
     hashPasses.every((h) => movedSince(hashPasses[0], h).length === 0);
+  // Read ONCE, above the candidate that records it and the decision that
+  // withholds it: the two must be the same answer, and reading twice made
+  // the invariant ("a written candidate's `lastModelId` is never empty")
+  // hold by coincidence rather than by construction. `fetch-pr` samples it
+  // at the round's start for the same reason.
+  const roundModelId = roundModelIdFrom(process.env);
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
@@ -688,10 +698,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // and each passed the other's gate. That is the identity-channel class
     // the PR flow closed by moving the comparison into the command; a local
     // round is the same contract ("an anchor is honoured only under the model
-    // whose clean verdict certified it") and needs the same treatment. An
-    // empty string means the runtime published nothing, which the gate reads
-    // as a mismatch rather than a pass.
-    lastModelId: roundModelIdFrom(process.env),
+    // whose clean verdict certified it"). Never empty here: the candidate
+    // is withheld outright when the runtime published nothing, because
+    // `cache-commit` refuses an anchor certified by nobody and the plan's
+    // absent field is what routes Step 8 to its documented fallback.
+    lastModelId: roundModelId,
     // What this round could SEE. A later round that sees less cannot certify
     // this one's state: with `--no-untracked` (or a `.gitignore` entry added
     // between rounds) the untracked block never runs and records no `skipped`
@@ -798,7 +809,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     treeHeldStill &&
     invisible !== null &&
     invisible.length === 0 &&
-    vanishedPresent.length === 0;
+    vanishedPresent.length === 0 &&
+    // An anchor certified by nobody: the gate reads an empty identity as a
+    // mismatch and `cache-commit` refuses it, so announcing this candidate
+    // would send Step 8 into a refusal with no branch — the round's
+    // findings ledger lost with it — where the absent field routes it to
+    // the documented fallback.
+    roundModelId !== '';
   if (candidateWritten) {
     // Guarded as a whole, like the PR flow's candidate write and for the
     // reason that one states: a convenience artefact must never take the
@@ -809,18 +826,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // to be the next round's anchor. The pre-guard code wrote here with a
     // plain `writeFileSync` and could not fail this way at all.
     try {
-      // The PARENT chain first: `noFollow` below guards only the final
-      // element, and `.qwen/tmp` committed as a symlink redirects the write
-      // just as well — the plan then advertises that path as
-      // `cacheCandidatePath` and `cache-commit` reads a candidate the
-      // attacker wrote. Same guard the promoted cache gets.
-      assertUnredirectedParent(
-        candidatePath,
-        'cache candidate',
-        'capture-local',
-      );
       // noFollow: a planted symlink at this deterministic path would redirect
-      // the candidate write onto its target (see cache-commit's note).
+      // the candidate write onto its target (see cache-commit's note). The
+      // directory above it is the entry guard's: a redirected `.qwen/tmp`
+      // refused the round before anything was written. That check is at the
+      // capture's entry rather than here, so it answers for the committed
+      // link this threat model names, not for a directory swapped mid-round
+      // by something that already has write access to the tree.
       atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
         noFollow: true,
       });
@@ -841,16 +853,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // would promote that stale anchor merged with this round's ledger.
     // Absent IS the withheld state — fail quiet.
     try {
-      // The same parent-chain guard the write branch applies: a planted
-      // `.qwen/tmp` link redirects a removal exactly as it redirects a
-      // write, and the victim file would go while stderr reported only the
-      // anchor cost. A refusal lands in the catch below — the absent field
-      // is what withholds; removing the stale file is a courtesy.
-      assertUnredirectedParent(
-        candidatePath,
-        'cache candidate',
-        'capture-local',
-      );
+      // Through the real directory the entry guard certified: a planted
+      // `.qwen/tmp` link would have redirected this removal exactly as it
+      // redirects a write, and refused the round instead.
       rmSync(candidatePath, { force: true });
     } catch {
       // The absent field above is the load-bearing half.
@@ -864,12 +869,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       );
     } else if (invisible === null || invisible.length > 0) {
       writeStderrLine(invisibleCandidateRefusal(invisible));
-    } else {
+    } else if (vanishedPresent.length > 0) {
       writeStderrLine(
         `The cache candidate is withheld: ${vanishedPresent.length} cached ` +
           `path(s) dropped out of this capture while still on disk, so the ` +
           `candidate would record their absence as reviewed state. The ` +
           `review itself proceeds in full.`,
+      );
+    } else {
+      writeStderrLine(
+        'The runtime published no model identity — the cache candidate is ' +
+          'withheld: an anchor certified by nobody is refused at promotion. ' +
+          'The review itself is unaffected.',
       );
     }
   }

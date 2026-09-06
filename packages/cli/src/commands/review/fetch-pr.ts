@@ -62,8 +62,7 @@ import { widenScope } from './lib/incremental-scope.js';
 import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
-  assertUnredirectedParent,
-  REVIEW_TMP_DIR,
+  ensureReviewTmpDir,
   reviewBranch,
   tmpFile,
   worktreePath,
@@ -846,6 +845,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
+  // The scratch directory, refused outright when the workspace redirected
+  // it — before the lease, the worktree, the diff and the plan land there
+  // (see `ensureReviewTmpDir`).
+  ensureReviewTmpDir('fetch-pr');
 
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively
@@ -1035,8 +1038,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );
     }
-
-    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
 
     // 5. Capture the diff to a file and partition it. The capture is decoded
     //    to UTF-8 text and written back as text, so a byte sequence that is
@@ -1646,7 +1647,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // and written beside the plan unconditionally: promotion into the cache is
     // Step 8's clean-high-effort decision, not the capture's.
     let cacheCandidatePath: string | undefined;
-    if (diffPath !== null && mergeBaseSha) {
+    if (diffPath !== null && mergeBaseSha && roundModelId === '') {
+      // An anchor certified by nobody: the gate reads an empty identity as
+      // a mismatch and `cache-commit` refuses it, so announcing this
+      // candidate would send Step 8 into a refusal with no branch — the
+      // round's findings ledger lost with it — where the absent field
+      // routes it to the hand-written fallback, which omits `lastModelId`.
+      writeStderrLine(
+        'WARNING: the runtime published no model identity; the cache ' +
+          'candidate is withheld (an anchor certified by nobody is refused ' +
+          'at promotion), and Step 8 falls back to the template. The review ' +
+          'itself is unaffected.',
+      );
+    } else if (diffPath !== null && mergeBaseSha) {
       // Pinned to the repo root: the pathspec-scoped ls-tree inside resolves
       // paths against git's cwd, and a fetch started from a subdirectory would
       // otherwise record every pair as (absent, absent) — a candidate that
@@ -1666,20 +1679,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             `pr-${prNumber}`,
             'cache-candidate.json',
           );
-          // `noFollow` below guards the final element only, and this path is
-          // deterministic and in-repo: `.qwen/tmp` committed as a symlink
-          // (gitignore does not stop `git add -f`) redirects the write
-          // through the chain — and the plan then advertises that
-          // attacker-chosen path as `cacheCandidatePath` for `cache-commit`
-          // to read back, so a swapped candidate promotes forged anchors into
-          // the review cache, where every validation is shape-based. The same
-          // guard `cache-commit` already applies to its own `--out`, for the
-          // same reason its header gives.
-          assertUnredirectedParent(
-            cacheCandidatePath,
-            'cache candidate',
-            'fetch-pr',
-          );
+          // `noFollow` guards the final element: a planted symlink at this
+          // deterministic path would redirect the write onto its target. The
+          // directory above it is the entry guard's — a redirected
+          // `.qwen/tmp` refused the round before anything was written.
           atomicWriteFileSync(
             cacheCandidatePath,
             JSON.stringify(
@@ -1695,9 +1698,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
                 // provider-qualified — two provider configurations exposing
                 // one model name wrote the same token and passed each other's
                 // same-model gate, which is the contract the anchor rests on.
-                // Empty when the runtime published nothing, which every
-                // consumer reads as a mismatch.
-                lastModelId: roundModelIdFrom(process.env),
+                // Never empty here: the branch above withholds the whole
+                // candidate when the runtime published nothing, because
+                // `cache-commit` refuses an anchor certified by nobody.
+                lastModelId: roundModelId,
               },
               null,
               2,

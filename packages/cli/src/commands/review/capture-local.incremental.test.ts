@@ -64,7 +64,14 @@ function write(rel: string, content: string): void {
   writeFileSync(abs, content);
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate is written only under a published identity (an anchor
+  // certified by nobody is withheld), so the fixtures publish one; `capture`
+  // overrides it per test through its `model` argument.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-loc-inc-')));
   cwd = process.cwd();
@@ -78,6 +85,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
@@ -108,6 +118,7 @@ type Plan = Record<string, unknown> & {
   files: Array<{ path: string }>;
   incremental?: { scope?: IncrementalScope };
   cacheCandidatePath: string;
+  cacheCandidateStateId: string;
   diffPath: string;
 };
 
@@ -668,10 +679,14 @@ describe('capture-local — promotion through the REAL cache-commit', () => {
       JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
     );
     mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    // `--state-id` exactly as Step 8 passes it: off the plan, not off the
+    // candidate file — the point of the flag is that the command re-reads
+    // that file and a concurrent round may have replaced it since.
     (cacheCommitCommand.handler as (argv: unknown) => void)({
       candidate: first.cacheCandidatePath,
       ledger: ledgerPath,
       out: first['cachePath'],
+      stateId: first['cacheCandidateStateId'],
     });
 
     write('src/foo.ts', 'export const real = 2;\n');

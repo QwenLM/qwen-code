@@ -589,6 +589,113 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
+  it('refuses a symlinked .qwen/tmp before the lease, the worktree or the diff', async () => {
+    // The entry guard runs first: a redirected scratch directory must not
+    // cost a lease write, a `cleanStale`, a worktree, or a diff — every one
+    // of them lands under it. The suite's fs is a mock, so the link is what
+    // `lstat` reports for the two in-repo components.
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      const p = String(path);
+      if (p === join('.qwen', 'tmp')) {
+        return { isSymbolicLink: () => true } as unknown as ReturnType<
+          typeof producerMocks.lstatSync
+        >;
+      }
+      if (p === '.qwen') {
+        return { isSymbolicLink: () => false } as unknown as ReturnType<
+          typeof producerMocks.lstatSync
+        >;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const { createReviewWorktreeLease } = await import(
+      '../../services/review-worktree-lease.js'
+    );
+    vi.mocked(createReviewWorktreeLease).mockClear();
+    producerMocks.git.mockClear();
+    await expect(reportFor({})).rejects.toThrow(
+      /^fetch-pr: .*tmp is a symbolic link/s,
+    );
+    expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+    expect(
+      producerMocks.git.mock.calls.some((c) => c.includes('worktree')),
+    ).toBe(false);
+    expect(
+      producerMocks.writeFileSync.mock.calls.some(([path]) =>
+        String(path).endsWith('diff.txt'),
+      ),
+    ).toBe(false);
+  });
+
+  it('withholds the cache candidate when the runtime published no identity', async () => {
+    // A merge base, so the candidate block runs at all (the suite's default
+    // is a base-less fetch, which never records pairs).
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'b'.repeat(40),
+      baseFetchFailed: false,
+    });
+    const said = () =>
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+    // Control first: under the fixture identity the block RUNS — it writes
+    // the candidate, or names the write it could not make (this suite's fs
+    // is a mock, so the real atomic write may have no directory to land in)
+    // — and never withholds for the identity. The absence below is then the
+    // guard's doing and not the fixture's.
+    producerMocks.writeStderrLine.mockClear();
+    const control = await reportFor({});
+    expect(
+      control.cacheCandidatePath !== undefined ||
+        /could not write the cache candidate/.test(said()),
+    ).toBe(true);
+    expect(said()).not.toContain('published no model identity');
+    // An empty identity never compares equal — the gate reads it as a
+    // mismatch and `cache-commit` refuses it — so announcing the candidate
+    // would send Step 8 into a refusal with no branch, losing the round's
+    // ledger with it. Withheld at the source, the absent field routes the
+    // round to the hand-written fallback, which omits `lastModelId`.
+    const savedModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_MODEL'] = '';
+    try {
+      producerMocks.writeStderrLine.mockClear();
+      const handler = fetchPrCommand.handler;
+      if (!handler) throw new Error('fetch-pr handler missing');
+      const savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
+      try {
+        await handler({
+          _: [],
+          $0: 'qwen',
+          pr_number: '42',
+          owner_repo: 'acme/widgets',
+          remote: 'origin',
+          out: '/tmp/fetch-report.json',
+          maxChunkLines: 400,
+        } as unknown as Parameters<typeof handler>[0]);
+      } finally {
+        if (savedIdentity === undefined) {
+          delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+        } else {
+          process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+        }
+      }
+      const call = producerMocks.writeFileSync.mock.calls.findLast(
+        ([path]: unknown[]) => path === '/tmp/fetch-report.json',
+      );
+      if (!call) throw new Error('report was not written');
+      const report = JSON.parse(String(call[1])) as Record<string, unknown>;
+      expect('cacheCandidatePath' in report).toBe(false);
+      expect('reviewModelId' in report).toBe(false);
+      expect(said()).toContain('published no model identity');
+      // …and nothing was attempted: the withholding is at the source.
+      expect(said()).not.toContain('could not write the cache candidate');
+    } finally {
+      if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
+      else process.env['QWEN_CODE_MODEL'] = savedModel;
+    }
+  });
+
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {
     // The base ref is server-controlled and reaches git's argv through the
     // base fetch — a dash-leading name (`--upload-pack=<payload>` is
