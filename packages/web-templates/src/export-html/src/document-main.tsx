@@ -3,7 +3,11 @@ import { Component, useEffect, useRef, useState, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import { WebShellTranscript } from '@qwen-code/web-shell';
+// Transcript-only subpath: the package root also pulls in the interactive
+// shell (App, daemon providers, editor chrome), which a read-only export
+// never uses. Keep this import narrow so the inlined runtime stays small
+// (see https://github.com/QwenLM/qwen-code/issues/11031).
+import { WebShellTranscript } from '@qwen-code/web-shell/transcript';
 
 declare const __EXPORT_TRANSCRIPT_RENDERER_VERSION__: string;
 declare const __EXPORT_TRANSCRIPT_MAX_BLOCKS__: number;
