@@ -6549,10 +6549,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ]);
       return response['closed'] === true;
     } catch (err) {
+      // The child's close refusal crosses the ACP wire as a JSON-RPC
+      // error record (plain object with `code`/`message`), not an `Error`
+      // instance — `String()` would collapse it to `[object Object]`.
       writeStderrLine(
         `qwen serve: ${label} ACP session close notification failed ` +
-          `for session ${JSON.stringify(entry.sessionId)}: ${String(
-            err instanceof Error ? err.message : err,
+          `for session ${JSON.stringify(entry.sessionId)}: ${extractErrorMessage(
+            err,
           )}`,
       );
       if (opts?.throwOnFailure === true) {
@@ -11087,8 +11090,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 );
               }
             } catch (cleanupErr) {
+              // Same wire-shape hazard as `notifyAgentSessionClose`: a
+              // child refusal arrives as a plain JSON-RPC error record.
               writeStderrLine(
-                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${extractErrorMessage(cleanupErr)}`,
               );
             }
             throw restoreErr;
