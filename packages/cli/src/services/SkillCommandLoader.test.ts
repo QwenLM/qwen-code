@@ -47,9 +47,19 @@ describe('SkillCommandLoader', () => {
   let mockConfig: Config;
   let mockSkillManager: { listSkills: ReturnType<typeof vi.fn> };
   let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
+  let mockAddSessionHook: ReturnType<typeof vi.fn>;
+  let mockSessionHooksManager: {
+    addSessionHook: ReturnType<typeof vi.fn>;
+    getHooksForEvent: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddSessionHook = vi.fn();
+    mockSessionHooksManager = {
+      addSessionHook: mockAddSessionHook,
+      getHooksForEvent: vi.fn().mockReturnValue([]),
+    };
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
@@ -63,11 +73,10 @@ describe('SkillCommandLoader', () => {
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
       isTrustedFolder: vi.fn().mockReturnValue(true),
-      // No hook system by default: applySkillHooks no-ops, so the existing
-      // assertions stay focused on allowedTools. The hooks describe block
-      // below overrides these to install a session-hooks mock.
-      getHookSystem: vi.fn().mockReturnValue(undefined),
-      getSessionId: vi.fn().mockReturnValue(undefined),
+      // A live-looking hook system by default (session id + session hooks
+      // manager): the frontmatter-hooks describe blocks assert registration
+      // directly, and any test that needs hooks disabled overrides
+      // getHookSystem itself.
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -76,6 +85,10 @@ describe('SkillCommandLoader', () => {
         (skill: SkillConfig) =>
           !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
       ),
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getHookSystem: vi.fn().mockReturnValue({
+        getSessionHooksManager: () => mockSessionHooksManager,
+      }),
     } as unknown as Config;
   });
 
@@ -813,7 +826,11 @@ describe('SkillCommandLoader', () => {
     });
 
     it('still submits the skill body when no hook system exists (no crash, hooks skipped)', async () => {
-      // Default beforeEach mocks have getHookSystem/getSessionId => undefined.
+      // Disable the hook system explicitly (the shared beforeEach installs
+      // one by default): registration no-ops but the body still loads.
+      (mockConfig.getHookSystem as ReturnType<typeof vi.fn>).mockReturnValue(
+        undefined,
+      );
       const skill = gatedSkill();
       mockSkillManager.listSkills.mockImplementation(
         ({ level }: { level: string }) =>
@@ -829,6 +846,21 @@ describe('SkillCommandLoader', () => {
       );
 
       expect(result).toMatchObject({ type: 'submit_prompt' });
+    });
+
+    it('does not register anything when the skill declares no hooks', async () => {
+      installHookSystem();
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [makeSkill()] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+
+      await command.action?.({} as CommandContext, '');
+
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
     });
   });
 

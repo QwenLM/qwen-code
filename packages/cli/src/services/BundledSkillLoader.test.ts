@@ -10,7 +10,7 @@ import { skillArgsPath } from './skill-args-file.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CommandKind } from '../ui/commands/types.js';
+import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
   HookEventName,
@@ -40,9 +40,11 @@ describe('BundledSkillLoader', () => {
     listSkills: ReturnType<typeof vi.fn>;
   };
   let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
+  let mockAddSessionHook: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddSessionHook = vi.fn();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
@@ -55,15 +57,24 @@ describe('BundledSkillLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
-      // No hook system by default: applySkillHooks no-ops, keeping the
-      // existing assertions focused on allowedTools. The hooks describe
-      // block below overrides these to install a session-hooks mock.
-      getHookSystem: vi.fn().mockReturnValue(undefined),
-      getSessionId: vi.fn().mockReturnValue(undefined),
+      // A live-looking hook system by default (session id + session hooks
+      // manager): the frontmatter-hooks describe blocks assert registration
+      // directly, and any test that needs hooks disabled overrides
+      // getHookSystem itself.
       // BundledSkillLoader filters via this. Default empty so existing
       // assertions about bundled skills surfacing stay true; per-test
       // cases override.
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      // The command action re-checks this, since `skills.disabled` can change
+      // after the registry was built.
+      isSkillEnabled: vi.fn().mockReturnValue(true),
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getHookSystem: vi.fn().mockReturnValue({
+        getSessionHooksManager: () => ({
+          addSessionHook: mockAddSessionHook,
+          getHooksForEvent: () => [],
+        }),
+      }),
     } as unknown as Config;
   });
 
@@ -742,6 +753,68 @@ describe('BundledSkillLoader', () => {
       expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
         'review',
       ]);
+    });
+  });
+  describe('frontmatter hooks registration (#11067)', () => {
+    it("registers a bundled skill's hooks when invoked via /<skill-name>", async () => {
+      const skill = makeSkill({
+        skillRoot: '/bundled/my-skill',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: 'command', command: './gate.sh' }],
+            },
+          ],
+        } as unknown as SkillConfig['hooks'],
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        'PreToolUse',
+        'Shell',
+        expect.objectContaining({ type: 'command', command: './gate.sh' }),
+        expect.objectContaining({ trustGated: false }),
+      );
+    });
+
+    it('installs nothing when the skill was disabled after the command loaded', async () => {
+      const skill = makeSkill({
+        skillRoot: '/bundled/my-skill',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: 'command', command: './gate.sh' }],
+            },
+          ],
+        } as unknown as SkillConfig['hooks'],
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      // The load-time filter cannot help here: the command already exists and
+      // the user disables the skill before invoking it.
+      (mockConfig.isSkillEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      const result = await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+      expect(result).toEqual(
+        expect.objectContaining({
+          type: 'message',
+          messageType: 'error',
+          content: `Skill "${skill.name}" is disabled.`,
+        }),
+      );
     });
   });
 });

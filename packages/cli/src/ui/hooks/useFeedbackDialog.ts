@@ -1,14 +1,12 @@
 import { useState, useCallback, useEffect } from 'react';
 import * as fs from 'node:fs';
-import {
-  type Config,
-  createDebugLogger,
-  logUserFeedback,
-  UserFeedbackEvent,
-  type UserFeedbackRating,
-  isNodeError,
-  Storage,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { logUserFeedback } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import { UserFeedbackEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import type { UserFeedbackRating } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { isNodeError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { StreamingState, MessageType, type HistoryItem } from '../types.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';

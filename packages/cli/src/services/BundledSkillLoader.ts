@@ -9,8 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
-  applySkillAllowedTools,
-  applySkillHooks,
+  applySkillSideEffects,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -99,22 +98,28 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          // Apply the skill's session side effects before its body is
-          // submitted: auto-approve its declared allowedTools and register
-          // its frontmatter tool-lifecycle hooks, mirroring the Skill-tool
-          // path (packages/core/src/tools/skill.ts applySideEffects) so a
-          // PreToolUse gate declared in SKILL.md also fires when the user
-          // starts the skill via /<skill-name> instead of the model (#11067).
+          // Re-check enabledness here, not just in the load-time filter above:
+          // `skills.disabled` can change after the command registry was built,
+          // and a stale command must not install a disabled skill's side
+          // effects. `SkillCommandLoader` refuses the same way.
+          if (this.config && !this.config.isSkillEnabled(skill)) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: `Skill "${skill.name}" is disabled.`,
+            };
+          }
+          // Apply the skill's declared side effects — allowedTools and
+          // frontmatter tool-lifecycle hooks — before its body is submitted,
+          // matching the Skill tool's model-invocation path (#11067).
           // Prompt-lifecycle events (UserPromptSubmit / UserPromptExpansion)
           // are deliberately excluded — see ApplySkillHooksOptions: this
           // action runs inside the dispatch of the submission carrying the
-          // skill's own body, and a hook registered here could block that
-          // very submission.
-          applySkillAllowedTools(
-            this.config?.getPermissionManager(),
-            skill.allowedTools,
-          );
-          applySkillHooks(this.config, skill, {
+          // skill's own body, and a hook registered here could fire on — and
+          // block — that very submission. The model Skill-tool path keeps
+          // full registration (no collision there: the body arrives as a
+          // tool result).
+          applySkillSideEffects(this.config, skill, {
             excludePromptLifecycleEvents: true,
           });
 

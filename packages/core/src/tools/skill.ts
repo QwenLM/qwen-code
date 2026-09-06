@@ -35,9 +35,7 @@ export interface SkillParams {
 export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
-  applySkillAllowedTools,
-  applySkillHooks,
-  canApplySkillSideEffects,
+  applySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -487,61 +485,13 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * restart, and a trust granted again restores them.
    */
   private applySideEffects(skill: SkillConfig): void {
-    if (!canApplySkillSideEffects(skill, this.config)) {
-      debugLogger.warn(
-        `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
-      );
-      return;
-    }
-    // Auto-approve the skill's declared allowedTools for the rest of the session.
-    applySkillAllowedTools(
-      this.config.getPermissionManager(),
-      skill.allowedTools,
-      { trustGated: skill.level === 'project' },
-    );
-    this.registerHooks(skill);
-  }
-
-  private registerHooks(skill: SkillConfig): void {
-    debugLogger.debug('Skill hooks check:', {
-      hasHooks: !!skill.hooks,
-      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-      skillName: skill.name,
-    });
-    if (!skill.hooks) {
-      // Re-run on every invocation (the gate is re-evaluated each time), so
-      // a hookless skill would otherwise WARN on every use of it.
-      debugLogger.debug(
-        `Skill "${this.params.skill}" has no hooks to register`,
-      );
-      return;
-    }
-    // Shared with the slash-command startup path (SkillCommandLoader /
-    // BundledSkillLoader): every path must register the same session hooks
-    // so a PreToolUse gate can't be bypassed by starting the skill as
-    // `/<skill-name>` instead of via the model (#11067). The one exception
-    // is the prompt-lifecycle events, which the slash-command callers
-    // exclude (see `ApplySkillHooksOptions`): registering them mid-dispatch
-    // would let a skill's own hook block the submission carrying its body.
-    // This model-side path keeps full registration — the body arrives as a
-    // tool result here, never as a prompt, so there is no collision.
-    const hookCount = applySkillHooks(this.config, skill);
-    if (hookCount > 0) {
-      debugLogger.info(
-        `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-      );
-    } else {
-      // Zero is the expected outcome of every re-invocation: the hooks are
-      // already registered and `registerSkillHooks` dedups them (it logs
-      // each skip at debug level), or there is no live hook system — hooks
-      // disabled via settings, `initialize({ skipHooks: true })`, or
-      // `initialize()` not yet run. Not a warning — a steady-state WARN
-      // claiming "no hooks registered" over hooks that are firing sends
-      // whoever reads the log after a phantom failure.
-      debugLogger.debug(
-        `No new hooks registered from skill "${this.params.skill}" (already registered or none registrable)`,
-      );
-    }
+    // Full registration on the model Skill-tool path (no
+    // `excludePromptLifecycleEvents`): the body arrives here as a tool
+    // result, never as a prompt, so a skill's own prompt-lifecycle hooks
+    // cannot collide with the invocation carrying them. The slash-command
+    // callers of `applySkillSideEffects` pass the exclusion — see
+    // `ApplySkillHooksOptions`.
+    applySkillSideEffects(this.config, skill);
   }
 
   private async recordAutoSkillUsageBestEffort(
