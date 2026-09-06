@@ -45,6 +45,10 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForHeadlessFailure,
+  goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
@@ -545,7 +549,10 @@ describe('runNonInteractive', () => {
       expectedStatus: 'paused',
       expectedObjective: 'existing goal',
       expectedWorkers: 0,
-      expectedText: 'Goal paused: existing goal',
+      // TEXT prints the reason for every non-active status, so a headless
+      // `/goal pause` says why it stopped rather than only that it did.
+      expectedText:
+        'Goal paused: existing goal\nReason: Paused with /goal pause.',
     },
     {
       name: 'resume',
@@ -685,12 +692,14 @@ describe('runNonInteractive', () => {
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('paused');
     mockFinishedGoalWorker();
+    const abortController = new AbortController();
 
     await runNonInteractive(
       mockConfig,
       mockSettings,
       '/goal resume',
       'goal-resume-exact',
+      { abortController },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
@@ -715,6 +724,16 @@ describe('runNonInteractive', () => {
       `goal-runtime:${options.goalPermit.turnId}`,
     );
     expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+    expect(options.getInterruptedGoalPauseReason()).toBe(
+      GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    );
+    expect(
+      options.getInterruptedGoalPauseReason({ failure: '503 upstream down' }),
+    ).toBe(goalPauseReasonForHeadlessFailure('503 upstream down'));
+    abortController.abort();
+    expect(options.getInterruptedGoalPauseReason()).toBe(
+      GOAL_PAUSE_REASON_USER_INTERRUPT,
+    );
   });
 
   it('includes verifier feedback in a scheduled Goal continuation', async () => {
@@ -1308,6 +1327,11 @@ describe('runNonInteractive', () => {
 
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     expect(goalStatusAtExit).toBe('paused');
+    expect(goalRuntime.getSnapshot().goal?.lastReason).toBe(
+      goalPauseReasonForHeadlessFailure(
+        'Headless Goal stopped after the session turn limit',
+      ),
+    );
   });
 
   it('keeps explicit tool-call budgets on runtime Goal work', async () => {
@@ -1359,8 +1383,17 @@ describe('runNonInteractive', () => {
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     expect(goalRuntime.getSnapshot()).toMatchObject({
       activity: 'idle',
-      goal: { status: 'paused' },
+      // The budget is what stopped this Goal. The generic failure prose
+      // would tell a headless user their turn broke and point them at a
+      // slash command in a process that has already exited.
+      goal: {
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('tool-calls'),
+      },
     });
+    expect(
+      mockLlmClient.sendMessageStream.mock.calls[0]![3].getInterruptedGoalPauseReason(),
+    ).toBe(goalPauseReasonForRunBudget('tool-calls'));
 
     void run;
   });
@@ -1476,10 +1509,270 @@ describe('runNonInteractive', () => {
     );
     expect(goalRuntime.getSnapshot()).toMatchObject({
       activity: 'idle',
-      goal: { status: 'paused' },
+      // Same discrimination in the settlement window, where the abort
+      // listener inside `finishGoalTurn` is the writer that settles first.
+      goal: {
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('wall-time'),
+      },
     });
 
     void run;
+  });
+
+  it('names the wall-time budget when the model stream settles the interrupted Goal turn', async () => {
+    // The pause that reaches the record on a mid-stream stop is the one
+    // `LlmClient.sendMessageStream` dispatches from inside its own generator,
+    // before headless ever sees the error -- so the stub below settles the
+    // turn the way that generator does, reading the reason off the host
+    // resolver. Without the resolver a budget stop reads as a user interrupt.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
+    const runAbortController = new AbortController();
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+    mockLlmClient.sendMessageStream.mockImplementationOnce(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: {
+          goalPermit: GoalTurnPermit;
+          getInterruptedGoalPauseReason: () => string;
+        },
+      ) =>
+        (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+          await new Promise<void>((resolve) => {
+            if (runAbortController.signal.aborted) {
+              resolve();
+              return;
+            }
+            runAbortController.signal.addEventListener(
+              'abort',
+              () => resolve(),
+              { once: true },
+            );
+          });
+          await goalRuntime.dispatch({
+            action: 'pause',
+            expectedGoalId: sendOptions.goalPermit.goalId,
+            expectedRevision: sendOptions.goalPermit.revision,
+            reason: sendOptions.getInterruptedGoalPauseReason(),
+          });
+          await goalRuntime.finishTurn(sendOptions.goalPermit);
+          yield { type: LlmEventType.UserCancelled };
+        })(),
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-wall-budget-in-generator',
+      { abortController: runAbortController },
+    ).catch(() => undefined);
+
+    await vi.waitFor(() =>
+      expect(goalRuntime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('wall-time'),
+      }),
+    );
+
+    void run;
+  });
+
+  it('names the failure in the headless register when an interrupted Goal turn dies', async () => {
+    // A model stream that fails without aborting the run is the dominant
+    // headless Goal failure, and it settles in the same generator. The
+    // interactive failure wording would tell a process that has already
+    // exited to run a slash command; the clean run-ended wording would claim
+    // a run that died finished.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+    mockLlmClient.sendMessageStream.mockImplementationOnce(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: {
+          goalPermit: GoalTurnPermit;
+          getInterruptedGoalPauseReason: () => string;
+        },
+      ) =>
+        (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+          await goalRuntime.dispatch({
+            action: 'pause',
+            expectedGoalId: sendOptions.goalPermit.goalId,
+            expectedRevision: sendOptions.goalPermit.revision,
+            reason: sendOptions.getInterruptedGoalPauseReason({
+              failure: 'the model stream broke',
+            }),
+          });
+          await goalRuntime.finishTurn(sendOptions.goalPermit);
+          yield {
+            type: LlmEventType.Error,
+            value: {
+              error: { message: 'the model stream broke', status: 500 },
+            },
+          };
+        })(),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-headless-stream-error',
+    ).catch(() => undefined);
+
+    const { goal } = goalRuntime.getSnapshot();
+    expect(goal).toMatchObject({
+      status: 'paused',
+      lastReason: goalPauseReasonForHeadlessFailure('the model stream broke'),
+    });
+    // A run that died did not end cleanly, and a process that has already
+    // exited cannot run a slash command.
+    expect(goal?.lastReason).not.toBe(GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED);
+    expect(goal?.lastReason).not.toContain('/goal resume');
+  });
+
+  it('records a user interrupt when the abort lands inside the settle window', async () => {
+    // The same Ctrl+C a moment earlier is routed by `routeAbort` and named a
+    // user interrupt; landing in `finishTurn`'s persistence window must not
+    // change what the journal says happened.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const runAbortController = new AbortController();
+    let enteredFinishTurn: () => void = () => {};
+    const inFinishTurn = new Promise<void>((resolve) => {
+      enteredFinishTurn = resolve;
+    });
+    vi.spyOn(goalRuntime, 'finishTurn').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          enteredFinishTurn();
+          runAbortController.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        }),
+    );
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-settle-window-interrupt',
+      { abortController: runAbortController, recoverableCancellation: true },
+    ).catch(() => undefined);
+    await inFinishTurn;
+    runAbortController.abort();
+    await run;
+
+    expect(goalRuntime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+    });
+  });
+
+  it('records a user interrupt when a Goal run is cancelled outside any budget', async () => {
+    // `routeAbort` is the writer here, and with no budget tripped the stop
+    // is the user's own, not a run that ran out of its allowance.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const runAbortController = new AbortController();
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        runAbortController.abort();
+        yield {
+          type: LlmEventType.UserCancelled,
+        } as ServerLlmStreamEvent;
+      })(),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-user-cancel',
+      { abortController: runAbortController, recoverableCancellation: true },
+    ).catch(() => undefined);
+
+    expect(goalRuntime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+    });
+  });
+
+  it('records the headless register when a Goal run ends with structured output', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    (mockConfig.getJsonSchema as Mock).mockReturnValue({
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+    });
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'ok' }],
+    });
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-structured-goal',
+            name: 'structured_output',
+            args: { summary: 'done' },
+            isClientInitiated: false,
+            prompt_id: 'goal-structured-output',
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-structured-output',
+    );
+
+    const { goal } = goalRuntime.getSnapshot();
+    expect(goal).toMatchObject({
+      status: 'paused',
+      lastReason: GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    });
+    // The run succeeded; nothing here failed, and the process is exiting.
+    expect(goal?.lastReason).not.toContain('could not finish');
+    expect(goal?.lastReason).not.toContain('/goal resume');
   });
 
   it('claims an active Goal for real user input before binding the host', async () => {
