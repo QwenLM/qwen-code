@@ -325,25 +325,3 @@ export async function finishRun(
     ),
   }));
 }
-
-/** The run a resuming dispatcher should hand to an agent next, if any. */
-/**
- * Adds tokens spent by a run to the thread tree's counter.
- *
- * Called by the dispatcher with the usage delta observed across one run, so a
- * thread is charged for work done on its behalf rather than for everything the
- * agent's long-lived body has ever said.
- */
-export async function chargeTokens(
-  projectRoot: string,
-  threadId: string,
-  tokens: number,
-): Promise<void> {
-  if (!Number.isFinite(tokens) || tokens <= 0) return;
-  const thread = await readThread(projectRoot, threadId);
-  if (!thread) return;
-  await updateThread(projectRoot, thread.rootThreadId, (root) => ({
-    ...root,
-    tokensUsed: root.tokensUsed + tokens,
-  }));
-}
