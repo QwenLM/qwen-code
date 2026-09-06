@@ -1644,6 +1644,19 @@ describe('bundled review skill', () => {
       'The incremental scope kept nothing to review, but untracked files were not enumerated (--no-untracked)',
     );
   });
+  it('has Step 0 WRITE its verdict, not pipe it past the guard', () => {
+    // The round's first write into `.qwen/tmp` is Step 0's. Through `tee` it
+    // was a shell redirection no command could guard, so a workspace that
+    // committed `.qwen/tmp` as a symlink took that write before anything
+    // checked; `--out` routes it through `ensureReviewTmpDir`. A drift back
+    // to `tee` re-opens it with every suite still green.
+    const body = skillBody();
+    expect(body).toContain(
+      'review parse-args --stdin --out .qwen/tmp/qwen-review-parse-args.json',
+    );
+    expect(body).not.toContain('| tee .qwen/tmp/qwen-review-parse-args.json');
+  });
+
   it('checks the candidate is this round\u2019s own before promoting', () => {
     // R17-4: the candidate path is stable per target and local/file reviews
     // take no lease, so a concurrent same-target run overwrites the file
@@ -1653,8 +1666,19 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain('`cacheCandidateStateId`');
     expect(body).toContain(
-      'A mismatch (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate',
+      "The command's refusal (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate",
     );
+    // R24-2: the check is the COMMAND's, bound to the bytes it promotes — a
+    // check the orchestrator made against the same stable path minutes
+    // earlier did not bind the read that followed it.
+    expect(body).toContain("--state-id <the plan's cacheCandidateStateId>");
+    // R25-1: the ledger name is per-round for the same concurrency reason —
+    // and by the report's clock, not the tree's hash, which two concurrent
+    // rounds over an unchanged tree compute alike.
+    expect(body).toContain(
+      '`.qwen/tmp/qwen-review-<target>-ledger-<timestamp>.json`',
+    );
+    expect(body).toContain("Not the tree's `stateId`");
   });
 
   it('has both PR stops write the sidecar the run reader expects', () => {
