@@ -68,7 +68,7 @@ import {
   useSessionStats,
 } from '../contexts/SessionContext.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import { setUpdateHandler } from '../handleAutoUpdate.js';
+import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
 import { useLogger } from '../hooks/useLogger.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 import { OpenTuiApp } from './opentui-app-shell.js';
@@ -181,19 +181,7 @@ function OpenTuiEntryApp({
   const setUpdateInfo = useCallback((info: UpdateObject | null) => {
     setUpdateNotice(info?.message ?? null);
   }, []);
-  const updateHandlerRef = useRef<ReturnType<typeof setUpdateHandler> | null>(
-    null,
-  );
-  useEffect(() => {
-    const handler = setUpdateHandler(addUpdateItem, setUpdateInfo, isIdleRef);
-    updateHandlerRef.current = handler;
-    return handler.cleanup;
-  }, [addUpdateItem, setUpdateInfo]);
-  // ink flushes update notifications deferred mid-turn once the turn returns
-  // to idle (AppContainer); flush is the only drain of pendingNotifications.
-  useEffect(() => {
-    if (!live.streaming) updateHandlerRef.current?.flush();
-  }, [live.streaming]);
+  useUpdateNoticeFlush(addUpdateItem, setUpdateInfo, isIdleRef, live.streaming);
 
   // --- two-press exit guard (ink useDoublePress parity) ---------------------
   const [exitHint, setExitHint] = useState<string | null>(null);
@@ -344,9 +332,9 @@ export async function startOpenTuiUI(
   const root = createRoot(renderer);
   let runtime: OpenTuiRuntime | null = null;
   try {
-    // Own the single awaited initialization before anything can load commands
-    // or submit: the registry loader's config.initialize() re-entry rejects,
-    // so the turn path must await this same shared promise instead.
+    // Start the one shared initialization flight before anything can load
+    // commands or submit; the turn path and the registry loader both await
+    // (or join) this same flight via ensureConfigInitialized.
     void ensureConfigInitialized(config);
     const version = await getCliVersion();
     if (

@@ -57,9 +57,11 @@ spec's flow-gating assertions moved to xterm-headless screen reconstruction
 (`waitForScreen` over the 110×38 viewport, polling 200 ms), the same channel
 `InteractiveSession.screen()` uses, which is faithful on both legs. The ink
 leg passed 5/5 with the screen-based spec unchanged, which pins the channel
-as leg-neutral. Single-token matches (the suite-wide canary, the turn-done
-marker) stay on `waitForText` deliberately: they are insensitive to the
-mechanism and keep a second independent channel in the spec.
+as leg-neutral. The turn-done marker (a single-token match, insensitive to
+the mechanism) stays a visible-transcript oracle, on the `waitForScreen`
+channel: after the request-body count confirms the second request was sent,
+the spec waits for the fake model's completion marker to reach the rendered
+transcript, so the gate proves a render and not merely a send.
 
 ## Decision 3 — U-36: config initialization is a shared once-guard, not a swallowed retry
 
@@ -67,17 +69,20 @@ The OpenTUI leg hung on `Chat not initialized`: `config.initialize()` is
 asynchronous while the first render is not, so a prompt submitted before
 initialization settles reached the chat before the chat existed — and the
 old `try { await config.initialize() } catch {}` in `livePromptEvents`
-swallowed the failure, leaving no screen signal. Command loading already
-calls `initialize()` concurrently and a second concurrent call rejects, so
-"call it again and wait" was not available.
+swallowed the failure, leaving no screen signal. Core joins callers onto an
+in-flight initialize and only rejects once initialization has settled, so a
+plain await is already race-safe; what it cannot do is own one boot flight or
+preserve a failure.
 
 `ensureConfigInitialized(config)` in `live-session.ts` keeps a
-`WeakMap`-keyed shared promise: first caller wins, everyone awaits the same
-settlement, a loser that observes `isInitialized()` proceeds. The entry calls
-it fire-and-forget before the first render (so boot overlaps initialization
-without serializing startup), and the turn path awaits the same promise. The
-swallow is removed: a genuine initialization failure now propagates to the
-screen instead of hanging.
+`WeakMap`-keyed shared promise: the entry starts one flight before the first
+render and the turn path awaits the same settlement, and when initialization
+fails the rejected promise stays cached — core never retries a settled
+initialization, so re-entering would report core's "Config was already
+initialized", be swallowed, and degrade into the bounded wait's "Chat not
+initialized"; keeping the rejection cached surfaces the real cause on every
+later submit instead. A genuine failure propagates to the screen instead of
+hanging.
 
 ## Decision 4 — U-37: the MCP confirmation asks ink's question
 

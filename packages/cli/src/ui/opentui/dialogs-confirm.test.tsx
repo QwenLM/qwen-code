@@ -26,6 +26,7 @@ vi.mock('@opentui/core', () => ({
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    dimensions: { width: 110, height: 40 },
   };
   // The components carry the @opentui/react JSX import source; map its
   // primitive elements to DOM nodes so @testing-library/react can mount them.
@@ -60,7 +61,7 @@ vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({ width: 110, height: 40 }),
+  useTerminalDimensions: () => mocks.state.dimensions,
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -144,6 +145,7 @@ describe('OpenTuiToolConfirmation', () => {
 
   beforeEach(() => {
     mocks.state.keyboardHandlers = [];
+    mocks.state.dimensions = { width: 110, height: 40 };
   });
 
   it('settles Cancel on Esc exactly once, whatever arrives afterwards', () => {
@@ -291,6 +293,37 @@ describe('OpenTuiToolConfirmation', () => {
     expect(expanded).toContain('BODY_TAIL');
     expect(expanded).not.toContain('lines hidden');
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
+  });
+
+  it('ignores ctrl-s on a body that already fits', () => {
+    // At height 24 the expanded tail window caps at 4 rows — smaller than
+    // this fitting body — so ctrl-s must do nothing instead of dropping the
+    // head rows.
+    mocks.state.dimensions = { width: 110, height: 24 };
+    const lines = Array.from(
+      { length: 17 },
+      (_, index) => `SHORT_BODY_${index.toString().padStart(2, '0')}`,
+    );
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Approve this call?',
+            prompt: lines.join('\n'),
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        onSettled={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('SHORT_BODY_00');
+
+    press({ name: 's', ctrl: true });
+    expect(container.textContent).toContain('SHORT_BODY_00');
+    expect(container.textContent).toContain('SHORT_BODY_16');
   });
 
   it('caps a single-line JSON payload by its wrapped height', () => {

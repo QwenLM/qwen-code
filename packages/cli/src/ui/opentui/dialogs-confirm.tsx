@@ -167,7 +167,11 @@ function TextBody({ text }: { text: string }) {
   );
 
   useKeyboard((key) => {
-    if (key.ctrl && toOriginalKey(key).name === 's') setExpanded(true);
+    // A body that fits must ignore ctrl-s: the expanded tail window can be
+    // shorter than the fitting body and would silently drop its head rows.
+    if (key.ctrl && toOriginalKey(key).name === 's' && window.hiddenRows > 0) {
+      setExpanded(true);
+    }
   });
 
   if (expanded) {

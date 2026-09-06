@@ -158,7 +158,7 @@ describe('executeUserShell', () => {
       type: 'tool-end',
       id: expect.any(String),
       success: true,
-      summary: 'echo hello',
+      summary: 'ok',
     });
     expect(addHistoryMock).toHaveBeenCalledWith(
       llmClient,
@@ -206,7 +206,7 @@ describe('executeUserShell', () => {
     expect(events[events.length - 1]).toMatchObject({
       type: 'tool-end',
       success: false,
-      summary: 'echo hello',
+      summary: 'error',
     });
     expect(addHistoryMock).toHaveBeenCalledWith(
       llmClient,
@@ -228,6 +228,35 @@ describe('executeUserShell', () => {
       type: 'tool-end',
       success: false,
     });
+  });
+
+  it('keeps card ids unique across two calls in the same millisecond', async () => {
+    executeMock.mockImplementation(() =>
+      Promise.resolve({ pid: 1, result: Promise.resolve(makeResult()) }),
+    );
+    const run = () => {
+      const events: OpenTuiStreamEvent[] = [];
+      const done = executeUserShell(
+        makeConfig(false),
+        'echo hello',
+        (event) => events.push(event),
+        new AbortController().signal,
+        { width: 80, height: 24 },
+      );
+      return { events, done };
+    };
+    // Fake timers freeze Date.now(), so both calls start within the same
+    // millisecond — where a Date.now()-derived id would collide.
+    const a = run();
+    const b = run();
+    await Promise.all([a.done, b.done]);
+    const startId = (events: OpenTuiStreamEvent[]): string => {
+      for (const event of events) {
+        if (event.type === 'tool-start') return event.id;
+      }
+      throw new Error('no tool-start event');
+    };
+    expect(startId(a.events)).not.toBe(startId(b.events));
   });
 
   it('substitutes a placeholder for binary output', async () => {
@@ -303,7 +332,7 @@ describe('executeUserShell', () => {
     expect(events[events.length - 1]).toMatchObject({
       type: 'tool-end',
       success: false,
-      summary: 'echo hello',
+      summary: 'error',
     });
   });
 });

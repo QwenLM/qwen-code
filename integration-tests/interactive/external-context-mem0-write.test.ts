@@ -281,6 +281,14 @@ const ENVIRONMENT_KEYS = [
             `fake model turn did not complete. providerRequests=${providerRequests.length} modelRequests=${modelRequests.length}`,
           );
         }
+        // Turn-done oracle (Decision 2): the fake model's single-token
+        // completion marker must reach the rendered transcript — request
+        // counting alone proves a send, not a render.
+        await waitForScreen(
+          screen,
+          (value) => value.includes('MEM0_WRITE_E2E_DONE'),
+          'the model completion marker to reach the transcript',
+        );
       } else {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         expect(fakeModel.requests).toHaveLength(1);

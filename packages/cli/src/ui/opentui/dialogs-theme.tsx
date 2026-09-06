@@ -247,10 +247,10 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
                 )
               }
               renderLabel={(item, { titleColor }) => (
-                <text fg={titleColor}>
-                  {item.themeNameDisplay}{' '}
+                <box flexDirection="row">
+                  <text fg={titleColor}>{`${item.themeNameDisplay} `}</text>
                   <text fg={C.dim}>{item.themeTypeDisplay}</text>
-                </text>
+                </box>
               )}
             />
           </box>

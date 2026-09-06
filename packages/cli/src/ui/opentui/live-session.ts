@@ -560,13 +560,15 @@ async function resolveSteeredPromptParts(
 }
 
 /**
- * Single shared `config.initialize()` for the OpenTUI app. Config.initialize()
- * throws on re-entry instead of returning the in-flight promise (its private
- * `initializationPromise` has no public accessor), so a submit landing while
- * the command-registry loader's initialization is still running must await the
- * SAME promise — awaiting `config.initialize()` directly rejects, and sending
- * with `chat` unset dies with "Chat not initialized". The entry calls this
- * once before the first render; the turn path awaits the cached promise.
+ * Single shared `config.initialize()` flight for the OpenTUI app. Core joins
+ * callers onto an in-flight initialize and only rejects once initialization
+ * has settled ("Config was already initialized"), so plain awaits are safe
+ * against a race but can neither own one boot flight nor preserve a failure:
+ * the guard gives the entry one flight that command loading and every turn
+ * await, and — because a settled failure is never retried by core and the
+ * rejected promise stays cached — every later submit surfaces the real cause
+ * instead of re-entering, swallowing the re-entry error and degrading into
+ * "Chat not initialized".
  */
 const initializationPromises = new WeakMap<Config, Promise<void>>();
 
@@ -574,12 +576,10 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
   const pending = initializationPromises.get(config);
   if (pending) return pending;
   const started = config.initialize().catch((err) => {
-    initializationPromises.delete(config);
-    // Another caller (command loading) won the race. If its initialization
-    // settled with a chat, sending is safe. If the loss surfaced as core's
-    // re-entry error, the winner is still in flight and livePromptEvents'
-    // bounded startup-chat wait handles readiness. Anything else is a real
-    // initialization failure and must surface.
+    // A caller that initialized elsewhere already won: its settled success
+    // reports as core's re-entry error while the chat is ready to send. A
+    // settled failure does not — the real error must surface, and core has
+    // no retry either way, so the rejected promise stays cached for awaiters.
     if (
       config.getGeminiClient()?.isInitialized?.() ||
       (err instanceof Error && err.message === 'Config was already initialized')

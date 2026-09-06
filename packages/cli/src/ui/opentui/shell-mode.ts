@@ -38,7 +38,7 @@ export function executeUserShell(
   signal: AbortSignal,
   terminalSize: { width: number; height: number },
 ): Promise<void> {
-  const callId = `shell-${Date.now()}`;
+  const callId = `shell-${crypto.randomUUID()}`;
   emit({ type: 'user-shell', text: rawQuery });
   emit({
     type: 'tool-start',
@@ -160,7 +160,12 @@ export function executeUserShell(
         const finalOutput = `${prefixText}${tail}`;
 
         emit({ type: 'tool-result', id: callId, display: finalOutput });
-        emit({ type: 'tool-end', id: callId, success, summary: rawQuery });
+        emit({
+          type: 'tool-end',
+          id: callId,
+          success,
+          summary: success ? 'ok' : 'error',
+        });
         addShellCommandToLlmHistory(
           config.getGeminiClient(),
           rawQuery,
@@ -174,7 +179,12 @@ export function executeUserShell(
         type: 'error',
         text: `An unexpected error occurred: ${errorMessage}`,
       });
-      emit({ type: 'tool-end', id: callId, success: false, summary: rawQuery });
+      emit({
+        type: 'tool-end',
+        id: callId,
+        success: false,
+        summary: 'error',
+      });
     })
     .finally(cleanup);
 }

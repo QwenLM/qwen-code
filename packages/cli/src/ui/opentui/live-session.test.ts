@@ -373,6 +373,30 @@ describe('livePromptEvents', () => {
     );
   });
 
+  it('keeps surfacing the real initialization failure on later submits', async () => {
+    // Core never retries a settled initialization, so the rejected shared
+    // promise stays cached: every submit sees "auth exploded", not the
+    // masked re-entry error that degrades into "Chat not initialized".
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('auth exploded');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+      }),
+    } as unknown as Config;
+
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'auth exploded',
+    );
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'auth exploded',
+    );
+  });
+
   it('waits for the chat an in-flight startup initialization creates', async () => {
     // The boot-time command-registry load owns the initialize() flight, so the
     // turn's own call throws "already initialized" and its catch proceeds

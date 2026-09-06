@@ -80,7 +80,10 @@ export function transcribeSession(
     }
     const parts = o.message?.parts ?? [];
     if (o.type === 'user') {
-      if (o.subtype) continue; // skip subtyped user records (goal_runtime etc.)
+      // Subtyped user records are side-band (goal_runtime, cron, …) except
+      // mid_turn_user_message — U-32 steering, a real user message ink
+      // replays on resume.
+      if (o.subtype && o.subtype !== 'mid_turn_user_message') continue;
       const text = parts
         .filter((p) => p.text && !p.thought)
         .map((p) => p.text as string)
