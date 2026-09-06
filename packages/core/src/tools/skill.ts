@@ -352,13 +352,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   restoreLoadedSkillsFromHistory(history: Content[]): void {
     this.clearLoadedSkills();
 
-    const skillByName = new Map<string, { name: string; output: string }>();
+    const skillByName = new Map<
+      string,
+      { name: string; output: string; config: SkillConfig }
+    >();
     for (const skill of this.skillManager.getCachedSkills() ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
-      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+      skillByName.set(skill.name.toLowerCase(), {
+        name: skill.name,
+        output,
+        config: skill,
+      });
     }
 
     const pendingSkillCalls = new Map<string, string>();
@@ -389,16 +396,103 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
         const skill = skillByName.get(requestedName.toLowerCase());
+        if (!skill) {
+          // The skill was invoked in the recorded session but no longer
+          // exists on disk (deleted, renamed, or its level disabled).
+          debugLogger.debug(
+            `Skill "${requestedName}" appears in the resumed history but is not in the current skill cache; not restoring it.`,
+          );
+          continue;
+        }
         if (
-          !skill ||
-          (output !== skill.output && !output.startsWith(`${skill.output}\n`))
+          output !== skill.output &&
+          !output.startsWith(`${skill.output}\n`)
         ) {
+          // The recorded body is not the one on disk now — SKILL.md was
+          // edited between sessions. We cannot attribute the resident body
+          // to the current file, so neither the dedup bookkeeping nor the
+          // side effects are restored. This branch used to be a bare
+          // `continue`; the silence is part of what made #11180 present as
+          // a working setup.
+          this.logSkillNotRestored(
+            skill.config,
+            'its body no longer matches SKILL.md on disk',
+          );
           continue;
         }
 
+        // Bookkeeping is unconditional: the body is in the restored context
+        // regardless, and the dedup guard must know about it.
         this.loadedSkillContents.add(skill.output);
         this.loadedSkillNames.add(skill.name);
+
+        this.restoreSkillSideEffects(skill.config);
       }
+    }
+  }
+
+  /**
+   * Re-applies a restored skill's side effects — `allowedTools` session allow
+   * rules and frontmatter `hooks:` — so a resumed session enforces the same
+   * rules the replayed conversation still instructs the model to follow.
+   *
+   * Both live in `PermissionManager` / `SessionHooksManager` as in-memory,
+   * per-process state, so a resumed session starts with none of them while
+   * the restored history still carries the skill's instructions. Nothing
+   * re-arms them on its own: the dedup guard answers "already loaded in
+   * context", so the model has no reason to re-invoke the skill. That is how
+   * a skill's `PreToolUse` gate silently stopped firing after `--continue`
+   * (#11180) — the fail-open shape #11067 closed on the slash-command path,
+   * displaced onto resume.
+   *
+   * Both registrations dedup and the folder-trust gate is re-applied inside
+   * `applySkillSideEffects`, so this is idempotent and a project skill in an
+   * untrusted folder still gets nothing.
+   *
+   * A skill a fresh invocation would refuse is skipped, mirroring both live
+   * paths, so resume never re-arms something the user cannot invoke today.
+   */
+  private restoreSkillSideEffects(skill: SkillConfig): void {
+    // Enabledness can change between sessions: a skill invoked, then
+    // disabled via `skills.disabled` or by deactivating its extension, is
+    // still in this history. Both live paths refuse a disabled skill before
+    // applying anything (`executeDisabledSkill`; the loader's disabled
+    // branch), so restoring its allow rules and hooks would switch an
+    // auto-approval back on after the user turned it off.
+    if (!this.config.isSkillEnabled(skill)) {
+      this.logSkillNotRestored(skill, 'it is disabled');
+      return;
+    }
+    // `paths:` activation is in-memory too, so a conditional skill starts a
+    // resumed session deactivated. `validateToolParams` refuses it in that
+    // state ("gated by path-based activation"), and this is the same check
+    // that backs `pendingConditionalSkillNames` — read from the manager
+    // directly so restore does not race the async `refreshSkills`.
+    if (!this.skillManager.isSkillActive(skill)) {
+      this.logSkillNotRestored(skill, 'its `paths:` activation has not fired');
+      return;
+    }
+    applySkillSideEffects(this.config, skill);
+  }
+
+  /**
+   * Says why a skill carried by the resumed history was not re-armed.
+   *
+   * `warn` when the skill declares `hooks:`, matching `applySkillHooks`: a
+   * declared hook is an enforcement gate, and the operator needs to know it
+   * is absent while the skill's instructions are still in context. Every
+   * other case is `debug` — nothing was promised, so it cannot become a
+   * steady-state warning.
+   */
+  private logSkillNotRestored(skill: SkillConfig, reason: string): void {
+    const message =
+      `Not restoring skill "${skill.name}" on resume: ${reason}. ` +
+      `Its instructions may still be in the replayed conversation; ` +
+      `re-invoke the skill to re-apply its hooks and allowedTools.`;
+    if (skill.hooks) {
+      debugLogger.warn(message);
+    } else {
+      debugLogger.debug(message);
     }
   }
 
