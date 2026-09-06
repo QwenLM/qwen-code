@@ -44478,5 +44478,98 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       expect(capturedSignal!.aborted).toBe(true);
     });
+
+    it('suppresses the suggestion when the turn ends on a non-end_turn stop reason', async () => {
+      // The stop-reason gate in #maybeEmitFollowupSuggestion
+      // (`if (result.stopReason !== 'end_turn') return;`) is the only line
+      // keeping an interrupted or token-capped turn from firing a wasted
+      // generatePromptSuggestion call. The published contract
+      // (docs/users/features/features/followup-suggestions.md, #11101)
+      // suppresses on every non-end_turn member of the ACP StopReason union:
+      // cancelled / refusal / max_tokens / max_turn_requests. The gate is a
+      // single `!== 'end_turn'` check, and of those four only cancelled and
+      // max_tokens have return sites in Session.ts (refusal and
+      // max_turn_requests are never produced by the daemon send path), so
+      // driving those two pins the whole union (#11159). Every other test in
+      // this block reaches the generator through a mocked end_turn stream, so
+      // deleting the gate line left the suite green.
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+      const suggestionCalls = () =>
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.filter(
+          ([method]) => method === 'qwen/notify/session/prompt-suggestion',
+        );
+
+      // Control: the same session and mocks, a cleanly finished turn — the
+      // suggestion fires exactly once (pinned by the test above; restated
+      // here so the negative assertions below are self-contained).
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalledTimes(1);
+        expect(suggestionCalls()).toHaveLength(1);
+      });
+
+      // cancelled: abort the turn while the model stream is pending. The
+      // abort-aware send loop settles the turn as cancelled and the result
+      // still flows through #maybeEmitFollowupSuggestion.
+      let releaseStream!: () => void;
+      const streamGate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockChat.sendMessageStream = vi.fn().mockImplementation(
+        async () =>
+          (async function* () {
+            await streamGate;
+          })(),
+      );
+      const cancellation = new AbortController();
+      const cancelledTurn = session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'abort me' }],
+        },
+        undefined,
+        cancellation.signal,
+      );
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalled(),
+      );
+      cancellation.abort();
+      releaseStream();
+      await expect(cancelledTurn).resolves.toEqual({
+        stopReason: 'cancelled',
+      });
+
+      // Give the (suppressed) fire-and-forget IIFE a chance to run.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(generateMock).toHaveBeenCalledTimes(1);
+      expect(suggestionCalls()).toHaveLength(1);
+
+      // max_tokens: the session token-limit gate drops the send before the
+      // model is ever called.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockLlmClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      const maxTokensTurn = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hit the limit' }],
+      });
+      expect(maxTokensTurn).toEqual({ stopReason: 'max_tokens' });
+
+      await new Promise((r) => setTimeout(r, 10));
+      expect(generateMock).toHaveBeenCalledTimes(1);
+      expect(suggestionCalls()).toHaveLength(1);
+    });
   });
 });
