@@ -467,10 +467,23 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    return workspaceFolder
-      ? await fsp.realpath(workspaceFolder.uri.fsPath)
-      : process.cwd();
+    const fsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!fsPath) return process.cwd();
+    try {
+      return await fsp.realpath(fsPath);
+    } catch (error) {
+      // A workspace folder that stops resolving while the window stays open
+      // (deleted or renamed from a terminal, a removed worktree, an unmounted
+      // volume, a dangling symlink) must not block the export: transcripts
+      // live under `~/.qwen/tmp/<getProjectHash(cwd)>/chats` and the hash is a
+      // pure digest of the path string, so the raw spelling still finds them —
+      // and this is exactly the state where rescuing a transcript matters.
+      // Only ENOENT falls back; EACCES/EIO/ELOOP keep propagating so transient
+      // I/O failures are not hidden, matching `canonicalizeWorkspace` in
+      // packages/acp-bridge/src/workspacePaths.ts.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return fsPath;
+    }
   }
 
   private async handleExportCommand(

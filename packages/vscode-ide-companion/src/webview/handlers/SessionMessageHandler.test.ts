@@ -1141,6 +1141,83 @@ describe('SessionMessageHandler', () => {
     });
   });
 
+  it('still exports when the workspace folder no longer resolves', async () => {
+    // A folder deleted, renamed, or unmounted while the window stays open must
+    // not turn a rescuable transcript into an error toast: nothing on the
+    // export path needs the directory to exist.
+    mockRealpath.mockRejectedValue(
+      Object.assign(new Error("realpath '/workspace'"), { code: 'ENOENT' }),
+    );
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi.fn().mockResolvedValue([]),
+      sendMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      {} as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: '/export html' },
+    });
+
+    expect(mockExportSessionToFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      cwd: '/workspace',
+      format: 'html',
+    });
+    expect(
+      sendToWebView.mock.calls.some(
+        ([message]) => (message as { type?: string }).type === 'error',
+      ),
+    ).toBe(false);
+  });
+
+  it('surfaces a non-ENOENT workspace realpath failure instead of exporting', async () => {
+    // Only ENOENT may fall back; swallowing EACCES/EIO/ELOOP would hide a
+    // transient I/O failure behind a silently wrong export location.
+    mockRealpath.mockRejectedValue(
+      Object.assign(
+        new Error("EACCES: permission denied, realpath '/workspace'"),
+        { code: 'EACCES' },
+      ),
+    );
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi.fn().mockResolvedValue([]),
+      sendMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      {} as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: '/export html' },
+    });
+
+    expect(mockExportSessionToFile).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({
+          message: expect.stringContaining('EACCES'),
+        }),
+      }),
+    );
+  });
+
   it('reports bare /export as a missing subcommand instead of exporting', async () => {
     const agentManager = {
       isConnected: true,
