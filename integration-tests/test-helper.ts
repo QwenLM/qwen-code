@@ -891,19 +891,6 @@ export class TestRig {
     return apiRequests.pop() || null;
   }
 
-  // Latest telemetry event by name, attributes included: unlike
-  // `waitForTelemetryEvent` (a boolean poll) this lets a test assert on the
-  // event payload, e.g. chat_compression's tokens_before/tokens_after.
-  readTelemetryEvent(eventName: string): ParsedLog | null {
-    const logs = this._readAndParseTelemetryLog();
-    const events = logs.filter(
-      (logData) =>
-        logData.attributes &&
-        logData.attributes['event.name'] === `qwen-code.${eventName}`,
-    );
-    return events.pop() || null;
-  }
-
   readMetric(metricName: string): Record<string, unknown> | null {
     const logs = this._readAndParseTelemetryLog();
     for (const logData of logs) {

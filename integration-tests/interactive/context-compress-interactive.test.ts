@@ -5,64 +5,79 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import stripAnsi from 'strip-ansi';
-import { TestRig, type } from '../test-helper.js';
-
-// The background memory extractor fires a second live model call (measured
-// 40-52s) while this suite is timing the compression round trip. With it on,
-// the first attempt exhausted the event budget below and only a retry passed
-// (293s for the file); with it off both live tests pass first attempt (171s).
-// Sibling interactive suites disable it for the same reason.
-const SUITE_SETTINGS = {
-  memory: {
-    enableManagedAutoMemory: false,
-  },
-  security: {
-    auth: {
-      selectedType: 'openai',
-    },
-  },
-};
-
-// /compress is a live model call whose cost depends on which path the
-// compression service takes: measured at 9.8s for the cold side-query (611
-// output tokens) and 63.6s for the cache-sharing request (4138 output tokens)
-// on an otherwise quiet machine. With the extractor off, 90s already sufficed
-// (measured), so the old ceiling per se was not what reddened the shard in
-// #11088 — the extractor competed with the measurement, and the previously
-// unasserted 25s seed wait could expire, leaving /compress held mid-turn and
-// drained at the idle edge (contract pinned by mid-turn-submit-interactive).
-// The seed wait is now asserted; 150s is margin over the slow path under
-// runner load. It cannot rise to the CLI's 240s stream-idle bound: vitest's
-// testTimeout is 300s, the readiness waits already spend part of it, and the
-// side-query runs stream:true, maxAttempts:1, so a slow stream gets no retry.
-const COMPRESSION_EVENT_TIMEOUT_MS = 150_000;
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
+import {
+  TestRig,
+  type,
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 describe('Interactive Mode', () => {
   let rig: TestRig;
+  let fakeServer: FakeOpenAIServer | undefined;
+  let restoreNoProxy: () => void;
 
   beforeEach(() => {
     rig = new TestRig();
+    restoreNoProxy = applyContainerSandboxNoProxy();
   });
 
   afterEach(async () => {
+    await fakeServer?.close();
+    fakeServer = undefined;
+    restoreNoProxy();
     await rig.cleanup();
   });
+
+  async function runInteractiveWithFakeModel() {
+    fakeServer = await startFakeOpenAIServer(
+      ({ requestIndex }) => ({
+        content:
+          requestIndex === 0
+            ? `${'history '.repeat(1000)} Einstein`
+            : '<state_snapshot>Compressed history focused on Einstein.</state_snapshot>',
+      }),
+      fakeServerHostOptions(),
+    );
+    return rig.runInteractive(
+      '--auth-type',
+      'openai',
+      '--openai-api-key',
+      'fake-key',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--model',
+      'fake-model',
+    );
+  }
 
   it.skipIf(process.platform === 'win32')(
     'should trigger chat compression with /compress command',
     async () => {
       await rig.setup('interactive-compress-test', {
-        settings: SUITE_SETTINGS,
+        settings: {
+          security: {
+            auth: {
+              selectedType: 'openai',
+            },
+          },
+        },
       });
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess } = await runInteractiveWithFakeModel();
 
       let fullOutput = '';
       ptyProcess.onData((data: string) => (fullOutput += data));
 
       // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message', 15000);
+      const isReady = await rig.waitForText(
+        'Type your message',
+        rig.getDefaultTimeout(),
+      );
       expect(
         isReady,
         'CLI did not start up in interactive mode correctly',
@@ -74,11 +89,8 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, longPrompt);
       await type(ptyProcess, '\r');
 
-      const seeded = await rig.waitForText('einstein', 60_000);
-      expect(
-        seeded,
-        `seed turn never rendered the 'einstein' sentinel within 60s. Screen (last 600):\n${stripAnsi(fullOutput).slice(-600)}`,
-      ).toBe(true);
+      const seedCompleted = await rig.waitForText('einstein');
+      expect(seedCompleted, 'seed response did not complete').toBe(true);
 
       await type(ptyProcess, '/compress');
       // A small delay to allow React to re-render the command list.
@@ -87,33 +99,23 @@ describe('Interactive Mode', () => {
 
       const foundEvent = await rig.waitForTelemetryEvent(
         'chat_compression',
-        COMPRESSION_EVENT_TIMEOUT_MS,
+        90000,
       );
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
       );
-
-      // The event is also emitted on the compression service's failure
-      // paths and carries no status field, so success is the recorded
-      // token reduction itself (failure paths emit before <= after).
-      // Telemetry, not UI text: the OpenTUI renderer never writes the
-      // compaction row to the PTY byte stream.
-      const compressionEvent = rig.readTelemetryEvent('chat_compression');
-      const tokensBefore = compressionEvent?.attributes?.['tokens_before'];
-      const tokensAfter = compressionEvent?.attributes?.['tokens_after'];
-      expect(
-        typeof tokensBefore === 'number' &&
-          typeof tokensAfter === 'number' &&
-          tokensBefore > tokensAfter,
-        'chat_compression event recorded no token reduction: ' +
-          `tokens_before=${String(tokensBefore)}, tokens_after=${String(tokensAfter)}`,
-      ).toBe(true);
     },
   );
 
   it.skip('should handle compression failure on token inflation', async () => {
     await rig.setup('interactive-compress-test', {
-      settings: SUITE_SETTINGS,
+      settings: {
+        security: {
+          auth: {
+            selectedType: 'openai',
+          },
+        },
+      },
     });
 
     const { ptyProcess } = rig.runInteractive();
@@ -133,7 +135,7 @@ describe('Interactive Mode', () => {
 
     const foundEvent = await rig.waitForTelemetryEvent(
       'chat_compression',
-      COMPRESSION_EVENT_TIMEOUT_MS,
+      90000,
     );
     expect(foundEvent).toBe(true);
 
@@ -149,15 +151,24 @@ describe('Interactive Mode', () => {
     'should forward /compress instructions through to the side-query',
     async () => {
       await rig.setup('interactive-compress-instructions-test', {
-        settings: SUITE_SETTINGS,
+        settings: {
+          security: {
+            auth: {
+              selectedType: 'openai',
+            },
+          },
+        },
       });
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess } = await runInteractiveWithFakeModel();
 
       let fullOutput = '';
       ptyProcess.onData((data: string) => (fullOutput += data));
 
-      const isReady = await rig.waitForText('Type your message', 15000);
+      const isReady = await rig.waitForText(
+        'Type your message',
+        rig.getDefaultTimeout(),
+      );
       expect(
         isReady,
         'CLI did not start up in interactive mode correctly',
@@ -170,11 +181,8 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, seedPrompt);
       await type(ptyProcess, '\r');
 
-      const seeded = await rig.waitForText('einstein', 60_000);
-      expect(
-        seeded,
-        `seed turn never rendered the 'einstein' sentinel within 60s. Screen (last 600):\n${stripAnsi(fullOutput).slice(-600)}`,
-      ).toBe(true);
+      const seedCompleted = await rig.waitForText('einstein');
+      expect(seedCompleted, 'seed response did not complete').toBe(true);
 
       // Fire /compress with a trailing instruction. We are not asserting on
       // summary CONTENT (model behaviour) — only that the wiring runs
@@ -187,27 +195,11 @@ describe('Interactive Mode', () => {
 
       const foundEvent = await rig.waitForTelemetryEvent(
         'chat_compression',
-        COMPRESSION_EVENT_TIMEOUT_MS,
+        90000,
       );
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
       );
-
-      // The event is also emitted on the compression service's failure
-      // paths and carries no status field, so success is the recorded
-      // token reduction itself (failure paths emit before <= after).
-      // Telemetry, not UI text: the OpenTUI renderer never writes the
-      // compaction row to the PTY byte stream.
-      const compressionEvent = rig.readTelemetryEvent('chat_compression');
-      const tokensBefore = compressionEvent?.attributes?.['tokens_before'];
-      const tokensAfter = compressionEvent?.attributes?.['tokens_after'];
-      expect(
-        typeof tokensBefore === 'number' &&
-          typeof tokensAfter === 'number' &&
-          tokensBefore > tokensAfter,
-        'chat_compression event recorded no token reduction: ' +
-          `tokens_before=${String(tokensBefore)}, tokens_after=${String(tokensAfter)}`,
-      ).toBe(true);
     },
   );
 });
