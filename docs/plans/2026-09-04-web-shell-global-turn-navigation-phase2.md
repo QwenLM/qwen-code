@@ -7,6 +7,14 @@
 - Consumes: merged Phase 1 protocol [#10751](https://github.com/QwenLM/qwen-code/pull/10751)
 - Architecture: `docs/design/web-shell/web-shell-global-turn-navigation.md`
 
+**2026-09-06 update:** Phase 2A merged as #11054. The
+[Phase 2B viewport design](../design/web-shell/web-shell-global-turn-navigation-phase2b.md)
+supersedes this plan's sequential-history migration, public-history-hook
+replacement, and blanket UI/browser-test deferrals. It proposes a separate
+historical viewport for built-in main/split views, retains legacy public hook
+semantics, and moves minimal scrolling/boundary UI into Phase 2B. The original
+sections below are retained as historical rationale, not competing requirements.
+
 ## Outcome
 
 Phase 2 will deliver the complete headless client data layer for session-wide

@@ -59,9 +59,22 @@ export interface HistoricalTranscriptRange {
   newer: TranscriptBoundary;
 }
 
+export interface SequentialHistoricalTranscriptRange {
+  id: string;
+  beforeRecordId: string;
+  snapshot: string;
+  pageIds: readonly string[];
+  older: TranscriptBoundary;
+  newer: TranscriptBoundary;
+}
+
+export type HistoricalViewportRange =
+  | HistoricalTranscriptRange
+  | SequentialHistoricalTranscriptRange;
+
 export interface HistoricalTranscriptPageTableSnapshot {
   pages: ReadonlyMap<string, HistoricalTranscriptPage>;
-  ranges: readonly HistoricalTranscriptRange[];
+  ranges: readonly HistoricalViewportRange[];
   retainedBytes: number;
 }
 
@@ -119,6 +132,7 @@ export class HistoricalTranscriptPageTable {
   private selectedRangeId: string | undefined;
   private selectedPageId: string | undefined;
   private liveRecordIds = new Set<string>();
+  private readonly viewportPins = new Map<string, string>();
   private readonly cachedBoundaryRequests = new Map<
     string,
     FrozenTranscriptBoundaryRequest
@@ -145,6 +159,7 @@ export class HistoricalTranscriptPageTable {
     this.selectedRangeId = undefined;
     this.selectedPageId = undefined;
     this.liveRecordIds.clear();
+    this.viewportPins.clear();
     this.cachedBoundaryRequests.clear();
   }
 
@@ -172,6 +187,7 @@ export class HistoricalTranscriptPageTable {
 
   findTurn(turnId: string): AdmittedHistoricalTarget | undefined {
     for (const range of this.snapshot.ranges) {
+      if (!('anchorTurnId' in range)) continue;
       for (const pageId of range.pageIds) {
         const blockId = this.snapshot.pages
           .get(pageId)
@@ -193,7 +209,152 @@ export class HistoricalTranscriptPageTable {
     this.touch(rangeId);
   }
 
+  setViewportAnchor(viewportId: string, pageId?: string): void {
+    if (pageId === undefined) {
+      this.viewportPins.delete(viewportId);
+    } else if (this.snapshot.pages.has(pageId)) {
+      this.viewportPins.set(viewportId, pageId);
+    }
+  }
+
+  admitBefore(
+    beforeRecordId: string,
+    snapshot: string,
+    response: DaemonSessionTranscriptPage,
+  ): AdmittedHistoricalTarget | undefined {
+    const existing = this.snapshot.ranges.find(
+      (range) =>
+        'beforeRecordId' in range &&
+        range.beforeRecordId === beforeRecordId &&
+        range.newer.kind === 'live',
+    );
+    if (existing) {
+      const page = this.snapshot.pages.get(existing.pageIds.at(-1)!);
+      if (page)
+        return {
+          rangeId: existing.id,
+          pageId: page.id,
+          blockId: page.blocks.at(-1)!.id,
+        };
+    }
+    assertContinuationCursor(response);
+    const materialized = this.materializePage(
+      snapshot,
+      response.events,
+      this.liveRecordIds,
+    );
+    const blocks = filterOverlappingBlocks(
+      materialized.page.blocks,
+      this.liveRecordIds,
+    );
+    if (blocks.length === 0) return undefined;
+    const filteredPage = this.pageFromBlocks(
+      materialized.page.id,
+      snapshot,
+      blocks,
+    );
+    if (!filteredPage.firstRecordId || !filteredPage.lastRecordId) {
+      throw new Error('Historical page has no persisted boundary');
+    }
+    const page = this.withNewerRequest(filteredPage, {
+      kind: 'gap',
+      anchorRecordId: beforeRecordId,
+      afterRecordId: filteredPage.lastRecordId,
+      snapshot,
+    });
+    this.assertPageFits(page);
+    const rangeId = `history-range-${this.nextRangeId++}`;
+    const range: SequentialHistoricalTranscriptRange = Object.freeze({
+      id: rangeId,
+      beforeRecordId,
+      snapshot,
+      pageIds: Object.freeze([page.id]),
+      older: this.nextBoundary('older', snapshot, page, response),
+      newer: { kind: 'live' as const },
+    });
+    const previous = this.snapshot;
+    const previousRequests = new Map(this.cachedBoundaryRequests);
+    const previousAccess = new Map(this.rangeAccess);
+    const pages = new Map(previous.pages);
+    let ranges = [...previous.ranges];
+    try {
+      for (const cached of previous.ranges) {
+        if ('anchorTurnId' in cached) continue;
+        if (
+          !cached.pageIds.some((id) =>
+            [...(pages.get(id)?.recordIds ?? [])].some((id) =>
+              page.recordIds.has(id),
+            ),
+          )
+        )
+          continue;
+        if (
+          cached.pageIds.some((id) =>
+            [...this.viewportPins.values()].includes(id),
+          )
+        ) {
+          throw new HistoricalTranscriptWindowFullError();
+        }
+        ranges = this.restoreCachedBoundaries(
+          ranges.filter((r) => r.id !== cached.id),
+          cached.id,
+        );
+        for (const id of cached.pageIds) pages.delete(id);
+        this.rangeAccess.delete(cached.id);
+        this.cachedBoundaryRequests.delete(
+          this.boundaryKey(cached.id, 'older'),
+        );
+        this.cachedBoundaryRequests.delete(
+          this.boundaryKey(cached.id, 'newer'),
+        );
+      }
+      pages.set(page.id, page);
+      this.snapshot = {
+        pages,
+        ranges: Object.freeze([...ranges, range]),
+        retainedBytes: 0,
+      };
+      this.evict(rangeId, page.id);
+      return { rangeId, pageId: page.id, blockId: blocks.at(-1)!.id };
+    } catch (error) {
+      this.snapshot = previous;
+      this.cachedBoundaryRequests.clear();
+      for (const [key, value] of previousRequests)
+        this.cachedBoundaryRequests.set(key, value);
+      this.rangeAccess.clear();
+      for (const [key, value] of previousAccess)
+        this.rangeAccess.set(key, value);
+      throw error;
+    }
+  }
+
   admitAnchor(
+    ordinal: number,
+    turnId: string,
+    snapshot: string,
+    response: DaemonSessionTranscriptPage,
+  ): AdmittedHistoricalTarget {
+    const previous = this.snapshot;
+    const requests = new Map(this.cachedBoundaryRequests);
+    const access = new Map(this.rangeAccess);
+    const selectedRange = this.selectedRangeId;
+    const selectedPage = this.selectedPageId;
+    try {
+      return this.admitAnchorPage(ordinal, turnId, snapshot, response);
+    } catch (error) {
+      this.snapshot = previous;
+      this.cachedBoundaryRequests.clear();
+      for (const [key, value] of requests)
+        this.cachedBoundaryRequests.set(key, value);
+      this.rangeAccess.clear();
+      for (const [key, value] of access) this.rangeAccess.set(key, value);
+      this.selectedRangeId = selectedRange;
+      this.selectedPageId = selectedPage;
+      throw error;
+    }
+  }
+
+  private admitAnchorPage(
     ordinal: number,
     turnId: string,
     snapshot: string,
@@ -269,6 +430,7 @@ export class HistoricalTranscriptPageTable {
     const pages = new Map(this.snapshot.pages);
     let retainedRanges = [...this.snapshot.ranges];
     for (const cachedRange of this.snapshot.ranges) {
+      if (!('anchorTurnId' in cachedRange)) continue;
       if (
         !cachedRange.pageIds.some((pageId) =>
           [...(pages.get(pageId)?.recordIds ?? [])].some((recordId) =>
@@ -280,6 +442,13 @@ export class HistoricalTranscriptPageTable {
       }
       // A cursor after this anchor cannot recover records deduplicated into
       // another range. Replace overlapping ranges instead of creating a gap.
+      if (
+        cachedRange.pageIds.some((id) =>
+          [...this.viewportPins.values()].includes(id),
+        )
+      ) {
+        throw new HistoricalTranscriptWindowFullError();
+      }
       retainedRanges = this.restoreCachedBoundaries(
         retainedRanges.filter((item) => item.id !== cachedRange.id),
         cachedRange.id,
@@ -325,6 +494,65 @@ export class HistoricalTranscriptPageTable {
     return request;
   }
 
+  reopenLiveBoundary(
+    rangeId: string,
+    beforeRecordId: string,
+    snapshot: string,
+  ): void {
+    const range = this.snapshot.ranges.find((range) => range.id === rangeId);
+    if (!range || !('beforeRecordId' in range) || range.newer.kind !== 'live')
+      return;
+    const edge = this.snapshot.pages.get(range.pageIds.at(-1)!);
+    if (!edge?.lastRecordId)
+      throw new Error('Historical page has no retained edge');
+    const nextRange: SequentialHistoricalTranscriptRange = {
+      ...range,
+      beforeRecordId,
+      snapshot,
+      newer: {
+        kind: 'loadable',
+        request: {
+          kind: 'gap',
+          anchorRecordId: beforeRecordId,
+          afterRecordId: edge.lastRecordId,
+          snapshot,
+        },
+      },
+    };
+    const pages = new Map(this.snapshot.pages);
+    for (const id of range.pageIds) {
+      const page = pages.get(id)!;
+      if (!page.lastRecordId) continue;
+      const { newerRequest, ...rest } = page;
+      pages.set(
+        id,
+        this.withNewerRequest(
+          {
+            ...rest,
+            retainedBytes: page.retainedBytes - requestBytes(newerRequest),
+          },
+          {
+            kind: 'gap',
+            anchorRecordId: beforeRecordId,
+            afterRecordId: page.lastRecordId,
+            snapshot,
+          },
+        ),
+      );
+    }
+    const ranges = this.snapshot.ranges.map((range) =>
+      range.id === rangeId ? Object.freeze(nextRange) : range,
+    );
+    const retainedBytes = this.measureRetainedBytes(pages, ranges);
+    if (retainedBytes > this.options.maxRetainedBytes)
+      throw new HistoricalTranscriptWindowFullError();
+    this.snapshot = Object.freeze({
+      pages,
+      ranges: Object.freeze(ranges),
+      retainedBytes,
+    });
+  }
+
   failBoundaryLoad(
     rangeId: string,
     direction: BoundaryDirection,
@@ -337,6 +565,21 @@ export class HistoricalTranscriptPageTable {
       ...range,
       [direction]: { kind: 'error', request, retryable },
     });
+  }
+
+  cancelBoundaryLoad(
+    rangeId: string,
+    direction: BoundaryDirection,
+    request: FrozenTranscriptBoundaryRequest,
+  ): void {
+    const range = this.snapshot.ranges.find((item) => item.id === rangeId);
+    const boundary = range?.[direction];
+    if (range && boundary?.kind === 'loading' && boundary.request === request) {
+      this.replaceRange(rangeId, {
+        ...range,
+        [direction]: { kind: 'loadable', request },
+      });
+    }
   }
 
   admitBoundary(
@@ -376,7 +619,7 @@ export class HistoricalTranscriptPageTable {
     const range = this.snapshot.ranges.find((item) => item.id === rangeId);
     if (!range || range[direction].kind !== 'loading') return;
     const admittedRequest = range[direction].request;
-    const knownRecordIds = this.allRecordIds();
+    const knownRecordIds = this.allRecordIds(range);
     for (const recordId of recovery?.excludedRecordIds ?? []) {
       knownRecordIds.add(recordId);
     }
@@ -401,16 +644,23 @@ export class HistoricalTranscriptPageTable {
       blocks.length === page.blocks.length
         ? page
         : this.pageFromBlocks(page.id, snapshot, blocks);
+    const sequentialTerminal =
+      'beforeRecordId' in range && recovery?.fromAnchor === true;
     const newerRequest =
       (direction === 'older' || (recovery && !recovery.fromAnchor)) &&
       filteredPage.lastRecordId
         ? {
             kind: 'gap' as const,
-            anchorRecordId: range.anchorTurnId,
+            anchorRecordId:
+              'anchorTurnId' in range
+                ? range.anchorTurnId
+                : range.beforeRecordId,
             afterRecordId: filteredPage.lastRecordId,
-            snapshot,
+            snapshot: 'beforeRecordId' in range ? range.snapshot : snapshot,
           }
-        : forwardRequest(response);
+        : sequentialTerminal
+          ? undefined
+          : forwardRequest(response);
     const admittedPage = this.withNewerRequest(filteredPage, newerRequest);
     if (admittedPage.blocks.length === 0) {
       if (recovery && !recovery.fromAnchor && !reachedLive && !cachedRangeId) {
@@ -420,16 +670,21 @@ export class HistoricalTranscriptPageTable {
         range,
         direction,
         response,
-        reachedLive,
+        reachedLive || sequentialTerminal,
         cachedRangeId,
       );
-      const activeRangeId = this.selectedRangeId ?? rangeId;
+      const activeRangeId =
+        'beforeRecordId' in range ? rangeId : (this.selectedRangeId ?? rangeId);
       const activeRange = this.snapshot.ranges.find(
         (item) => item.id === activeRangeId,
       );
       this.evict(
         activeRangeId,
-        this.selectedPageId ?? activeRange?.pageIds[0] ?? range.pageIds[0]!,
+        (activeRangeId === this.selectedRangeId
+          ? this.selectedPageId
+          : undefined) ??
+          activeRange?.pageIds[0] ??
+          range.pageIds[0]!,
         activeRangeId === rangeId
           ? { direction, request: admittedRequest }
           : undefined,
@@ -444,18 +699,19 @@ export class HistoricalTranscriptPageTable {
       direction === 'older'
         ? [admittedPage.id, ...range.pageIds]
         : [...range.pageIds, admittedPage.id];
-    const boundary = reachedLive
-      ? ({ kind: 'live' } as const)
-      : cachedRangeId
-        ? this.cachedBoundary(
-            rangeId,
-            direction,
-            cachedRangeId,
-            admittedRequest,
-          )
-        : direction === 'newer'
-          ? requestBoundary(newerRequest)
-          : this.nextBoundary(direction, snapshot, admittedPage, response);
+    const boundary =
+      reachedLive || sequentialTerminal
+        ? ({ kind: 'live' } as const)
+        : cachedRangeId
+          ? this.cachedBoundary(
+              rangeId,
+              direction,
+              cachedRangeId,
+              admittedRequest,
+            )
+          : direction === 'newer'
+            ? requestBoundary(newerRequest)
+            : this.nextBoundary(direction, snapshot, admittedPage, response);
     const nextRange = Object.freeze({
       ...range,
       pageIds: Object.freeze(pageIds),
@@ -472,13 +728,21 @@ export class HistoricalTranscriptPageTable {
       retainedBytes: this.measureRetainedBytes(pages, ranges),
     });
     this.touch(rangeId);
-    const activeRangeId = this.selectedRangeId ?? rangeId;
+    const activeRangeId =
+      'beforeRecordId' in range ? rangeId : (this.selectedRangeId ?? rangeId);
     const activeRange = this.snapshot.ranges.find(
       (item) => item.id === activeRangeId,
     );
     this.evict(
       activeRangeId,
-      this.selectedPageId ?? activeRange?.pageIds[0] ?? range.pageIds[0]!,
+      (activeRangeId === this.selectedRangeId
+        ? this.selectedPageId
+        : undefined) ??
+        [...this.viewportPins.values()].find((id) =>
+          range.pageIds.includes(id),
+        ) ??
+        activeRange?.pageIds[0] ??
+        range.pageIds[0]!,
       activeRangeId === rangeId
         ? { direction, request: admittedRequest, pageId: admittedPage.id }
         : undefined,
@@ -598,7 +862,7 @@ export class HistoricalTranscriptPageTable {
   }
 
   private finishBoundaryWithoutPage(
-    range: HistoricalTranscriptRange,
+    range: HistoricalViewportRange,
     direction: BoundaryDirection,
     response: DaemonSessionTranscriptPage,
     reachedLive: boolean,
@@ -625,11 +889,15 @@ export class HistoricalTranscriptPageTable {
     this.replaceRange(range.id, { ...range, [direction]: terminal });
   }
 
-  private allRecordIds(): Set<string> {
+  private allRecordIds(origin: HistoricalViewportRange): Set<string> {
     const ids = new Set(this.liveRecordIds);
-    for (const page of this.snapshot.pages.values()) {
-      for (const id of page.recordIds) {
-        ids.add(id);
+    for (const range of this.snapshot.ranges) {
+      if ('anchorTurnId' in range !== 'anchorTurnId' in origin) continue;
+      for (const pageId of range.pageIds) {
+        const page = this.snapshot.pages.get(pageId)!;
+        for (const id of page.recordIds) {
+          ids.add(id);
+        }
       }
     }
     return ids;
@@ -641,8 +909,12 @@ export class HistoricalTranscriptPageTable {
     direction: BoundaryDirection,
   ): string | undefined {
     const encountered = [...recordIds];
+    const origin = this.snapshot.ranges.find(
+      (range) => range.id === excludedRangeId,
+    )!;
     for (const range of this.snapshot.ranges) {
       if (range.id === excludedRangeId) continue;
+      if ('anchorTurnId' in range !== 'anchorTurnId' in origin) continue;
       const edgePageId =
         direction === 'older' ? range.pageIds.at(-1) : range.pageIds[0];
       const edgePage = edgePageId
@@ -690,7 +962,7 @@ export class HistoricalTranscriptPageTable {
     return `${rangeId}:${direction}`;
   }
 
-  private replaceRange(rangeId: string, next: HistoricalTranscriptRange): void {
+  private replaceRange(rangeId: string, next: HistoricalViewportRange): void {
     const ranges = Object.freeze(
       this.snapshot.ranges.map((range) =>
         range.id === rangeId ? Object.freeze(next) : range,
@@ -725,7 +997,13 @@ export class HistoricalTranscriptPageTable {
 
     while (overBudget()) {
       const inactive = ranges
-        .filter((range) => range.id !== activeRangeId)
+        .filter(
+          (range) =>
+            range.id !== activeRangeId &&
+            !range.pageIds.some((id) =>
+              [...this.viewportPins.values()].includes(id),
+            ),
+        )
         .sort(
           (left, right) =>
             (this.rangeAccess.get(left.id) ?? 0) -
@@ -770,6 +1048,7 @@ export class HistoricalTranscriptPageTable {
           });
           throw new HistoricalTranscriptWindowFullError();
         }
+        if (overBudget()) throw new HistoricalTranscriptWindowFullError();
         break;
       }
       const edges =
@@ -778,7 +1057,9 @@ export class HistoricalTranscriptPageTable {
           : [active.pageIds[0], active.pageIds.at(-1)];
       const removable = edges.find(
         (pageId) =>
-          pageId !== targetPageId && pageId !== admittedBoundary?.pageId,
+          pageId !== targetPageId &&
+          pageId !== admittedBoundary?.pageId &&
+          ![...this.viewportPins.values()].includes(pageId!),
       );
       if (!removable) throw new HistoricalTranscriptWindowFullError();
       const removedFirst = removable === active.pageIds[0];
@@ -840,7 +1121,7 @@ export class HistoricalTranscriptPageTable {
 
   private measureRetainedBytes(
     pages: ReadonlyMap<string, HistoricalTranscriptPage>,
-    ranges: readonly HistoricalTranscriptRange[],
+    ranges: readonly HistoricalViewportRange[],
   ): number {
     let bytes = 128;
     for (const page of pages.values()) bytes += page.retainedBytes;
@@ -848,7 +1129,10 @@ export class HistoricalTranscriptPageTable {
       bytes +=
         128 +
         range.id.length * 2 +
-        range.anchorTurnId.length * 2 +
+        ('anchorTurnId' in range
+          ? range.anchorTurnId.length
+          : range.beforeRecordId.length + range.snapshot.length) *
+          2 +
         range.pageIds.length * 24;
       bytes += this.measureBoundaryBytes(range.id, 'older', range.older);
       bytes += this.measureBoundaryBytes(range.id, 'newer', range.newer);
@@ -872,9 +1156,9 @@ export class HistoricalTranscriptPageTable {
   }
 
   private restoreCachedBoundaries(
-    ranges: readonly HistoricalTranscriptRange[],
+    ranges: readonly HistoricalViewportRange[],
     removedRangeId: string,
-  ): HistoricalTranscriptRange[] {
+  ): HistoricalViewportRange[] {
     return ranges.map((range) => {
       const older = this.restoreCachedBoundary(range, 'older', removedRangeId);
       const newer = this.restoreCachedBoundary(range, 'newer', removedRangeId);
@@ -885,7 +1169,7 @@ export class HistoricalTranscriptPageTable {
   }
 
   private restoreCachedBoundary(
-    range: HistoricalTranscriptRange,
+    range: HistoricalViewportRange,
     direction: BoundaryDirection,
     removedRangeId: string,
   ): TranscriptBoundary {

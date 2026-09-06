@@ -197,8 +197,8 @@ vi.mock('../monitorDetailsContext', async () => {
   };
 });
 
-vi.mock('./MessageList', () => ({
-  MessageList: (props: any) => (
+vi.mock('./TranscriptViewport', () => ({
+  TranscriptViewport: (props: any) => (
     <div
       data-testid="pane-messages"
       data-approval={props.pendingApproval ? 'yes' : 'no'}

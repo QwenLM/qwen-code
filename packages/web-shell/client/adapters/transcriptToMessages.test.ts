@@ -192,6 +192,36 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('preserves recorded terminal background status without dropping tool detail', () => {
+    const block = toolBlock('agent-history', 'agent-1', 'completed', 20, {
+      toolName: 'agent',
+      rawInput: { prompt: 'inspect history' },
+      rawOutput: {
+        type: 'task_execution',
+        status: 'background',
+        result: 'kept detail',
+      },
+    });
+    const live = transcriptBlocksToDaemonMessages([block]);
+    const recorded = transcriptBlocksToDaemonMessages([block], {
+      recordedToolStatus: true,
+    });
+    expect(live[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'pending' }],
+    });
+    expect(recorded[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [
+        {
+          status: 'completed',
+          args: { prompt: 'inspect history' },
+          rawOutput: { result: 'kept detail' },
+        },
+      ],
+    });
+  });
+
   it('preserves user source metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'scheduled prompt', 1, false, {

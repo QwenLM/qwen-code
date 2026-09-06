@@ -140,6 +140,7 @@ import {
   createDaemonTurnNavigationStore,
   type DaemonTurnNavigationSnapshot,
   type DaemonTurnNavigationStore,
+  type DaemonHistoryNavigationStore,
 } from './turn-navigation-store.js';
 
 export type {
@@ -666,7 +667,7 @@ const DaemonTranscriptHistoryContext = createContext<
   DaemonTranscriptHistory | undefined
 >(undefined);
 const DaemonTurnNavigationContext = createContext<
-  DaemonTurnNavigationStore | undefined
+  DaemonHistoryNavigationStore | undefined
 >(undefined);
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
@@ -850,6 +851,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     beforeRecordId?: string;
     cursor?: string;
     hasMore: boolean;
+    persistedReachable?: boolean;
     loading: boolean;
     capacityReached: boolean;
     paginationError: boolean;
@@ -901,6 +903,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // (`evictedOldest === false`) drops the newest blocks and leaves
           // the oldest anchor intact, so it must not trigger re-anchoring.
           if (detail.evictedOldest !== false) {
+            history.persistedReachable = true;
             if (detail.oldestRetainedRecordId !== undefined) {
               history.beforeRecordId = detail.oldestRetainedRecordId;
               history.cursor = undefined;
@@ -1036,7 +1039,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
   );
   const turnNavigationStore = useMemo(
-    () => createDaemonTurnNavigationStore(),
+    () =>
+      createDaemonTurnNavigationStore({
+        captureLiveBoundary: () => {
+          const history = transcriptHistoryRef.current;
+          const owner = sessionRef.current;
+          const generation = paginationGenerationRef.current;
+          const beforeRecordId = history.beforeRecordId;
+          const repair = liveJournalRepairRef.current;
+          return {
+            beforeRecordId,
+            reachable:
+              !!owner &&
+              owner.sessionId === history.sessionId &&
+              !!beforeRecordId &&
+              !repair &&
+              !history.loading &&
+              (history.persistedReachable ?? history.hasMore),
+            isCurrent: () =>
+              sessionRef.current === owner &&
+              transcriptHistoryRef.current === history &&
+              history.beforeRecordId === beforeRecordId &&
+              !history.loading &&
+              paginationGenerationRef.current === generation &&
+              liveJournalRepairRef.current === repair,
+          };
+        },
+      }),
     [],
   );
   const eventStreamRef = useRef<
@@ -2332,6 +2361,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? { beforeRecordId: firstPersistedRecordId }
                 : {}),
               hasMore: historyHasMore,
+              persistedReachable: historyHasMore,
               loading: false,
               capacityReached: false,
               paginationError: false,
@@ -2625,6 +2655,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             if (replayExceededCapacity) {
+              transcriptHistoryRef.current.persistedReachable = true;
               if (replayTrimmed) {
                 if (replayTrimmedAnchor !== undefined) {
                   transcriptHistoryRef.current.beforeRecordId =
@@ -4464,6 +4495,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           nextBeforeRecordId === undefined ? page.nextCursor : undefined;
         history.beforeRecordId = nextBeforeRecordId;
         history.hasMore = page.hasMore && hasCapacity;
+        history.persistedReachable = page.hasMore;
         history.loading = false;
         setTranscriptHistoryState({
           hasMore: history.hasMore,
@@ -4935,6 +4967,10 @@ export function useDaemonTranscriptHistory(): DaemonTranscriptHistory {
 }
 
 export function useDaemonTurnNavigationStore(): DaemonTurnNavigationStore {
+  return useDaemonHistoryNavigationStore();
+}
+
+export function useDaemonHistoryNavigationStore(): DaemonHistoryNavigationStore {
   const store = useContext(DaemonTurnNavigationContext);
   if (!store) {
     throw new Error(

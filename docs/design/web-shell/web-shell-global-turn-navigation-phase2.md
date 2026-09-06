@@ -2,8 +2,10 @@
 
 ## Status
 
-Phase 2A implemented in [#11054](https://github.com/QwenLM/qwen-code/pull/11054)
-(under review); Phase 2B pending. Original proposal: 2026-09-04. Builds on
+Phase 2A merged in [#11054](https://github.com/QwenLM/qwen-code/pull/11054);
+Phase 2B proposed in the
+[historical viewport integration design](web-shell-global-turn-navigation-phase2b.md).
+Original proposal: 2026-09-04. Builds on
 `web-shell-global-turn-navigation.md` (Phase 1 merged as #10751) and the
 page-table model of `web-shell-bounded-transcript-and-subagent-details.md`.
 
@@ -21,9 +23,10 @@ same PR so the two documents stop contradicting each other.
 
 The [implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigation-phase2.md)
 supersedes the proposed API names and migration sequence below. Phase 2A adds
-the headless index, isolated historical page table, reconciliation, and hooks;
-Phase 2B migrates legacy sequential pagination. The problem analysis below
-describes `origin/main` at `80497a74d0`, before Phase 2A.
+the headless index, isolated historical page table, reconciliation, and hooks.
+The Phase 2B design supersedes the earlier prepend-compatibility migration and
+defers only the global rail, not the minimal historical viewport, to Phase 3.
+The problem analysis below describes `origin/main` at `80497a74d0`, before Phase 2A.
 
 ## Problem
 

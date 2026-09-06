@@ -33,9 +33,11 @@ export function transcriptBlocksToLocalizedMessages(
   blocks: readonly DaemonTranscriptBlock[],
   t: Translator,
   safeToolProjection = false,
+  recordedToolStatus = false,
 ): Message[] {
   return transcriptBlocksToDaemonMessages(blocks, {
     safeToolProjection,
+    recordedToolStatus,
     includeSourceIdentity: true,
     labels: {
       promptCancelled: t('request.cancelled'),

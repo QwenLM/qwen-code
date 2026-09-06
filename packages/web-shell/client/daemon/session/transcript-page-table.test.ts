@@ -74,6 +74,123 @@ function createTable(options?: { maxPages?: number; maxBytes?: number }) {
 }
 
 describe('HistoricalTranscriptPageTable', () => {
+  it('reuses the pinned live join after a fresh snapshot of the same lineage', () => {
+    const table = createTable({ maxPages: 1 });
+    const first = table.admitBefore('live', 's1', response(['old']))!;
+    table.setViewportAnchor('one', first.pageId);
+    const before = table.getSnapshot();
+    expect(table.admitBefore('live', 's2', response(['old']))).toEqual(first);
+    expect(table.getSnapshot()).toBe(before);
+  });
+
+  it('keeps sequential ranges out of legacy turn lookup and cached links', () => {
+    const table = createTable();
+    const sequential = table.admitBefore('live', 's', response(['old']))!;
+    expect(table.findTurn('old')).toBeUndefined();
+    const legacy = table.admitAnchor(
+      0,
+      'old',
+      's',
+      response(['old'], { targetRecordId: 'old' }),
+    );
+    expect(legacy.rangeId).not.toBe(sequential.rangeId);
+    expect(table.getSnapshot().ranges).toHaveLength(2);
+  });
+
+  it('protects independent viewport pins and rolls back a full admission', () => {
+    const table = createTable({ maxPages: 2 });
+    const first = table.admitBefore(
+      'live',
+      's',
+      response(['a'], { hasMore: true, nextCursor: 'older-a' }),
+    )!;
+    table.setViewportAnchor('one', first.pageId);
+    table.beginBoundaryLoad(first.rangeId, 'older');
+    table.admitBoundary(
+      first.rangeId,
+      'older',
+      's',
+      response(['b'], { hasMore: true, nextCursor: 'older-b' }),
+    );
+    const secondPage = table.getSnapshot().ranges[0]!.pageIds[0]!;
+    table.setViewportAnchor('two', secondPage);
+    table.beginBoundaryLoad(first.rangeId, 'older');
+    const before = table.getSnapshot();
+    expect(() =>
+      table.admitBoundary(first.rangeId, 'older', 's', response(['c'])),
+    ).toThrow(HistoricalTranscriptWindowFullError);
+    expect(table.getSnapshot()).toBe(before);
+    table.setViewportAnchor('one');
+    table.admitBoundary(first.rangeId, 'older', 's', response(['c']));
+    expect(table.getSnapshot().pages.has(secondPage)).toBe(true);
+    expect(table.getSnapshot().pages.has(first.pageId)).toBe(false);
+    expect(table.getSnapshot().ranges[0]?.newer).toMatchObject({
+      kind: 'loadable',
+      request: { kind: 'gap', anchorRecordId: 'live', afterRecordId: 'b' },
+    });
+  });
+
+  it('does not replace a pinned legacy range during an overlapping anchor load', () => {
+    const table = createTable();
+    const target = table.admitAnchor(
+      0,
+      'a',
+      's',
+      response(['a', 'b'], { targetRecordId: 'a' }),
+    );
+    table.setViewportAnchor('reader', target.pageId);
+    const before = table.getSnapshot();
+    expect(() =>
+      table.admitAnchor(
+        2,
+        'c',
+        's',
+        response(['b', 'c'], { targetRecordId: 'c' }),
+      ),
+    ).toThrow(HistoricalTranscriptWindowFullError);
+    expect(table.getSnapshot()).toBe(before);
+  });
+
+  it('reopens a trimmed live edge with a fresh before-origin and exact retained record', () => {
+    const table = createTable();
+    const target = table.admitBefore('live-1', 's1', response(['a']))!;
+    table.reopenLiveBoundary(target.rangeId, 'live-2', 's2');
+    expect(table.beginBoundaryLoad(target.rangeId, 'newer')).toEqual({
+      kind: 'gap',
+      anchorRecordId: 'live-2',
+      afterRecordId: 'a',
+      snapshot: 's2',
+    });
+    table.admitBoundary(
+      target.rangeId,
+      'newer',
+      's2',
+      response(['a', 'live-1']),
+      { excludedRecordIds: ['a'], fromAnchor: true },
+    );
+    expect(table.getSnapshot().ranges[0]?.newer.kind).toBe('live');
+    expect(
+      [...table.getSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['a', 'live-1']);
+  });
+
+  it('treats an empty before-origin recovery as live, never as a backward newer cursor', () => {
+    const table = createTable();
+    const target = table.admitBefore('live-1', 's1', response(['a']))!;
+    table.reopenLiveBoundary(target.rangeId, 'live-2', 's2');
+    table.beginBoundaryLoad(target.rangeId, 'newer');
+    table.admitBoundary(
+      target.rangeId,
+      'newer',
+      's2',
+      response(['a'], { hasMore: true, nextCursor: 'backward' }),
+      { excludedRecordIds: ['a'], fromAnchor: true },
+    );
+    expect(table.getSnapshot().ranges[0]?.newer.kind).toBe('live');
+  });
+
   it('rejects an invalid page capacity at construction', () => {
     expect(() => createTable({ maxPages: 0 })).toThrow(RangeError);
   });
