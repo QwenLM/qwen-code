@@ -137,7 +137,7 @@ export interface ThreadRun {
    * daemon restart is on attempt 2; a second failure is terminal.
    */
   attempts: number;
-  /** Diagnostic wall clock; ordering uses a lock-issued sequence. */
+  /** Diagnostic wall clock only; never a FIFO key. */
   queuedAt: number;
   startedAt?: number;
   endedAt?: number;
