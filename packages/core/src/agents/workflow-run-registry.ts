@@ -40,13 +40,19 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
-import { escapeXml } from '../utils/xml.js';
+import {
+  buildResumeCall,
+  hasUninlinableResumeArgs,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
+import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
 
 const mutatingWorkflowTasks = new Map<string, symbol>();
+const activeWorkflowRunKeys = new Map<string, number>();
 const workflowTaskMutationContext = new AsyncLocalStorage<
   ReadonlyMap<string, symbol>
 >();
@@ -107,6 +113,30 @@ export async function tryWithWorkflowTaskMutation<T>(
       mutatingWorkflowTasks.delete(mutationKey);
     }
   }
+}
+
+export function markWorkflowRunPersistenceActive(
+  config: Config,
+  runId: string,
+): () => void {
+  const key = getWorkflowTaskMutationKey(config, runId);
+  activeWorkflowRunKeys.set(key, (activeWorkflowRunKeys.get(key) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const count = activeWorkflowRunKeys.get(key) ?? 0;
+    if (count <= 1) activeWorkflowRunKeys.delete(key);
+    else activeWorkflowRunKeys.set(key, count - 1);
+  };
+}
+
+export function isWorkflowRunPersistenceActive(
+  config: Config,
+  runId: string,
+): boolean {
+  const key = getWorkflowTaskMutationKey(config, runId);
+  return activeWorkflowRunKeys.has(key) || mutatingWorkflowTasks.has(key);
 }
 
 /**
@@ -274,6 +304,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Whether a model-visible resume may preserve background execution. */
+  resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
   currentPhase: string | null;
   /**
@@ -332,12 +364,17 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Original structured arguments, retained so a failed run can resume the same journal prefix. */
   args?: unknown;
   /**
-   * P7b: the path the script was loaded from, when the run was launched
-   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
-   * slash command). `undefined` for inline scripts. Recorded as run
-   * provenance (e.g. for the snapshot).
+   * The loaded saved-workflow path or the persisted copy of an inline script.
+   * `undefined` only when an inline script could not be persisted.
    */
   scriptPath?: string;
+  /**
+   * This run's resume journal (`<projectDir>/workflows/<runId>/journal.jsonl`),
+   * when the config had a `storage` to hold one. Recorded so the terminal
+   * notification can point the model at the per-agent results without
+   * reconstructing the path from a storage handle it does not have.
+   */
+  journalPath?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -575,6 +612,25 @@ export class WorkflowRunRegistry {
     if (entry.status === 'failed') {
       modelParts.push(
         `<result>Error: ${escapeXml(entry.error ?? '')}</result>`,
+      );
+    }
+    // What the run cost, so the model can size the next fan-out against a
+    // number instead of a guess. `agents_cached` is the resume-relevant half:
+    // a resumed run whose agents all replayed spent nothing and proves it here.
+    modelParts.push(`<usage>${escapeXml(buildUsageLine(entry))}</usage>`);
+    // The two recovery routes a backgrounded run needs and cannot reconstruct:
+    // a failure needs the resume call (the script is on disk, editable before
+    // the retry); a success needs the journal, because an empty-looking result
+    // is far more often a script that dropped its values than a fan-out that
+    // produced none.
+    const recovery =
+      entry.status === 'failed'
+        ? buildRecoveryLines(entry)
+        : buildDiagnosticsLines(entry);
+    if (recovery.length > 0) {
+      const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
+      modelParts.push(
+        `<${tag}>${escapeXmlElementText(recovery.join('\n'))}</${tag}>`,
       );
     }
     modelParts.push('</task-notification>');
@@ -1693,4 +1749,69 @@ function restrictWorkflowConfirmationDetails(
       return _exhaustive;
     }
   }
+}
+
+/** Flat `key=value` usage line for the terminal notification. */
+function buildUsageLine(entry: WorkflowTask): string {
+  const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
+    entry.dispatches.reduce((n, d) => (d.status === status ? n + 1 : n), 0);
+  // A run that never settled its end time reads as zero elapsed rather than
+  // as a negative duration computed against `Date.now()`.
+  const durationMs = Math.max(
+    0,
+    (entry.endTime ?? entry.startTime) - entry.startTime,
+  );
+  return [
+    `agents_dispatched=${entry.dispatches.length}`,
+    `agents_succeeded=${countByStatus('completed')}`,
+    `agents_cached=${countByStatus('cached')}`,
+    `agents_failed=${countByStatus('failed')}`,
+    `agents_cancelled=${countByStatus('cancelled')}`,
+    `tokens_spent=${entry.tokensSpent}`,
+    `duration_ms=${durationMs}`,
+  ].join(' ');
+}
+
+/** `<recovery>` body for a failed run. */
+function buildRecoveryLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    const pathAdvice = entry.workflowName
+      ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
+      : 'Edit the generated script copy first if the script needs to change.';
+    const journalAdvice = entry.journalPath
+      ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
+      : 'No journal was written for this run, so every agent() call runs live.';
+    lines.push(`Resume: ${resume} — ${pathAdvice} ${journalAdvice}`);
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  if (entry.journalPath) {
+    lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  return lines;
+}
+
+/** `<diagnostics>` body for a completed run. */
+function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  if (entry.journalPath) {
+    lines.push(
+      `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
+    );
+  }
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    lines.push(
+      entry.workflowName
+        ? `Re-run the saved /${entry.workflowName} workflow: ${resume}`
+        : `Re-run after editing the generated script: ${resume}`,
+    );
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  return lines;
 }
