@@ -258,6 +258,7 @@ async function main() {
         baseUrl={DAEMON_BASE_URL || window.location.origin}
         initialToken={daemonToken}
         language={getInitialLanguage()}
+        theme={getInitialTheme()}
       >
         {(token) => <StandaloneApp daemonToken={token} />}
       </StandaloneAuth>

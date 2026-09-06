@@ -5,8 +5,10 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import AppStyles from '../App.module.css';
 import { persistDaemonToken } from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
+import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
 import {
   Card,
@@ -104,12 +106,15 @@ export function StandaloneAuth({
   baseUrl,
   initialToken,
   language = 'en',
+  theme = WebShellThemeId.Dark,
   children,
 }: {
   baseUrl: string;
   initialToken?: string;
   /** Selects the gate copy. Defaults to English when omitted. */
   language?: WebShellLanguage;
+  /** Selects the theme palette the app root will apply after mount. */
+  theme?: WebShellTheme;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
@@ -209,7 +214,18 @@ export function StandaloneAuth({
 
   if (accepted) return children(accepted.token);
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+    <div
+      // The generated Tailwind utilities and shadcn tokens are scoped to the
+      // Web Shell root; the gate renders before App mounts, so it opts into
+      // the same scope and theme palette the app root uses (App.tsx).
+      data-web-shell-root
+      data-web-shell-shadcn
+      className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
+        theme === WebShellThemeId.Light
+          ? AppStyles.themeLight
+          : `${AppStyles.themeDark} dark`
+      }`}
+    >
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <CardTitle className="text-2xl">{copy.heading}</CardTitle>
