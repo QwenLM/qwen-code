@@ -21,7 +21,7 @@ Every step also updates the design doc: any sentence the implementation contradi
 ### Step 1 — Admission foundation (landed on this branch)
 
 Gate: the three mesh test files pass on CI; `THREAD_STATUSES` includes `blocked`; a missing or invalid root fails closed; `countQueuedElsewhere` counts `queued` only; a human post on a child does not touch the root's `autoTurnsUsed`; unknown `@name` yields `agent_unknown` and does not wake the assignee; a post with no target yields `no_target`; `coalesce(running)` from an agent charges one turn.
-Evidence: the test names covering each clause. Currently 37 tests; keep the count in §5.3 current.
+Evidence: the test names covering each clause. Currently 38 tests; keep the count in §5.3 current.
 
 ### Step 2 — Read-only capability boundary
 

@@ -586,7 +586,7 @@ cd packages/core
 npx vitest run src/agents/mesh/mentions.test.ts \
   src/agents/mesh/dispatch-policy.test.ts \
   src/agents/mesh/thread-actions.test.ts
-# 3 files, 37 tests passed
+# 3 files, 38 tests passed
 ```
 
 Targeted lint and core typecheck also pass on this branch. They establish
@@ -867,7 +867,7 @@ remain genuinely open:
     assignee, or an explicit blocker id.
 12. **Runtime as a first-class concept (v2 binding).** V1 binds an agent to a
     local background agent (`MeshAgent.backgroundAgentId`) in a hidden host
-    session. Multica binds a task to a *runtime* that claims it
+    session. Multica binds a task to a _runtime_ that claims it
     (`taskWakeupLoop`, runtime ids), which is what makes remote, cloud, and
     non-Qwen agents possible — the gap §7 calls the one hard one. Decide now,
     because it shapes step 3 and step 4: if v2 wants runtimes, the v1 schema

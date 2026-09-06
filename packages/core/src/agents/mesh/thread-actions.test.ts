@@ -228,6 +228,26 @@ describe('mesh thread actions', () => {
     ).rejects.toThrow(/No valid root thread/);
   });
 
+  it('fails closed when a child points to a non-root thread', async () => {
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ id: 'th_not_root', rootThreadId: 'th_actual_root' }),
+    );
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ id: 'th_child', rootThreadId: 'th_not_root' }),
+    );
+
+    await expect(
+      postMessage(
+        PROJECT_ROOT,
+        'th_child',
+        { from: BOB.id, text: '@alice check' },
+        { agents: [ALICE, BOB] },
+      ),
+    ).rejects.toThrow(/No valid root thread/);
+  });
+
   it('inherits the parent turn count without minting a fresh allowance', async () => {
     await writeThread(PROJECT_ROOT, thread({ autoTurnsUsed: 7 }));
 
