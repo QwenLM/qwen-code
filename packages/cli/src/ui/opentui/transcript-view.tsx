@@ -155,6 +155,8 @@ function TranscriptItem({
       return <GoalCard item={item} />;
     case 'away-recap':
       return <AwayRecapRow text={item.text} />;
+    case 'user-shell':
+      return <UserShellRow text={item.text} />;
     case 'advisor':
       return <AdvisorRow text={item.text} model={item.model} />;
     case 'arena-agent':
@@ -557,6 +559,19 @@ function AwayRecapRow({ text }: { text: string }) {
         {'recap: '}
       </text>
       <text fg={C.dim} attributes={4} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+      </text>
+    </box>
+  );
+}
+
+// ink UserShellMessage parity: `$ ` prefix (ink's link color → accent) +
+// the command text in the primary color.
+function UserShellRow({ text }: { text: string }) {
+  return (
+    <box flexDirection="row">
+      <text fg={C.accent}>{'$ '}</text>
+      <text fg={C.text} {...selectionProps()}>
         {sanitizeTerminalText(text)}
       </text>
     </box>

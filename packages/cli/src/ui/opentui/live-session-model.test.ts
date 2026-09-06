@@ -475,6 +475,17 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
     });
   });
 
+  it('pushes the U-33 user shell row after settling a streaming assistant', () => {
+    const items = foldLiveEvent([assistant('thinking')], {
+      type: 'user-shell',
+      text: 'ls',
+    });
+    expect(items).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'user-shell', text: 'ls' },
+    ]);
+  });
+
   it('pushes the U-34 command cards structurally', () => {
     const agent = {
       label: 'left',

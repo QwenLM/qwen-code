@@ -1146,6 +1146,8 @@ export function projectItemToStreamEvent(
       };
     case 'away_recap':
       return { type: 'away-recap', text: item.text };
+    case 'user_shell':
+      return { type: 'user-shell', text: item.text };
     case 'advisor':
       return { type: 'advisor', text: item.text, model: item.model };
     case 'arena_agent_complete':
@@ -1187,8 +1189,7 @@ export function projectItemToStreamEvent(
     //  - the rest: ink renders these through dedicated components and no
     //    OpenTUI writer produces them (tool_use_summary is written by ink's
     //    use-llm-stream only; diff_stats comes from the file-history rewind
-    //    flow, which has no OpenTUI seam; notification/user_shell have no
-    //    writer yet — user_shell is U-33).
+    //    flow, which has no OpenTUI seam; notification has no writer yet).
     case 'tool_group':
     case 'retry_countdown':
     case 'vision_notice':
@@ -1198,7 +1199,6 @@ export function projectItemToStreamEvent(
     case 'gemini_thought_content':
     case 'help':
     case 'notification':
-    case 'user_shell':
     case 'tool_use_summary':
     case 'diff_stats':
       return null;

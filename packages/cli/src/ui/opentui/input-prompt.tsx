@@ -204,6 +204,10 @@ export interface InputPromptProps {
   promptSuggestion?: string | null;
   /** U-7: clears the published suggestion (accept/typing/submit). */
   onPromptSuggestionDismiss?: () => void;
+  /** U-33: `!` shell mode is active (ink shellModeActive chrome parity). */
+  shellModeActive?: boolean;
+  /** U-33: toggles shell mode (empty-buffer `!`, ink InputPrompt parity). */
+  onToggleShellMode?: () => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -222,6 +226,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     recentSlashCommands,
     promptSuggestion,
     onPromptSuggestionDismiss,
+    shellModeActive = false,
+    onToggleShellMode,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -317,7 +323,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
 
-  const chrome = promptChrome(approvalMode);
+  // Shell mode overrides the approval chrome (ink InputPrompt order: `!`
+  // wins over the approval-mode prefix and status text).
+  const chrome = shellModeActive ? { prefix: '!' } : promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
 
   // ── real command registry feeding /-completion ──────────────────────────
@@ -829,6 +837,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.preventDefault();
       return;
     }
+    // U-33: an empty-buffer `!` toggles shell mode instead of inserting
+    // (ink InputPrompt parity — the character still inserts in a non-empty
+    // buffer, so `echo hi!` is unaffected).
+    if (
+      key.sequence === '!' &&
+      el.plainText.length === 0 &&
+      onToggleShellMode
+    ) {
+      onToggleShellMode();
+      key.preventDefault();
+      return;
+    }
     if (isPrintableKeyInput(key)) {
       // Typing over a ghost suggestion dismisses it but still inserts the
       // character (ink parity: no preventDefault on the dismiss itself).
@@ -858,6 +878,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.preventDefault();
       if (streaming) {
         onInterrupt?.();
+        return;
+      }
+      // Ink InputPrompt parity: Esc in shell mode exits the mode before any
+      // other escape behavior (queue restore, double-Esc clear).
+      if (shellModeActive) {
+        onToggleShellMode?.();
         return;
       }
       if (completionModeRef.current !== CompletionMode.IDLE) {

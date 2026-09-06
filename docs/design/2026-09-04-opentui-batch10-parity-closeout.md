@@ -193,7 +193,7 @@ per-item height distribution itself stays open as transcript-region work.
 
 U-6/G-1 (landed — Decision 8), U-7/G-2 (landed — Decision 11),
 U-9 (landed — Decision 10), G-3 (landed —
-Decision 9), U-33 (the `!` shell row), U-34 (landed — Decision 14), U-32
+Decision 9), U-33 (landed — Decision 15), U-34 (landed — Decision 14), U-32
 (landed — Decision 12), U-11 (landed — Decision 13), U-13 (landed —
 Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
@@ -402,8 +402,7 @@ red, else dim) while still reusing the helper's icon/label text.
 
 Still no-ops, each for a stated reason: `tool_use_summary` (written only by
 ink's use-llm-stream — no OpenTUI producer), `diff_stats` (file-history
-rewind flow, no OpenTUI seam), `notification`/`user_shell` (no writer yet;
-user_shell is U-33).
+rewind flow, no OpenTUI seam), and `notification` (no writer yet).
 
 Resume consistency: arena items are recorded via `recordSlashCommand`
 outputHistoryItems but `transcribeSession` never replays them on either
@@ -414,6 +413,71 @@ structural event payload, `live-session-model.test.ts` pins the fold, and
 the former no-op test list shrinks by exactly the four kinds. No e2e leg
 drives these rows (they need real `/advisor`//`arena`//`recap` command
 runs); `npm run typecheck` and eslint clean on the touched files.
+
+## Decision 15 — U-33: the `!` shell mode is the row plus the minimal writer behind it
+
+A row-only U-33 would be dead code — nothing in OpenTUI writes `user_shell` —
+so the honest scope is the full minimal shell mode, mirroring ink's five
+touchpoints. Entry/exit: `!` on an empty composer buffer toggles shell mode
+in both directions (ink does not gate the toggle on the mode either; a
+non-empty buffer still inserts, so `echo hi!` is unaffected), Esc exits the
+mode before any other escape behavior (ink InputPrompt's priority), and the
+chrome prefix becomes `!`, overriding the approval-mode prefix and status
+text. Routing: slash dispatch is checked before
+shell mode exactly as in ink's use-llm-stream, so `/help` in shell mode still
+dispatches; a shell-mode submission runs without a model turn — typing the
+command IS the consent, matching ink's no-approval shellCommandProcessor.
+
+Mid-turn submissions defer through the existing streaming gate as tagged
+entries `{text, shell}`: the drain drops `outcome === false` dispatches, so
+an entry must carry its own routing instead of relying on ambient shell-mode
+state, and a shell command queued behind a turn replays after it — the drain
+awaits each shell before the next entry, so queued commands cannot race each
+other. Execution
+is a thin OpenTUI-local executor (`shell-mode.ts`) over core's
+`ShellExecutionService.execute` — ink's `handleShellCommand` core is too
+ink-entangled to extract (`setPendingHistoryItem`, `themeManager`, pty id
+handling), so the ~40 lines that matter are mirrored: the cwd-capture wrapper
+on non-Windows, the stateless-`cd` warning prepended to the status prefix,
+and the error/cancelled/signal/exit-code prefixes. Child-process text streams
+as 1s-throttled deltas; pty and binary streams land once at completion
+(neither replays as append deltas). The result event appends only the tail
+the streamed head does not already cover (compared against the trimmed
+emission, since the stream tail usually carries the final newline the trimmed
+result drops).
+
+The transcript shows ink's two rows: the `$ ` command row (`user-shell`
+event; ink's link color maps to `C.accent` — the live palette has no link
+key) and a synthetic `run_shell_command` tool card driven through the
+existing tool-start/description/output/result/end events, so it inherits the
+whole card pipeline including the Decision 7 flood bounding; the card has no
+confirm field, hence no approval dialog. The command+result is injected into
+the LLM history by reusing ink's exported `addShellCommandToLlmHistory`
+(single authoritative copy, 10k-char truncation included).
+
+Live-only, consistent with U-32/U-34: the OpenTUI shell run is not recorded,
+and ink-recorded `user_shell` history items replay through the projection
+(resume parity) — which is why `item-projection`'s `user_shell` null arm
+shrank in the same commit. Documented divergences: the per-run
+AbortController is aborted only on quit — Esc during a running shell cancels
+the model turn, not the shell command (ink's Esc interrupts both); and ink's
+shell-history extras (persistent per-project command history with up/down
+recall and `(r:)` reverse search, prompt-history navigation disabled in
+shell mode) are not ported — they are a self-contained feature behind
+`useShellHistory`, deferred rather than silently dropped.
+
+Coverage: unit-only. `shell-mode.test.ts` (8 tests) pins the event sequence,
+the shared card id, the throttle (no delta before 1s, one delta after), the
+tail dedup (streamed `hello world\n` + identical result → empty append), the
+full-output and exit-code/cancelled/binary prefixes, the pwd warning plus
+tmp-file cleanup, the pty no-delta path, and the execute-failure error event;
+`item-projection.test.ts` pins the replay projection and the fold is pinned
+in `live-session-model.test.ts`; `input-prompt.test.tsx` gains three tests
+(empty-buffer `!` toggles, non-empty `!` inserts, Esc exits before the queue
+restore). The submit routing lives in the shell harness where submit cannot
+run (same boundary as Decisions 8/9) and is review-pinned against
+AppContainer. No e2e leg drives a real `!` command. `npm run typecheck` and
+eslint clean on the touched files; 146 tests green across the four suites.
 
 ## Coverage boundary
 

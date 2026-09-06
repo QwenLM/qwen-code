@@ -123,6 +123,13 @@ export type LiveAwayRecapItem = {
   text: string;
 };
 
+/** User `!`-shell command row (ink user_shell → UserShellMessage). */
+export type LiveUserShellItem = {
+  kind: 'user-shell';
+  id: string;
+  text: string;
+};
+
 /** Advisor review card (ink advisor → AdvisorMessage). */
 export type LiveAdvisorItem = {
   kind: 'advisor';
@@ -181,6 +188,7 @@ export type LiveHistoryItem =
   | LiveRetryItem
   | LiveStopHookItem
   | LiveAwayRecapItem
+  | LiveUserShellItem
   | LiveAdvisorItem
   | LiveArenaAgentItem
   | LiveArenaSessionItem
@@ -538,6 +546,12 @@ export function foldLiveEvent(
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({ kind: 'away-recap', id: nid('recap'), text: ev.text });
+      return items;
+    }
+    case 'user-shell': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({ kind: 'user-shell', id: nid('ushl'), text: ev.text });
       return items;
     }
     case 'advisor': {

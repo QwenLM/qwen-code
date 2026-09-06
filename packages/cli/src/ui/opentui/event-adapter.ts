@@ -129,6 +129,9 @@ export type OpenTuiStreamEvent =
   /** Away-summary recap (ink away_recap → AwayRecapMessage): `※` gutter +
    * bold "recap:" label, all secondary-colored. */
   | { type: 'away-recap'; text: string }
+  /** User `!`-shell command row (ink user_shell → UserShellMessage):
+   * `$ ` prefix + the command text. */
+  | { type: 'user-shell'; text: string }
   /** Advisor review card (ink advisor → AdvisorMessage): header with the
    * resolved model + the review body as markdown. */
   | { type: 'advisor'; text: string; model: string }

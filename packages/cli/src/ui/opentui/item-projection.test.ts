@@ -848,13 +848,18 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       { type: 'gemini_thought_content', text: 'g' },
       { type: 'help', timestamp: new Date() },
       { type: 'notification', text: 'n' },
-      { type: 'user_shell', text: 'u' },
       { type: 'tool_use_summary', text: 't' },
       { type: 'diff_stats', text: 'd' },
     ] as unknown as HistoryItemWithoutId[];
     for (const item of noOps) {
       expect(projectItemToStreamEvent(item, ctx)).toBeNull();
     }
+  });
+
+  it('carries the user_shell command row structurally (U-33)', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'user_shell', text: 'ls -la' }, ctx),
+    ).toEqual({ type: 'user-shell', text: 'ls -la' });
   });
 
   it('carries the four dedicated-component kinds structurally (U-34)', () => {

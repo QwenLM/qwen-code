@@ -584,6 +584,63 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(editor.plainText).toBe('queued text');
   });
 
+  it('an empty-buffer ! toggles shell mode on and off (U-33)', async () => {
+    let toggleCount = 0;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={() => {
+          toggleCount += 1;
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
+    });
+    expect(toggleCount).toBe(1);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('a non-empty buffer inserts ! instead of toggling (U-33)', async () => {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={() => {
+          throw new Error('must not toggle');
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('echo hi');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
+    });
+    expect(editor.plainText).toBe('echo hi!');
+  });
+
+  it('Esc in shell mode exits the mode before the queue restore (U-33)', async () => {
+    const onToggleShellMode = vi.fn();
+    const onPopQueue = vi.fn(() => 'queued text');
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        shellModeActive
+        onToggleShellMode={onToggleShellMode}
+        queueLength={1}
+        onPopQueue={onPopQueue}
+      />,
+    );
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onToggleShellMode).toHaveBeenCalledTimes(1);
+    expect(onPopQueue).not.toHaveBeenCalled();
+  });
+
   it('Up at the top edge pops queued prompts into the composer', async () => {
     let queued: string | null = 'from queue';
     render(

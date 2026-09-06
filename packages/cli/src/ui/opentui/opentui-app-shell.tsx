@@ -53,6 +53,9 @@ import type { ShellConfirmationResolution } from './commands-context.js';
 import type { WaitingCallInfo } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
+import { executeUserShell } from './shell-mode.js';
+import { useTerminalDimensions } from '@opentui/react';
+import { isSlashCommand } from '../utils/commandUtils.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -215,6 +218,35 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
 
+  // U-33: `!` shell mode (ink shellModeActive parity). The state lives here
+  // with the submit routing; the composer only renders the chrome and the
+  // toggle. A running command's controller is aborted on quit.
+  const [shellModeActive, setShellModeActive] = useState(false);
+  const shellAbortRef = useRef<AbortController | null>(null);
+  const { width: terminalWidth, height: terminalHeight } =
+    useTerminalDimensions();
+  const toggleShellMode = useCallback(
+    () => setShellModeActive((active) => !active),
+    [],
+  );
+  const runShellCommand = useCallback(
+    (command: string) => {
+      if (!props.onTranscriptEvent) return;
+      const controller = new AbortController();
+      shellAbortRef.current = controller;
+      return executeUserShell(
+        config,
+        command,
+        props.onTranscriptEvent,
+        controller.signal,
+        { width: terminalWidth, height: terminalHeight },
+      ).finally(() => {
+        if (shellAbortRef.current === controller) shellAbortRef.current = null;
+      });
+    },
+    [config, props.onTranscriptEvent, terminalWidth, terminalHeight],
+  );
+
   // U-9: the shell owns the settings sub-dialog routing (ink DialogManager
   // parity: ui.theme/editor/model rows open their dialogs; anything else
   // closes) and the composer fill the arena picker relies on.
@@ -343,9 +375,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
-  // Slash submissions held back while a model turn streams (ink's message
-  // queue, restricted to commands: a queued prompt is the live turn's job).
-  const deferredCommandsRef = useRef<string[]>([]);
+  // Slash and shell submissions held back while a model turn streams (ink's
+  // message queue; a queued shell entry carries its routing so the drain
+  // cannot be fooled by a mid-turn toggle).
+  const deferredCommandsRef = useRef<Array<{ text: string; shell?: boolean }>>(
+    [],
+  );
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
   // ref so re-queueing behind a turn or a dialog does not re-trigger the
   // effect, but a push has to: the mid-turn gate awaits the registry, and a
@@ -418,6 +453,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // asked to leave.
           deferredCommandsRef.current = [];
           onPopQueue?.();
+          // A running `!` shell command dies with the session too.
+          shellAbortRef.current?.abort();
           // ink's quit action cancels the ongoing request before the exit
           // drains, so a mid-turn /quit stops the stream instead of racing the
           // cleanup chain (recording flush, config.shutdown) against a turn
@@ -443,15 +480,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       const submission = normalizeQuitSubmission(text);
       // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
       // only a command that opted into canRunDuringStreaming runs now — the
-      // rest wait for idle instead of racing the stream.
-      if (streaming && (await gateway.mustDeferDuringStreaming(submission))) {
-        const command = submission.trim();
-        deferredCommandsRef.current.push(command);
-        setDeferredRevision((revision) => revision + 1);
-        notify(
-          `Queued ${command} — it will run when the current response ends.`,
-        );
-        return;
+      // rest wait for idle instead of racing the stream. A shell-mode
+      // submission (non-slash) defers the same way, tagged so the drain
+      // routes it back to the executor.
+      if (streaming) {
+        const shellEntry = shellModeActive && !isSlashCommand(submission);
+        if (
+          shellEntry ||
+          (await gateway.mustDeferDuringStreaming(submission))
+        ) {
+          const command = submission.trim();
+          deferredCommandsRef.current.push({
+            text: command,
+            shell: shellEntry,
+          });
+          setDeferredRevision((revision) => revision + 1);
+          notify(
+            `Queued ${command} — it will run when the current response ends.`,
+          );
+          return;
+        }
       }
       const settlement = await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
@@ -459,6 +507,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return;
       }
       if (settlement.outcome === false) {
+        // ink order (use-llm-stream): slash commands dispatch first; a
+        // shell-mode submission runs only when dispatch did not claim it.
+        const query = text.trim();
+        if (shellModeActive && query) {
+          void runShellCommand(query);
+          return;
+        }
         if (!onSubmitPrompt) {
           notify('The live prompt turn is not wired in this shell.');
           return;
@@ -466,7 +521,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // The raw typed text is both the prompt and the `UserPromptSubmit`
         // provenance; `@path` expansion happens where the prompt enters the
         // stream (live-session), so text queued mid-turn expands too.
-        const query = text.trim();
         onSubmitPrompt(query, imagePaths, {
           submittedPrompt: query || undefined,
         });
@@ -474,7 +528,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       }
       applyOutcome(settlement.outcome);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify, streaming],
+    [
+      gateway,
+      onSubmitPrompt,
+      applyOutcome,
+      notify,
+      streaming,
+      shellModeActive,
+      runShellCommand,
+    ],
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once
@@ -493,9 +555,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     const pending = deferredCommandsRef.current;
     deferredCommandsRef.current = [];
     void (async () => {
-      for (const [i, command] of pending.entries()) {
+      for (const [i, entry] of pending.entries()) {
         if (isExitInProgress()) return;
-        const settlement = await gateway.dispatch(command);
+        if (entry.shell) {
+          await runShellCommand(entry.text);
+          continue;
+        }
+        const settlement = await gateway.dispatch(entry.text);
         if (settlement.kind === 'rejected') {
           notify(settlement.reason);
           continue;
@@ -524,6 +590,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     notify,
     applyOutcome,
     onSubmitPrompt,
+    runShellCommand,
   ]);
 
   const userMessages = useMemo(
@@ -602,6 +669,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             composerHandle={props.composerHandle}
             promptSuggestion={promptSuggestion}
             onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+            shellModeActive={shellModeActive}
+            onToggleShellMode={toggleShellMode}
           />
         )}
       </box>

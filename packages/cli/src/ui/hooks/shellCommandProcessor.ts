@@ -41,7 +41,7 @@ function copyString(value: string): string {
   return value.split('').join('');
 }
 
-function addShellCommandToLlmHistory(
+export function addShellCommandToLlmHistory(
   llmClient: LlmClient,
   rawQuery: string,
   resultText: string,
