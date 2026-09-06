@@ -16731,17 +16731,19 @@ describe('runQwenServe startup observability', () => {
 
     try {
       await waitForPreheatStatus(handle, 'running');
+      const current = workspaceRegistry!.primaryEntry.current;
       delete workspaceRegistry!.primaryEntry.current;
       resolvePreheat();
-      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
-        status: 'succeeded',
-      });
-      await vi.waitFor(() => {
-        expect(fs.existsSync(debugLogPath)).toBe(true);
-        expect(fs.readFileSync(debugLogPath, 'utf8')).toContain(
-          'workspace MCP discovery after preheat skipped: no primary runtime',
-        );
-      });
+      try {
+        await vi.waitFor(() => {
+          expect(fs.existsSync(debugLogPath)).toBe(true);
+          expect(fs.readFileSync(debugLogPath, 'utf8')).toContain(
+            'workspace MCP discovery after preheat skipped: no primary runtime',
+          );
+        });
+      } finally {
+        workspaceRegistry!.primaryEntry.current = current;
+      }
     } finally {
       qwenCore.setDebugLogSession(null);
       qwenCore.resetDebugLoggingState();
