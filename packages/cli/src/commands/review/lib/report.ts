@@ -190,6 +190,7 @@ export function buildPlanReport(
       {
         srcDiffLines: plan.srcDiffLines,
         diffLines: plan.diffLines,
+        changedFiles: files.length,
       },
       context,
     ),

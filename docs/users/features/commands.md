@@ -36,6 +36,10 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
+> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+
+> [!note]
+>
 > `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
 
 > [!note]

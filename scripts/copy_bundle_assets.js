@@ -565,6 +565,27 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     );
   }
 
+  const exportTranscriptRenderer = join(
+    root,
+    'packages',
+    'web-templates',
+    'src',
+    'export-html',
+    'dist',
+    'export-transcript-document.js',
+  );
+  if (existsSync(exportTranscriptRenderer)) {
+    copyFileSync(
+      exportTranscriptRenderer,
+      join(distDir, 'export-transcript-document.js'),
+    );
+    console.log('Copied HTML export renderer to dist/');
+  } else {
+    console.warn(
+      'Warning: HTML export renderer not found; run a full `npm run build` before bundling.',
+    );
+  }
+
   // Stamp what the review sources looked like at build time. `/review` drives
   // the bundle, not the working tree, so a review command edited after this
   // point takes no effect — and without a record of what was built, the run

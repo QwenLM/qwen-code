@@ -48,31 +48,31 @@ const records = [
 ];
 
 describe('HTML export formatter', () => {
-  it('preserves the legacy formatter when source records are unavailable', () => {
-    const html = toHtml(sessionData);
-
-    expect(html).toContain('id="chat-data"');
-    expect(html).not.toContain('id="transcript-document"');
-  });
-
   it('uses the version-bound document renderer for the product export path', () => {
     const html = toHtml(sessionData, records);
     const secondHtml = toHtml(sessionData, records);
     const nonce = html.match(/script-src 'nonce-([^']+)'/)?.[1];
     const secondNonce = secondHtml.match(/script-src 'nonce-([^']+)'/)?.[1];
-
     expect(html).toContain('id="transcript-document"');
     expect(html).toContain('Hello from the document exporter.');
     expect(html).toContain("connect-src 'none'");
+    expect(html).toMatch(/script-src 'nonce-[^']+';/);
+    expect(html).toContain(
+      `https://unpkg.com/@qwen-code/qwen-code@${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
+    );
+    expect(EXPORT_TRANSCRIPT_RENDERER_VERSION).toMatch(
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+[a-f0-9]{16}$/,
+    );
+    expect(html).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
+    expect(html).toContain('crossorigin="anonymous"');
+    expect(html).not.toContain('qwen-code-assets.oss-cn-hangzhou.aliyuncs.com');
+    expect(html).not.toContain('type="importmap"');
+    expect(html).not.toContain('type="module"');
+    expect(html.length).toBeLessThan(500_000);
     expect(html).not.toContain('id="chat-data"');
     expect(html).not.toContain('session-secret');
     expect(html).not.toContain('/home/alice');
     expect(html).not.toContain('__EXPORT_NONCE__');
-    expect(html).toContain('data-document-metadata');
-    expect(html).toContain('Context Usage');
-    expect(html).toContain('data-document-expand-all');
-    expect(html).toContain('data-document-collapse-all');
-    expect(html).toContain('data-document-theme-toggle');
     expect(nonce).toBeTruthy();
     expect(secondNonce).toBeTruthy();
     expect(secondNonce).not.toBe(nonce);

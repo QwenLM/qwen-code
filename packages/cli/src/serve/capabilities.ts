@@ -313,7 +313,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // can pre-flight whether the daemon will honor their cross-origin
   // request before issuing it (and parsing a 403). The configured
   // pattern list is intentionally NOT echoed in the capabilities
-  // envelope — browser webui knows its own origin, and surfacing the
+  // envelope — a browser client knows its own origin, and surfacing the
   // list would let an unauthenticated `/capabilities` reader
   // enumerate every trusted origin, which is useful recon for a
   // misconfigured deployment.
