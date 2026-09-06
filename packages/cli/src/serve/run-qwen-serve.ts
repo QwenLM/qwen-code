@@ -8928,17 +8928,17 @@ async function runQwenServeImpl(
         clearRuntimeStartupTimer();
         markRuntimeReady();
       };
-      const schedulePersistedMcpConfigurationAfterPreheat = (
+      const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
         app: Application,
       ): void => {
         const registry = app.locals?.['workspaceRegistry'] as
           | WorkspaceRegistry
           | undefined;
-        const primary = registry?.primary;
-        if (!primary?.trusted) return;
-        getWorkspaceRuntimeCoordinatorIfSupported?.(
-          primary,
-        )?.reconcileMcpConfiguration();
+        const runtime = registry?.primaryEntry.current?.runtime;
+        if (!runtime) return;
+        void getWorkspaceRuntimeCoordinatorIfSupported?.(runtime)
+          ?.ensure()
+          .catch(() => undefined);
       };
       const startBridgePreheat = (
         bridge: AcpSessionBridge,
@@ -8953,7 +8953,7 @@ async function runQwenServeImpl(
             startup.preheat.durationMs = Math.round(
               performance.now() - preheatStartedAt,
             );
-            schedulePersistedMcpConfigurationAfterPreheat(app);
+            scheduleWorkspaceMcpDiscoveryAfterPreheat(app);
           })
           .catch((err) => {
             const message = err instanceof Error ? err.message : String(err);

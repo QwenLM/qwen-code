@@ -85,6 +85,7 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { WorkspaceRuntimeCoordinator } from './workspace-runtime-coordinator.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
@@ -16281,14 +16282,6 @@ describe('runQwenServe startup observability', () => {
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
       isChannelLive: vi.fn().mockReturnValue(true),
-      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
-        state: 'idle',
-        runtimeLive: true,
-        runtimeEpoch: 1,
-        activeWork: false,
-      }),
-      reloadWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
-      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
     } as unknown as HttpAcpBridge;
   }
 
@@ -16532,11 +16525,25 @@ describe('runQwenServe startup observability', () => {
     }
   });
 
-  it('loads persisted MCP configuration after ACP preheat succeeds', async () => {
+  it('starts workspace MCP discovery after ACP preheat succeeds', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-config-')),
     );
     const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
+    });
+    const ensureSpy = vi
+      .spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure')
+      .mockResolvedValue({
+        runtimeLive: true,
+      } as never);
 
     const handle = await runQwenServe(
       {
@@ -16554,9 +16561,7 @@ describe('runQwenServe startup observability', () => {
       expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
         status: 'succeeded',
       });
-      await vi.waitFor(() =>
-        expect(bridge.reloadWorkspaceMcp).toHaveBeenCalledOnce(),
-      );
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
     } finally {
       await handle.close();
     }
