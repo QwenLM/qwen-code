@@ -60,6 +60,10 @@ import {
   writeSnapshotArtifacts,
   collectPlatformInfo,
 } from './_daemon-perf-report.js';
+import {
+  promptLatencySkipReason,
+  shouldSkipPromptLatency,
+} from './_prompt-latency-policy.js';
 
 // Minimal type-shape for the SSE backpressure unit suite — we only assert
 // `.type`, so we avoid coupling tests to the full BridgeEvent surface.
@@ -90,23 +94,7 @@ const RSS_SAMPLE_DURATION_MS = Number(
   process.env['QWEN_BASELINE_RSS_SAMPLE_DURATION_MS'] ??
     (HEAVY ? 15_000 : 5_000),
 );
-const PROMPT_LATENCY_CREDENTIAL_ENV_KEYS = [
-  'DASHSCOPE_API_KEY',
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'GEMINI_API_KEY',
-  'GOOGLE_API_KEY',
-  'QWEN_API_KEY',
-];
-const HAS_PROMPT_LATENCY_CREDENTIAL =
-  process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] === '1' ||
-  PROMPT_LATENCY_CREDENTIAL_ENV_KEYS.some((key) => Boolean(process.env[key])) ||
-  Object.entries(process.env).some(
-    ([key, value]) => key.startsWith('QWEN_CUSTOM_API_KEY_') && Boolean(value),
-  );
-const SKIP_PROMPT_LATENCY =
-  process.env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
-  !HAS_PROMPT_LATENCY_CREDENTIAL;
+const SKIP_PROMPT_LATENCY = shouldSkipPromptLatency(process.env);
 
 const FIXTURES_DIR = path.resolve(__dirname, '../fixtures');
 const IDLE_MCP_PATH = path.join(FIXTURES_DIR, 'idle-mcp/server.mjs');
@@ -672,14 +660,13 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
       );
 
       if (SKIP_PROMPT_LATENCY) {
-        it('prompt latency skipped (no model credential env)', () => {
+        it('prompt latency skipped', () => {
           snapshot.promptLatency = {
             iterations: 0,
             firstByteMs: null,
             totalMs: null,
             skipped: true,
-            skipReason:
-              'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.',
+            skipReason: promptLatencySkipReason(process.env, PROMPT_ITERATIONS),
           };
           // Mark via a no-op assertion so the suite still appears in output.
           expect(true).toBe(true);

@@ -407,7 +407,7 @@ const SESSION_LIST_CANCEL_YIELD_INTERVAL = 128;
 
 /**
  * Maximum character length for a session custom title.
- * Shared across CLI, WebUI, VSCode, and ACP.
+ * Shared across CLI, browser, VS Code, and ACP clients.
  */
 export const SESSION_TITLE_MAX_LENGTH = 200;
 
@@ -3718,7 +3718,7 @@ export class SessionService {
 
       // Append a custom_title system record. `renameSession` is the
       // fallback path when no live recording service is attached (e.g., from
-      // the WebUI or VSCode extension). Callers pass `titleSource='auto'`
+      // Web Shell or the VS Code extension). Callers pass `titleSource='auto'`
       // only when the title came from the auto-generator; defaults to
       // 'manual' for explicit user renames.
       const titleRecord: ChatRecord = {

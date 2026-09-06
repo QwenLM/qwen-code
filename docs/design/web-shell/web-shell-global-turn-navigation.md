@@ -577,21 +577,27 @@ the live-owner and workspace-qualified paths.
 
 ### Phase 2: bounded client window
 
+(Re-aligned with the #10750 checklist on 2026-09-04: the data-layer items
+originally listed under Phase 3 — the turn-index store, tail refresh,
+provisional reconciliation, and canonical locator map — belong to this phase,
+leaving Phase 3 as the rail UI. The detailed design lives in
+`web-shell-global-turn-navigation-phase2.md`.)
+
 1. Land the immutable historical page table and separate live tail described
    by the bounded-transcript design.
 2. Add bidirectional boundaries, deduplication by record ID, page admission,
    eviction, and detached-live behavior.
 3. Migrate existing sequential prepend pagination to that window before adding
    random jump.
+4. Add the turn-index store, tail refresh, provisional reconciliation, and
+   canonical locator map.
 
 ### Phase 3: global rail
 
-1. Add the turn-index store, tail refresh, provisional reconciliation, and
-   canonical locator map.
-2. Virtualize `SessionTimeline` by total ordinal count.
-3. Add loaded and unloaded selection paths, retry, placeholders, keyboard
+1. Virtualize `SessionTimeline` by total ordinal count.
+2. Add loaded and unloaded selection paths, retry, placeholders, keyboard
    navigation, and jump-to-latest integration.
-4. Keep the old `getSessionTimelineEntries(messages)` path as the capability
+3. Keep the old `getSessionTimelineEntries(messages)` path as the capability
    fallback.
 
 ## Implementation map

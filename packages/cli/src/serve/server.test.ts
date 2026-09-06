@@ -751,6 +751,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'workspace_skills') {
+      return [feature, 'workspace_skills_config_runtime'];
+    }
     if (feature === 'session_artifacts') {
       return [feature, 'session_artifacts_persistence'];
     }
@@ -2228,6 +2231,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessions: [],
     }));
   return {
+    // The fake stands in for production bridges built through
+    // `createSpawnChannelFactory`, which carry the forwarding attestation
+    // the Conversations runtime publication gate requires.
+    mandatoryLeaseAttested: true,
     // F3 Commit 6 — `AcpSessionBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
     // exercise mediation; pin to the pre-F3 default ('first-responder')
@@ -3627,7 +3634,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_runtime') {
+        if (
+          feature === 'workspace_runtime' ||
+          feature === 'workspace_skills_config_runtime'
+        ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -28788,7 +28798,7 @@ describe('createServeApp', () => {
       expect(res.headers['content-disposition']).toMatch(
         /^attachment; filename="qwen-code-export-.+\.html"$/,
       );
-      expect(res.text).toContain('id="chat-data"');
+      expect(res.text).toContain('id="transcript-document"');
       expect(res.text).toContain('hello export');
       expect(res.text).toContain('export response');
     });

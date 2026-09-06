@@ -168,6 +168,19 @@ describe('resolveEffectiveOutputStyle', () => {
     expect(resolveEffectiveOutputStyle(learning, 'acp')).toBe(learning);
   });
 
+  it('keeps a custom style that took the Learning name', () => {
+    // A file may shadow a built-in by name. The rule exists because the
+    // built-in Learning prompt waits for a reply; a user's own Learning.md
+    // carries no such instruction, and dropping it would leave a headless run
+    // with no style at all and no diagnostic.
+    const custom = {
+      ...learning,
+      source: 'user' as const,
+      prompt: 'Answer in rhyming couplets.',
+    };
+    expect(resolveEffectiveOutputStyle(custom, 'headless')).toBe(custom);
+  });
+
   it('keeps every other style in every mode', () => {
     for (const mode of ['interactive', 'headless', 'acp'] as const) {
       expect(resolveEffectiveOutputStyle(concise, mode)).toBe(concise);
