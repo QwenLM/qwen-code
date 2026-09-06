@@ -3122,6 +3122,64 @@ describe('SessionRouter', () => {
       );
     });
 
+    it('counts waiters that outlived an invalidation on the session they land on', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 1,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 5 });
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      // Two waiters park on the restore reservation; a second restore's
+      // reservation pass invalidates it, and both re-route to the successor.
+      const waiterA = router.resolve('ch', 'alice', 'chat1');
+      const waiterB = router.resolve('ch', 'alice', 'chat1');
+      await drainMicrotasks();
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+
+      loadResolvers[1]!('old-alice');
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+
+      expect(await waiterA).toBe('old-alice');
+      expect(await waiterB).toBe('old-alice');
+      await expect(first).resolves.toEqual({ restored: 0, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      // Seeded at the persisted 1, each retried waiter counts its own
+      // routing exactly once — a retry path that skipped countTurn would
+      // leave the bound under-counted.
+      expect(rotationCounters(router).toTurns.get('old-alice')).toBe(3);
+      expect(routingLeases(router).get('old-alice')).toBe(2);
+      router.releaseRoutingLease('old-alice');
+      router.releaseRoutingLease('old-alice');
+    });
+
     it('clears a bound when the channel re-registers without one', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 2 });
@@ -3535,6 +3593,88 @@ describe('SessionRouter', () => {
       router.releaseRoutingLease('session-1');
       router.releaseRoutingLease('session-1');
       expect(routingLeases(router).has('session-1')).toBe(false);
+    });
+
+    it('skips the rotation check while a reload is in flight on the route', async () => {
+      vi.useFakeTimers();
+      try {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'routes.json');
+        writeFileSync(
+          persistPath,
+          JSON.stringify({
+            'ch:alice:chat1': {
+              sessionId: 'old-alice',
+              target: {
+                channelName: 'ch',
+                senderId: 'alice',
+                chatId: 'chat1',
+              },
+              cwd: '/tmp',
+              startedAt: Date.now(),
+            },
+          }),
+        );
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+          recoveryMode: 'lazy',
+        });
+        router.setChannelRotation('ch', { maxAgeHours: 1 });
+        router.restoreRoutes();
+        let releaseLoad!: (sessionId: string) => void;
+        (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              releaseLoad = resolve;
+            }),
+        );
+
+        // The route is below its age bound when the reload starts; the bound
+        // expires mid-flight. The concurrent message must NOT rotate here:
+        // rotating would invalidate the in-flight load and fail it instead.
+        const first = router.resolve('ch', 'alice', 'chat1');
+        await drainMicrotasks();
+        vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
+        const second = router.resolve('ch', 'alice', 'chat1');
+        await drainMicrotasks();
+
+        releaseLoad('old-alice');
+        await expect(first).resolves.toBe('old-alice');
+        router.releaseRoutingLease('old-alice');
+        // The mid-flight rotation never happened: the load was neither
+        // invalidated nor its result discarded.
+        expect(bridge.discardSession).not.toHaveBeenCalledWith(
+          'old-alice',
+          expect.anything(),
+        );
+
+        // The waiting message routed onto the loaded session (the first
+        // message's lease was still held when it re-entered the gate); the
+        // bound is enforced on the next message once leases drain.
+        await expect(second).resolves.toBe('old-alice');
+        router.releaseRoutingLease('old-alice');
+        expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
+          'old-alice',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops consulting a channel activity checker once unregistered', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 1 });
+      let active = true;
+      router.setSessionActivityChecker('ch', () => active);
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      // The checker reports a turn running: the second message defers.
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
+
+      // Unregistered, the stale checker must not gate rotation forever.
+      router.setSessionActivityChecker('ch', undefined);
+      active = false;
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
     });
 
     it('invalidates an in-flight creation when a restore reserves the key', async () => {

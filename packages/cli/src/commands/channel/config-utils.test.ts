@@ -150,6 +150,18 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive integer');
   });
 
+  it('throws when sessionRotation is not an object', async () => {
+    for (const sessionRotation of ['daily', 200, ['maxTurns']]) {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'telegram',
+          token: 't',
+          sessionRotation,
+        }),
+      ).rejects.toThrow('"sessionRotation" must be an object');
+    }
+  });
+
   it('accepts a fractional maxAgeHours', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'telegram',
