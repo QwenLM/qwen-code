@@ -41,6 +41,7 @@ interface CacheCommitArgs {
   candidate: string;
   ledger: string;
   out: string;
+  stateId?: string;
 }
 
 function readJsonObject(path: string, what: string): Record<string, unknown> {
@@ -183,6 +184,62 @@ function runCacheCommit(args: CacheCommitArgs): void {
     );
   }
 
+  // …and bind it to THIS round, not to a check the orchestrator made
+  // earlier against the same stable path: a local or file round takes no
+  // lease, so a concurrent same-target round overwrites the candidate file
+  // mid-round — and a CHECK that read the file minutes before this command
+  // read it again promoted the other round's anchor under this round's
+  // ledger.
+  //
+  // Which flow this is comes from `--out`, whose spelling the naming
+  // contract above has just been checked against, and NOT from the
+  // candidate: that file is the tamperable one this command's header
+  // names, so a stripped `stateId` would otherwise read as "a PR round"
+  // and promote unbound — the defect wearing the fix's clothes. A PR round
+  // has no such check by design: `fetch-pr` holds the worktree lease,
+  // which already excludes the concurrent round this binds against, so its
+  // candidate carries no `stateId` and its plan publishes none.
+  // What this proves is a NAME, not a flow: `--out` is the cache the round
+  // was told to write, and `pr-<n>.json` is the PR cache by the naming
+  // contract checked just above. A plain round could be given
+  // `--target pr-7` by hand and land on that name — it would already
+  // collide with PR 7's every side file, and nothing in the skill passes
+  // `--target` to a capture — but the flag would then be rejected for a
+  // round that holds no lease.
+  //
+  // `stem`, not `outTarget`: the file form's token is a FLATTENED source
+  // path and the token space reserves nothing, so a repo-root file named
+  // `pr-7` unwraps to exactly the PR spelling — the conflation the
+  // `file-<token>-<digest>` namespace exists to prevent, read back out of
+  // that namespace. A file-form stem starts with `file-` and can never
+  // match, so the whole file flow stays where it belongs.
+  if (/^pr-\d+$/.test(stem)) {
+    if (args.stateId !== undefined) {
+      throw new Error(
+        `cache-commit: --out names the PR cache ${inertText(stem, 80)}, ` +
+          'whose rounds hold the worktree lease and publish no ' +
+          '`cacheCandidateStateId` — drop `--state-id`, which belongs to ' +
+          'local and file rounds.',
+      );
+    }
+  } else if (args.stateId === undefined) {
+    throw new Error(
+      `cache-commit: --out names the ${inertText(stem, 80)} cache, a local ` +
+        "or file round — pass `--state-id <the plan's " +
+        'cacheCandidateStateId>`. Without it a concurrent same-target round ' +
+        'could have overwritten the candidate since the plan named it, and ' +
+        'nothing here would know.',
+    );
+  } else if (candidate['stateId'] !== args.stateId) {
+    throw new Error(
+      `cache-commit: the candidate's stateId ` +
+        `(${inertText(String(candidate['stateId'] ?? 'none'), 80)}) is not ` +
+        `the one the plan published (${inertText(args.stateId, 80)}) — a ` +
+        `concurrent same-target round overwrote it; refusing to promote a ` +
+        `tree this round never reviewed.`,
+    );
+  }
+
   // The ledger contributes ONLY the names it owns. Spreading it whole and
   // then overwriting the anchor names left a hole the deny list cannot see:
   // an anchor name THIS candidate happens not to carry (`fileVerdicts` on a
@@ -265,6 +322,13 @@ export const cacheCommitCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'The cache file to write (.qwen/review-cache/<target>.json)',
+      })
+      .option('state-id', {
+        type: 'string',
+        describe:
+          "The plan's `cacheCandidateStateId` — required for local and file " +
+          'rounds (any --out but `pr-<n>.json`), rejected for PR rounds: ' +
+          'refuse a candidate whose stateId is not this one',
       })
       .strict(),
   handler: (argv) => runCacheCommit(argv as unknown as CacheCommitArgs),

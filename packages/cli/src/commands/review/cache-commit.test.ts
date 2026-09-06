@@ -22,6 +22,7 @@ import {
   lstatSync,
   realpathSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,6 +35,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: vi.fn(),
 }));
 
+import yargs, { type Argv } from 'yargs';
 import { cacheCommitCommand } from './cache-commit.js';
 
 let dir: string;
@@ -132,7 +134,7 @@ describe('cache-commit', () => {
       { round: 1, verdict: 'Comment', findings: [] },
     );
     argv['out'] = join(dir, 'cache/src_foo.ts.json');
-    run(argv);
+    run({ ...argv, stateId: 's' });
     const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
       string,
       unknown
@@ -198,7 +200,7 @@ describe('cache-commit', () => {
       { round: 1, verdict: 'Comment', findings: [] },
     );
     argv['out'] = join(dir, 'cache/local.json');
-    run(argv);
+    run({ ...argv, stateId: 's' });
     const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
       string,
       unknown
@@ -284,7 +286,7 @@ describe('cache-commit', () => {
       { lastModelId: 'm1', round: 3, verdict: 'Approve', findings: [] },
     );
     argv['out'] = join(dir, 'cache/local.json');
-    run(argv);
+    run({ ...argv, stateId: 's1' });
     const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
       string,
       unknown
@@ -332,7 +334,7 @@ describe('cache-commit', () => {
       { lastModelId: 'm1' },
     );
     argv['out'] = join(dir, 'cache/local.json');
-    run(argv);
+    run({ ...argv, stateId: 's' });
     const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
       string,
       unknown
@@ -560,6 +562,134 @@ describe('cache-commit', () => {
     }
   });
 
+  it('binds the promotion to the plan\u2019s stateId when --state-id is passed', () => {
+    // The orchestrator's CHECK and this command's read were two reads of one
+    // stable path; a concurrent same-target round overwrote the file between
+    // them. The comparison now happens on the bytes the command promotes.
+    const argv = seed(
+      { v: 1, target: 'local', headSha: 'h', files: {}, stateId: 's1' },
+      { round: 1, verdict: 'Comment', findings: [] },
+    );
+    argv['out'] = join(dir, 'cache/local.json');
+    expect(() => run({ ...argv, stateId: 's2' })).toThrow(
+      /is not the one the plan published/,
+    );
+    expect(existsSync(argv['out'])).toBe(false);
+    run({ ...argv, stateId: 's1' });
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['stateId']).toBe('s1');
+  });
+
+  it('spells the flag --state-id on the command line and stateId in the handler', () => {
+    // The handler is driven directly above; this pins the one seam it
+    // bypasses — yargs' hyphen-to-camel mapping — so a renamed option cannot
+    // ship green.
+    const parsed = (cacheCommitCommand.builder as (y: Argv) => Argv)(
+      yargs([]),
+    ).parseSync([
+      '--candidate',
+      'c.json',
+      '--ledger',
+      'l.json',
+      '--out',
+      'o.json',
+      '--state-id',
+      's1',
+    ]);
+    expect(parsed['stateId']).toBe('s1');
+  });
+
+  it('refuses a local promotion WITHOUT --state-id — decided by --out, not the candidate', () => {
+    // The flag is not optional for the flow that needs it: a local round
+    // takes no lease, and an omitted flag is the unchecked promotion R24-2
+    // is about. Which flow it is comes from `--out`, whose spelling the
+    // cache's naming contract has just been checked against — NOT from the
+    // candidate file, which this command's header calls tamperable: a
+    // stripped `stateId` there must not read as "a PR round" and promote
+    // unbound.
+    const withField = seed(
+      { v: 1, target: 'local', headSha: 'h', files: {}, stateId: 's1' },
+      { round: 1, verdict: 'Comment', findings: [] },
+    );
+    withField['out'] = join(dir, 'cache/local.json');
+    expect(() => run(withField)).toThrow(/pass .--state-id/);
+    expect(existsSync(withField['out'])).toBe(false);
+
+    const stripped = seed(
+      { v: 1, target: 'local', headSha: 'h', files: {} },
+      { round: 1, verdict: 'Comment', findings: [] },
+    );
+    stripped['out'] = join(dir, 'cache/local.json');
+    expect(() => run(stripped)).toThrow(/pass .--state-id/);
+    expect(existsSync(stripped['out'])).toBe(false);
+  });
+
+  it('keeps a file review local even when its token spells a PR target', () => {
+    // The file form's token is a flattened source path and the token space
+    // reserves nothing: a repo-root file named `pr-7` unwraps to exactly
+    // the PR spelling. Reading the flow off the unwrapped token would send
+    // that review down the PR branch — `--state-id` refused, then promoted
+    // unbound — which is the conflation the `file-<token>-<digest>` name
+    // exists to prevent.
+    const argv = seed(
+      {
+        v: 1,
+        target: 'pr-7',
+        source: 'pr-7',
+        headSha: 'h',
+        files: {},
+        stateId: 's1',
+      },
+      { round: 1, verdict: 'Comment', findings: [] },
+    );
+    const digest = createHash('sha256')
+      .update('pr-7')
+      .digest('hex')
+      .slice(0, 8);
+    argv['out'] = join(dir, `cache/file-pr-7-${digest}.json`);
+    // The flag is REQUIRED here, not rejected…
+    expect(() => run(argv)).toThrow(/pass .--state-id/);
+    expect(existsSync(argv['out'])).toBe(false);
+    // …and it binds, exactly as it does for any other file review.
+    expect(() => run({ ...argv, stateId: 's2' })).toThrow(
+      /is not the one the plan published/,
+    );
+    run({ ...argv, stateId: 's1' });
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['stateId']).toBe('s1');
+  });
+
+  it('refuses --state-id on a PR promotion, and says which flow owns it', () => {
+    // The other direction of the same binding: a PR round holds the
+    // worktree lease and publishes no `cacheCandidateStateId`, so a flag
+    // here is an orchestrator error — and reporting it as a stateId
+    // MISMATCH would tell the operator about a concurrent round that never
+    // happened, and lose the PR cache write to a phantom.
+    const argv = seed(
+      { v: 1, target: 'pr-7', lastCommitSha: 'h', fileVerdicts: {} },
+      { round: 1 },
+    );
+    expect(() => run({ ...argv, stateId: 's1' })).toThrow(/drop .--state-id/);
+    expect(existsSync(argv['out'])).toBe(false);
+  });
+
+  it('a PR candidate, which carries no stateId, commits without --state-id', () => {
+    // Absent is the normal state there: the PR flow's lease already excludes
+    // the concurrent run the flag guards against.
+    const argv = seed(
+      { v: 1, target: 'pr-7', lastCommitSha: 'h', fileVerdicts: {} },
+      { round: 1 },
+    );
+    run(argv);
+    expect(existsSync(argv['out'])).toBe(true);
+  });
+
   it('refuses to promote a file candidate into another source path\u2019s cache', () => {
     // `src/foo.ts` and `src_foo.ts` flatten to one token; the digest in the
     // file-form name is the only thing that tells the two caches apart.
@@ -575,7 +705,9 @@ describe('cache-commit', () => {
       { round: 1 },
     );
     argv['out'] = join(dir, 'cache/file-src_foo.ts-00000000.json');
-    expect(() => run(argv)).toThrow(/different source path/);
+    expect(() => run({ ...argv, stateId: 's' })).toThrow(
+      /different source path/,
+    );
     expect(existsSync(argv['out'])).toBe(false);
   });
 });
