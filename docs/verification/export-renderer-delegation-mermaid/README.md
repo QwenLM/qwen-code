@@ -2,9 +2,9 @@
 
 **Audience:** an agent or person on a machine that can run `npm ci`, the
 web-templates esbuild build, and vitest. The machine that wrote this change runs
-none of them, so **every number below that is not marked "measured here" is
-unverified**, and the two byte constants in `build.mjs` are deliberately left
-loose until someone runs §2.
+none of them, so **every number below that is not marked "measured here" or
+attributed to a CI run is unverified**. §2 has since been answered by this PR's
+own CI and the byte constants are ratcheted; the rest still needs a human.
 
 ```bash
 git clone --depth=1 --branch fix/export-renderer-delegation https://github.com/QwenLM/qwen-code.git
@@ -23,48 +23,46 @@ numbers that document would be corrected to. Fix it after §2 below produces the
 
 ## 1. What changed, and what each part rests on
 
-| Change | Rests on | Falsifiable by |
-| --- | --- | --- |
-| `mermaid` resolved to a stub in the document build, added to `FORBIDDEN_DOCUMENT_INPUTS` | document mode never reaching `MermaidBlock` after the `CodeBlock` guard | §3: a mermaid fence in an export that renders anything other than a plain `<pre>` |
-| `QWEN_EXPORT_RENDERER_IDENTITY` / `_INTEGRITY` delegation | the envelope identity, the URL and the SRI hash all describing one published asset | §4: an export from a CI build that shows the "incompatible renderer version" page |
-| `react-markdown` override to `^9` | `@datafe-open/markdown-chart-react` using only `createElement(ReactMarkdown, { components }, source)` | §5: a chart block that throws in the interactive app |
+| Change                                                                                   | Rests on                                                                                              | Falsifiable by                                                                    |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `mermaid` resolved to a stub in the document build, added to `FORBIDDEN_DOCUMENT_INPUTS` | document mode never reaching `MermaidBlock` after the `CodeBlock` guard                               | §3: a mermaid fence in an export that renders anything other than a plain `<pre>` |
+| `QWEN_EXPORT_RENDERER_IDENTITY` / `_INTEGRITY` delegation                                | the envelope identity, the URL and the SRI hash all describing one published asset                    | §4: an export from a CI build that shows the "incompatible renderer version" page |
+| `react-markdown` override to `^9`                                                        | `@datafe-open/markdown-chart-react` using only `createElement(ReactMarkdown, { components }, source)` | §5: a chart block that throws in the interactive app                              |
 
-## 2. Re-measure and ratchet the budget — the first ask
+## 2. The budget — measured, ratcheted, still worth re-checking
 
-`packages/web-templates/src/export-html/build.mjs` still carries
-`DOCUMENT_RUNTIME_WARNING_BYTES = 7_300_000` and `MAX_DOCUMENT_RUNTIME_BYTES =
-7_400_000`, measured by a reviewer on #11038 **before** mermaid was removed. This
-change should drop the asset substantially, so those two constants are now a
-ratchet with slack in it. They were not lowered here because lowering them
-without a measurement risks failing every build; that is the trade this section
-exists to close.
+**This section is answered.** The `Lint & Static` lane on PR #11167 printed the
+build's own numbers at commit `69bd8cfb`:
+
+```
+Document export top inputs (pre-minify bytes): first-party 3733340, lucide-react 1574512,
+  katex 601155, react-dom 545403, micromark-core-commonmark 114773, tailwind-merge 105606,
+  micromark 70253, @datafe-open/markdown-chart-echarts 69449
+Document export runtime is 4083810 bytes
+Document export delegates its renderer to
+  https://unpkg.com/@qwen-code/qwen-code@0.23.1-preview.0/export-transcript-document.js
+  (this build's own asset is 0.23.0+a669af2290f8c73b)
+```
+
+`mermaid`, `@mermaid-js/parser`, `cytoscape` and `lodash-es` are all gone from
+the top inputs, and the runtime fell 7,275,173 → 4,083,810 bytes (−44%). The two
+constants in `build.mjs` are ratcheted to 4,100,000 / 4,200,000 accordingly, and
+the delegation log line confirms the identity split behaves as designed in a
+real build.
+
+What is still worth doing on a build-capable machine:
 
 ```bash
 cd packages/web-templates && node src/export-html/build.mjs
 ```
 
-Report both printed lines verbatim:
-
-- `Document export runtime is N bytes`
-- `Document export top inputs (pre-minify bytes): …`
-
-Then set the two constants from the measured `N` — the file's own convention is a
-small headroom over the measurement, not a percentage widening — and say in
-`results.md` which values you chose.
-
-**What "good" looks like:** a direction, not a target. `mermaid` (~2.88 MB
-pre-minify), `@mermaid-js/parser` (~1.37 MB) and `cytoscape` (~1.11 MB) should be
-gone from the top-inputs line entirely, and `lodash-es` should shrink or vanish
-with them. Those three figures are quoted from the metafile a reviewer measured
-on #11038's branch, not re-measured here. If `N` did not move by roughly that
-order, the stub did not take effect — check the `FORBIDDEN_DOCUMENT_INPUTS`
-throw fired rather than assuming the number.
-
-The largest single remaining component is expected to be the 1,440,050 chars of
-base64 KaTeX `@font-face` inside the inlined stylesheet (a reviewer's figure from
-#11038, again not re-measured). Math is deliberately still rendered — see the
-docblock in `src/document-mermaid-stub.ts` for why — but if §2's `N` is dominated
-by that block, say so: it is the next decision, and it is not this PR's.
+Confirm the same two lines locally — the numbers above come from one CI run on
+one commit, not from a repeated measurement — and report any drift. The largest
+remaining component is expected to be the base64 KaTeX `@font-face` block inside
+the inlined stylesheet (a reviewer's figure from #11038, not re-measured here).
+Math is deliberately still rendered; see the docblock in
+`src/document-mermaid-stub.ts` for why. If that block dominates what is left, say
+so — it is the next decision, and it is not this PR's.
 
 ## 3. Mermaid in an exported document
 
@@ -80,7 +78,7 @@ Testing").
 Then the product path: export a transcript containing a ```mermaid fence and open
 the file. Expected: the fence renders as a plain `<pre>` holding its own mermaid
 source, selectable and findable with the browser's own search — the same
-degradation document mode already applies to syntax highlighting. Expected *not*
+degradation document mode already applies to syntax highlighting. Expected _not_
 to happen: an empty box, a "Mermaid render failed" label, or a diagram.
 
 The interactive app must be unaffected: the same fence in the web shell still
@@ -134,12 +132,10 @@ cd packages/web-shell && npx vitest run client/components/messages
 ```
 
 Then exercise a chart block (an ```echarts-fulldata fence) in the interactive
-app. `@datafe-open/markdown-chart-react` declares `react-markdown@^10.1.0` and
-now receives 9.1.0; its only use of the library is
-`createElement(ReactMarkdown, { components }, props.source)` (read out of its
-published `dist/index.js`), and web-shell imports `MarkdownChartBlock`,
-`MarkdownChartProvider`, `createMarkdownChartComponents` and
-`isRegisteredChartLanguage` from it — not the `MarkdownChart` component that
+app. `@datafe-open/markdown-chart-react`declares`react-markdown@^10.1.0`and
+now receives 9.1.0; its only use of the library is`createElement(ReactMarkdown, { components }, props.source)`(read out of its
+published`dist/index.js`), and web-shell imports `MarkdownChartBlock`,
+`MarkdownChartProvider`, `createMarkdownChartComponents`and`isRegisteredChartLanguage`from it — not the`MarkdownChart` component that
 holds that call. If a chart still renders, the override is safe.
 
 ## 6. What to report back

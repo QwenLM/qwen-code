@@ -40,12 +40,14 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 //   cd packages/web-templates && node src/export-html/build.mjs
 // (the build prints `Document export runtime is N bytes`.)
 //
-// Last measured at 7,275,173 bytes, with the echarts stub below in place, by a
-// reviewer building this branch locally (PR #11038). The prior CI measurement
-// on the same branch without that stub was 8,456,076. Re-measure and lower
-// these two again after any change to the document entry's dependencies.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 7_300_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 7_400_000;
+// Last measured at 4,083,810 bytes by the Lint & Static lane on PR #11167, with
+// the mermaid stub below in place; it was 7,275,173 before that stub (measured
+// by a reviewer on PR #11038) and 8,456,076 before the echarts one. Re-measure
+// and lower these two again after any change to the document entry's
+// dependencies — a cap left far above the measurement is a ratchet with enough
+// slack for a whole dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 4_100_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 4_200_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -74,13 +76,15 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'resolved to src/document-echarts-stub.ts by the strip plugin below.',
   },
   {
-    pattern: /(^|\/)node_modules\/mermaid\//,
+    pattern: /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\//,
     why:
       'Exported transcripts render a ```mermaid fence as a plain <pre>, the ' +
       'same degradation CodeBlock already applies to syntax highlighting in ' +
       'document mode (#11091). Mermaid and its graph dependencies were the ' +
-      'largest remaining input at ~6 MB pre-minify; they are resolved to ' +
-      'src/document-mermaid-stub.ts by the strip plugin below.',
+      'largest remaining input at ~6 MB pre-minify; `mermaid` is resolved to ' +
+      'src/document-mermaid-stub.ts by the strip plugin below, and its two ' +
+      'heaviest transitive graphs are named here too so neither can return ' +
+      'through another path — the same shape as the echarts/zrender rule.',
   },
   {
     pattern: /(^|\/)node_modules\/(codemirror|@codemirror)\//,

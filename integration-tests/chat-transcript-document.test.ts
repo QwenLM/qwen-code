@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { performance as nodePerformance } from 'node:perf_hooks';
@@ -43,6 +44,37 @@ const rendererAssetPath = resolve(
   'packages/web-templates/src/export-html/dist/export-transcript-document.js',
 );
 const rendererAsset = readFileSync(rendererAssetPath, 'utf8');
+
+// This gate has no network: it fulfils the renderer request itself with the
+// asset this build just produced. Since #11096 the document may instead pin the
+// SRI of an *already published* renderer (the delegation `build.mjs` reads from
+// QWEN_EXPORT_RENDERER_IDENTITY / _INTEGRITY, which CI sets while no release
+// containing #9812 is on npm), and those bytes cannot match the ones served
+// here by construction. Re-pin the document to the bytes actually served so the
+// integrity check still runs for real against real content, rather than being
+// defeated either way.
+//
+// What this deliberately does not cover: that the delegated hash matches the
+// published asset. Nothing offline can check that — it belongs to the release
+// smoke test #11096 calls for. A non-delegated build already carries this exact
+// value, so the rewrite is a no-op there.
+const servedRendererIntegrity = `sha384-${createHash('sha384')
+  .update(rendererAsset)
+  .digest('base64')}`;
+const RENDERER_INTEGRITY_ATTRIBUTE = /integrity="sha384-[A-Za-z0-9+/]+={0,2}"/;
+
+function pinToServedRenderer(html: string): string {
+  if (!RENDERER_INTEGRITY_ATTRIBUTE.test(html)) {
+    throw new Error(
+      'Transcript document is missing its renderer integrity attribute; the ' +
+        'gate can no longer prove the SRI check runs.',
+    );
+  }
+  return html.replace(
+    RENDERER_INTEGRITY_ATTRIBUTE,
+    `integrity="${servedRendererIntegrity}"`,
+  );
+}
 
 const expectedNetwork = JSON.parse(
   readFileSync(
@@ -450,7 +482,7 @@ describe('ExportTranscriptDocument browser gate', () => {
         ).memory?.usedJSHeapSize ?? 0,
     );
 
-    await page.setContent(html, { waitUntil: 'load' });
+    await page.setContent(pinToServedRenderer(html), { waitUntil: 'load' });
     await expect
       .poll(() => page.locator('body').getAttribute('data-render-complete'))
       .toBe('true');
@@ -470,9 +502,14 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(await expandAll.isDisabled()).toBe(true);
     await themeToggle.click();
     expect(await page.locator('html').getAttribute('class')).toContain('light');
-    await expect
-      .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
-      .toBeGreaterThan(0);
+    // Since #11091 a document does not render diagrams: mermaid is stubbed out
+    // of this bundle, and the fence degrades to its own source in a plain <pre>
+    // so it stays readable, selectable and findable. Math is deliberately kept,
+    // which is why `.katex` below still has to be there.
+    expect(await page.locator('div[class*="mermaidInline"]').count()).toBe(0);
+    expect(
+      await page.evaluate(() => globalThis.document.body.innerText),
+    ).toContain('graph TD; A[Export] --> B[Document]');
     expect(await page.locator('.katex').count()).toBeGreaterThan(0);
     expect(
       await page.locator('[data-agent-status]').count(),
@@ -601,9 +638,10 @@ describe('ExportTranscriptDocument browser gate', () => {
     for (const invalidDocument of invalidDocuments) {
       const page = await browser.newPage();
       const probe = await installNetworkAndCspProbe(page);
-      await page.setContent(replaceDocumentEnvelope(html, invalidDocument), {
-        waitUntil: 'load',
-      });
+      await page.setContent(
+        pinToServedRenderer(replaceDocumentEnvelope(html, invalidDocument)),
+        { waitUntil: 'load' },
+      );
       await expect
         .poll(() => page.locator('body').getAttribute('data-render-complete'))
         .toBe('error');
@@ -715,7 +753,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     const probe = await installNetworkAndCspProbe(page);
-    await page.setContent(html, { waitUntil: 'load' });
+    await page.setContent(pinToServedRenderer(html), { waitUntil: 'load' });
     await expect
       .poll(() => page.locator('body').getAttribute('data-render-complete'))
       .toBe('true');
