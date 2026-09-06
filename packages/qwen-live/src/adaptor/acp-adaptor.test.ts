@@ -222,7 +222,7 @@ describe('AcpAdaptor sessions and receipts', () => {
       const preflight = adaptor.preflight();
       // The old 10s budget would have rejected here; the widened budget
       // still lets a slow handshake finish.
-      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(29_000);
       resolveInitialize({ agentCapabilities: {}, authMethods: [] });
       await preflight;
     } finally {
