@@ -732,7 +732,7 @@ MR2A 落地后，`@qwen-code/webui` 只剩 HTML Export 的 legacy 回退这一�
 1. **无剩余产品消费者**：CLI `/export html`、Web API `session-export` 和 VS Code `/export html` 都无条件传入原始 records，因此 legacy 分支在产品路径上不可达；
 2. **接口收紧**：`toHtml(sessionData, originalRecords)` 的第二参改为必填，`loadHtmlTemplate` 与 `injectDataIntoHtmlTemplate` 连同 UMD/CDN 模板一并删除，document renderer 成为唯一 HTML 导出实现；
 3. **回退被显式拒绝而非静默降级**：integration runner 遇到 legacy exported JSONL 时直接报错，要求提供 source ChatRecord JSONL，避免用一条未经 allowlist 的路径渲染旧文件；
-4. **防回归**：CI 增加 `check:no-webui`，拒绝重新引入该 package 或其依赖。
+4. **一次性确认**：退役合并前扫描全仓，确认没有剩余产品依赖或 workspace 路径引用。
 
 本节只覆盖 legacy HTML renderer。VS Code legacy `MessageList` 不在此范围内，其移除仍受 §15 的观察期与删除证据约束。
 
