@@ -342,7 +342,7 @@ export type DaemonUnrecognizedDiagnosticReason =
 
 /**
  * Membership over the runtime reason array, exported so every routing guard
- * (reducer sidechannel here, provider flush/drop guard pair in webui)
+ * (reducer sidechannel here, provider flush/drop guard pair in Web Shell)
  * classifies against one source. A reason added to the array routes onto the
  * sidechannel everywhere without hand-editing each consumer (#8823 review).
  */

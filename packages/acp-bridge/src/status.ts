@@ -25,6 +25,7 @@ export interface ServeWorkspaceRuntimeStatus {
   runtimeEpoch: number;
   capabilities?: {
     mcp?: ServeWorkspaceRuntimeCapabilityStatus;
+    skills?: ServeWorkspaceRuntimeCapabilityStatus;
   };
 }
 
@@ -546,6 +547,7 @@ export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
 }

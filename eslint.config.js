@@ -12,8 +12,6 @@ import prettierConfig from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
-// For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
-import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
@@ -421,6 +419,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      // web-templates' export-html template build scripts also run with `node`.
+      'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
@@ -505,11 +505,6 @@ export default tseslint.config(
   // VS Code IDE companion - out of scope for no-console rule
   {
     files: ['packages/vscode-ide-companion/**/*.ts', 'packages/vscode-ide-companion/**/*.tsx', 'packages/vscode-ide-companion/**/*.js'],
-    rules: { 'no-console': 'off' },
-  },
-  // WebUI package - UI component library with Storybook
-  {
-    files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
     rules: { 'no-console': 'off' },
   },
   // Chrome extension (chrome-extension) - the MV3 background service
@@ -612,5 +607,4 @@ export default tseslint.config(
       'react/react-in-jsx-scope': 'off',
     },
   },
-  storybook.configs['flat/recommended'],
 );

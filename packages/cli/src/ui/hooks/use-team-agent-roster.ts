@@ -5,19 +5,23 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import type { AgentTask } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import {
   AgentStatus,
-  TeamEventType,
   isTerminalStatus,
-  listTasks,
-  onTasksUpdated,
-  type AgentTask,
-  type Config,
-  type SwarmTask,
-  type TeamManager,
+} from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import {
+  TeamEventType,
   type TeammateExitedEvent,
   type TeammateStatusChangeEvent,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/agents/team/team-events.js';
+import {
+  listTasks,
+  onTasksUpdated,
+} from '@qwen-code/qwen-code-core/agents/team/tasks.js';
+import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
+import type { SwarmTask } from '@qwen-code/qwen-code-core/agents/team/types.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 
 export interface TeamAgentDialogEntry extends AgentTask {
   teamName: string;

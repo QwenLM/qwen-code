@@ -4399,6 +4399,140 @@ describe('DingtalkChannel quoted media', () => {
     ).onMessage(downstream);
   }
 
+  function sendDirectText(
+    channel: DingtalkChannelInstance,
+    content: string,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'direct-text',
+        conversationType: '1',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        msgtype: 'text',
+        text: { content },
+      }),
+      headers: { messageId: 'direct-text' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
+  it('keeps user-authored DingTalk text behind the configured prefix', async () => {
+    // The mirror of the media exemption: text the user typed must never be
+    // exempted, or the configured prefix is defeated for the whole adapter.
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    sendDirectText(channel, '/review inspect this');
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('/review inspect this');
+    expect(envelope.syntheticText).toBeUndefined();
+    expect(envelope.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('exempts a captionless DingTalk media message from the prefix', async () => {
+    mockMediaDownload('image/png', new Uint8Array([1, 2, 3]));
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    sendDirectMedia(channel, 'picture', { downloadCode: 'direct-picture' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.syntheticText).toBe(true);
+  });
+
+  it('marks readable chat records as user text and exempts only the empty placeholder', async () => {
+    const readable = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(readable, 'chatRecord', {
+      chatRecord: [{ senderName: 'Alice', content: 'inspect production' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(readable.handleInbound).toHaveBeenCalledOnce();
+    });
+    const readableEnvelope = vi.mocked(readable.handleInbound).mock
+      .calls[0]![0];
+    expect(readableEnvelope.syntheticText).toBeUndefined();
+
+    const empty = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(empty, 'chatRecord', {});
+
+    await vi.waitFor(() => {
+      expect(empty.handleInbound).toHaveBeenCalledOnce();
+    });
+    const emptyEnvelope = vi.mocked(empty.handleInbound).mock.calls[0]![0];
+    expect(emptyEnvelope.text).toBe('(chat record)');
+    expect(emptyEnvelope.syntheticText).toBe(true);
+  });
+
+  it.each([
+    ['an empty rich-text message', 'richText', { richText: [] }],
+    ['a picture without a download code', 'picture', {}],
+  ])(
+    'does not exempt %s from the configured prefix',
+    async (_label, msgtype, content) => {
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, msgtype, content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      expect(envelope.syntheticText).toBeUndefined();
+    },
+  );
+
+  it.each([
+    {
+      label: 'a transcribed voice message stays gated',
+      content: {
+        downloadCode: 'direct-audio',
+        recognition: 'please review the build failure',
+      },
+      text: 'please review the build failure',
+      synthetic: undefined,
+    },
+    {
+      label: 'an untranscribed voice message runs as media',
+      content: { downloadCode: 'direct-audio' },
+      // The placeholder is cleared once the attachment is downloaded.
+      text: '',
+      synthetic: true,
+    },
+  ])(
+    'under a configured prefix, $label',
+    async ({ content, text, synthetic }) => {
+      // A transcript is the user's own words, so it carries the prefix like
+      // any other message; only the `(audio)` placeholder is adapter text.
+      mockMediaDownload('audio/amr', new Uint8Array([1, 2, 3]));
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, 'audio', content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope.text).toBe(text);
+      expect(envelope.syntheticText).toBe(synthetic);
+    },
+  );
+
   it('downloads every picture in one richText callback', async () => {
     const downloadCodes: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(
@@ -4725,6 +4859,7 @@ describe('DingtalkChannel quoted media', () => {
     expect(envelope).toMatchObject({
       text: '(image)',
       referencedText: '[image]',
+      syntheticText: true,
     });
     expect(envelope.attachments).toHaveLength(2);
     expect(envelope.attachments).toEqual([

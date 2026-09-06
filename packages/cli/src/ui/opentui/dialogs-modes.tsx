@@ -20,15 +20,15 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import {
   applyReasoningEffort,
-  APPROVAL_MODES,
   REASONING_EFFORT_TIERS,
-  type ApprovalMode,
-  type OutputStyleDefinition,
-  type ReasoningEffort,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
