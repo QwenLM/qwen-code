@@ -83,8 +83,8 @@ Evidence: the thread JSON files after the run, the two agents' transcript slices
 
 ### Step 8 — Dispatcher reliability
 
-Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/cancel (`cancelling` state, runtime abort); restart recovery (`running` → reconcile → resume once → terminal on second failure); stall sweeper; full outbox replay on startup.
-Gate: failure injection at each named point, as separate tests: enqueue returns false; process exit after `acceptedMessageIds` write; process exit after transcript record but before `consumedMessageIds` write; process exit after parent apply but before acknowledge; daemon restart with one `running` and one `queued` run; N-minute stall. Each test asserts the thread file's final state and that no message id is both unconsumed and unbooked.
+Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/cancel (`cancelling` state, runtime abort); restart recovery (`running` → reconcile → resume once → terminal on second failure); stale host-session binding replacement after a definitive resume failure; stall sweeper; full outbox replay on startup.
+Gate: failure injection at each named point, as separate tests: enqueue returns false; process exit after `acceptedMessageIds` write; process exit after transcript record but before `consumedMessageIds` write; process exit after parent apply but before acknowledge; daemon restart with one `running` and one `queued` run; a stored host session that cannot be resumed is replaced once; N-minute stall. Each test asserts the thread file's final state and that no message id is both unconsumed and unbooked.
 Evidence: the injection matrix as a table in the PR, one row per test, with the asserted final state.
 
 ### Step 9 — REST and Web Shell

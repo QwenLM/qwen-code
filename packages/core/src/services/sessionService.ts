@@ -2742,16 +2742,19 @@ export class SessionService {
    *
    * Same disk-walk shape as {@link findSessionTitlesByPrefix} /
    * {@link findSessionsByTitle}: `readdir` the chats dir, cap at the
-   * file-processing safety limit, then read only the first JSONL record for
-   * project membership. Title/prompt/message hydration is skipped entirely.
+   * file-processing safety limit, then read the first JSONL record for project
+   * membership. A requested source exclusion adds one bounded tail read;
+   * title/prompt/message hydration is still skipped.
    *
    * Still an O(n) disk walk — callers (and HTTP clients of
    * `GET .../session-info`) must not poll this in a tight loop.
    */
-  async getSessionInfoCounts(): Promise<SessionInfoCounts> {
+  async getSessionInfoCounts(
+    options: { excludeSourceType?: string } = {},
+  ): Promise<SessionInfoCounts> {
     const [active, archived] = await Promise.all([
-      this.countSessionsInState('active'),
-      this.countSessionsInState('archived'),
+      this.countSessionsInState('active', options.excludeSourceType),
+      this.countSessionsInState('archived', options.excludeSourceType),
     ]);
     return {
       active: active.count,
@@ -2763,6 +2766,7 @@ export class SessionService {
 
   private async countSessionsInState(
     archiveState: SessionArchiveState,
+    excludeSourceType?: string,
   ): Promise<{ count: number; truncated: boolean }> {
     const chatsDir = this.getChatsDirForState(archiveState);
     let fileNames: string[];
@@ -2803,6 +2807,13 @@ export class SessionService {
             firstRecord.sessionId,
             firstRecord.cwd,
           ))
+        ) {
+          continue;
+        }
+        if (
+          excludeSourceType !== undefined &&
+          this.extractCreationMetadataFromFile(filePath, records).sourceType ===
+            excludeSourceType
         ) {
           continue;
         }

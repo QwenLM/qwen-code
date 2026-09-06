@@ -16,6 +16,7 @@ import {
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
+  getWorkspaceSessionInfoForResponse,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
@@ -257,6 +258,9 @@ describe('mesh host session owner', () => {
     expect(liveResult.sessions.map((session) => session.sessionId)).toEqual([
       'default-session',
     ]);
+    await expect(
+      getWorkspaceSessionInfoForResponse(bridge, workspace),
+    ).resolves.toMatchObject({ active: 0, total: 0, live: 1 });
   });
 
   it('filters persisted hosts before paginating public catalogs', async () => {
@@ -306,6 +310,10 @@ describe('mesh host session owner', () => {
       { runtimeBaseDir: scratch, mergeLive: false },
     );
     expect(explicitMesh.sessions).toEqual([]);
+
+    await expect(
+      getWorkspaceSessionInfoForResponse(bridge, workspace),
+    ).resolves.toMatchObject({ active: 1, archived: 0, total: 1, live: 0 });
   });
 
   it('does not duplicate a resume that outlives its deadline', async () => {

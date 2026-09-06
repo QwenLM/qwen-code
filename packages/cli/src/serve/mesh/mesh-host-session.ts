@@ -12,8 +12,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
+import { MESH_HOST_SESSION_SOURCE_TYPE } from './mesh-session-source.js';
 
-export const MESH_HOST_SESSION_SOURCE_TYPE = 'mesh';
 const DEFAULT_MESH_KEEPALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_MESH_RESUME_TIMEOUT_MS = 70_000;
 
