@@ -284,10 +284,24 @@ describe('release workflow', () => {
   };
 
   it('cleans every shared ECS workspace before checkout', () => {
-    const checkoutJobs = Object.entries(releaseYaml.jobs).filter(([, job]) =>
+    // The subject set has to be derived from a property independent of the
+    // wipe itself: selecting on "has a Restore workspace ownership step"
+    // would filter out any newly added pool-routed job before an assertion
+    // ever ran. The pool marker is what makes state survive across jobs, and
+    // it cannot be swapped for the hosted label because every pool-routed
+    // runs-on expression names 'ubuntu-latest' as its fallback branch.
+    const isPoolRouted = (job) =>
+      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+    const wipesWorkspace = (job) =>
       (job.steps ?? []).some(
         (step) => step.name === 'Restore workspace ownership',
-      ),
+      );
+    const checkoutJobs = Object.entries(releaseYaml.jobs).filter(
+      ([, job]) =>
+        (job.steps ?? []).some((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
+        ) &&
+        (isPoolRouted(job) || wipesWorkspace(job)),
     );
 
     expect(checkoutJobs.map(([id]) => id)).toEqual([
@@ -321,6 +335,14 @@ describe('release workflow', () => {
       // ladder uniformly from all nine copies keeps every substring and
       // equality-across-copies pin green while reopening the incident.
       expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
+    }
+    // Pool-routed jobs inherit root-owned leftovers whether or not they
+    // check out, so the exemption above must never extend to them.
+    for (const [id, job] of Object.entries(releaseYaml.jobs)) {
+      if (!isPoolRouted(job)) {
+        continue;
+      }
+      expect(wipesWorkspace(job), id).toBe(true);
     }
   });
 
