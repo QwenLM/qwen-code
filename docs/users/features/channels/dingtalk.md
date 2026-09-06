@@ -65,10 +65,11 @@ Or define them in the `env` section of `settings.json`:
 
 ### Interactive Cards
 
-Add an `interactiveCards` object to opt in to DingTalk status and question
-cards. Omitting the object disables interactive cards. When the object is
-present, the overall switch and both card types default to enabled, and
-question cards time out after 270,000 milliseconds (270 seconds).
+Add an `interactiveCards` object to opt in to DingTalk status, question, and
+permission cards. Omitting the object disables interactive cards. When the
+object is present, the overall switch and every card type default to enabled,
+and question and permission cards time out after 270,000 milliseconds (270
+seconds).
 
 ```json
 {
@@ -83,6 +84,10 @@ question cards time out after 270,000 milliseconds (270 seconds).
         "questionCard": {
           "enabled": true,
           "timeoutMs": 270000
+        },
+        "permissionCard": {
+          "enabled": true,
+          "timeoutMs": 270000
         }
       }
     }
@@ -91,13 +96,23 @@ question cards time out after 270,000 milliseconds (270 seconds).
 ```
 
 Set `interactiveCards.enabled` to `false` to disable all interactive cards.
-Use `statusCard.enabled` or `questionCard.enabled` to disable one card type,
-and set `questionCard.timeoutMs` to a finite positive number to change how long
-Qwen Code waits for a question-card response. Values above 2,147,483,647
-milliseconds (about 24.8 days) are capped at that maximum. Interactive cards
-are configured through `settings.json` or the management API; the Web Shell
-channel editor does not render them, and it preserves the stored object when
-you edit other fields.
+Use `statusCard.enabled`, `questionCard.enabled`, or `permissionCard.enabled`
+to disable one card type, and set `questionCard.timeoutMs` or
+`permissionCard.timeoutMs` to a finite positive number to change how long
+Qwen Code waits for a question- or permission-card response. Values above
+2,147,483,647 milliseconds (about 24.8 days) are capped at that maximum.
+Interactive cards are configured through `settings.json` or the management
+API; the Web Shell channel editor does not render them, and it preserves the
+stored object when you edit other fields.
+
+When permission cards are enabled and a tool needs approval during an attended
+DingTalk run, Qwen Code sends a native interactive card with the decisions the
+permission request actually advertised — allow once, always allow (only when
+the request offers a persistent grant), and deny. Only the member who started
+the run can act on the card, the request settles exactly once, and a settled,
+cancelled, or expired card becomes read-only. The `/approve`,
+`/approve-always`, and `/deny` text commands remain available as the fallback
+whenever permission cards are disabled or card delivery fails.
 
 ### Connection Recovery
 
