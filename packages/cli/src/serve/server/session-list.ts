@@ -16,6 +16,7 @@ import {
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
+  type SessionListItem,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -1051,6 +1052,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
+    if (session.sourceType === 'mesh') return false;
     if (!matchesSessionMetadataSource(session, options)) return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
@@ -1243,6 +1245,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const matches = [...bySessionId.values()]
     .filter(
       (session) =>
+        session.sourceType !== 'mesh' &&
         (filter.parentSessionId === undefined ||
           session.parentSessionId === filter.parentSessionId) &&
         matchesSessionMetadataSource(session, filter),
@@ -1334,12 +1337,7 @@ export async function listWorkspaceSessionsForResponse(
       }),
   );
   readOptions.signal?.throwIfAborted();
-  return {
-    ...result,
-    sessions: result.sessions.filter(
-      (session) => session.sourceType !== 'mesh',
-    ),
-  };
+  return result;
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(
@@ -1402,12 +1400,29 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   const sessionService = new SessionService(workspaceCwd);
   const archiveState = options?.archiveState ?? 'active';
-  const persisted = await sessionService.listSessions({
-    cursor: numericCursor,
-    size: pageSize,
-    archiveState,
-    ...(readOptions.signal ? { signal: readOptions.signal } : {}),
-  });
+  let persistedCursor = numericCursor;
+  const persistedItems: SessionListItem[] = [];
+  let nextPersistedCursor: number | undefined;
+  do {
+    const persistedPage = await sessionService.listSessions({
+      cursor: persistedCursor,
+      size: pageSize - persistedItems.length,
+      archiveState,
+      ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+    });
+    persistedItems.push(
+      ...persistedPage.items.filter((item) => item.sourceType !== 'mesh'),
+    );
+    nextPersistedCursor = persistedPage.nextCursor;
+    persistedCursor = nextPersistedCursor;
+  } while (
+    persistedItems.length < pageSize &&
+    nextPersistedCursor !== undefined
+  );
+  const persisted = {
+    items: persistedItems,
+    nextCursor: nextPersistedCursor,
+  };
   readOptions.signal?.throwIfAborted();
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
@@ -1436,7 +1451,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return { sessions, nextCursor };
   }
 
-  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  const liveSessions = bridge
+    .listWorkspaceSessions(workspaceCwd)
+    .filter((session) => session.sourceType !== 'mesh');
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
