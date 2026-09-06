@@ -17009,7 +17009,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('flushes the live recording before reading the latest persisted page', async () => {
+  it('reads the live transcript page through the owner write barrier', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
     const recording = innerConfig.getChatRecordingService();
     const readPage = vi.fn().mockResolvedValue({
@@ -17038,13 +17038,73 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     );
 
-    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(recording?.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(recording?.flush).not.toHaveBeenCalled();
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
       direction: 'backward',
       limit: 100,
       maxBytes: 4 * 1024 * 1024,
     });
     expect(result['hasMore']).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('serializes live transcript reads behind in-flight tool-result writes', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    let releaseBarrier!: () => void;
+    let markBarrierEntered!: () => void;
+    const barrierEntered = new Promise<void>((resolve) => {
+      markBarrierEntered = resolve;
+    });
+    const barrierGate = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    recording.runWithWriteBarrier.mockImplementation(
+      async <T>(operation: () => Promise<T>): Promise<T> => {
+        markBarrierEntered();
+        await barrierGate;
+        return operation();
+      },
+    );
+
+    let readStarted = false;
+    const readPage = vi.fn().mockImplementation(async () => {
+      readStarted = true;
+      return {
+        sessionId: VALID_SESSION_ID,
+        records: [],
+        hasMore: false,
+        startTime: 'start',
+        lastUpdated: 'end',
+      };
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const transcriptPromise = agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      },
+    );
+    await barrierEntered;
+    expect(readStarted).toBe(false);
+
+    releaseBarrier();
+    await transcriptPromise;
+    expect(readPage).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -17249,7 +17309,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('does not finalize dangling transcript calls when a prompt settles during the read', async () => {
+  it('does not finalize dangling transcript calls when a turn settles during the read', async () => {
     await setupSessionMocks(VALID_SESSION_ID);
     const page = {
       sessionId: VALID_SESSION_ID,
@@ -17268,18 +17328,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let finishPrompt: ((value: unknown) => void) | undefined;
-    lastSessionMock!.prompt.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishPrompt = resolve;
-        }),
-    );
-
-    const prompt = agent.prompt({ sessionId: VALID_SESSION_ID, prompt: [] });
-    await vi.waitFor(() => expect(lastSessionMock!.prompt).toHaveBeenCalled());
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
     readPage.mockImplementationOnce(async () => {
-      finishPrompt?.({ stopReason: 'end_turn' });
+      lastSessionMock!.isTurnIdle.mockReturnValue(true);
       await new Promise<void>((resolve) => setImmediate(resolve));
       return page;
     });
@@ -17293,7 +17344,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ finalizeDangling: false }),
     );
 
-    await prompt;
     await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
       sessionId: VALID_SESSION_ID,
     });

@@ -9025,41 +9025,44 @@ class QwenAgent implements Agent {
 
         try {
           const readTranscriptPage = async (settings: LoadedSettings) => {
-            if (rawDirection === 'backward') {
-              await this.sessions
-                .get(sessionId)
-                ?.getConfig()
-                .getChatRecordingService()
-                ?.flush();
-            }
-            const reader = new SessionTranscriptReader(cwd);
-            const activePromptBeforeRead =
-              this.activePromptCalls.has(sessionId);
-            const page = await reader.readPage(sessionId, {
-              ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
-              ...(typeof rawBeforeRecordId === 'string'
-                ? { beforeRecordId: rawBeforeRecordId }
-                : {}),
-              ...(typeof rawAtRecordId === 'string'
-                ? { atRecordId: rawAtRecordId }
-                : {}),
-              ...(typeof rawSnapshot === 'string'
-                ? { snapshot: rawSnapshot }
-                : {}),
-              ...(rawDirection === 'backward'
-                ? { direction: rawDirection }
-                : {}),
-              ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
-              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
-            });
+            const liveSession = this.sessions.get(sessionId);
+            const recording = liveSession
+              ?.getConfig()
+              .getChatRecordingService();
+            const turnIdleBeforeRead = liveSession?.isTurnIdle() ?? true;
+            const readPersistedPage = async () => {
+              const reader = new SessionTranscriptReader(cwd);
+              return await reader.readPage(sessionId, {
+                ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+                ...(typeof rawBeforeRecordId === 'string'
+                  ? { beforeRecordId: rawBeforeRecordId }
+                  : {}),
+                ...(typeof rawAtRecordId === 'string'
+                  ? { atRecordId: rawAtRecordId }
+                  : {}),
+                ...(typeof rawSnapshot === 'string'
+                  ? { snapshot: rawSnapshot }
+                  : {}),
+                ...(rawDirection === 'backward'
+                  ? { direction: rawDirection }
+                  : {}),
+                ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+                maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+              });
+            };
+            const page =
+              recording !== undefined
+                ? await recording.runWithWriteBarrier(readPersistedPage)
+                : await readPersistedPage();
             const config = await this.getTranscriptReplayConfig(cwd, settings);
             const replay = await replayTranscriptRecordPage({
               sessionId,
               page,
               config,
-              finalizeDangling:
-                !activePromptBeforeRead &&
-                !this.activePromptCalls.has(sessionId),
+              finalizeDangling: this.finalizeDanglingForRestore(
+                liveSession,
+                turnIdleBeforeRead,
+              ),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
               logger: debugLogger,
