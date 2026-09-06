@@ -90,3 +90,16 @@ One more decision that predates all of these: the relationship between this subs
 - Runtime preparation was merged in the order #11200 → #11204 → #11202. The expected final conflict keeps both contracts: structured external input and typed continuation outcomes. Those source PRs remain open as drafts and are not merged separately to `main`.
 - Merge `main` into the mesh branch when it falls behind; never rebase (repo policy, and the force-push bot).
 - Keep the design doc and this file current in the same commit as the code that changes them.
+
+## 5. Watch list — what the implementer keeps in view at every step
+
+Ordered by how much damage a miss does. Each item names the step where it is proven.
+
+1. **The close contract (§6) is the first thing a live model can break.** A run must end with `thread_wait`, `thread_block`, or `thread_review`; a plain final answer is `unclosed`. Nothing before step 7 proves a model will do this. Run step 7 as early as the plan allows, and record every prompt change together with the failure it fixed.
+2. **Step 3 is where later bugs get blamed.** Sequence counter written before the thread file; outbox persisted before apply and acknowledged after; migration keeps the `.v0.json` backup until the migrated file reads back through the validator. Each has a crash-injection test in step 3's gate; do not weaken them to make the step land sooner.
+3. **Ambient binding lives inside `runBody`, and mutating tools re-check it.** The per-turn `runWithMeshRunContext` frame is the only hard boundary against wrong-thread actions; the prompt frame is advisory. Every mutating tool reads the ambient triple and then verifies the run is still `running` on that thread before writing (step 5).
+4. **No silent path.** Every admission result is persisted on the message and rendered; a quiescent thread with nothing runnable becomes `blocked`, never idle `in_progress`. Round 2 found more defects of this class than any other.
+5. **Runtime hot paths change in isolated commits.** `agent-core.ts`, `background-tasks.ts`, `background-agent-resume.ts`, `agent-headless.ts`, `agent.ts` are shared with Agent Team and every subagent. Keep each such change minimal, pair it with its own tests, and land it directly in #11206 rather than opening another delivery PR.
+6. **Trust labels are not boundaries.** Until §9.9 is decided, no prompt heading is called "trusted" and no code treats one as a policy input. Provenance is derived from the ambient run, never from model or HTTP input.
+7. **Product decisions stay open until decided.** §9.4, §9.5, §9.9, §9.10, §9.11, §9.12 and the #9402 relationship; the conservative defaults in §3 above apply meanwhile.
+8. **Read the CI of #11206 after every numbered step.** Local and source-branch tests are supporting evidence; only the whole delivery branch is the gate.
