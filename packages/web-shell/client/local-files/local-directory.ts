@@ -505,6 +505,13 @@ export class LocalDirectory {
         for await (const entry of dir.values()) {
           if (truncatedBy !== null) break;
           if (isDirectoryEntry(entry)) {
+            // Directory skeletons must consume the budget too, or a huge
+            // near-file-less tree can hang this one tool call.
+            if (filesExamined >= maxFiles) {
+              truncatedBy = 'files';
+              break;
+            }
+            filesExamined += 1;
             queue.push({ dir: entry, prefix: [...prefix, entry.name] });
             continue;
           }

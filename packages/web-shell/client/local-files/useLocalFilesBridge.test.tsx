@@ -640,6 +640,98 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('holds while resolving and restores once the blocker clears', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    };
+    const h = render({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    await h.flush();
+    // Pending judgement must not start a bridge (fail-open onto the primary
+    // mount is the trust-gate hole this closes).
+    expect(h.sockets).toHaveLength(0);
+
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    h.unmount();
+  });
+
+  it('a bystander tab disconnecting does not wipe the owner grant', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const lock = { held: false };
+    const locks: LockManagerLike = {
+      request: async (_name, options, callback) => {
+        if (lock.held && options.ifAvailable) return undefined;
+        lock.held = true;
+        try {
+          await callback({});
+        } finally {
+          lock.held = false;
+        }
+      },
+    };
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+
+    await act(async () => {
+      hB.get().disconnect();
+    });
+    await hB.flush();
+    // The bystander never persisted anything: the origin-global record is
+    // the OWNER's and must survive its disconnect.
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('reports start_failed when the lock request rejects outright', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+      locks: {
+        request: async () => {
+          throw new DOMException('blocked by policy', 'SecurityError');
+        },
+      },
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({ phase: 'failed' });
+    h.unmount();
+  });
+
   it('stops the running bridge when a blocker activates late', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const common = {

@@ -505,6 +505,17 @@ describe('LocalDirectory.search', () => {
     expect(result.hits).toEqual([]);
   });
 
+  it('counts directory skeletons against the search budget', async () => {
+    const root = new FakeDir('root');
+    // A huge near-file-less tree must not hang this one tool call.
+    for (const name of ['d1', 'd2', 'd3']) {
+      root.dirs.set(name, new FakeDir(name));
+    }
+    const result = await new LocalDirectory(root).search('x', { maxFiles: 2 });
+    expect(result.truncatedBy).toBe('files');
+    expect(result.hits).toEqual([]);
+  });
+
   it('skips undecodable files in search instead of scanning mojibake', async () => {
     const root = new FakeDir('root');
     root.files.set(

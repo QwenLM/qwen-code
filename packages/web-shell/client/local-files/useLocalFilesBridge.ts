@@ -432,9 +432,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // Invalidates any connect() still waiting on the picker, so a grant made
     // after the user asked to disconnect cannot start a bridge behind them.
     generationRef.current += 1;
+    // A bystander tab (parked held-elsewhere behind the owner's lock) never
+    // persisted anything of its own: clearing the origin-global store here
+    // would wipe the OWNER tab's grant while its bridge keeps running.
+    const bystander =
+      bridgeRef.current !== undefined &&
+      bridgeRef.current.getState().phase === 'held-elsewhere';
     stopBridge();
     handleRef.current = undefined;
-    void store?.clear();
+    if (!bystander) void store?.clear();
     setStatus(
       capability.blocker !== null
         ? { phase: 'unavailable', blocker: capability.blocker }
