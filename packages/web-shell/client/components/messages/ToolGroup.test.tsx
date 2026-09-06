@@ -2734,6 +2734,51 @@ describe('pending edit approval rows', () => {
     expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
   });
 
+  // R3-11: the approval reaches sub-agent rows through a different path than a
+  // top-level edit — hasSubToolApproval keeps the agent row shown and the panel
+  // only receives the approval while the host owns the diff preview. Neither
+  // half had a witness.
+  it('keeps a sub-agent row open for a nested edit approval the host owns', () => {
+    const tool = makeTool({
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [
+        { callId: 'sub-edit', toolName: 'WriteFile', status: 'pending' },
+      ],
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: 'sub-edit',
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The approval belongs to a tool call inside the agent, not to the agent's
+    // own launch, so the row must stay open — collapsing it would hide the
+    // edit the user is being asked to approve.
+    expect(container.textContent).toContain('WriteFile');
+
+    // Control: the same agent with nothing pending stays collapsed, so the
+    // assertion above is about the approval and not about agent rows always
+    // rendering their sub-tools.
+    const withoutApproval = renderToolLine(
+      tool,
+      {},
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(withoutApproval.textContent).not.toContain('WriteFile');
+  });
+
   it('keeps pending edit rows expandable when the host does not own the diff', () => {
     const tool = makeTool({
       toolName: 'WriteFile',

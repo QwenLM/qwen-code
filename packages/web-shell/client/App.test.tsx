@@ -25823,6 +25823,79 @@ describe('App session callbacks', () => {
     );
   });
 
+  // R3-15: the exact-request-id gate was only ever crossed with a matching id.
+  // The host votes by id precisely so a stale native diff — one left over from
+  // an approval that has already moved on — cannot resolve the current
+  // request; nothing pinned the refusal.
+  it('refuses a native edit approval vote bound to a different request id', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { rerender } = renderApp({
+      hostOwnsEditDiffPreview: true,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'run_shell_command',
+          kind: 'execute',
+          content: [
+            {
+              type: 'diff',
+              path: 'file.ts',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+          options: [
+            {
+              optionId: 'proceed_once',
+              label: 'Allow',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+
+    let resolved: boolean | undefined;
+    await act(async () => {
+      resolved = await shellApi?.respondToPendingPermission(
+        'req-stale',
+        'allow',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(resolved).toBe(false);
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+
+    // The pending approval is untouched and the matching id still votes.
+    await act(async () => {
+      resolved = await shellApi?.respondToPendingPermission('req-1', 'allow');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(resolved).toBe(true);
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'req-1',
+      'proceed_once',
+    );
+  });
+
   it('does not let stale split classification replace a newer direct open', async () => {
     const classification = deferred<never>();
     mockWorkspace.capabilities = {

@@ -1060,6 +1060,26 @@ describe('EmbeddedApp permission diff request-id wiring', () => {
     );
   });
 
+  // R3-13: the host file-open hand-off had zero coverage in either package.
+  // It is what makes a workspace file open in a real VS Code editor instead of
+  // the web shell's own attachment panel.
+  it('routes a workspace file open to the extension host', async () => {
+    const props = await renderApp();
+    const onWorkspaceFileOpen = callback<(path: string) => void>(
+      props,
+      'onWorkspaceFileOpen',
+    );
+
+    await act(async () => {
+      onWorkspaceFileOpen('src/app.ts');
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('openFile')).toEqual([
+      { type: 'openFile', data: { path: 'src/app.ts' } },
+    ]);
+  });
+
   // R3-4: the cleanup loop closes by (path, requestId) rather than by path, so
   // a resolved approval cannot close a diff another request owns.
   it('closes the diff scoped to the request that no longer needs it', async () => {
