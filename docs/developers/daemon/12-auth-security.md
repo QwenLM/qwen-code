@@ -154,8 +154,8 @@ Control is enabled (the LAN origin is added/removed with the listener):
   preflight returns `204`.
 - Non-matching `Origin` values receive the same deterministic
   `403 { error: 'Request denied by CORS policy' }` as deny mode.
-- `--allow-origin '*'` requires `--token`; otherwise boot refuses.
-- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts. A non-loopback browser origin requires a token because it could otherwise exercise the full operator API, including code execution as the daemon user.
+- `--allow-origin '*'` requires a bearer token; on loopback binds boot refuses when none is configured, while on non-loopback binds the generated ephemeral token satisfies the guard (the refusal is loopback-only).
+- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts on loopback binds; on non-loopback binds the generated token satisfies the same guard. A non-loopback browser origin always authenticates with the bearer because it could otherwise exercise the full operator API, including code execution as the daemon user.
 - Explicit browser-extension origins retain their tokenless local-automation path. Startup logs that any tokenless allowed browser origin receives full operator authority.
 - `parseAllowOriginPatterns()` validates pattern syntax at boot.
 - The `allow_origin` capability tag is advertised only when this mode is
