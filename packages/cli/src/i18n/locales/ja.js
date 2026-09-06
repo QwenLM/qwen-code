@@ -357,6 +357,7 @@ export default {
   'Vim Mode': 'Vim モード',
   'Output Format': '出力形式',
   'Hide Tips': 'ヒントを非表示',
+  'Show Tool Call Arguments': 'ツール呼び出し引数を表示',
   Text: 'テキスト',
   JSON: 'JSON',
   Plan: 'プラン',

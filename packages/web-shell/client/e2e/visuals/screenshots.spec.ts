@@ -84,6 +84,67 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`usage-limited goal status`, async ({ page }, testInfo) => {
+      // Seed the compatibility card together with its canonical V2 state, as
+      // emitted by both live goal updates and transcript replay.
+      const usageLimitedGoalEvent: DaemonEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-visual-usage-limited',
+                  revision: 2,
+                  objective: 'Finish the evaluation suite',
+                  status: 'usage_limited',
+                  limitKind: 'token_budget',
+                  evidenceCursor: { recordId: 'goal-visual-record' },
+                  turnCount: 4,
+                  activeTimeMs: 5000,
+                  tokensUsed: 1000,
+                  createdAt: 1234,
+                  updatedAt: 2345,
+                  lastReason: 'Token budget reached',
+                },
+              },
+              goalStatus: {
+                kind: 'aborted',
+                condition: 'Finish the evaluation suite',
+                iterations: 4,
+                durationMs: 5000,
+                lastReason: 'Token budget reached',
+              },
+            },
+          },
+        },
+      };
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Finish the evaluation suite.', { id: 1 }),
+          usageLimitedGoalEvent,
+          turnCompleteEvent('prompt-goal-usage-limited', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).toContainText('Token budget reached');
+      await captureScreenshot(page, `goal-usage-limited-${theme}`);
+    });
+
     test(`terminal turn error`, async ({ browser, page }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const scenario = createTerminalTurnErrorScenario(
