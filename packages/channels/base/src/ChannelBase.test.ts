@@ -4566,7 +4566,7 @@ describe('ChannelBase', () => {
       );
       const ch = createChannel({ multiSession: true }, { stateDir });
       const interrupted =
-        'The task was interrupted while being reset. Its files were not changed. Clear the task again to finish the reset.';
+        'Task "feature" was interrupted while being reset. Its files were not changed. Clear the task again to finish the reset.';
       try {
         await ch.handleInbound(
           envelope({ text: '/session new feature --worktree' }),
@@ -4581,6 +4581,51 @@ describe('ChannelBase', () => {
 
         expect(recoveredBridge.prompt).not.toHaveBeenCalled();
         expect(recoveredBridge.resetWorktreeSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('names the broken task instead of pointing a clear at the selected one', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        await ch.handleInbound(
+          envelope({ text: '/session new review --worktree' }),
+        );
+        // Only feature reports the interrupted transfer; review, the task a
+        // clear would act on, is healthy.
+        vi.mocked(bridge.loadSession).mockImplementation(
+          async (sessionId: string) => {
+            if (sessionId === 's-1') {
+              throw daemonError('worktree_reset_interrupted');
+            }
+            return sessionId;
+          },
+        );
+        ch.setBridge(bridge);
+
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+
+        const reply = ch.sent.at(-1)?.text ?? '';
+        expect(reply).toContain('feature');
+        expect(reply).toContain('/session close feature');
+        // Telling the user to clear again would run a full ownership transfer
+        // against review and destroy a conversation that is not broken.
+        expect(reply).not.toContain('Clear the task again');
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: review');
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledWith(
+          's-2',
+          '/tmp',
+          { sourceId: 'test-chan' },
+          expect.anything(),
+        );
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }
@@ -4602,7 +4647,7 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/session use feature' }));
 
         expect(ch.sent.at(-1)?.text).toBe(
-          'The task cannot verify its worktree because its ownership marker is missing. Its files were not changed. Clear the task to restart it in the same worktree, or close it.',
+          'Task "feature" cannot verify its worktree because its ownership marker is missing. Its files were not changed. Clear the task to restart it in the same worktree, or close it.',
         );
         expect(recoveredBridge.resetWorktreeSession).not.toHaveBeenCalled();
         await ch.handleInbound(envelope({ text: '/session current' }));
@@ -5291,6 +5336,82 @@ describe('ChannelBase', () => {
           ).toBe(0),
         );
       } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('dispatches a collected turn whose id another turn already healed', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishFirst!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = resolve;
+          }),
+      );
+      const healedBridge = createBridge();
+      vi.mocked(healedBridge.loadSession).mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 's-1') {
+            throw daemonError('worktree_session_superseded', {
+              replacementSessionId: 's-2',
+            });
+          }
+          return sessionId;
+        },
+      );
+      vi.mocked(healedBridge.listSessions!).mockReturnValue([
+        {
+          sessionId: 's-2',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: { slug: 's-1', path: '/worktrees/s-1', branch: 's-1' },
+          worktreeState: 'persisted-v1',
+        },
+      ]);
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel(
+        { multiSession: true, dispatchMode: 'collect' },
+        { stateDir },
+      );
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+
+        const first = ch.handleInbound(envelope({ text: 'build feature' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        // Buffered behind the running prompt, so this turn is bound to s-1 and
+        // keeps that binding until it drains.
+        await ch.handleInbound(envelope({ text: 'update feature' }));
+
+        // A different turn heals the task onto the replacement first, so the
+        // buffered turn is left holding an id no task names any more.
+        ch.setBridge(healedBridge);
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+
+        finishFirst('done');
+        await first;
+
+        await vi.waitFor(() =>
+          expect(healedBridge.prompt).toHaveBeenCalledTimes(1),
+        );
+        expect(healedBridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('update feature'),
+          expect.anything(),
+        );
+        // The user-visible half: the buffered turn is answered instead of
+        // vanishing behind an operator-only log line.
+        expect(
+          writeSpy.mock.calls.some(([message]) =>
+            String(message).includes('dropped collected turn'),
+          ),
+        ).toBe(false);
+      } finally {
+        writeSpy.mockRestore();
         rmSync(stateDir, { recursive: true, force: true });
       }
     });

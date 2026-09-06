@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { closeSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -15,6 +16,7 @@ import {
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionMarkerStrictSync,
   transferWorktreeSessionMarkerOwner,
+  WorktreeMarkerCommittedError,
   WORKTREE_SESSION_FILE,
 } from './gitWorktreeService.js';
 
@@ -268,6 +270,66 @@ describe('daemon worktree session markers', () => {
       );
     } finally {
       writeSpy.mockRestore();
+    }
+  });
+
+  it('reports a committed marker when the post-commit close rejects', async () => {
+    const createDir = await tempDir();
+    const transferDir = await tempDir();
+    const probe = await fs.open(path.join(createDir, 'probe'), 'w');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    await probe.close();
+    const realStat = prototype.stat;
+    let statCalls = 0;
+    // A FileHandle's `close` is a per-instance property, so the seam is the
+    // prototype's `stat`: the marker create stats exactly twice (pre-write
+    // identity, post-write verification), and closing the raw fd under the
+    // second one makes production's own post-commit `handle.close()` reject
+    // with the marker already written, fsync'd and identity-verified.
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof prototype) {
+        const stats = await realStat.call(this);
+        statCalls += 1;
+        if (statCalls % 2 === 0) closeSync(this.fd);
+        return stats;
+      });
+
+    const settle = (run: () => Promise<unknown>): Promise<unknown> =>
+      run().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    let createError: unknown;
+    let transferError: unknown;
+    try {
+      createError = await settle(() =>
+        createWorktreeSessionMarkerExclusive(createDir, 'session-new'),
+      );
+      // The reset route's missing-marker hatch reaches the same tail through
+      // the transfer primitive, so the classification must propagate.
+      transferError = await settle(() =>
+        transferWorktreeSessionMarkerOwner(transferDir, null, 'session-new'),
+      );
+    } finally {
+      statSpy.mockRestore();
+    }
+
+    expect(statCalls).toBe(4);
+    for (const error of [createError, transferError]) {
+      expect(error).toBeInstanceOf(WorktreeMarkerCommittedError);
+      expect((error as WorktreeMarkerCommittedError).committedOwner).toBe(
+        'session-new',
+      );
+      expect((error as Error).cause).toMatchObject({ code: 'EBADF' });
+    }
+    // The close rejection propagates with the marker intact: no cleanup of a
+    // valid file, so a caller that compensates on failure would dismantle a
+    // session the marker already names.
+    for (const dir of [createDir, transferDir]) {
+      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject(
+        { state: 'valid', sessionId: 'session-new' },
+      );
     }
   });
 });

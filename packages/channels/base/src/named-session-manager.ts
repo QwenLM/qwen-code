@@ -79,6 +79,24 @@ interface StoredRegistry {
   owners: StoredOwner[];
 }
 
+/**
+ * A named-session failure that carries the task it happened to. The recovery
+ * advice the channel derives from it depends on which task broke, and that is
+ * not recoverable from the message text.
+ */
+export class NamedSessionTaskError extends Error {
+  readonly taskName: string;
+
+  constructor(
+    message: string,
+    taskName: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.taskName = taskName;
+  }
+}
+
 export class NamedSessionManager {
   private readonly channelName: string;
   private readonly cwd: string;
@@ -90,6 +108,12 @@ export class NamedSessionManager {
   private registry: StoredRegistry;
   private taskBySessionId: Map<string, NamedSessionTaskReference>;
   private readonly ownerOperations = new Map<string, Promise<void>>();
+  /**
+   * Superseded session id → the replacement its task moved onto. A queued turn
+   * stays bound to the id it reserved, so the reservation lookup has to follow
+   * the task or every turn after the first one is stranded on the old id.
+   */
+  private readonly supersededSessionIds = new Map<string, string>();
 
   constructor(options: NamedSessionManagerOptions) {
     this.channelName = options.channelName;
@@ -244,9 +268,14 @@ export class NamedSessionManager {
   ): Promise<string | undefined> {
     return this.withOwnerLock(input, async () => {
       const owner = await this.ensureOwner(input, false);
+      // The registry may already have healed this task onto its replacement;
+      // the caller's binding still names the superseded id.
+      const reservedSessionId =
+        this.supersededSessionIds.get(sessionId) ?? sessionId;
       const task = owner?.tasks.find(
         (candidate) =>
-          candidate.sessionId === sessionId && candidate.status === 'open',
+          candidate.sessionId === reservedSessionId &&
+          candidate.status === 'open',
       );
       if (!task) return undefined;
       const result = await this.loadTask(
@@ -541,6 +570,8 @@ export class NamedSessionManager {
           updatedTask.cwd,
         );
         this.router.forgetManagedSession(task.sessionId);
+        this.repointSupersededSessionIds(task.sessionId, sessionId);
+        this.supersededSessionIds.delete(task.sessionId);
         return {
           name: task.name,
           previousSessionId: task.sessionId,
@@ -575,6 +606,8 @@ export class NamedSessionManager {
         updatedTask.cwd,
       );
       this.router.forgetManagedSession(task.sessionId);
+      this.repointSupersededSessionIds(task.sessionId, sessionId);
+      this.supersededSessionIds.delete(task.sessionId);
       return {
         name: task.name,
         previousSessionId: task.sessionId,
@@ -763,7 +796,9 @@ export class NamedSessionManager {
       // overwrite the heal.
       return result;
     } catch (error) {
-      throw new Error(failureMessage, { cause: error });
+      throw new NamedSessionTaskError(failureMessage, task.name, {
+        cause: error,
+      });
     }
   }
 
@@ -786,6 +821,24 @@ export class NamedSessionManager {
         owner.activeTaskName,
       ),
     );
+    this.repointSupersededSessionIds(task.sessionId, sessionId);
+    this.supersededSessionIds.set(task.sessionId, sessionId);
+  }
+
+  /**
+   * Follow every id that still resolves to `oldSessionId` onto its
+   * replacement, so a task superseded more than once stays reachable from the
+   * oldest id a turn is bound to and the map does not grow once per reset.
+   */
+  private repointSupersededSessionIds(
+    oldSessionId: string,
+    newSessionId: string,
+  ): void {
+    for (const boundSessionId of [...this.supersededSessionIds.keys()]) {
+      if (this.supersededSessionIds.get(boundSessionId) === oldSessionId) {
+        this.supersededSessionIds.set(boundSessionId, newSessionId);
+      }
+    }
   }
 
   private async resetWorktreeSession(task: StoredTask): Promise<string> {
@@ -797,9 +850,11 @@ export class NamedSessionManager {
         task.cwd,
       );
     } catch (error) {
-      throw new Error(`Could not reset task "${task.name}".`, {
-        cause: error,
-      });
+      throw new NamedSessionTaskError(
+        `Could not reset task "${task.name}".`,
+        task.name,
+        { cause: error },
+      );
     }
   }
 

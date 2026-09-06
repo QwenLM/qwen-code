@@ -706,11 +706,12 @@ export class CdWhilePromptActiveError extends Error {
 }
 
 /**
- * Prompt admission refusal for a session whose worktree ownership is being
+ * Admission refusal for a session whose worktree ownership is being
  * transferred to a replacement session (worktree reset). The daemon arms the
- * barrier before the transfer's first side effect, so every prompt source
- * fails closed for its duration; the session id in the message is the
- * superseded one.
+ * barrier before the transfer's first side effect, so every prompt source and
+ * every other writer that could reach the session's checkout or cwd fails
+ * closed for its duration; the session id in the message is the superseded
+ * one.
  */
 export class SessionResetPendingError extends Error {
   readonly sessionId: string;

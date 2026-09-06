@@ -33,6 +33,7 @@ import {
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   writeWorktreeSession,
+  WorktreeMarkerCommittedError,
   type ChatRecord,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
@@ -55,6 +56,41 @@ vi.mock('../server/session-archive.js', async (importOriginal) => ({
   deleteDaemonSessionIfOrphan: archiveMocks.deleteDaemonSessionIfOrphan,
 }));
 
+// The transfer's crash windows sit between durable writes, so the cases that
+// pin them observe the core primitives directly. Each spy delegates to the
+// real implementation and is re-installed in `beforeEach`; individual cases
+// override one call to park or fail the transfer at a chosen step.
+type CoreTransferFns = Pick<
+  typeof import('@qwen-code/qwen-code-core'),
+  | 'writeWorktreeSession'
+  | 'readWorktreeSessionStrict'
+  | 'transferWorktreeSessionMarkerOwner'
+>;
+const coreMocks = vi.hoisted(() => ({
+  real: {} as CoreTransferFns,
+  writeWorktreeSession: vi.fn(),
+  readWorktreeSessionStrict: vi.fn(),
+  transferWorktreeSessionMarkerOwner: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  coreMocks.real = {
+    writeWorktreeSession: actual.writeWorktreeSession,
+    readWorktreeSessionStrict: actual.readWorktreeSessionStrict,
+    transferWorktreeSessionMarkerOwner:
+      actual.transferWorktreeSessionMarkerOwner,
+  };
+  return {
+    ...actual,
+    writeWorktreeSession: coreMocks.writeWorktreeSession,
+    readWorktreeSessionStrict: coreMocks.readWorktreeSessionStrict,
+    transferWorktreeSessionMarkerOwner:
+      coreMocks.transferWorktreeSessionMarkerOwner,
+  };
+});
+
 import { registerSessionRoutes } from './session.js';
 
 const tmpRoot = mkdtempSync(path.join(tmpdir(), 'session-worktree-reset-'));
@@ -73,6 +109,15 @@ const CHANNEL_METADATA: CreationMetadata = {
 beforeEach(() => {
   vi.clearAllMocks();
   archiveMocks.deleteDaemonSessionIfOrphan.mockResolvedValue(true);
+  coreMocks.writeWorktreeSession.mockImplementation(
+    coreMocks.real.writeWorktreeSession,
+  );
+  coreMocks.readWorktreeSessionStrict.mockImplementation(
+    coreMocks.real.readWorktreeSessionStrict,
+  );
+  coreMocks.transferWorktreeSessionMarkerOwner.mockImplementation(
+    coreMocks.real.transferWorktreeSessionMarkerOwner,
+  );
   vi.spyOn(SessionService.prototype, 'readCreationMetadata').mockResolvedValue(
     CHANNEL_METADATA,
   );
@@ -127,7 +172,10 @@ function makeBridge(options: { resetSupport?: boolean } = {}): FakeBridge {
   );
   const setSessionWorktree = vi.fn();
   const clearSessionWorktree = vi.fn();
-  const severSessionClients = vi.fn(async () => {});
+  // The bridge reports whether the superseded entry is gone after its drain
+  // loop; a child holding background work refuses the idle close and it
+  // survives. Tests override this per case with mockResolvedValueOnce(false).
+  const severSessionClients = vi.fn(async () => true);
   const setSessionResetPending = vi.fn(() => true);
   const clearSessionResetPending = vi.fn();
   const loadSession = vi.fn(
@@ -415,6 +463,50 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
   });
 
+  it('releases the ownership lock after a refused transfer so the checkout stays usable', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    // A refusal from inside the lock: the busy check runs after the transfer
+    // acquired it, so this is the path where a leaked key would wedge every
+    // later operation on the same checkout.
+    fixture.fake.setSummary(oldId, {
+      hasActivePrompt: true,
+      pendingInteractionCount: 0,
+    });
+
+    const refused = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('worktree_reset_active');
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+
+    fixture.fake.setSummary(oldId, {
+      hasActivePrompt: false,
+      pendingInteractionCount: 0,
+    });
+    // Both take the same worktree-keyed lock. Awaited directly on purpose: a
+    // refusal that leaked the key would hang here until the test times out.
+    const load = await request(fixture.app)
+      .post(`/session/${oldId}/load`)
+      .send({});
+
+    expect(load.status).toBe(200);
+    expect(load.body.worktreeState).toBe('persisted-v1');
+
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).not.toBe(oldId);
+    await expectMarkerOwner(fixture, retry.body.sessionId);
+  });
+
   it('rejects with 404 when the session record is missing', async () => {
     const fixture = makeFixture();
     const sessionId = randomUUID();
@@ -625,7 +717,9 @@ describe('POST /session/:id/worktree-reset', () => {
     await fixture.writeSidecar(oldId, { supersededBy: replacementId });
     // The crash left the backward link but never persisted the forward one,
     // so the pair disagrees and the rollback the marker would authorize has
-    // nothing to agree with.
+    // nothing to agree with. The transfer writes the backward link first
+    // precisely so this is the shape such a crash leaves — a visible refusal
+    // rather than a forward link no retry ever looks for.
     await fixture.createMarker(oldId);
 
     const res = await request(fixture.app)
@@ -647,6 +741,37 @@ describe('POST /session/:id/worktree-reset', () => {
     });
     await expectMarkerOwner(fixture, oldId);
     expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
+  });
+
+  it('writes the backward supersede link before the forward one', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    const writesBefore = coreMocks.writeWorktreeSession.mock.calls.length;
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    const newId = res.body.sessionId;
+    const oldSidecarPath = fixture.sessionService.getWorktreeSessionPath(oldId);
+    const newSidecarPath = fixture.sessionService.getWorktreeSessionPath(newId);
+    const transferWrites =
+      coreMocks.writeWorktreeSession.mock.calls.slice(writesBefore);
+    // The backward link is the only door into the resume classification, so
+    // it has to be durable first: a crash between the two writes then leaves
+    // the shape the case above refuses for repair, instead of a dangling
+    // forward link that no retry ever sees (it would spawn a second
+    // replacement and strand the first under an untyped 500 forever).
+    expect(transferWrites.map((call) => call[0])).toEqual([
+      oldSidecarPath,
+      newSidecarPath,
+    ]);
+    expect(transferWrites[0]?.[1]).toMatchObject({ supersededBy: newId });
+    expect(transferWrites[1]?.[1]).toMatchObject({ supersedes: oldId });
   });
 
   it('refuses a committed resume whose replacement links to another session', async () => {
@@ -749,6 +874,111 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
     expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
   });
+
+  it('never rolls back a marker flip whose post-commit tail failed', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    const realTransfer = coreMocks.real.transferWorktreeSessionMarkerOwner;
+    // Commit the flip for real, then fail the way the primitive's own
+    // post-commit tail does: the marker handle's close runs after the marker
+    // is durable and propagates with the marker intact.
+    coreMocks.transferWorktreeSessionMarkerOwner.mockImplementationOnce(
+      async (...args: Parameters<typeof realTransfer>) => {
+        await realTransfer(...args);
+        throw new WorktreeMarkerCommittedError(args[2], {
+          cause: Object.assign(new Error('i/o error, close'), {
+            code: 'EIO',
+          }),
+        });
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    const newId = fixture.fake.spawnedIds[0]!;
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
+    // Not the invalid-state 409, whose contract is that this request made no
+    // destructive change: the marker already names the replacement.
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBeUndefined();
+    expect(res.body.error).not.toMatch(/ownership state is invalid/);
+    // The pre-flip rollback did not run: both sidecars and the replacement's
+    // record survive, and the marker stays on the committed owner.
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBe(newId);
+    const newSidecar = await expectSidecar(fixture, newId);
+    expect(newSidecar?.supersedes).toBe(oldId);
+    await expectMarkerOwner(fixture, newId);
+
+    // The response tells the caller to retry; the retry resumes the committed
+    // transfer instead of spawning a second replacement.
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).toBe(newId);
+    expect(fixture.fake.spawnOrAttach).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the barrier armed and reports a superseded session that survives sever', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    // The child holds background work, so the last detach's idle close is
+    // refused and the superseded entry survives inside the checkout whose
+    // ownership just moved.
+    fixture.fake.severSessionClients.mockResolvedValueOnce(false);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    const newId = res.body.sessionId;
+    await expectMarkerOwner(fixture, newId);
+    // The survivor stays fenced: the barrier is armed and never cleared.
+    expect(fixture.fake.setSessionResetPending).toHaveBeenCalledWith(oldId);
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+    // Never escalate: killSession turns a close error into a channel kill,
+    // and the replacement was spawned onto that same workspace-bound bridge.
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+    // And the 200 reports the hold instead of certifying a severance that did
+    // not happen.
+    expect(res.body.supersededSessionLive).toBe(true);
+
+    // A retry while the child still holds takes the committed resume path and
+    // must report the same hold rather than clear the barrier.
+    fixture.fake.severSessionClients.mockResolvedValueOnce(false);
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).toBe(newId);
+    expect(retry.body.supersededSessionLive).toBe(true);
+    expect(fixture.fake.spawnOrAttach).toHaveBeenCalledTimes(1);
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+
+    // Once the child releases its holds the resumed severance completes and
+    // the barrier is finally dropped.
+    const settled = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(settled.status).toBe(200);
+    expect(settled.body.sessionId).toBe(newId);
+    expect(settled.body.supersededSessionLive).toBeUndefined();
+    expect(fixture.fake.spawnOrAttach).toHaveBeenCalledTimes(1);
+    expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
+  });
 });
 
 describe('POST /session/:id/load worktree classifications', () => {
@@ -768,6 +998,90 @@ describe('POST /session/:id/load worktree classifications', () => {
     expect(res.body.sessionId).toBe(oldId);
     expect(res.body.replacementSessionId).toBe(replacementId);
     expect(fixture.fake.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('decides the superseded redirect under the ownership lock, not before it', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    const oldSidecarPath = fixture.sessionService.getWorktreeSessionPath(oldId);
+
+    // Park the transfer at the marker flip: both sidecar links are durably on
+    // disk and the reset holds the worktree-keyed ownership lock.
+    let reachedFlip!: () => void;
+    const atFlip = new Promise<void>((resolve) => {
+      reachedFlip = resolve;
+    });
+    let releaseFlip!: () => void;
+    const flipGate = new Promise<void>((resolve) => {
+      releaseFlip = resolve;
+    });
+    coreMocks.transferWorktreeSessionMarkerOwner.mockImplementationOnce(
+      async () => {
+        reachedFlip();
+        await flipGate;
+        // Fail the flip, so the pre-commit rollback clears the very link the
+        // contending load is about to observe.
+        throw new Error('Worktree marker owner does not match the expectation');
+      },
+    );
+    // Signal once the load has read the old sidecar, so the rollback cannot
+    // race ahead of the observation this case is about.
+    let loadIssued = false;
+    let preReadDone!: () => void;
+    const loadPreRead = new Promise<void>((resolve) => {
+      preReadDone = resolve;
+    });
+    const realRead = coreMocks.real.readWorktreeSessionStrict;
+    coreMocks.readWorktreeSessionStrict.mockImplementation(
+      async (...args: Parameters<typeof realRead>) => {
+        const read = await realRead(...args);
+        if (loadIssued && args[0] === oldSidecarPath) preReadDone();
+        return read;
+      },
+    );
+
+    // Supertest dispatches on the first `then`, so both requests are chained.
+    const resetInFlight = request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({})
+      .then((response) => response);
+    await atFlip;
+    // The transient shape a pre-lock decision would act on: the backward link
+    // names a replacement this daemon is about to delete.
+    const midTransfer = await fixture.readSidecar(oldId);
+    expect(midTransfer.state).toBe('valid');
+    if (midTransfer.state === 'valid') {
+      expect(midTransfer.session.supersededBy).toBe(fixture.fake.spawnedIds[0]);
+    }
+
+    loadIssued = true;
+    const loadInFlight = request(fixture.app)
+      .post(`/session/${oldId}/load`)
+      .send({})
+      .then((response) => response);
+    await loadPreRead;
+
+    releaseFlip();
+    const [resetResponse, loadResponse] = await Promise.all([
+      resetInFlight,
+      loadInFlight,
+    ]);
+
+    expect(resetResponse.status).toBe(409);
+    expect(resetResponse.body.code).toBe('worktree_reset_invalid_state');
+    // The rollback cleared the link while the load waited for the lock, so the
+    // locked re-read restores the session that still owns the checkout
+    // instead of redirecting to a replacement that no longer exists.
+    expect(loadResponse.status).toBe(200);
+    expect(loadResponse.body.code).toBeUndefined();
+    expect(loadResponse.body.replacementSessionId).toBeUndefined();
+    expect(loadResponse.body.worktreeState).toBe('persisted-v1');
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBeUndefined();
+    await expectMarkerOwner(fixture, oldId);
   });
 
   it('rejects a Part4A restore when the ownership marker is missing', async () => {

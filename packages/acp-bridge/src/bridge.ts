@@ -4258,12 +4258,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const inFlightRestores = new Map<string, InFlightRestore>();
 
   // Sessions whose worktree ownership is being transferred to a replacement
-  // session (worktree reset). While an id is present, `sendPrompt` refuses
-  // admission synchronously so no prompt source can start a turn on the
-  // superseded session mid-transfer. Keyed by id (not the SessionEntry) so
-  // the barrier survives entry replacement and dies only with the process;
-  // the reset route clears it on every outcome.
+  // session (worktree reset). While an id is present, every writer that could
+  // reach the superseded session's checkout or cwd refuses admission
+  // synchronously. Keyed by id (not the SessionEntry) so the barrier survives
+  // entry replacement and dies only with the process; the reset route clears
+  // it on every outcome.
   const resetPendingSessions = new Set<string>();
+
+  /**
+   * Barrier check for the writers other than `sendPrompt`: a rewind restores
+   * files under the session cwd, a fork agent runs tools there, a shell
+   * command executes in `effectiveCwd`, a branch mutates the session's
+   * persisted history, and a cwd change moves the session inside the
+   * checkout. Each is admitted precisely in the idle state the transfer
+   * requires, so each fails closed on the same id-keyed barrier.
+   */
+  function assertSessionResetNotPending(sessionId: string): void {
+    if (resetPendingSessions.has(sessionId)) {
+      throw new SessionResetPendingError(sessionId);
+    }
+  }
 
   async function settleReleasedRuntimeWork(
     context: string,
@@ -10936,6 +10950,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         resolveTrustedClientId(entry, context.clientId);
       }
 
+      // A branch mutates the superseded session's persisted history and spawns
+      // a derivative session while the checkout's ownership is in flux.
+      assertSessionResetNotPending(sessionId);
+
       const concurrentSideTask = isSideTask && entry.promptActive;
       // Admission-time check: pendingPromptCount changes synchronously when a
       // prompt is accepted, before its queue callback sets promptActive. A
@@ -11246,6 +11264,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
 
+      // Relocation moves the session's cwd — including into a subdir of the
+      // checkout the transfer is moving. The route relocates the *replacement*
+      // (never armed), so the superseded id fails closed here.
+      assertSessionResetNotPending(sessionId);
+
       // Chain onto promptQueue and update tail — ensures:
       // 1. cd waits for any in-flight prompt to complete
       // 2. Subsequent prompts wait for cd to complete (prevents stale config.cwd)
@@ -11520,7 +11543,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // — and a non-empty `clientIds` is precisely what holds the idle close
       // off. Re-snapshot the keys each pass, once per remaining registration.
       const entry = byId.get(sessionId);
-      if (!entry) return;
+      if (!entry) return true;
       const registrations = (): number => {
         let total = 0;
         for (const count of entry.clientIds.values()) total += count;
@@ -11538,6 +11561,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (remaining >= outstanding) break;
         outstanding = remaining;
       }
+      // The idle close is conditional: a child that holds work (a background
+      // shell inside the worktree) refuses it and the close is deferred, so
+      // the documented end state above is not reached and the superseded
+      // session stays live and re-attachable. Report which happened rather
+      // than leaving the caller to assume the entry is gone.
+      return !byId.has(sessionId);
     },
 
     fireDeferredRestoreAskUserQuestionPrompt(sessionId, clientId) {
@@ -13584,6 +13613,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!trimmed) {
         throw new Error('Fork directive is required');
       }
+      // The fork agent runs its tools in this session's cwd — the checkout the
+      // transfer is moving — and it chains onto the same queue a prompt would.
+      assertSessionResetNotPending(sessionId);
       if (entry.pendingPromptCount > 0 || entry.promptActive) {
         throw new SessionBusyError(
           sessionId,
@@ -13670,6 +13702,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context.clientId,
       );
+
+      // A shell command runs in `entry.effectiveCwd`, which for a worktree
+      // session is the checkout itself — the strongest writer vector on the
+      // superseded session, not a workspace-cwd one.
+      assertSessionResetNotPending(sessionId);
 
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
@@ -13838,6 +13875,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+
+      // A rewind restores files relative to the session cwd, so it writes into
+      // the checkout the transfer is moving — and it is admitted precisely in
+      // the idle state the transfer requires, setting none of the flags the
+      // barrier or the route's re-check reads.
+      assertSessionResetNotPending(sessionId);
 
       // Admission-time check: a rewind queued behind an active prompt runs
       // after the prompt's `finally` clears the busy flags, and client-side

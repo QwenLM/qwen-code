@@ -1314,6 +1314,57 @@ describe('SessionRouter', () => {
       expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
     });
 
+    it('still releases the old session on detach after a failed reset', async () => {
+      const discardSession = vi.fn().mockResolvedValue(undefined);
+      const managedBridge = worktreeResetBridge({
+        listSessions: vi
+          .fn()
+          .mockReturnValue([
+            worktreeSessionInfo('old-session'),
+            worktreeSessionInfo('replacement-session'),
+          ]),
+        resetWorktreeSession: vi
+          .fn()
+          .mockRejectedValue(new Error('daemon unavailable')),
+        discardSession,
+      });
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      await expect(
+        router.loadManagedSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+          'worktree',
+        ),
+      ).resolves.toEqual({ loaded: true, sessionId: 'old-session' });
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('daemon unavailable');
+      expect(discardSession).not.toHaveBeenCalled();
+
+      // The failed reset dropped the live flag so the next load consults the
+      // daemon again, but the bridge still holds the client and its event
+      // pump: closing the task must release it rather than leak it until the
+      // daemon's idle reaper runs.
+      await router.detachManagedSession('old-session');
+
+      expect(discardSession).toHaveBeenCalledWith('old-session');
+      expect(router.getTarget('old-session')).toBeUndefined();
+    });
+
     it('discards a replacement that dies before the reset completes', async () => {
       const state: { router?: SessionRouter } = {};
       const discardSession = vi.fn().mockResolvedValue(undefined);

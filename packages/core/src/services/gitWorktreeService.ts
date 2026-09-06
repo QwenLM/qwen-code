@@ -119,6 +119,26 @@ export async function writeWorktreeSessionMarker(
 }
 
 /**
+ * The marker is durably committed — written, fsync'd and identity-verified —
+ * but this primitive's own post-commit tail failed. The commit stands: a
+ * caller that compensates on failure must classify this as "the flip
+ * happened" rather than roll back a transfer the marker already records, and
+ * must not clean up a valid marker file. `committedOwner` is the session id
+ * the marker now names.
+ */
+export class WorktreeMarkerCommittedError extends Error {
+  readonly committedOwner: string;
+  constructor(committedOwner: string, options?: { cause?: unknown }) {
+    super(
+      `Worktree session marker committed for ${committedOwner}; the post-commit close failed`,
+      options,
+    );
+    this.name = 'WorktreeMarkerCommittedError';
+    this.committedOwner = committedOwner;
+  }
+}
+
+/**
  * Creates the daemon-owned marker without replacing any existing path.
  * This is intentionally separate from {@link writeWorktreeSessionMarker},
  * whose overwrite semantics are required by interactive worktree tools.
@@ -187,8 +207,14 @@ export async function createWorktreeSessionMarkerExclusive(
   }
   // Close after the catch: the marker is fully written and fsync'd at this
   // point, so a close rejection must propagate with the marker intact rather
-  // than trigger cleanup of a valid file.
-  await handle.close();
+  // than trigger cleanup of a valid file. Classified so a caller that
+  // compensates on failure cannot read the committed flip as a pre-flip
+  // error and dismantle what the marker now names.
+  try {
+    await handle.close();
+  } catch (error) {
+    throw new WorktreeMarkerCommittedError(sessionId, { cause: error });
+  }
   await addWorktreeSessionMarkerExclude(worktreePath);
 }
 
@@ -423,6 +449,11 @@ export function readWorktreeSessionMarkerStrictSync(
  * read — a marker swapped between the read and the commit aborts the write.
  * Where uid identity is available, a foreign-owned marker is refused outright
  * rather than rewritten through the ownership-preserving in-place path.
+ *
+ * The missing-marker hatch delegates to
+ * {@link createWorktreeSessionMarkerExclusive}, so a failure after that
+ * create committed surfaces as {@link WorktreeMarkerCommittedError}: the
+ * marker already names `newOwner` and must not be compensated backwards.
  */
 export async function transferWorktreeSessionMarkerOwner(
   worktreePath: string,

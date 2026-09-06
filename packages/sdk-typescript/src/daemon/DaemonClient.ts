@@ -3327,21 +3327,35 @@ export class DaemonClient {
    * Transfer a worktree session's checkout ownership to a fresh replacement
    * session (`POST /session/:id/worktree-reset`, capability
    * `session_worktree_reset_v1`). Resolves 200 with the replacement
-   * session's create-shape response, which carries no client registration
-   * for the caller — the route never reads a client id, so this method takes
-   * none. Typed 409 bodies carry the reset taxonomy:
-   * `worktree_reset_unsupported` (not a worktree session),
+   * session's create-shape response. The route never reads a caller-supplied
+   * client id, so this method takes none — but the response is not
+   * registration-free: a fresh transfer mints an owner-style `clientId` for
+   * the spawn it performs, registers it on the replacement, and returns it in
+   * the body, while an idempotent resume of a committed transfer returns
+   * none. That registration is not an attachment (the replacement's attach
+   * count is unaffected), and nothing detaches it for you — pass a minted id
+   * you do not keep using to `detachSession`, or the replacement never
+   * reaches the daemon's idle cleanup. Typed 409 bodies carry the reset
+   * taxonomy: `worktree_reset_unsupported` (not a worktree session),
    * `worktree_reset_active` (a session involved is busy), and
    * `worktree_reset_invalid_state` (corrupt or ambiguous ownership state; a
    * partial transfer this request started is rolled back, while a
    * pre-existing interrupted state is left untouched for operator repair).
-   * A previous transfer that crashed is self-healed here rather than
-   * reported: the route rolls it back and completes a fresh one, or resumes
-   * the committed replacement as a no-op. `worktree_reset_interrupted`,
-   * `worktree_session_superseded`, and `worktree_marker_missing` belong to
-   * the restore surface (`loadSession` / `resumeSession`) instead; the repair
-   * for an interrupted transfer is retrying this reset against the superseded
-   * session.
+   * A crashed transfer whose sidecar links agree is self-healed here: a
+   * pre-commit one (the marker still names this session, or is absent while
+   * the replacement is dormant) is rolled back and re-run in the same
+   * request, and a committed one (the marker names the replacement) is
+   * finished idempotently. Every other interrupted shape — disagreeing links,
+   * an invalid marker, a marker naming a third session, a replacement still
+   * live with no marker — is reported as `worktree_reset_invalid_state` (or
+   * `worktree_reset_active` when the committed replacement is busy) and left
+   * untouched: a retry re-reads the same state and returns the same 409, so
+   * it does not converge and needs operator repair rather than a retry loop.
+   * `worktree_reset_interrupted`, `worktree_session_superseded`, and
+   * `worktree_marker_missing` belong to the restore surface (`loadSession` /
+   * `resumeSession`) instead; for `worktree_reset_interrupted` — the
+   * agreeing-links shape — retrying this reset against the superseded session
+   * is the repair.
    */
   async resetWorktreeSession(
     sessionId: string,

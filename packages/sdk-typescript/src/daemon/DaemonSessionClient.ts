@@ -453,16 +453,21 @@ export class DaemonSessionClient {
 
   /**
    * Transfer a worktree session's checkout ownership to a fresh replacement
-   * session and return a client bound to the replacement's identity. The
-   * reset route registers no client for the caller, so that client is not an
-   * attachment: it carries whatever `clientId` the response had — a
-   * daemon-minted one on a fresh transfer, none on an idempotent resume of a
-   * committed one. Load or resume the replacement through the normal restore
-   * surface when a registered attachment is required. The replacement is a
-   * brand-new conversation; the superseded session keeps its transcript on
-   * the daemon and is never restored again (its restore surfaces
-   * `worktree_session_superseded`). The existing reattach identity guard
-   * applies to the replacement client unchanged.
+   * session and return a client bound to the replacement's identity. That
+   * client carries whatever `clientId` the response had: a fresh transfer
+   * mints and registers an owner-style one for the spawn it performs, while
+   * an idempotent resume of a committed transfer returns none. The
+   * registration is not an attachment (the replacement's attach count is
+   * unaffected), but it is a client registration, and a non-empty one is what
+   * holds the daemon's idle cleanup off — so detach a minted id you do not
+   * keep using, or the replacement stays live indefinitely. A registered
+   * attachment still requires the normal restore surface: load or resume the
+   * replacement, passing the minted id to reuse that registration instead of
+   * adding a second one. The replacement is a brand-new conversation; the
+   * superseded session keeps its transcript on the daemon and is never
+   * restored again (its restore surfaces `worktree_session_superseded`). The
+   * existing reattach identity guard applies to the replacement client
+   * unchanged.
    */
   static async resetWorktree(
     client: DaemonClient,
@@ -783,11 +788,15 @@ export class DaemonSessionClient {
           // most often a legitimate exit (exit_worktree removes the sidecar
           // without notifying this client), but also a cleared in-memory
           // association or a provenance that skips sidecar restore. The
-          // client cannot distinguish these, so it drops the cached claim
-          // and lets the identity gate re-establish the truth: a task that
-          // still needs worktree attestation fails closed there rather than
-          // running in the wrong directory. A response that still carries
-          // `worktree` metadata is never treated as proof of exit.
+          // client cannot distinguish these, so it drops the cached claim and
+          // lets the caller's identity gate re-establish the truth on its
+          // next load or selection. The heal does not gate this call's retry:
+          // `withClientIdSelfHeal` re-runs the pending operation right after
+          // the reattach, so one turn can still execute in a directory this
+          // client can no longer attest. A caller that requires worktree
+          // attestation must re-verify it before dispatching, not rely on the
+          // dropped claim. A response that still carries `worktree` metadata
+          // is never treated as proof of exit.
           this.session.worktree = undefined;
           this.session.worktreeState = undefined;
         } else {

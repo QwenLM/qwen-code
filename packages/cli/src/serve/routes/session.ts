@@ -31,6 +31,7 @@ import {
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   transferWorktreeSessionMarkerOwner,
+  WorktreeMarkerCommittedError,
   clearWorktreeSession,
   writeWorktreeSession,
   readSessionPrs,
@@ -3920,19 +3921,11 @@ export function registerSessionRoutes(
                 sessionService.getWorktreeSessionPath(restoredStorageSessionId),
               );
               if (isChannelRestore) {
-                // A reset moved this session's worktree ownership to a
-                // replacement: never restore the superseded session — tell the
-                // caller where the ownership went so it can redirect (and
-                // self-heal its registry).
-                if (
-                  sidecarBeforeRestore.state === 'valid' &&
-                  sidecarBeforeRestore.session.supersededBy !== undefined
-                ) {
-                  throw new WorktreeSessionSupersededError(
-                    restoredStorageSessionId,
-                    sidecarBeforeRestore.session.supersededBy,
-                  );
-                }
+                // The superseded decision is deliberately NOT taken here:
+                // this pre-read only supplies the ownership lock's key, and a
+                // transfer that rolls back between the two would make this
+                // route redirect the caller to a replacement the same daemon
+                // is about to delete. It is re-read under the lock below.
                 suppressWorktreeContextRestore = !(
                   sidecarBeforeRestore.state === 'valid' &&
                   sidecarBeforeRestore.session.workspaceCwd === undefined
@@ -3977,6 +3970,28 @@ export function registerSessionRoutes(
                 runtime.bridge,
                 part4AWorktreeKey,
               );
+              if (isChannelRestore) {
+                // A reset moved this session's worktree ownership to a
+                // replacement: never restore the superseded session — tell
+                // the caller where the ownership went so it can redirect (and
+                // self-heal its registry). Decided on the locked read, so a
+                // transfer that rolled back while this request waited cannot
+                // make it redirect to a replacement that no longer exists.
+                const sidecarUnderLock = await readWorktreeSessionStrict(
+                  sessionService.getWorktreeSessionPath(
+                    restoredStorageSessionId,
+                  ),
+                );
+                if (
+                  sidecarUnderLock.state === 'valid' &&
+                  sidecarUnderLock.session.supersededBy !== undefined
+                ) {
+                  throw new WorktreeSessionSupersededError(
+                    restoredStorageSessionId,
+                    sidecarUnderLock.session.supersededBy,
+                  );
+                }
+              }
             }
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
@@ -4392,27 +4407,48 @@ export function registerSessionRoutes(
               // deferred shape still reaches the relocating branch and earns
               // its attestation. A genuinely active session refuses the
               // relocation instead of being moved under its prompt.
-              if (session.hasActivePrompt) {
-                if (session.currentCwd !== realTarget) {
-                  throw new Error('Active session is outside its worktree');
-                }
+              //
+              // A restore that never asked for the deferral still reports an
+              // active prompt when `restoreAskUserQuestion` is on: the bridge
+              // fires the re-hung question during the cold restore, and that
+              // response carries no `currentCwd`. Relocating it is impossible
+              // (`changeSessionCwd` chains onto the prompt queue and refuses
+              // while a prompt is live), and failing closed would kill the
+              // session the caller just recovered — inside a checkout a
+              // non-suppressed restore lets the child place itself in. Keep
+              // the pre-4B outcome for that one shape: worktree metadata
+              // without the attestation the route cannot earn.
+              const hasUnlocatedRestoredPrompt =
+                session.hasActivePrompt &&
+                !session.attached &&
+                session.currentCwd === undefined &&
+                !deferRestoreAskUserQuestionPrompt;
+              if (hasUnlocatedRestoredPrompt) {
+                runtime.bridge.setSessionWorktree(sessionId, worktree);
+                session.worktree = worktree;
               } else {
-                const changed = await runtime.bridge.changeSessionCwd(
-                  sessionId,
-                  {
-                    path: realTarget,
-                    allowedRoots: candidateRoots,
-                  },
-                );
-                if (changed.newCwd !== realTarget) {
-                  throw new Error('Worktree relocation was rejected');
+                if (session.hasActivePrompt) {
+                  if (session.currentCwd !== realTarget) {
+                    throw new Error('Active session is outside its worktree');
+                  }
+                } else {
+                  const changed = await runtime.bridge.changeSessionCwd(
+                    sessionId,
+                    {
+                      path: realTarget,
+                      allowedRoots: candidateRoots,
+                    },
+                  );
+                  if (changed.newCwd !== realTarget) {
+                    throw new Error('Worktree relocation was rejected');
+                  }
+                  session.currentCwd = changed.newCwd;
                 }
-                session.currentCwd = changed.newCwd;
+                runtime.bridge.setSessionWorktree(sessionId, worktree);
+                assertRuntimeGenerationOpen?.();
+                session.worktree = worktree;
+                session.worktreeState = 'persisted-v1';
               }
-              runtime.bridge.setSessionWorktree(sessionId, worktree);
-              assertRuntimeGenerationOpen?.();
-              session.worktree = worktree;
-              session.worktreeState = 'persisted-v1';
             } catch (restoreErr) {
               daemonLog?.warn('worktree integrity validation failed', {
                 sessionId: session.sessionId,
@@ -4835,7 +4871,21 @@ export function registerSessionRoutes(
                     throw new WorktreeResetActiveError(replacementId);
                   }
                   runtime.bridge.clearSessionWorktree(sessionId);
-                  await runtime.bridge.severSessionClients(sessionId);
+                  const severCompleted =
+                    await runtime.bridge.severSessionClients(sessionId);
+                  if (severCompleted) {
+                    runtime.bridge.clearSessionResetPending(sessionId);
+                  } else {
+                    // The same hold the fresh transfer's sever step reports:
+                    // keep the barrier armed on the surviving superseded
+                    // entry instead of certifying a severance that did not
+                    // happen.
+                    daemonLog?.warn(
+                      'worktree reset left the superseded session live',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                  }
+                  barrierArmed = false;
                   assertRuntimeGenerationOpen?.();
                   daemonLog?.info(
                     'worktree session reset resumed after interruption',
@@ -4852,6 +4902,7 @@ export function registerSessionRoutes(
                     },
                     worktreeState: 'persisted-v1',
                     attached: false,
+                    ...(severCompleted ? {} : { supersededSessionLive: true }),
                   });
                   return;
                 } else {
@@ -4903,7 +4954,19 @@ export function registerSessionRoutes(
                 if (changed.newCwd !== realTarget) {
                   throw new Error('Worktree relocation was rejected');
                 }
-                // 3. The replacement's sidecar carries the forward link.
+                // 3. The old sidecar names its replacement first: that
+                // backward link is the only door into the resume
+                // classification above, so a crash between the two writes
+                // stays observable to a retry — it refuses the disagreeing
+                // pair for operator repair instead of spawning a second
+                // replacement and stranding the first under a dangling
+                // forward link nothing ever scans for.
+                await writeWorktreeSession(oldSidecarPath, {
+                  ...effectiveOldSidecar,
+                  supersededBy: spawned.sessionId,
+                });
+                oldSupersededWritten = true;
+                // 4. The replacement's sidecar carries the forward link.
                 const newSidecarPath = sessionService.getWorktreeSessionPath(
                   spawned.sessionId,
                 );
@@ -4917,12 +4980,6 @@ export function registerSessionRoutes(
                   supersedes: storageSessionId,
                 });
                 newSidecarWritten = true;
-                // 4. The old sidecar names its replacement.
-                await writeWorktreeSession(oldSidecarPath, {
-                  ...effectiveOldSidecar,
-                  supersededBy: spawned.sessionId,
-                });
-                oldSupersededWritten = true;
                 // 5. A prompt admitted in the check-to-arm window and still
                 // winding down aborts the transfer; after the flip it would
                 // write into a checkout whose ownership just moved.
@@ -4956,6 +5013,18 @@ export function registerSessionRoutes(
                         ? markerError.message
                         : String(markerError),
                   });
+                  if (markerError instanceof WorktreeMarkerCommittedError) {
+                    // The primitive's own post-commit tail failed with the
+                    // marker already naming the replacement, so the flip did
+                    // happen: never compensate backwards, and never report
+                    // the invalid-state 409 whose contract is that this
+                    // request changed nothing. A retry resumes the committed
+                    // transfer idempotently.
+                    markerTransferred = true;
+                    throw new Error(
+                      'Worktree ownership moved to the replacement, but the marker commit did not finish cleanly; retry the reset to complete the transfer',
+                    );
+                  }
                   throw new WorktreeResetInvalidStateError(sessionId);
                 }
                 markerTransferred = true;
@@ -4973,8 +5042,31 @@ export function registerSessionRoutes(
                 );
                 assertRuntimeGenerationOpen?.();
                 runtime.bridge.clearSessionWorktree(sessionId);
-                await runtime.bridge.severSessionClients(sessionId);
-                runtime.bridge.clearSessionResetPending(sessionId);
+                const severCompleted =
+                  await runtime.bridge.severSessionClients(sessionId);
+                if (severCompleted) {
+                  runtime.bridge.clearSessionResetPending(sessionId);
+                } else {
+                  // The child holds background work, so the last detach's
+                  // idle close was refused and the superseded session is
+                  // still live inside the checkout whose ownership just
+                  // moved. Keep the prompt barrier armed — it is the only
+                  // fence left on that entry — and report the hold instead of
+                  // certifying a severance that did not happen. Escalating to
+                  // killSession is not an option: it turns a close error into
+                  // a channel kill, and the replacement was spawned onto that
+                  // same workspace-bound bridge.
+                  daemonLog?.warn(
+                    'worktree reset left the superseded session live',
+                    {
+                      sessionId,
+                      replacementSessionId: spawned.sessionId,
+                    },
+                  );
+                }
+                // Either way this request stops owning the barrier release: a
+                // completed severance just cleared it, and a survivor's fence
+                // has to outlive the request that left it armed.
                 barrierArmed = false;
                 daemonLog?.info('worktree session reset', {
                   sessionId,
@@ -4985,6 +5077,7 @@ export function registerSessionRoutes(
                   currentCwd: realTarget,
                   worktree: newWorktree,
                   worktreeState: 'persisted-v1',
+                  ...(severCompleted ? {} : { supersededSessionLive: true }),
                 });
               } catch (transferError) {
                 if (markerTransferred) {
@@ -5006,16 +5099,19 @@ export function registerSessionRoutes(
                   throw transferError;
                 }
                 // Roll back to the pre-commit shape: the old session keeps
-                // ownership and a retry starts a fresh transfer.
+                // ownership and a retry starts a fresh transfer. Undo in the
+                // reverse of the write order above so a crash mid-rollback
+                // leaves the backward link alone — the shape a retry refuses
+                // for repair — instead of a forward link nothing scans for.
+                if (newSidecarWritten && spawnedNew) {
+                  await clearWorktreeSession(
+                    sessionService.getWorktreeSessionPath(spawnedNew.sessionId),
+                  );
+                }
                 if (oldSupersededWritten) {
                   await writeWorktreeSession(
                     oldSidecarPath,
                     effectiveOldSidecar,
-                  );
-                }
-                if (newSidecarWritten && spawnedNew) {
-                  await clearWorktreeSession(
-                    sessionService.getWorktreeSessionPath(spawnedNew.sessionId),
                   );
                 }
                 if (spawnedNew) {

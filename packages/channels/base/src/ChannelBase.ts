@@ -42,6 +42,7 @@ import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
 import {
   NamedSessionManager,
+  NamedSessionTaskError,
   type NamedSessionOwnerInput,
   type NamedSessionSelection,
   type NamedSessionTaskReference,
@@ -3535,15 +3536,65 @@ export abstract class ChannelBase {
    * — the reset route resumes an interrupted transfer itself and reports a
    * broken marker as invalid state — so they surface on selection and on a
    * message, wrapped in the manager's generic load failure.
+   *
+   * Clearing always acts on the *selected* task, so pointing the user at a
+   * clear is only safe when the task that failed is the selected one. Aimed at
+   * any other task it would run a full ownership transfer against a healthy
+   * one and destroy that conversation, so the alternative points at the close
+   * that works on the broken task without loading it. Both name that task.
    */
-  private worktreeRecoveryMessage(error: unknown): string | undefined {
-    switch (readDaemonHttpErrorCode(error)) {
-      case 'worktree_reset_interrupted':
-        return 'The task was interrupted while being reset. Its files were not changed. Clear the task again to finish the reset.';
-      case 'worktree_marker_missing':
-        return 'The task cannot verify its worktree because its ownership marker is missing. Its files were not changed. Clear the task to restart it in the same worktree, or close it.';
-      default:
-        return undefined;
+  private async worktreeRecoveryMessage(
+    envelope: Envelope,
+    error: unknown,
+  ): Promise<string | undefined> {
+    const code = readDaemonHttpErrorCode(error);
+    if (
+      code !== 'worktree_reset_interrupted' &&
+      code !== 'worktree_marker_missing'
+    ) {
+      return undefined;
+    }
+    const interrupted = code === 'worktree_reset_interrupted';
+    const failedTaskName =
+      error instanceof NamedSessionTaskError ? error.taskName : undefined;
+    // This message bypasses the wrapper's sanitizeDisplayText, so bound the one
+    // piece of interpolated text it adds.
+    const safeTaskName =
+      failedTaskName === undefined
+        ? undefined
+        : sanitizeDisplayText(failedTaskName, 32);
+    const subject =
+      safeTaskName === undefined ? 'The task' : `Task "${safeTaskName}"`;
+    const problem = interrupted
+      ? 'was interrupted while being reset'
+      : 'cannot verify its worktree because its ownership marker is missing';
+    if (
+      safeTaskName !== undefined &&
+      failedTaskName === (await this.selectedTaskName(envelope))
+    ) {
+      return `${subject} ${problem}. Its files were not changed. ${
+        interrupted
+          ? 'Clear the task again to finish the reset.'
+          : 'Clear the task to restart it in the same worktree, or close it.'
+      }`;
+    }
+    const remedy =
+      safeTaskName === undefined
+        ? 'select this task first or close it'
+        : `select this task first or close it with ${this.prefixedCommand(`/session close ${safeTaskName}`)}`;
+    return `${subject} ${problem}. Its files were not changed. Clearing now would reset the selected task instead, so ${remedy}.`;
+  }
+
+  private async selectedTaskName(
+    envelope: Envelope,
+  ): Promise<string | undefined> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions) return undefined;
+    try {
+      return (await namedSessions.current(this.namedSessionOwner(envelope)))
+        ?.name;
+    } catch {
+      return undefined;
     }
   }
 
@@ -3557,7 +3608,7 @@ export abstract class ChannelBase {
       );
     }
     const message =
-      this.worktreeRecoveryMessage(error) ??
+      (await this.worktreeRecoveryMessage(envelope, error)) ??
       (error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
         : 'Named-session operation failed.');

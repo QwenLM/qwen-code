@@ -16752,6 +16752,76 @@ describe('createServeApp', () => {
       }
     });
 
+    it('keeps a fired non-Channel restore prompt unattested instead of killing the session', async () => {
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'restored-client',
+          state: {},
+          hasActivePrompt: true,
+        }),
+      });
+      // No persisted source and none requested, so this is not a Channel
+      // restore and the route asks the bridge for no deferral. With
+      // `restoreAskUserQuestion` enabled the bridge then FIRES the re-hung
+      // question during the cold restore, and that response reports an
+      // active prompt while carrying no `currentCwd` at all.
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({});
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        // The session is inside its checkout — a non-suppressed restore lets
+        // the child restore its own worktree context — and relocating it is
+        // impossible while its prompt is live. It keeps the worktree metadata
+        // without the attestation the route cannot earn, and survives.
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'my-task',
+          path: worktreePath,
+          branch: 'worktree-my-task',
+        });
+        expect(res.body.worktreeState).toBeUndefined();
+        expect(bridge.loadCalls[0]).not.toHaveProperty(
+          'suppressWorktreeContextRestore',
+        );
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+        expect(bridge.killCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
     it('attests an active route-owned session already inside its worktree', async () => {
       const worktreePath = path.join(WS_BOUND, '.qwen', 'worktrees', 'my-task');
       const bridge = fakeBridge({

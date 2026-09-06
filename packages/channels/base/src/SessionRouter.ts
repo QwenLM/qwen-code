@@ -834,11 +834,14 @@ export class SessionRouter {
 
   async detachManagedSession(sessionId: string): Promise<void> {
     try {
-      if (this.liveSessionIds.has(sessionId)) {
-        if (!this.bridge.discardSession) {
-          throw new Error('Managed session detach is not supported');
-        }
+      if (this.bridge.discardSession) {
+        // Release regardless of the live flag: a failed worktree reset drops it
+        // so the superseded redirect can heal the id, while the bridge keeps
+        // holding the client and its event pump. Discarding an id the bridge
+        // has no binding for is a no-op.
         await this.bridge.discardSession(sessionId);
+      } else if (this.liveSessionIds.has(sessionId)) {
+        throw new Error('Managed session detach is not supported');
       }
     } finally {
       this.forgetManagedSession(sessionId);

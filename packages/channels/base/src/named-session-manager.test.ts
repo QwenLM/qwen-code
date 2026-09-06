@@ -1034,6 +1034,13 @@ describe('NamedSessionManager', () => {
     await expect(
       restarted.manager.resumeReserved(alice, created.sessionId),
     ).resolves.toBe('session-2');
+    // The heal rewrote the registry, but the *other* queued turns of this chat
+    // are still bound to the superseded id. They must follow the task onto the
+    // replacement instead of resolving to nothing and being dropped in
+    // silence.
+    await expect(
+      restarted.manager.resumeReserved(alice, created.sessionId),
+    ).resolves.toBe('session-2');
     await expect(restarted.manager.current(alice)).resolves.toEqual(
       expect.objectContaining({ name: 'feature', sessionId: 'session-2' }),
     );
