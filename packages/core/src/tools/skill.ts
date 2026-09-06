@@ -352,20 +352,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   restoreLoadedSkillsFromHistory(history: Content[]): void {
     this.clearLoadedSkills();
 
-    const skillByName = new Map<
-      string,
-      { name: string; output: string; config: SkillConfig }
-    >();
+    const skillByName = new Map<string, { name: string; output: string }>();
     for (const skill of this.skillManager.getCachedSkills() ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
-      skillByName.set(skill.name.toLowerCase(), {
-        name: skill.name,
-        output,
-        config: skill,
-      });
+      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
     }
 
     const pendingSkillCalls = new Map<string, string>();
@@ -403,29 +396,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           continue;
         }
 
-        // Bookkeeping is unconditional: the body is in the restored context
-        // regardless, and the dedup guard must know about it.
         this.loadedSkillContents.add(skill.output);
         this.loadedSkillNames.add(skill.name);
-
-        // Session hooks and allow rules live only in memory, so a resumed
-        // session starts with none of them — while the restored body still
-        // carries the skill's instructions to the model. Without this the
-        // skill's PreToolUse gate would never fire again after `--continue` /
-        // `--resume`: the dedup guard answers "already loaded in context", so
-        // nothing prompts a re-invocation that would re-apply them. That is
-        // the same fail-open shape this path is meant to prevent. Both
-        // registrations dedup, and the trust gate is re-applied here.
-        //
-        // Enabledness is re-checked because it can change between sessions:
-        // a skill invoked, then disabled via `skills.disabled`, is still in
-        // this history. Both live paths refuse a disabled skill before
-        // applying anything (`executeDisabledSkill`; the loader's disabled
-        // branch), so restoring its allow rules and hooks would re-arm an
-        // auto-approval the user has since switched off.
-        if (this.config.isSkillEnabled(skill.config)) {
-          applySkillSideEffects(this.config, skill.config);
-        }
       }
     }
   }
