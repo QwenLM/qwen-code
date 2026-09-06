@@ -470,14 +470,25 @@ export class SessionMessageHandler extends BaseMessageHandler {
     const fsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!fsPath) return process.cwd();
     try {
+      // `fs/promises` realpath is documented to use the same semantics as
+      // `fs.realpath.native()`: it calls the realpath(3) binding directly, not
+      // the JS component walker that `fs.realpath` uses and that echoes the
+      // caller's casing on case-insensitive volumes (APFS/NTFS). That is the
+      // spelling `canonicalizeWorkspace` in
+      // packages/acp-bridge/src/workspacePaths.ts canonicalizes to, and the one
+      // the transcript bucket is hashed from.
       return await fsp.realpath(fsPath);
     } catch (error) {
       // A workspace folder that stops resolving while the window stays open
       // (deleted or renamed from a terminal, a removed worktree, an unmounted
-      // volume, a dangling symlink) must not block the export: transcripts
-      // live under `~/.qwen/tmp/<getProjectHash(cwd)>/chats` and the hash is a
-      // pure digest of the path string, so the raw spelling still finds them —
-      // and this is exactly the state where rescuing a transcript matters.
+      // volume, a dangling symlink) must not block the export. For a
+      // non-symlinked folder the raw spelling IS the canonical one, so the
+      // transcript bucket under `~/.qwen/tmp/<getProjectHash(cwd)>/chats` still
+      // matches. The daemon hashes the *canonicalized* workspace
+      // (packages/cli/src/serve/server.ts), so in a symlinked folder the
+      // canonical spelling is unrecoverable once the alias stops resolving and
+      // this degrades the way it did before the branch existed — the export
+      // still gets a folder path for the save dialog instead of failing.
       // Only ENOENT falls back; EACCES/EIO/ELOOP keep propagating so transient
       // I/O failures are not hidden, matching `canonicalizeWorkspace` in
       // packages/acp-bridge/src/workspacePaths.ts.
