@@ -3,7 +3,7 @@ import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
-import { useStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import { useStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import { useStreamingLoadingMetrics } from '../hooks/useStreamingLoadingMetrics';
@@ -12,11 +12,29 @@ import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {
   startedAt?: number;
+  /**
+   * When false, hide the rotating "witty" loading phrase and skip its rotation
+   * timer entirely — the spinner, elapsed time, token count, and cancel hint
+   * still render. Split-view panes pass false to keep each pane's composer
+   * status compact. Defaults to true (the main chat shows the phrase).
+   */
+  showPhrase?: boolean;
+  /**
+   * When true, the daemon reports the session has an in-flight prompt. The
+   * indicator stays visible even while streamingState is idle, so long tool
+   * calls that produce >3s silent gaps do not hide the loading state mid-turn
+   * (#9487). The daemon's session live state is the authoritative source.
+   */
+  hasActivePrompt?: boolean;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-export function StreamingStatus({ startedAt }: StreamingStatusProps) {
+export function StreamingStatus({
+  startedAt,
+  showPhrase = true,
+  hasActivePrompt,
+}: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
     useStreamingLoadingMetrics();
@@ -53,16 +71,23 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   const [loadingPhrase, setLoadingPhrase] = useState(
     () => resolvePhrases(language)[0] ?? '',
   );
-
-  const isActive = streamingState !== 'idle';
+  const isActive = streamingState !== 'idle' || hasActivePrompt === true;
+  // Tracks whether the previous effect run was active, so a silent gap (active
+  // via hasActivePrompt while the host's startedAt goes undefined) keeps the
+  // turn's original anchor instead of restarting the elapsed clock at zero.
+  const wasActiveRef = useRef(false);
 
   useEffect(() => {
     if (!isActive) {
+      wasActiveRef.current = false;
       setElapsed(0);
       return;
     }
 
-    startTime.current = startedAt ?? Date.now();
+    if (startedAt !== undefined || !wasActiveRef.current) {
+      startTime.current = startedAt ?? Date.now();
+    }
+    wasActiveRef.current = true;
     setElapsed(elapsedSeconds(startTime.current));
     const interval = setInterval(() => {
       setElapsed(elapsedSeconds(startTime.current));
@@ -71,6 +96,10 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   }, [isActive, startedAt]);
 
   useEffect(() => {
+    // Callers that hide the phrase (e.g. split-view panes) don't need the
+    // rotation timer at all — bail before arming it so panes don't each run a
+    // needless interval and re-render on every tick.
+    if (!showPhrase) return;
     if (streamingState === 'idle') {
       setLoadingPhrase(resolvePhrases(language)[0] ?? '');
       return;
@@ -90,17 +119,17 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
     pickPhrase();
     const interval = setInterval(pickPhrase, PHRASE_CHANGE_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [language, streamingState, resolvePhrases]);
+  }, [language, streamingState, resolvePhrases, showPhrase]);
 
   useEffect(() => {
-    if (streamingState === 'idle') return;
+    if (!isActive) return;
     const interval = setInterval(() => {
       setDotFrame((f) => (f + 1) % SPINNER_FRAMES.length);
     }, 250);
     return () => clearInterval(interval);
-  }, [streamingState]);
+  }, [isActive]);
 
-  if (streamingState === 'idle') return null;
+  if (streamingState === 'idle' && !hasActivePrompt) return null;
 
   const spinnerChar = SPINNER_FRAMES[dotFrame % SPINNER_FRAMES.length];
   const arrow = isReceivingContent ? '↓' : '↑';
@@ -113,7 +142,9 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   return (
     <div className={styles.status}>
       <span className={styles.spinner}>{spinnerChar}</span>
-      {loadingPhrase && <span className={styles.label}>{loadingPhrase}</span>}
+      {showPhrase && loadingPhrase && (
+        <span className={styles.label}>{loadingPhrase}</span>
+      )}
       <span className={styles.meta}>
         ({timeStr}
         {tokenStr} · {t('stream.cancel')})

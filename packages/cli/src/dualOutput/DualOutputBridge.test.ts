@@ -5,16 +5,22 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+  HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+} from '../nonInteractive/io/headless-tool-result-text-projection.js';
+import {
   DualOutputBridge,
   DUAL_OUTPUT_PROTOCOL_VERSION,
   SUPPORTED_EVENTS,
 } from './DualOutputBridge.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 function createMockConfig(): Config {
   return {
@@ -64,6 +70,63 @@ describe('DualOutputBridge', () => {
   });
 
   describe('--json-file output', () => {
+    it('emits recording failures for the affected session and unsubscribes on shutdown', async () => {
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      const unsubscribe = vi.fn();
+      config = {
+        ...createMockConfig(),
+        onChatRecordingFailure: vi.fn((nextListener) => {
+          listener = nextListener;
+          return unsubscribe;
+        }),
+      } as unknown as Config;
+      bridge = new DualOutputBridge(config, { filePath: target });
+
+      listener?.({ sessionId: 'affected-session', error: new Error('EACCES') });
+      await bridge.shutdown();
+
+      expect(readJsonl(target)).toContainEqual(
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'session_recording_degraded',
+          session_id: 'affected-session',
+          data: expect.objectContaining({
+            session_id: 'affected-session',
+            reason: 'write_failed',
+          }),
+        }),
+      );
+      expect(unsubscribe).toHaveBeenCalledOnce();
+
+      listener?.({ sessionId: 'late-session', error: new Error('ENOSPC') });
+      expect(readJsonl(target)).not.toContainEqual(
+        expect.objectContaining({ session_id: 'late-session' }),
+      );
+    });
+
+    it('disables dual output when recording failure reporting throws', () => {
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      config = {
+        ...createMockConfig(),
+        onChatRecordingFailure: vi.fn((nextListener) => {
+          listener = nextListener;
+          return vi.fn();
+        }),
+      } as unknown as Config;
+      bridge = new DualOutputBridge(config, { filePath: target });
+      vi.spyOn(bridge['adapter'], 'emitMessage').mockImplementation(() => {
+        throw new Error('sidecar disconnected');
+      });
+
+      listener?.({ sessionId: 'affected-session', error: new Error('ENOSPC') });
+
+      expect(bridge.isConnected).toBe(false);
+    });
+
     it('creates the file automatically when it does not exist (ENOENT fallback)', async () => {
       const newFile = path.join(tmpDir, 'does-not-exist.jsonl');
       // newFile is NOT pre-created — tests the ENOENT fallback path
@@ -108,6 +171,43 @@ describe('DualOutputBridge', () => {
       expect(data['version']).toBe('1.2.3');
       expect(data['protocol_version']).toBe(DUAL_OUTPUT_PROTOCOL_VERSION);
       expect(data['supported_events']).toEqual([...SUPPORTED_EVENTS]);
+      expect(DUAL_OUTPUT_PROTOCOL_VERSION).toBe(2);
+    });
+
+    it('writes bounded tool result content to the sidecar file', async () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      const display = 'HEAD-' + 'x'.repeat(100_000) + '-TAIL';
+
+      bridge.emitToolResult(
+        {
+          callId: 'tool-large',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'tool-large',
+          responseParts: [],
+          resultDisplay: display,
+          error: undefined,
+          errorType: undefined,
+        },
+      );
+      await bridge.shutdown();
+
+      const user = readJsonl(target).find((line) => line['type'] === 'user');
+      const content = (
+        user as {
+          message: { content: Array<{ content: string }> };
+        }
+      ).message.content[0].content;
+
+      expect(
+        Buffer.byteLength(JSON.stringify(content), 'utf8'),
+      ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+      expect(content).toContain(HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+      expect(content).not.toBe(display);
     });
 
     it('emits session_end on shutdown for a clean termination signal', async () => {
@@ -160,7 +260,20 @@ describe('DualOutputBridge', () => {
 
     it('routes permission requests + responses through the adapter', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.emitPermissionRequest('req-1', 'shell', 'tu-1', { cmd: 'ls' });
+      bridge.emitPermissionRequest(
+        'req-1',
+        'shell',
+        'tu-1',
+        { cmd: 'ls' },
+        null,
+        [
+          {
+            type: 'allow',
+            label: 'Allow Command',
+            description: 'Exact one-off approval required',
+          },
+        ],
+      );
       bridge.emitControlResponse('req-1', false);
       await bridge.shutdown();
 
@@ -175,6 +288,13 @@ describe('DualOutputBridge', () => {
           tool_name: 'shell',
           tool_use_id: 'tu-1',
           input: { cmd: 'ls' },
+          permission_suggestions: [
+            {
+              type: 'allow',
+              label: 'Allow Command',
+              description: 'Exact one-off approval required',
+            },
+          ],
           blocked_path: null,
         },
       });
@@ -267,7 +387,7 @@ describe('DualOutputBridge', () => {
         bridge = new DualOutputBridge(config, { filePath: fifoPath });
         const elapsed = Date.now() - start;
 
-        expect(elapsed).toBeLessThan(500);
+        expectWithinLatencyBudget(elapsed, 500);
         expect(bridge.isConnected).toBe(true);
       });
 

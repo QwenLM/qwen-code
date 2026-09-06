@@ -81,12 +81,14 @@ const {
   };
 });
 
-vi.mock('node:os', () => ({
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
   totalmem: () => getMockOsTotalmem(),
   cpus: () => [{ model: 'mock', speed: 0, times: {} }],
 }));
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
   readFileSync: (path: string) => getMockCgroupFile(path),
 }));
 
@@ -135,7 +137,7 @@ beforeAll(async () => {
 function createMockConfig(
   overrides: {
     fileReadCache?: Partial<FileReadCache>;
-    geminiClient?: {
+    llmClient?: {
       isInitialized?: () => boolean;
       getChat?: () => {
         getHistoryShallow?: () => unknown[];
@@ -151,7 +153,7 @@ function createMockConfig(
   } = {},
 ): Config {
   const client =
-    overrides.geminiClient === undefined
+    overrides.llmClient === undefined
       ? {
           isInitialized: () => true,
           getChat: () => ({
@@ -160,15 +162,17 @@ function createMockConfig(
             setHistory: vi.fn(),
           }),
         }
-      : overrides.geminiClient;
+      : overrides.llmClient;
   return {
+    getProjectRoot: () => '/mock/project',
+    getTargetDir: () => '/mock/project',
     getFileReadCache: () =>
       ({
         clear: vi.fn(),
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
-    getGeminiClient: () => client as never,
+    getLlmClient: () => client as never,
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
@@ -1244,7 +1248,7 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => false,
             getChat: () => ({
               getHistoryShallow: () => [{ role: 'user' }],
@@ -1268,7 +1272,7 @@ describe('MemoryPressureMonitor', () => {
       const originalHistory = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => originalHistory,
@@ -1292,7 +1296,7 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => [],
@@ -1314,7 +1318,7 @@ describe('MemoryPressureMonitor', () => {
     it('handles exceptions during compaction gracefully', async () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => {
               throw new Error('chat unavailable');
@@ -1333,11 +1337,11 @@ describe('MemoryPressureMonitor', () => {
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
-    it('handles getGeminiClient returning null', async () => {
+    it('handles getLlmClient returning null', async () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: null,
+          llmClient: null,
         }),
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
@@ -1355,14 +1359,19 @@ describe('MemoryPressureMonitor', () => {
       // Build history with 7 read_file tool results (keep=5, so 2 get cleared)
       const toolHistory: Content[] = [];
       for (let i = 0; i < 7; i++) {
+        const filePath =
+          i === 0
+            ? '/mock/project/.qwen/team-memory/feedback/testing.md'
+            : `/f${i}.ts`;
         toolHistory.push(
           {
             role: 'model',
             parts: [
               {
                 functionCall: {
+                  id: `call_${i}`,
                   name: 'read_file',
-                  args: { path: `/f${i}.ts` },
+                  args: { file_path: filePath },
                 },
               },
             ],
@@ -1383,7 +1392,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
@@ -1419,6 +1428,12 @@ describe('MemoryPressureMonitor', () => {
         ),
       );
       expect(blankedResponses.length).toBeGreaterThan(0);
+      const memoryResult = compacted
+        .flatMap((entry) => entry.parts ?? [])
+        .find((part) => part.functionResponse?.id === 'call_0');
+      expect(memoryResult?.functionResponse?.response?.['output']).toBe(
+        'content of f0',
+      );
     });
 
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {
@@ -1454,7 +1469,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
@@ -1514,7 +1529,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
@@ -1574,7 +1589,7 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,

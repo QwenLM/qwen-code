@@ -34,6 +34,8 @@ export {
   shouldShowStep,
 } from './provider-config.js';
 
+export { discoverProviderModels } from './model-discovery.js';
+
 // Provider registry
 export {
   ALL_PROVIDERS,
@@ -47,9 +49,11 @@ export {
   findProviderById,
   generateCustomEnvKey,
   getAllProviderBaseUrls,
+  grokProvider,
   idealabProvider,
   minimaxProvider,
   modelscopeProvider,
+  moonshotProvider,
   openRouterProvider,
   requestyProvider,
   THIRD_PARTY_PROVIDERS,
@@ -65,8 +69,11 @@ export {
 } from './presets/alibaba-coding-plan.js';
 export {
   TOKEN_PLAN_BASE_URL,
+  TOKEN_PLAN_CHINA_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
 } from './presets/alibaba-token-plan.js';
+export { GROK_BASE_URL, GROK_ENV_KEY } from './presets/grok.js';
 export {
   OPENROUTER_BASE_URL,
   OPENROUTER_ENV_KEY,

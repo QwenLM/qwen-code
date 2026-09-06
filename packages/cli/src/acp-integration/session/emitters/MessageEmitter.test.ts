@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MessageEmitter } from './MessageEmitter.js';
 import type { SessionContext } from '../types.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  apiActivityTracker,
+  type Config,
+  type GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core';
 
 describe('MessageEmitter', () => {
   let mockContext: SessionContext;
@@ -15,10 +19,18 @@ describe('MessageEmitter', () => {
   let emitter: MessageEmitter;
 
   beforeEach(() => {
+    // emitUsageMetadata drains the process-global API-activity tracker onto a
+    // live frame's `_meta`; zero it so a nonzero count from another test can't
+    // inject apiErrors/apiRetries keys into these exact-`_meta` assertions.
+    apiActivityTracker.drain();
     sendUpdateSpy = vi.fn().mockResolvedValue(undefined);
     mockContext = {
       sessionId: 'test-session-id',
-      config: {} as Config,
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          contextWindowSize: 128_000,
+        }),
+      } as unknown as Config,
       sendUpdate: sendUpdateSpy,
     };
     emitter = new MessageEmitter(mockContext);
@@ -98,25 +110,14 @@ describe('MessageEmitter', () => {
     });
   });
 
-  describe('emitGoalTerminal', () => {
-    it('should send a goal terminal update in metadata', async () => {
-      const event = {
-        kind: 'achieved' as const,
-        condition: 'ship goal support',
-        iterations: 2,
-        durationMs: 1234,
-        lastReason: 'The requested support is complete.',
-      };
+  describe('emitSlashCommandOutput', () => {
+    it('should identify slash-command output in metadata', async () => {
+      await emitter.emitSlashCommandOutput('Compressing context...');
 
-      await emitter.emitGoalTerminal(event);
-
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: '' },
-        _meta: {
-          goalTerminal: event,
-        },
+        content: { type: 'text', text: 'Compressing context...' },
+        _meta: { source: 'slash_command' },
       });
     });
   });
@@ -138,6 +139,60 @@ describe('MessageEmitter', () => {
         _meta: {
           goalStatus: status,
         },
+      });
+    });
+  });
+
+  describe('emitGoalState', () => {
+    it('sends canonical state with the legacy projection used by replay', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'ship ACP Goal support',
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        },
+      };
+
+      await emitter.emitGoalState(snapshot, 'create');
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: snapshot,
+          goalStatus: {
+            kind: 'set',
+            condition: 'ship ACP Goal support',
+            iterations: 0,
+            setAt: 1234,
+            durationMs: 0,
+          },
+        },
+      });
+    });
+
+    it('emits an authoritative status snapshot without inventing a cause', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      };
+
+      await emitter.emitGoalState(snapshot);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { goalState: snapshot },
       });
     });
   });
@@ -241,6 +296,85 @@ describe('MessageEmitter', () => {
   });
 
   describe('emitUsageMetadata', () => {
+    it('emits standard usage updates with the latest context occupancy, not a cumulative sum', async () => {
+      await emitter.emitUsageMetadata(
+        { promptTokenCount: 100, totalTokenCount: 175 },
+        '',
+        20,
+      );
+      await emitter.emitUsageMetadata(
+        { promptTokenCount: 120, totalTokenCount: 210 },
+        '',
+        30,
+      );
+
+      const usageUpdates = sendUpdateSpy.mock.calls
+        .map(([update]) => update)
+        .filter((update) => update.sessionUpdate === 'usage_update');
+      expect(usageUpdates).toEqual([
+        { sessionUpdate: 'usage_update', used: 100, size: 128_000 },
+        { sessionUpdate: 'usage_update', used: 120, size: 128_000 },
+      ]);
+
+      // Keep emitting the existing Qwen extension for current consumers.
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: expect.objectContaining({
+            usage: expect.objectContaining({ inputTokens: 120 }),
+          }),
+        }),
+      );
+    });
+
+    it('does not replace main-session context usage with replay or subagent usage', async () => {
+      await emitter.emitUsageMetadata({ promptTokenCount: 90 });
+      await emitter.emitUsageMetadata({ promptTokenCount: 40 }, '', 10, {
+        parentToolCallId: 'agent-parent-1',
+        subagentType: 'general-purpose',
+      });
+
+      expect(
+        sendUpdateSpy.mock.calls
+          .map(([update]) => update)
+          .filter((update) => update.sessionUpdate === 'usage_update'),
+      ).toEqual([]);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to total tokens when a live provider omits prompt tokens', async () => {
+      await emitter.emitUsageMetadata({ totalTokenCount: 75 }, '', 10);
+
+      expect(sendUpdateSpy).toHaveBeenLastCalledWith({
+        sessionUpdate: 'usage_update',
+        used: 75,
+        size: 128_000,
+      });
+    });
+
+    it('keeps private usage metadata when the context window is unresolved', async () => {
+      const ctx: SessionContext = {
+        ...mockContext,
+        config: {
+          getContentGeneratorConfig: () => undefined,
+        } as unknown as Config,
+      };
+
+      await new MessageEmitter(ctx).emitUsageMetadata(
+        { promptTokenCount: 75 },
+        '',
+        10,
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: expect.objectContaining({ usage: expect.any(Object) }),
+        }),
+      );
+    });
+
     it('should emit agent_message_chunk with _meta.usage containing token counts', async () => {
       const usageMetadata = {
         promptTokenCount: 100,
@@ -294,6 +428,46 @@ describe('MessageEmitter', () => {
       });
     });
 
+    it('drains model API errors/retries onto a live frame and stamps them', async () => {
+      apiActivityTracker.recordError();
+      apiActivityTracker.recordError();
+      apiActivityTracker.recordRetry();
+
+      // Live round (durationMs present) → the counts are drained and stamped.
+      await emitter.emitUsageMetadata({ totalTokenCount: 1 }, '', 500);
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _meta: expect.objectContaining({ apiErrors: 2, apiRetries: 1 }),
+        }),
+      );
+
+      // A second live round with nothing pending carries neither key (the first
+      // emit drained the tracker to zero).
+      await emitter.emitUsageMetadata({ totalTokenCount: 1 }, '', 500);
+      const privateUsageUpdates = sendUpdateSpy.mock.calls
+        .map(([update]) => update)
+        .filter(
+          (update) =>
+            update.sessionUpdate === 'agent_message_chunk' &&
+            update._meta?.usage,
+        );
+      const secondMeta = privateUsageUpdates.at(-1)?._meta;
+      expect(secondMeta).not.toHaveProperty('apiErrors');
+      expect(secondMeta).not.toHaveProperty('apiRetries');
+    });
+
+    it('does not drain the tracker on a replay frame (no durationMs)', async () => {
+      apiActivityTracker.recordError();
+
+      // Replay path omits durationMs → must not consume the pending count nor
+      // stamp it onto a frame the daemon ignores for replay.
+      await emitter.emitUsageMetadata({ totalTokenCount: 1 });
+      const replayMeta = sendUpdateSpy.mock.lastCall?.[0]._meta;
+      expect(replayMeta).not.toHaveProperty('apiErrors');
+      // The count survived for the next live frame to report.
+      expect(apiActivityTracker.peek().errors).toBe(1);
+    });
+
     it('accumulates token counts and API time into the context cumulative usage', async () => {
       const cumulativeUsage = {
         promptTokens: 0,
@@ -303,7 +477,7 @@ describe('MessageEmitter', () => {
       };
       const ctx: SessionContext = {
         sessionId: 'test-session-id',
-        config: {} as Config,
+        config: mockContext.config,
         sendUpdate: sendUpdateSpy,
         cumulativeUsage,
       };

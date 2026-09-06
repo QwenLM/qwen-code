@@ -55,6 +55,19 @@ describe('modelConfigUtils', () => {
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_OPENAI);
     });
 
+    it('uses an injected env instead of process.env when provided', () => {
+      process.env['OPENAI_API_KEY'] = 'process-key';
+      process.env['OPENAI_MODEL'] = 'process-model';
+      process.env['OPENAI_BASE_URL'] = 'https://process.example';
+
+      expect(
+        getAuthTypeFromEnv({
+          GEMINI_API_KEY: 'runtime-key',
+          GEMINI_MODEL: 'runtime-model',
+        }),
+      ).toBe(AuthType.USE_GEMINI);
+    });
+
     it('should return USE_OPENAI when the model is given via QWEN_MODEL', () => {
       // QWEN_MODEL is a valid USE_OPENAI model var (see AUTH_ENV_MODEL_VARS),
       // so a config that sets it instead of OPENAI_MODEL must still resolve.
@@ -99,6 +112,49 @@ describe('modelConfigUtils', () => {
       process.env['GOOGLE_MODEL'] = 'vertex-model';
 
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should return USE_VERTEX_AI for keyless Vertex AI env vars', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should preserve keyed Vertex AI precedence', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_API_KEY: 'test-key',
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should not infer keyless Vertex AI without a model', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_CLOUD_PROJECT: 'test-project' }),
+      ).toBeUndefined();
+    });
+
+    it('should not infer keyless Vertex AI without a project', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_MODEL: 'vertex-model' }),
+      ).toBeUndefined();
+    });
+
+    it('should prefer keyless Vertex AI over a complete Anthropic env', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+          ANTHROPIC_API_KEY: 'test-key',
+          ANTHROPIC_MODEL: 'anthropic-model',
+          ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
     });
 
     it('should return undefined when Google env vars are incomplete', () => {
@@ -167,6 +223,34 @@ describe('modelConfigUtils', () => {
         ...overrides,
       } as Settings;
     }
+
+    it('loads none as an explicit reasoning disable', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: { effort: 'xhigh' },
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.warnings).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Ignoring invalid model.reasoningEffort'),
+        ]),
+      );
+    });
 
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
@@ -618,7 +702,7 @@ describe('modelConfigUtils', () => {
           },
         });
 
-        resolveCliGenerationConfig({
+        const result = resolveCliGenerationConfig({
           argv: {},
           settings,
           selectedAuthType: AuthType.USE_OPENAI,
@@ -630,6 +714,7 @@ describe('modelConfigUtils', () => {
         expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
           expect.objectContaining({ modelProvider: ideaLab }),
         );
+        expect(result.registryBaseUrl).toBe(ideaLab.baseUrl);
       });
 
       it('falls back to the first id match when no baseUrl is persisted (backward compat)', () => {

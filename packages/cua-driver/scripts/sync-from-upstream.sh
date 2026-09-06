@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # sync-from-upstream.sh — update this vendored copy of trycua/cua's
-# `libs/cua-driver` by layering ONLY the upstream delta on top of our local
+# `libs/cua-driver` into `packages/cua-driver` by layering ONLY the upstream
+# delta on top of our local
 # changes (the 0–1000 relative-coordinate shim + the qwen-cua-driver rename),
-# via a 3-way apply.
+# via a reject-based apply.
 #
 # Why not `git subtree`: `git subtree split` hangs on a commit deep in the
 # trycua/cua history, so the subtree pull workflow is not usable for this repo.
@@ -59,10 +60,10 @@ trap 'rm -f "$PATCH"' EXIT
 
 # Upstream delta for the driver only. --no-renames keeps the patch simple
 # (rename = delete + add), which 3-way-applies more predictably.
-git -C "$CUA_REPO" diff --no-renames "$OLD_REF" "$NEW_REF" -- libs/cua-driver > "$PATCH"
+git -C "$CUA_REPO" diff --binary --no-renames "$OLD_REF" "$NEW_REF" -- libs/cua-driver > "$PATCH"
 
 if [ ! -s "$PATCH" ]; then
-  echo "No upstream changes to libs/cua-driver between $OLD_REF and $NEW_REF."
+  echo "No upstream changes to the vendored driver between $OLD_REF and $NEW_REF."
   echo "$NEW_REF" > "$VENDORED_FILE"
   exit 0
 fi

@@ -4,6 +4,9 @@ export default {
   name: 'pr-2371-review',
   spawn: ['node', 'dist/cli.js', '--yolo'],
   terminal: { title: 'qwen-code', cwd: '../../..' },
+  // `gif` is a scenario-level switch (see ScenarioConfig). It used to sit
+  // inside `streaming` below, where the runner never read it.
+  gif: true,
   flow: [
     {
       type: '/review https://github.com/QwenLM/qwen-code/pull/2371',
@@ -11,7 +14,6 @@ export default {
         delayMs: 5000,
         intervalMs: 10000, // Every 10s
         count: 60, // 10 minutes total (60 * 10s)
-        gif: true,
       },
     },
   ],

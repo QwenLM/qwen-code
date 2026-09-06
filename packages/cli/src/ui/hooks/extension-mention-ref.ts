@@ -5,8 +5,10 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { Suggestion } from '../components/SuggestionsDisplay.js';
-import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+import {
+  MAX_SUGGESTIONS_TO_SHOW,
+  type Suggestion,
+} from '../utils/suggestions.js';
 import { t } from '../../i18n/index.js';
 export {
   EXTENSION_REF_PREFIX,
@@ -63,5 +65,6 @@ export function getExtensionSuggestions(
         : undefined,
       sourceBadge: t('Extension'),
       isDirectory: false,
+      category: 'extension' as const,
     }));
 }

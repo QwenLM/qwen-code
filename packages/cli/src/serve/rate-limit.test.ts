@@ -171,6 +171,48 @@ describe('rateLimit', () => {
       limiter.dispose();
     });
 
+    it('exempts only enabled workspace-qualified ACP transport paths', () => {
+      const qualifiedLimiter = createRateLimiter({
+        tiers: {
+          prompt: { windowMs: 60_000, max: 1 },
+          mutation: { windowMs: 60_000, max: 1 },
+          read: { windowMs: 60_000, max: 1 },
+        },
+        hostname: '127.0.0.1',
+        workspaceQualifiedAcpEnabled: true,
+      });
+
+      for (const path of [
+        '/workspaces/secondary-id/acp',
+        '/workspaces/secondary-id/acp/',
+        '/WORKSPACES/secondary-id/ACP',
+      ]) {
+        const next = vi.fn();
+        qualifiedLimiter.middleware(mockReq({ path }), mockRes(), next);
+        qualifiedLimiter.middleware(mockReq({ path }), mockRes(), next);
+        expect(next).toHaveBeenCalledTimes(2);
+      }
+
+      const nearby = '/workspaces/secondary-id/acp/extra';
+      qualifiedLimiter.middleware(
+        mockReq({ path: nearby }),
+        mockRes(),
+        vi.fn(),
+      );
+      const res = mockRes();
+      qualifiedLimiter.middleware(mockReq({ path: nearby }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'mutation' });
+      qualifiedLimiter.dispose();
+    });
+
+    it('does not exempt workspace-qualified ACP when the route is disabled', () => {
+      const path = '/workspaces/secondary-id/acp';
+      limiter.middleware(mockReq({ path }), mockRes(), vi.fn());
+      const res = mockRes();
+      limiter.middleware(mockReq({ path }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'mutation' });
+    });
+
     it('classifies POST .../prompt as prompt tier', () => {
       const next = vi.fn();
       limiter.middleware(
@@ -219,6 +261,29 @@ describe('rateLimit', () => {
       expect(res.body).toMatchObject({ tier: 'read' });
     });
 
+    it('classifies plural workspace session listing as read tier', () => {
+      const next = vi.fn();
+      limiter.middleware(
+        mockReq({
+          method: 'GET',
+          path: '/workspaces/ws-secondary/sessions',
+        }),
+        mockRes(),
+        next,
+      );
+      expect(next).toHaveBeenCalled();
+      const res = mockRes();
+      limiter.middleware(
+        mockReq({
+          method: 'GET',
+          path: '/workspaces/ws-secondary/sessions',
+        }),
+        res,
+        vi.fn(),
+      );
+      expect(res.body).toMatchObject({ tier: 'read' });
+    });
+
     it('exempts GET /health', () => {
       const next = vi.fn();
       for (let i = 0; i < 5; i++) {
@@ -231,16 +296,32 @@ describe('rateLimit', () => {
       expect(next).toHaveBeenCalledTimes(5);
     });
 
-    it('exempts GET /demo', () => {
-      const next = vi.fn();
-      for (let i = 0; i < 5; i++) {
-        limiter.middleware(
-          mockReq({ method: 'GET', path: '/demo' }),
-          mockRes(),
-          next,
-        );
+    it('exempts no GET path other than /health', () => {
+      // Pins the shape of the GET/HEAD exemption after `/demo` was removed
+      // from it. Any future widening of the predicate — a second pre-auth
+      // page, a prefix match — flips one of these to `next()` and fails here
+      // instead of silently letting an unauthenticated route escape the
+      // limiter.
+      for (const path of ['/demo', '/health/deep', '/healthz', '/']) {
+        // A fresh limiter per path: the read bucket is keyed by caller, not by
+        // path, so one shared limiter would exhaust after the first entry.
+        const scoped = createRateLimiter({
+          tiers: {
+            prompt: { windowMs: 60_000, max: 1 },
+            mutation: { windowMs: 60_000, max: 1 },
+            read: { windowMs: 60_000, max: 1 },
+          },
+          hostname: '127.0.0.1',
+        });
+        const next = vi.fn();
+        const res = mockRes();
+        scoped.middleware(mockReq({ method: 'GET', path }), mockRes(), next);
+        scoped.middleware(mockReq({ method: 'GET', path }), res, vi.fn());
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(res.statusCode).toBe(429);
+        expect(res.body).toMatchObject({ tier: 'read' });
+        scoped.dispose();
       }
-      expect(next).toHaveBeenCalledTimes(5);
     });
 
     it('exempts POST .../heartbeat', () => {

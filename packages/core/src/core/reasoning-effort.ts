@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Config } from '../config/config.js';
+
 /**
  * Unified reasoning-effort ladder exposed to users (e.g. via `/effort`).
  *
@@ -105,4 +107,20 @@ export function clampReasoningEffort(
   }
   // Nothing at or above the request: fall back to the strongest available.
   return ranked[ranked.length - 1]!;
+}
+
+/**
+ * Set `effort` and read it back to confirm the config actually accepted it.
+ * `Config.setReasoningEffort` is a documented no-op when thinking is
+ * explicitly disabled (`reasoning: false`); returns false when the requested
+ * tier did not land so each surface can report the discard its own way
+ * instead of reporting success. Clearing the override (`undefined`) always
+ * reports true.
+ */
+export function applyReasoningEffort(
+  config: Config,
+  effort: ReasoningEffort | undefined,
+): boolean {
+  config.setReasoningEffort(effort);
+  return config.getReasoningEffort() === effort;
 }

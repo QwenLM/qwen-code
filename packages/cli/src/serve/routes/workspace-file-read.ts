@@ -8,11 +8,20 @@ import * as path from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  FsError,
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
+  canonicalizeWorkspace,
   isFsError,
-  type FsError,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
+import {
+  getWorkspaceRouteContext,
+  resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+  setWorkspaceRouteContext,
+} from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 /**
  * Hard cap on entries returned from `GET /list`. The boundary probes
@@ -84,6 +93,7 @@ export function applyReadHeaders(res: Response): void {
  */
 export function sendFsError(res: Response, err: unknown, route: string): void {
   applyReadHeaders(res);
+  if (sendGenerationClosedError(res, err)) return;
   if (isFsError(err)) {
     const fs: FsError = err;
     res.status(fs.status).json({
@@ -168,10 +178,18 @@ function requireStringQuery(
  * by a custom embed without injecting `deps.fsFactory`, which is a
  * deployment misconfiguration the route can't recover from.
  */
+function routeName(req: Request, legacyRoute: string): string {
+  const context = getWorkspaceRouteContext(req);
+  if (!context) return legacyRoute;
+  return `${context.routePrefix}${legacyRoute.slice('GET '.length)}`;
+}
+
 function getFsFactory(
   req: Request,
   res: Response,
 ): WorkspaceFileSystemFactory | null {
+  const context = getWorkspaceRouteContext(req);
+  if (context) return context.runtime.routeFileSystemFactory;
   const factory = (req.app.locals as { fsFactory?: WorkspaceFileSystemFactory })
     .fsFactory;
   if (!factory) {
@@ -202,7 +220,7 @@ async function handleGetFile(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'GET /file';
+  const ROUTE = routeName(req, 'GET /file');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const clientId = deps.parseClientId(req, res);
@@ -239,13 +257,34 @@ async function handleGetFile(
     });
     return;
   }
+  const rawCursor = req.query['cursor'];
+  if (
+    rawCursor !== undefined &&
+    (typeof rawCursor !== 'string' ||
+      rawCursor.length === 0 ||
+      rawCursor.length > MAX_TEXT_CURSOR_CHARS)
+  ) {
+    applyReadHeaders(res);
+    res.status(400).json({
+      errorKind: 'parse_error',
+      error: `\`cursor\` must be a non-empty string of at most ${MAX_TEXT_CURSOR_CHARS} characters`,
+      status: 400,
+    });
+    return;
+  }
+  const cursor = rawCursor as string | undefined;
   const fs = factory.forRequest({
     originatorClientId: clientId ?? undefined,
     route: ROUTE,
   });
   try {
     const resolved = await fs.resolve(queryPath, 'read');
-    const out = await fs.readText(resolved, { maxBytes, line, limit });
+    const out = await fs.readText(resolved, {
+      maxBytes,
+      line,
+      limit,
+      cursor,
+    });
     const returnedBytes = Buffer.byteLength(out.content, 'utf-8');
     applyReadHeaders(res);
     res.status(200).json({
@@ -261,6 +300,8 @@ async function handleGetFile(
       hash: out.meta.hash,
       matchedIgnore: out.meta.matchedIgnore ?? null,
       originalLineCount: out.meta.originalLineCount ?? null,
+      nextCursor: out.meta.nextCursor ?? null,
+      hasMore: out.meta.hasMore === true,
     });
   } catch (err) {
     sendFsError(res, err, ROUTE);
@@ -272,7 +313,7 @@ async function handleGetFileBytes(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'GET /file/bytes';
+  const ROUTE = routeName(req, 'GET /file/bytes');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const clientId = deps.parseClientId(req, res);
@@ -334,7 +375,7 @@ async function handleGetStat(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'GET /stat';
+  const ROUTE = routeName(req, 'GET /stat');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const clientId = deps.parseClientId(req, res);
@@ -366,7 +407,7 @@ async function handleGetList(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'GET /list';
+  const ROUTE = routeName(req, 'GET /list');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const clientId = deps.parseClientId(req, res);
@@ -408,7 +449,7 @@ async function handleGetGlob(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'GET /glob';
+  const ROUTE = routeName(req, 'GET /glob');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const clientId = deps.parseClientId(req, res);
@@ -502,14 +543,37 @@ async function handleGetGlob(
  * `/file`, `/stat`, `/list`, and `/glob` response paths.
  */
 export function workspaceRelative(req: Request, resolved: string): string {
-  const boundWorkspace = (req.app.locals as { boundWorkspace?: string })
-    .boundWorkspace;
+  const boundWorkspace =
+    getWorkspaceRouteContext(req)?.runtime.workspaceCwd ??
+    (req.app.locals as { boundWorkspace?: string }).boundWorkspace;
   if (!boundWorkspace) {
     throw new Error('bound workspace is not configured');
   }
-  const rel = path.relative(boundWorkspace, resolved);
+  let rel = path.relative(boundWorkspace, resolved);
+  if (isOutsideWorkspaceRelative(rel)) {
+    try {
+      rel = path.relative(canonicalizeWorkspace(boundWorkspace), resolved);
+    } catch {
+      throw new FsError(
+        'path_outside_workspace',
+        'path resolved outside workspace',
+      );
+    }
+  }
+  if (isOutsideWorkspaceRelative(rel)) {
+    throw new FsError(
+      'path_outside_workspace',
+      'path resolved outside workspace',
+    );
+  }
   if (rel === '') return '.';
   return path.sep === '/' ? rel : rel.split(path.sep).join('/');
+}
+
+function isOutsideWorkspaceRelative(rel: string): boolean {
+  return (
+    rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+  );
 }
 
 export function registerWorkspaceFileReadRoutes(
@@ -521,4 +585,43 @@ export function registerWorkspaceFileReadRoutes(
   app.get('/stat', (req, res) => handleGetStat(req, res, deps));
   app.get('/list', (req, res) => handleGetList(req, res, deps));
   app.get('/glob', (req, res) => handleGetGlob(req, res, deps));
+}
+
+export function registerWorkspaceQualifiedFileReadRoutes(
+  app: Application,
+  deps: RegisterDeps & { workspaceRegistry: WorkspaceRegistry },
+): void {
+  const resolve = (req: Request, res: Response): boolean => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return false;
+    setWorkspaceRouteContext(req, {
+      runtime,
+      routePrefix: 'GET /workspaces/:workspace',
+    });
+    return true;
+  };
+  app.get('/workspaces/:workspace/file', (req, res) => {
+    if (!resolve(req, res)) return;
+    void handleGetFile(req, res, deps);
+  });
+  app.get('/workspaces/:workspace/file/bytes', (req, res) => {
+    if (!resolve(req, res)) return;
+    void handleGetFileBytes(req, res, deps);
+  });
+  app.get('/workspaces/:workspace/stat', (req, res) => {
+    if (!resolve(req, res)) return;
+    void handleGetStat(req, res, deps);
+  });
+  app.get('/workspaces/:workspace/list', (req, res) => {
+    if (!resolve(req, res)) return;
+    void handleGetList(req, res, deps);
+  });
+  app.get('/workspaces/:workspace/glob', (req, res) => {
+    if (!resolve(req, res)) return;
+    void handleGetGlob(req, res, deps);
+  });
 }

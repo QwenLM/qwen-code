@@ -48,18 +48,19 @@
 }
 
 .addButton {
-  padding: 5px 12px;
+  appearance: none;
+  padding: 4px 12px;
   border: 1px solid var(--primary);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--primary) 14%, transparent);
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--background);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
 }
 
 .addButton:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: default;
   border-color: var(--border);
   background: transparent;
@@ -84,7 +85,9 @@
 }
 
 .pickerItem {
-  display: block;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   width: 100%;
   text-align: left;
   padding: 7px 10px;
@@ -94,9 +97,29 @@
   color: var(--foreground);
   font-size: 13px;
   cursor: pointer;
+}
+
+.pickerItemLabel {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Which workspace a session lives in — only shown on a multi-workspace daemon,
+   so the single-workspace picker is unchanged. */
+.pickerItemWorkspace {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(
+    --muted-foreground,
+    color-mix(in srgb, var(--foreground) 55%, transparent)
+  );
 }
 
 .pickerItem:hover {
@@ -119,6 +142,12 @@
   min-width: 340px;
   height: 100%;
   min-height: 0;
+}
+
+/* While one pane is maximized, its siblings are hidden (but stay mounted, so
+   their sessions keep streaming). The lone visible slot then fills the row. */
+.paneSlot[data-pane-hidden] {
+  display: none;
 }
 
 .empty {

@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PermissionMode } from './permission-mode.js';
+
+export type { PermissionMode } from './permission-mode.js';
 export interface Annotation {
   type: string;
   value: string;
@@ -120,7 +123,7 @@ export interface SDKSystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -230,8 +233,6 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
-
 /**
  * Authentication types supported by the CLI.
  * Aligns with CLI's --auth-type parameter.
@@ -303,6 +304,7 @@ export interface MCPServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -357,6 +359,11 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, MCPServerConfig>;
   agents?: SubagentConfig[];
+  /**
+   * Initial reasoning effort tier: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+   * Applied at session start via config.setReasoningEffort().
+   */
+  effort?: string;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -400,6 +407,20 @@ export interface CLIControlGetContextUsageRequest {
   show_details?: boolean;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlContinueLastTurnRequest
@@ -411,7 +432,10 @@ export type ControlRequestPayload =
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlSetEffortRequest
+  | CLIControlGetAvailableModelsRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -604,8 +628,11 @@ export enum ControlRequestType {
   INTERRUPT = 'interrupt',
   CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
+  SET_EFFORT = 'set_effort',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',
+  GET_AVAILABLE_MODELS = 'get_available_models',
+  GET_USAGE_INFO = 'get_usage_info',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

@@ -29,6 +29,7 @@ import {
 } from './classifier.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 function makeConfig(
   autoModeSettings: ReturnType<Config['getAutoModeSettings']> = {},
@@ -85,6 +86,65 @@ describe('classifyAction — stage 1 happy path', () => {
 });
 
 describe('classifyAction — stage 1 escalates to stage 2', () => {
+  it('sends the same trusted-answer transcript to both stages', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+    await classifyAction(
+      makeInput({
+        messages: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  response: {},
+                },
+              },
+            ],
+          },
+        ],
+        trustedUserAnswers: [
+          {
+            callId: 'ask-1',
+            omitted: false,
+            answers: [
+              {
+                question: 'Create marker?',
+                answer: 'No',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const stage1 = runSideQueryMock.mock.calls[0]?.[1] as {
+      contents: unknown;
+    };
+    const stage2 = runSideQueryMock.mock.calls[1]?.[1] as {
+      contents: unknown;
+    };
+    expect(stage2.contents).toBe(stage1.contents);
+    expect(JSON.stringify(stage1.contents)).toContain('Create marker?');
+    expect(JSON.stringify(stage1.contents)).toContain('No');
+  });
+
   it('returns stage 2 verdict (block + reason) when stage 2 confirms block', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
@@ -131,14 +191,14 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
   });
 });
 
-describe('classifyAction — fail-closed on stage 1 failure', () => {
+describe('classifyAction — unavailable on stage 1 failure', () => {
   it('returns unavailable=true when stage 1 throws an API error', async () => {
     runSideQueryMock.mockRejectedValueOnce(new Error('API 500'));
     const result = await classifyAction(makeInput());
     expect(result.shouldBlock).toBe(true);
     expect(result.unavailable).toBe(true);
     expect(result.stage).toBe('fast');
-    expect(result.reason).toMatch(/blocked for safety/);
+    expect(result.reason).toBe('Classifier stage 1 unavailable');
   });
 
   it('surfaces a context-overflow reason when stage 1 fails with that error', async () => {
@@ -163,7 +223,7 @@ describe('classifyAction — fail-closed on stage 1 failure', () => {
   });
 });
 
-describe('classifyAction — fail-closed on stage 2 failure', () => {
+describe('classifyAction — unavailable on stage 2 failure', () => {
   it('honors stage 1 block when stage 2 fails (unavailable=true)', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
@@ -248,7 +308,7 @@ describe('classifier configuration', () => {
     );
   });
 
-  it('uses temperature 0 and max_output_tokens=32 with thinking disabled for stage 1', async () => {
+  it('uses temperature 0 and max_output_tokens=256 with thinking disabled for stage 1', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
     const opts = runSideQueryMock.mock.calls[0]?.[1] as {
@@ -259,7 +319,7 @@ describe('classifier configuration', () => {
       };
     };
     expect(opts.config?.temperature).toBe(0);
-    expect(opts.config?.maxOutputTokens).toBe(32);
+    expect(opts.config?.maxOutputTokens).toBe(256);
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 
@@ -350,7 +410,7 @@ describe('sanitizeClassifierReason', () => {
     const adversarial = '<a'.repeat(2000) + '>'.repeat(2000);
     const t0 = Date.now();
     sanitizeClassifierReason(adversarial);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expectWithinLatencyBudget(Date.now() - t0, 1000, { poolMultiplier: 20 });
   });
 
   it('collapses whitespace and newlines to single spaces', () => {

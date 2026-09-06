@@ -182,19 +182,32 @@ describe('ToolApproval', () => {
       );
     });
 
-    const text = container.textContent ?? '';
-    const rejectIndex = text.indexOf('Reject');
-    const userIndex = text.indexOf('Always allow for this user');
-    const projectIndex = text.indexOf('Always allow in this project');
-    const serverIndex = text.indexOf('Always allow for this server');
-    const toolIndex = text.indexOf('Always allow for this tool');
-    const onceIndex = text.indexOf('Yes, allow once');
-    expect(rejectIndex).toBeGreaterThanOrEqual(0);
-    expect(userIndex).toBeGreaterThan(rejectIndex);
-    expect(projectIndex).toBeGreaterThan(userIndex);
-    expect(serverIndex).toBeGreaterThan(projectIndex);
-    expect(toolIndex).toBeGreaterThan(serverIndex);
-    expect(onceIndex).toBeGreaterThan(toolIndex);
+    const ids = Array.from(container.querySelectorAll('[data-option-id]')).map(
+      (el) => el.getAttribute('data-option-id'),
+    );
+    expect(ids).toEqual([
+      'cancel',
+      'proceed_always_user',
+      'proceed_always_project',
+      'proceed_always_server',
+      'proceed_always_tool',
+      'proceed_once',
+    ]);
+
+    // The fixture's server labels deliberately differ from the i18n strings
+    // (e.g. 'Always Allow in project' vs 'Always allow in this project'), so
+    // asserting the rendered text proves localization overrides server labels.
+    const labels = Array.from(
+      container.querySelectorAll('[data-web-shell-option-label]'),
+    ).map((el) => el.textContent);
+    expect(labels).toEqual([
+      'Reject',
+      'Always allow for this user',
+      'Always allow in this project',
+      'Always allow for this server',
+      'Always allow for this tool',
+      'Yes, allow once',
+    ]);
 
     act(() => root.unmount());
   });

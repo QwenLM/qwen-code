@@ -10,6 +10,25 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export interface ServeWorkspaceRuntimeCapabilityStatus {
+  state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  revision: number;
+  runtimeEpoch?: number;
+  error?: { code: string; message: string };
+}
+
+export interface ServeWorkspaceRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+  capabilities?: {
+    mcp?: ServeWorkspaceRuntimeCapabilityStatus;
+    skills?: ServeWorkspaceRuntimeCapabilityStatus;
+  };
+}
+
 /**
  * Closed enumeration of structured error categories surfaced on diagnostic
  * status cells. Cells produced by `/workspace/preflight`, `/workspace/env`,
@@ -21,6 +40,7 @@ export const SERVE_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',
@@ -53,6 +73,18 @@ export class BridgeTimeoutError extends Error {
     this.name = 'BridgeTimeoutError';
     this.label = label;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+export class SessionRestoreTimeoutError extends BridgeTimeoutError {
+  readonly sessionId: string;
+  readonly action: 'load' | 'resume';
+
+  constructor(sessionId: string, action: 'load' | 'resume', timeoutMs: number) {
+    super(`session/${action}`, timeoutMs);
+    this.name = 'SessionRestoreTimeoutError';
+    this.sessionId = sessionId;
+    this.action = action;
   }
 }
 
@@ -95,6 +127,7 @@ export class MissingCliEntryError extends Error {
 }
 
 export const SERVE_STATUS_EXT_METHODS = {
+  channelPing: 'qwen/status/channel/ping',
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceMcpTools: 'qwen/status/workspace/mcp/tools',
   workspaceMcpResources: 'qwen/status/workspace/mcp/resources',
@@ -108,8 +141,20 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionAgents: 'qwen/status/session/agents',
+  sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionResources: 'qwen/status/session/resources',
+  /**
+   * Read one saved workflow definition (script + parsed `meta`). Params:
+   * `{ sessionId, name }`; result: `ServeSessionSavedWorkflowStatus`, whose
+   * `workflow` is null when the name is unknown or Workflow controls are
+   * unavailable.
+   */
+  sessionSavedWorkflow: 'qwen/status/session/saved_workflow',
+  sessionTranscript: 'qwen/status/session/transcript',
+  sessionTurnIndex: 'qwen/status/session/turn_index',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -130,28 +175,67 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionBranch: 'qwen/control/session/branch',
+  sessionSideTask: 'qwen/control/session/side_task',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
+  sessionGenerationStart: 'qwen/control/session/generation/start',
+  sessionGenerationCancel: 'qwen/control/session/generation/cancel',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
+  sessionParent: 'qwen/control/session/parent',
+  sessionSource: 'qwen/control/session/source',
+  sessionLiveConversation: 'qwen/control/session/live-conversation',
+  sessionLiveTranscript: 'qwen/control/session/live-transcript',
+  sessionBackgroundNotification: 'qwen/control/session/background_notification',
+  sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
+  workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
+  workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceGenerationStart: 'qwen/control/workspace/generation/start',
+  workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
+  workspaceSessionWorkflow: 'qwen/control/workspace/session-workflow',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
+  /**
+   * Sessionless user-level language sync: the runtime switches its process
+   * UI language, reloads the user-scope settings the daemon already
+   * persisted, and, when `syncOutputLanguage` is true, refreshes every local
+   * session's system instruction.
+   * Params: `{ language, syncOutputLanguage }`; result:
+   * `{ language, sessions, failed }`.
+   */
+  userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',
+  sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
+  /**
+   * Read a live session's `/goal` state. The active goal lives only in the
+   * child's in-memory store, so this is the sole authoritative source for the
+   * condition, its running turn count and the judge's last verdict. Params:
+   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   */
+  sessionGoalGet: 'qwen/control/session/goal/get',
+  sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
+  sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
+  /** Read a bounded settled `turn_result` from the active transcript. */
+  sessionTurnStatus: 'qwen/control/session/turn_status',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
+  workspaceModelProvidersReload:
+    'qwen/control/workspace/model-providers/reload',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
@@ -164,7 +248,33 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * result: `{ payload }`.
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
+  /**
+   * Called by a private ACP CHILD immediately before a tool executor. The
+   * parent validates the runtime-owned session/prompt identity, invokes its
+   * configured external provider once, and returns allow/deny. Unavailable
+   * unless the daemon explicitly enabled required external guarding.
+   */
+  externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
   sessionCd: 'qwen/control/session/cd',
+  sessionManagedConversationBindingCommit:
+    'qwen/control/session/managed-conversation-binding/commit',
+  sessionManagedConversationBindingRelease:
+    'qwen/control/session/managed-conversation-binding/release',
+  /**
+   * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
+   * `create_sub_session` tool, running inside a child's agent turn, asks the
+   * daemon to spawn a fresh top-level sub-session and run a prompt in it. Params:
+   * `{ prompt, completion:'sent'|'first-turn', model?, name?, callerSessionId? }`;
+   * result: `{ sessionId, result?, stopReason? }` (result present only for the
+   * `first-turn` mode, which waits for the sub-session's first turn to finish).
+   */
+  createSubSession: 'qwen/control/create-sub-session',
+  createCurrentSessionScheduledTask:
+    'qwen/control/scheduled-task/create-current',
+  liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
+  liveTaskTool: 'qwen/control/live/task-tool',
+  liveSpeakToUser: 'qwen/control/live/speak-to-user',
+  channelDelivery: 'qwen/control/channel-delivery',
 } as const;
 
 export type ServeStatus =
@@ -208,7 +318,19 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   transport: ServeMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
+  approvalState?: 'pending' | 'rejected';
+  authenticationState?: 'pending' | 'succeeded' | 'failed';
+  authenticationError?: string;
   source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
+  removable?: boolean;
   config?: {
     command?: string;
     args?: string[];
@@ -282,10 +404,10 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
 export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * Workspace-level budget status cell. Surfaced as one entry in
- * `ServeWorkspaceMcpStatus.budgets[]`. The list shape (vs a single
- * `budget?` field) is forward-compat for a future change that may
- * add a `scope: 'pool'` cell alongside without a schema bump.
+ * MCP budget status cell. Surfaced as one entry in
+ * `ServeWorkspaceMcpStatus.budgets[]`. Daemons advertising
+ * `mcp_workspace_pool` emit workspace-scoped accounting; the legacy no-pool
+ * fallback emits session-scoped accounting.
  *
  * Consumers MUST tolerate additional entries with unrecognized
  * `scope` values — drop them rather than failing.
@@ -295,22 +417,13 @@ export interface ServeMcpBudgetStatusCell extends ServeStatusCell {
   /**
    * Identifies which accounting scope this cell describes.
    *
-   * **The budget feature v1 emits `'session'`** because each ACP session creates
-   * its own `Config`/`McpClientManager` via `acpAgent.newSessionConfig()`
-   * — so the budget caps live MCP clients **per session**, not
-   * per-workspace. The snapshot reflects the bootstrap session's
-   * view; concurrent sessions each enforce their own copy of the
-   * cap independently. See `qwen-serve-protocol.md` "The budget feature v1
-   * scope: per-session" for the operator-facing rationale.
+   * `'workspace'` means sessions inside the selected runtime share an MCP pool
+   * and budget. `'session'` is the legacy per-session manager used when
+   * `mcp_workspace_pool` is absent.
    *
-   * Future PRs:
-   *   - A future shared MCP pool may introduce a workspace-scoped
-   *     manager and will emit `'workspace'` (or `'pool'`) cells.
-   *   - The `string & {}` widening keeps IDE autocomplete + literal
-   *     narrowing for known scopes while allowing unknown scopes
-   *     through without a compile-time break — the protocol contract
-   *     is "consumers MUST tolerate additional scope values, drop
-   *     don't fail."
+   * The `string & {}` widening keeps IDE autocomplete + literal narrowing for
+   * known scopes while allowing unknown scopes through without a compile-time
+   * break. Consumers drop unrecognized scopes rather than failing.
    */
   scope: 'session' | 'workspace' | (string & {});
   /** Live (CONNECTED) MCP client count at snapshot time. */
@@ -327,6 +440,8 @@ export interface ServeWorkspaceMcpStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache';
   discoveryState?: ServeMcpDiscoveryState;
   servers: ServeWorkspaceMcpServerStatus[];
   errors?: ServeStatusCell[];
@@ -359,6 +474,7 @@ export interface ServeWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: ServeWorkspaceMcpToolStatus[];
   errors?: ServeStatusCell[];
@@ -391,6 +507,7 @@ export interface ServeWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: ServeWorkspaceMcpResourceStatus[];
   errors?: ServeStatusCell[];
@@ -404,17 +521,56 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   description: string;
   level: ServeSkillLevel;
   modelInvocable: boolean;
+  disabledReason?: 'hard' | 'default' | 'inactive_extension';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+  userInvocable?: false;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
+  /** Canonical name of the extension that provides this skill. */
   extensionName?: string;
+  /** Localized presentation name; never use as an extension identity. */
+  extensionDisplayName?: string;
 }
+
+export interface ServeWorkspaceSkillsRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  configsRefreshed?: number;
+  configsFailed?: number;
+  reason?: ServeWorkspaceSkillsRefreshReason;
+}
+
+export type ServeWorkspaceSkillsRefreshReason = 'settings' | 'content' | 'all';
 
 export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+}
+
+/**
+ * Sanitized Skill and MCP snapshots built from one live session's Config.
+ * The nested workspace status envelopes are reused intentionally so their
+ * loading, error, discovery, and compatibility fields remain identical.
+ */
+export interface ServeSessionResourcesStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: ServeWorkspaceSkillsStatus;
+  /**
+   * Session-scoped MCP snapshot. Status, discovery, and accounting come from
+   * the selected session's manager; workspace-owned pool, budget, and
+   * discovery-error enrichments are absent. The name-keyed `hasOAuthTokens`,
+   * `requiresAuth`, `authenticationState`, and `authenticationError` fields
+   * are always absent; consumers must not treat their absence as a negative
+   * authentication state.
+   */
+  mcp: ServeWorkspaceMcpStatus;
 }
 
 export interface ServeWorkspaceProviderCurrent {
@@ -441,6 +597,7 @@ export interface ServeWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface ServeWorkspaceProviderStatus extends ServeStatusCell {
@@ -527,6 +684,50 @@ export interface ServeSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: AvailableCommand[];
   availableSkills: string[];
+  /** Whether Workflow is available for this session. */
+  workflowsEnabled?: boolean;
+  /** Reusable workflow definitions visible to this session. */
+  savedWorkflows?: Array<{
+    name: string;
+    source: 'project' | 'user';
+  }>;
+}
+
+/** Parsed `export const meta` contract of a saved workflow script. */
+export interface ServeSavedWorkflowMeta {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  phases?: Array<{ title: string; detail?: string; model?: string }>;
+}
+
+/** One saved workflow definition, resolved and read for display. */
+export interface ServeSessionSavedWorkflowDetail {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  name: string;
+  source: 'project' | 'user';
+  /** Absolute path of the `.js` file the definition was read from. */
+  scriptPath: string;
+  /** Full script source, `export const meta` included. */
+  script: string;
+  /** Parsed meta block, or null when the script declares none or it is malformed. */
+  meta: ServeSavedWorkflowMeta | null;
+  /** Why `meta` is null although a meta block is present. */
+  metaError?: string;
+}
+
+/**
+ * Envelope for one saved-workflow read. `workflow` is null when the name is
+ * unknown, the file cannot be read, or Workflow controls are unavailable for
+ * the session (untrusted workspace) — the same fail-closed shape on every
+ * transport, so clients never need a 404 branch.
+ */
+export interface ServeSessionSavedWorkflowStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  name: string;
+  workflow: ServeSessionSavedWorkflowDetail | null;
 }
 
 export interface ServeLspServerStatus {
@@ -583,6 +784,8 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /**
    * `id` of the agent task that spawned this one; absent for agents
    * launched by the top-level session. Mirrors `AgentTask.parentAgentId`
@@ -633,18 +836,166 @@ export interface ServeSessionMonitorTaskStatus {
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
+  toolUseId?: string;
+}
+
+export interface ServeWorkflowPhaseVisit {
+  id: string;
+  index: number;
+  title: string;
+  startedAt: number;
+  endedAt?: number;
+}
+
+export type ServeWorkflowDispatchStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'cached';
+
+export interface ServeWorkflowDispatchStatusEntry {
+  id: string;
+  phaseVisitId: string | null;
+  label: string;
+  prompt: string;
+  subagentId?: string;
+  status: ServeWorkflowDispatchStatus;
+  dependsOn: string[];
+  queuedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  error?: string;
+}
+
+export interface ServeWorkflowApprovalStatusEntry {
+  approvalId: string;
+  subagentId: string;
+  name: string;
+  description: string;
+  at: number;
+}
+
+interface ServeWorkflowEventBase {
+  id: string;
+  at: number;
+}
+
+export type ServeWorkflowEvent =
+  | (ServeWorkflowEventBase & {
+      type: 'phase-started';
+      phaseVisitId: string;
+      title: string;
+    })
+  | (ServeWorkflowEventBase & {
+      type: 'phase-completed';
+      phaseVisitId: string;
+    })
+  | (ServeWorkflowEventBase & {
+      type:
+        | 'dispatch-queued'
+        | 'dispatch-started'
+        | 'dispatch-completed'
+        | 'dispatch-cancelled'
+        | 'dispatch-cached';
+      dispatchId: string;
+    })
+  | (ServeWorkflowEventBase & {
+      type: 'dispatch-failed';
+      dispatchId: string;
+      error: string;
+    })
+  | (ServeWorkflowEventBase & { type: 'log'; message: string })
+  | (ServeWorkflowEventBase & {
+      type: 'approval-requested' | 'approval-settled';
+      name: string;
+      dispatchId?: string;
+    })
+  | (ServeWorkflowEventBase & {
+      type: 'workflow-completed' | 'workflow-cancelled';
+    })
+  | (ServeWorkflowEventBase & {
+      type: 'workflow-failed';
+      error: string;
+    });
+
+export interface ServeSessionWorkflowTaskStatus {
+  kind: 'workflow';
+  id: string;
+  /** Tool call in the parent session that launched this workflow. */
+  toolUseId?: string;
+  /** Saved workflow definition name, when this run came from one. */
+  workflowName?: string;
+  /** Restored from the project snapshot store; controls are read-only. */
+  isHistorical?: boolean;
+  sourceRunId?: string;
+  startMode?: 'retry' | 'rerun';
+  label: string;
+  description: string;
+  status: ServeSessionTaskLifecycleStatus | 'pausing';
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  isBackgrounded: boolean;
+  currentPhase: string | null;
+  phaseVisits: ServeWorkflowPhaseVisit[];
+  dispatches: ServeWorkflowDispatchStatusEntry[];
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal: number | null;
+  recentLogs: string[];
+  /** Ordered runtime facts; absent for snapshots created before event tracing. */
+  events?: ServeWorkflowEvent[];
+  pendingApprovalCount: number;
+  pendingApprovals?: ServeWorkflowApprovalStatusEntry[];
+  error?: string;
 }
 
 export type ServeSessionTaskStatus =
   | ServeSessionAgentTaskStatus
   | ServeSessionShellTaskStatus
-  | ServeSessionMonitorTaskStatus;
+  | ServeSessionMonitorTaskStatus
+  | ServeSessionWorkflowTaskStatus;
 
 export interface ServeSessionTasksStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+export interface ServeSessionAgentsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  now: number;
+  tasks: ServeSessionAgentTaskStatus[];
+}
+
+export interface ServeAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface ServeSessionAgentTrace {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  nodes: ServeAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
 }
 
 export interface ServeSessionStatsModelMetrics {
@@ -655,9 +1006,12 @@ export interface ServeSessionStatsModelMetrics {
   };
   tokens: {
     prompt: number;
+    /** Provider-reported candidate tokens; may already include reasoning. */
     candidates: number;
+    /** Prompt plus all generated output, with reasoning counted once. */
     total: number;
     cached: number;
+    /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
   };
 }
@@ -681,6 +1035,17 @@ export interface ServeSessionStatsSkillByName {
   fail: number;
 }
 
+/** One subagent invocation's token consumption, with readable labels. */
+export interface ServeSessionStatsSource {
+  /** Unique invocation id of the subagent. */
+  id: string;
+  /** Agent type name (e.g. "general-purpose"). */
+  type: string;
+  /** Business/task name for this invocation. */
+  name: string;
+  tokens: ServeSessionStatsModelMetrics['tokens'];
+}
+
 export interface ServeSessionStatsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
@@ -689,6 +1054,11 @@ export interface ServeSessionStatsStatus {
   durationMs: number;
   promptCount: number;
   models: Record<string, ServeSessionStatsModelMetrics>;
+  /**
+   * Per-subagent-invocation token totals, sorted by total tokens desc.
+   * `main` conversation calls are excluded — they are the aggregate remainder.
+   */
+  sources: ServeSessionStatsSource[];
   tools: {
     totalCalls: number;
     totalSuccess: number;
@@ -775,10 +1145,17 @@ export interface ServeWorkspaceAgentSummary {
   isBuiltin: boolean;
   /** Whether this agent restricts the tool set via `tools:` frontmatter. */
   hasTools: boolean;
+  tools?: string[];
+  disallowedTools?: string[];
   model?: string;
   color?: string;
   background?: boolean;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServerNames?: string[];
+  hookEvents?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
   extensionName?: string;
   /** Absolute path to the file backing this agent (or sentinel for built-ins). */
   filePath?: string;
@@ -786,9 +1163,8 @@ export interface ServeWorkspaceAgentSummary {
 
 export interface ServeWorkspaceAgentDetail extends ServeWorkspaceAgentSummary {
   systemPrompt: string;
-  tools?: string[];
-  disallowedTools?: string[];
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
 }
 
 export interface ServeWorkspaceAgentsStatus {
@@ -936,6 +1312,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
   },
+  MessageDisplay: {
+    description: 'Repeatedly, as the assistant reply streams',
+  },
   Stop: { description: 'Right before Qwen Code concludes its response' },
   SubagentStart: {
     description: 'When a subagent is started',
@@ -956,6 +1335,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   SessionEnd: {
     description: 'When a session is ending',
     matcherKind: 'sessionTrigger',
+  },
+  SessionDelete: {
+    description: 'After an explicitly selected session is deleted',
   },
   PermissionRequest: {
     description: 'When a permission dialog is displayed',
@@ -987,9 +1369,15 @@ export type ServeExtensionInstallType =
   | 'link'
   | 'github-release'
   | 'npm'
-  | 'archive-url';
+  | 'archive-url'
+  | 'snapshot';
 
-export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ServeExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface ServeExtensionCapabilities {
   mcpServerCount: number;
@@ -1005,6 +1393,7 @@ export interface ServeExtensionCapabilities {
 export type ServeExtensionUpdateState =
   | 'checking for updates'
   | 'updated, needs restart'
+  | 'updated with warnings'
   | 'updating'
   | 'updated'
   | 'update available'
@@ -1036,6 +1425,7 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
   details?: ServeExtensionDetails;
@@ -1334,6 +1724,7 @@ const MODEL_CONFIG_ERROR_NAMES: ReadonlySet<string> = new Set([
 export function mapDomainErrorToErrorKind(
   err: unknown,
 ): ServeErrorKind | undefined {
+  if (err instanceof SessionRestoreTimeoutError) return 'restore_timeout';
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
   if (err instanceof BridgeChannelClosedError) return 'protocol_error';
   if (err instanceof MissingCliEntryError) return 'missing_binary';

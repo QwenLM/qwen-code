@@ -16,6 +16,7 @@ import {
   type DaemonIdeEvent,
   type DaemonIdeSessionClient,
 } from './daemonIdeConnection.js';
+import { logger } from '../utils/logger.js';
 
 class EventQueue implements AsyncGenerator<DaemonIdeEvent> {
   private events: DaemonIdeEvent[] = [];
@@ -387,7 +388,7 @@ describe('DaemonIdeConnection', () => {
   });
 
   it('cancels permission requests when the handler throws', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const events = new EventQueue();
     const session = createFakeSession(events);
     const connection = new DaemonIdeConnection();
@@ -761,7 +762,7 @@ describe('DaemonIdeConnection', () => {
   });
 
   it('does not advance replay state when permission responses fail', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const events = new EventQueue();
     const session = createFakeSession(events);
     session.respondToPermission.mockRejectedValueOnce(
@@ -807,7 +808,7 @@ describe('DaemonIdeConnection', () => {
   });
 
   it('surfaces event stream failures and normal stream completion', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const failedEvents = new EventQueue();
     failedEvents.fail(new Error('network down'));
     const failedSession = createFakeSession(failedEvents);
@@ -847,7 +848,7 @@ describe('DaemonIdeConnection', () => {
   });
 
   it('continues after handler failures while advancing replay state', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const events = new EventQueue();
     const session = createFakeSession(events);
     const connection = new DaemonIdeConnection();

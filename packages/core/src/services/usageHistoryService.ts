@@ -16,6 +16,24 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/**
+ * Trailing window used by {@link loadUsageHistoryWithLive} when merging
+ * non-persisted (daemon / Web Shell / in-progress) sessions into the history.
+ *
+ * Sized to cover the largest summary/daily range the usage-dashboard exposes
+ * (month = 30 days) plus margin, so the hero totals, breakdown tiles, and the
+ * per-day line/bar charts are exact. Crucially it is NOT sized for the full
+ * heatmap span (~12 months): persisted `usage_record.jsonl` records of any age
+ * are always unioned in, so the heatmap keeps its full history, but a *never-
+ * persisted* daemon session older than this window is not replayed — that cell
+ * undercounts slightly. That cosmetic gap is a deliberate trade for load
+ * latency: replaying a full year of transcripts costs ~13s here vs. ~1.7s for
+ * this window (heavy Web Shell users accumulate thousands of unpersisted
+ * transcripts). Widen only alongside a cheaper scan.
+ */
+const LIVE_REBUILD_WINDOW_DAYS = 35;
+
 export interface UsageSummaryRecord {
   version: 1;
   sessionId: string;
@@ -56,6 +74,11 @@ export interface UsageSummaryRecord {
     totalFail: number;
     byName: Record<string, { count: number; success: number; fail: number }>;
   };
+}
+
+export interface PreparedUsageBeforeTranscriptDeletion {
+  usagePath: string;
+  record: UsageSummaryRecord;
 }
 
 export type TimeRange = 'today' | 'week' | 'month' | 'all';
@@ -204,10 +227,158 @@ export function metricsToUsageRecord(
   };
 }
 
+/**
+ * Replays a session transcript's `ui_telemetry` records into a usage
+ * summary. Returns null for an empty transcript; `record` is null when the
+ * transcript has no telemetry events (or unparseable timestamps) — the
+ * sessionId is still reported so callers can dedupe by session.
+ *
+ * Single implementation shared by the rebuild migration and the
+ * pre-deletion salvage (#7384) so the two can never drift.
+ */
+function summarizeTranscript(
+  records: ChatRecord[],
+): { sessionId: string; record: UsageSummaryRecord | null } | null {
+  if (records.length === 0) return null;
+  const firstRecord = records[0]!;
+  const sessionId = firstRecord.sessionId;
+  if (!sessionId) return null;
+  const project = firstRecord.cwd;
+
+  const telemetry = new UiTelemetryService();
+  let hasEvents = false;
+  for (const record of records) {
+    if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+      const payload = record.systemPayload as { uiEvent?: UiEvent } | undefined;
+      if (payload?.uiEvent) {
+        telemetry.addEvent(payload.uiEvent);
+        hasEvents = true;
+      }
+    }
+  }
+  if (!hasEvents) return { sessionId, record: null };
+
+  const startTime = new Date(firstRecord.timestamp).getTime();
+  const endTime = new Date(records[records.length - 1]!.timestamp).getTime();
+  if (isNaN(startTime) || isNaN(endTime)) {
+    return { sessionId, record: null };
+  }
+  return {
+    sessionId,
+    record: metricsToUsageRecord(
+      sessionId,
+      project,
+      startTime,
+      endTime,
+      telemetry.getMetrics(),
+    ),
+  };
+}
+
+export async function prepareUsageBeforeTranscriptDeletion(
+  transcriptPath: string,
+): Promise<PreparedUsageBeforeTranscriptDeletion | null> {
+  try {
+    const records = await jsonl.read<ChatRecord>(transcriptPath);
+    const summarized = summarizeTranscript(records);
+    if (!summarized?.record) return null;
+
+    const usagePath = getUsageHistoryPath();
+    try {
+      if (fs.existsSync(usagePath)) {
+        const existing = await jsonl.read<UsageSummaryRecord>(usagePath);
+        if (existing.some((r) => r?.sessionId === summarized.sessionId)) {
+          return null;
+        }
+      }
+    } catch (e) {
+      // Unreadable history: write anyway — the read side dedupes by
+      // sessionId (last-wins), so a duplicate is bounded and preferable to
+      // silently losing the session's usage.
+      debugLogger.debug(
+        `persistUsageBeforeTranscriptDeletion: cannot read history: ${e}`,
+      );
+    }
+    return { usagePath, record: summarized.record };
+  } catch (e) {
+    debugLogger.debug(`prepareUsageBeforeTranscriptDeletion: ${e}`);
+    return null;
+  }
+}
+
+export function commitUsageBeforeTranscriptDeletion(
+  prepared: PreparedUsageBeforeTranscriptDeletion,
+): boolean {
+  try {
+    if (fs.existsSync(prepared.usagePath)) {
+      const alreadyPersisted = fs
+        .readFileSync(prepared.usagePath, 'utf8')
+        .split(/\r?\n/)
+        .some((line) => {
+          const trimmed = line.trim();
+          return (
+            trimmed.length > 0 &&
+            jsonl
+              .parseLineTolerant<UsageSummaryRecord>(
+                trimmed,
+                prepared.usagePath,
+              )
+              .some((record) => record.sessionId === prepared.record.sessionId)
+          );
+        });
+      if (alreadyPersisted) return false;
+    }
+    jsonl.writeLineSync(prepared.usagePath, prepared.record);
+    return true;
+  } catch (e) {
+    debugLogger.debug(`commitUsageBeforeTranscriptDeletion: ${e}`);
+    return false;
+  }
+}
+
+/**
+ * Salvages a session's usage before transcript deletion (#7384). Never throws,
+ * and skips sessions that already have a persisted authoritative summary.
+ */
+export async function persistUsageBeforeTranscriptDeletion(
+  transcriptPath: string,
+): Promise<boolean> {
+  const prepared = await prepareUsageBeforeTranscriptDeletion(transcriptPath);
+  return prepared ? commitUsageBeforeTranscriptDeletion(prepared) : false;
+}
+
+interface RebuildFromSessionJsonlOptions {
+  /**
+   * Session to exclude from the one-time persistence migration (the caller's
+   * in-progress session — {@link persistSessionUsage} writes its authoritative
+   * record on `/clear` or exit). It is still returned in the rebuilt records.
+   */
+  skipSessionInRebuild?: string;
+  /** Persist rebuilt records as a migration. Read-only callers pass `false`. */
+  persist?: boolean;
+  /**
+   * Only replay transcripts whose file mtime is at/after this epoch-ms. Bounds
+   * the scan when merging recent live sessions into an already-persisted
+   * history (see {@link loadUsageHistoryWithLive}); undefined replays all.
+   */
+  sinceMs?: number;
+  /**
+   * Session ids already covered by the persisted history. Their transcripts are
+   * skipped by filename (`{sessionId}.jsonl`) with no file read, avoiding a full
+   * replay of sessions the persisted file already records authoritatively.
+   */
+  skipSessionIds?: ReadonlySet<string>;
+}
+
 async function rebuildFromSessionJsonl(
-  skipSessionInRebuild?: string,
-  persist = true,
+  options: RebuildFromSessionJsonlOptions = {},
 ): Promise<UsageSummaryRecord[]> {
+  const {
+    skipSessionInRebuild,
+    persist = true,
+    sinceMs,
+    skipSessionIds,
+  } = options;
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
     if (!fs.existsSync(projectsDir)) return [];
@@ -232,7 +403,11 @@ async function rebuildFromSessionJsonl(
     const chatsDir = path.join(projectsDir, projDir, 'chats');
     let files: string[];
     try {
-      files = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.jsonl'));
+      // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not a
+      // transcript — only real session JSONL files carry usage evidence.
+      files = fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.ledger.jsonl'));
     } catch (e) {
       debugLogger.debug(
         `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,
@@ -243,46 +418,47 @@ async function rebuildFromSessionJsonl(
     for (const file of files) {
       try {
         const filePath = path.join(chatsDir, file);
-        const records = await jsonl.read<ChatRecord>(filePath);
-        if (records.length === 0) continue;
 
-        const firstRecord = records[0]!;
-        const sessionId = firstRecord.sessionId;
-        if (seenSessionIds.has(sessionId)) continue;
-        seenSessionIds.add(sessionId);
-        const project = firstRecord.cwd;
-
-        const telemetry = new UiTelemetryService();
-        let hasEvents = false;
-
-        for (const record of records) {
-          if (record.type === 'system' && record.subtype === 'ui_telemetry') {
-            const payload = record.systemPayload as
-              | { uiEvent?: UiEvent }
-              | undefined;
-            if (payload?.uiEvent) {
-              telemetry.addEvent(payload.uiEvent);
-              hasEvents = true;
-            }
-          }
+        let stats: fs.Stats;
+        try {
+          stats = fs.statSync(filePath);
+        } catch (e) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
+          );
+          continue;
+        }
+        // Only regular files are readable transcripts: a FIFO (or any other
+        // special file) passing the name filter would block open() forever
+        // and wedge the whole rebuild — the daemon's usage dashboard serves
+        // from this path.
+        if (!stats.isFile()) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,
+          );
+          continue;
         }
 
-        if (!hasEvents) continue;
+        // Bound the scan when merging live sessions into a persisted history:
+        // skip transcripts untouched before `sinceMs`.
+        if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
 
-        const startTime = new Date(firstRecord.timestamp).getTime();
-        const lastRecord = records[records.length - 1]!;
-        const endTime = new Date(lastRecord.timestamp).getTime();
-        if (isNaN(startTime) || isNaN(endTime) || !sessionId) continue;
+        // Skip sessions the persisted history already records, before any file
+        // read: the transcript filename is `{sessionId}.jsonl`
+        // (chatRecordingService.ts), so the sessionId — the same value the
+        // full-read path below derives from the first record — needs no I/O.
+        if (skipSessionIds && skipSessionIds.size > 0) {
+          const fileSessionId = path.basename(file, '.jsonl');
+          if (skipSessionIds.has(fileSessionId)) continue;
+        }
 
-        results.push(
-          metricsToUsageRecord(
-            sessionId,
-            project,
-            startTime,
-            endTime,
-            telemetry.getMetrics(),
-          ),
-        );
+        const records = await jsonl.read<ChatRecord>(filePath);
+        const summarized = summarizeTranscript(records);
+        if (!summarized) continue;
+        if (seenSessionIds.has(summarized.sessionId)) continue;
+        seenSessionIds.add(summarized.sessionId);
+        if (!summarized.record) continue;
+        results.push(summarized.record);
       } catch (e) {
         debugLogger.debug(
           `rebuildFromSessionJsonl: failed to process ${file}: ${e}`,
@@ -337,11 +513,71 @@ export async function loadUsageHistory(
   }
 
   return dedupBySessionId(
-    await rebuildFromSessionJsonl(
+    await rebuildFromSessionJsonl({
       skipSessionInRebuild,
-      options?.persistRebuild ?? true,
-    ),
+      persist: options?.persistRebuild ?? true,
+    }),
   );
+}
+
+/**
+ * Load the durable usage history **and** merge in sessions that were never
+ * written to `usage_record.jsonl` — notably daemon / Web Shell sessions (only
+ * the TUI `/clear` path persists usage) and any still-in-progress session.
+ *
+ * Unlike {@link loadUsageHistory}, which returns the persisted file verbatim
+ * whenever it is non-empty (and so silently omits everything not yet
+ * persisted), this replays recent transcripts for sessions the persisted file
+ * does not already cover and unions the two. Persisted records win on any
+ * sessionId conflict — they are the authoritative final snapshot. This is what
+ * the daemon usage-dashboard reads so its totals reflect live Web Shell
+ * activity. Read-only: never writes `usage_record.jsonl`.
+ *
+ * The transcript scan is bounded to a trailing window (mtime-based) so an
+ * established history does not pay a full cross-project replay on every load.
+ */
+export async function loadUsageHistoryWithLive(options?: {
+  /**
+   * Only replay transcripts touched at/after this epoch-ms. Defaults to a
+   * {@link LIVE_REBUILD_WINDOW_DAYS}-day trailing window (covers the dashboard's
+   * summary + daily charts; see the constant for the heatmap trade-off).
+   */
+  sinceMs?: number;
+}): Promise<UsageSummaryRecord[]> {
+  let persisted: UsageSummaryRecord[] = [];
+  try {
+    const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
+    persisted = records.filter((r) => r.version === 1);
+  } catch (e) {
+    debugLogger.debug(
+      `loadUsageHistoryWithLive: failed to read usage file: ${e}`,
+    );
+  }
+
+  const persistedIds = new Set(persisted.map((r) => r.sessionId));
+
+  // The trailing window bounds an *incremental* live merge on top of persisted
+  // history: old days come from the persisted file, so only recent transcripts
+  // need replaying. When there is no persisted base (fresh machine, or a user
+  // who only ever ran Web Shell so `/clear` never persisted), nothing else
+  // covers older history — replay it all (unbounded) rather than silently
+  // truncating the dashboard, matching the pre-existing empty-file behavior.
+  const sinceMs =
+    options?.sinceMs ??
+    (persistedIds.size > 0
+      ? Date.now() - LIVE_REBUILD_WINDOW_DAYS * MS_PER_DAY
+      : undefined);
+
+  const rebuilt = await rebuildFromSessionJsonl({
+    persist: false,
+    sinceMs,
+    skipSessionIds: persistedIds,
+  });
+
+  // Persisted records are the authoritative final snapshot, so they win on any
+  // sessionId conflict — place them last (dedupBySessionId is last-wins). The
+  // rebuilt set only adds sessions the persisted file never captured.
+  return dedupBySessionId([...rebuilt, ...persisted]);
 }
 
 export function getTimeRangeBounds(range: TimeRange): {

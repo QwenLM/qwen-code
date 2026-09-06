@@ -4,19 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
 import type { Span } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
+import { extractLlmContent, stringifyGenAiJson } from './gen-ai-content.js';
 
-const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 const SHORT_TRUNCATION_SUFFIX = '...[TRUNCATED]';
-
-// Process-global; intentionally never cleared in production. Bounded by the
-// number of unique system prompts + tool schemas seen in one session.
-const seenHashes = new Set<string>();
+const debugLogger = createDebugLogger('GEN_AI_CONTENT');
 
 export function areSensitiveSpanAttributesEnabled(config: Config): boolean {
   return (
@@ -92,16 +88,163 @@ function truncatePrefixedContent(
   };
 }
 
-function shortHash(content: string): string {
-  return createHash('sha256').update(content).digest('hex').slice(0, 12);
-}
-
-function stringifyContentUnion(value: unknown): string {
-  if (typeof value === 'string') return value;
-  return safeJsonStringify(value) ?? '';
-}
-
 // --- Interaction Span: User Prompt ---
+
+export function addAgentInputMessageAttributes(
+  config: Config,
+  span: Span,
+  promptText: string,
+): void {
+  if (
+    !areSensitiveSpanAttributesEnabled(config) ||
+    promptText.trim().length === 0
+  ) {
+    return;
+  }
+  writeJsonAttribute(config, span, 'gen_ai.input.messages', [
+    {
+      role: 'user',
+      parts: [{ type: 'text', content: promptText }],
+    },
+  ]);
+}
+
+export function addAgentOutputMessageAttributes(
+  config: Config,
+  span: Span,
+  responseText: string,
+  finishReason: string,
+): void {
+  if (
+    !areSensitiveSpanAttributesEnabled(config) ||
+    responseText.trim().length === 0
+  ) {
+    return;
+  }
+  const reason = normalizeAgentFinishReason(finishReason);
+  if (!reason) return;
+  writeJsonAttribute(config, span, 'gen_ai.output.messages', [
+    {
+      role: 'assistant',
+      parts: [{ type: 'text', content: responseText }],
+      finish_reason: reason,
+    },
+  ]);
+}
+
+function normalizeAgentFinishReason(
+  finishReason: string | undefined,
+): string | undefined {
+  const reason = finishReason?.trim().toLowerCase();
+  if (!reason || reason === 'finish_reason_unspecified') return undefined;
+  if (reason === 'stop') return 'stop';
+  if (reason === 'max_tokens') return 'length';
+  if (
+    reason === 'tool_calls' ||
+    reason === 'function_call' ||
+    reason === 'tool_call'
+  ) {
+    return 'tool_call';
+  }
+  if (
+    reason === 'safety' ||
+    reason === 'recitation' ||
+    reason === 'language' ||
+    reason === 'blocklist' ||
+    reason === 'prohibited_content' ||
+    reason === 'spii' ||
+    reason === 'image_safety' ||
+    reason === 'image_prohibited_content' ||
+    reason === 'image_recitation' ||
+    reason === 'image_other'
+  ) {
+    return 'content_filter';
+  }
+  return reason;
+}
+
+export class AgentOutputMessageCapture {
+  private readonly enabled: boolean;
+  private readonly maxLength: number;
+  private responseText = '';
+  private finishReason: string | undefined;
+  private overflow = false;
+  private committed: { responseText: string; finishReason: string } | undefined;
+
+  constructor(private readonly config: Config) {
+    this.enabled = areSensitiveSpanAttributesEnabled(config);
+    this.maxLength = this.enabled
+      ? config.getTelemetrySensitiveSpanAttributeMaxLength()
+      : 0;
+  }
+
+  beginResponse(): void {
+    if (!this.enabled) return;
+    this.clearResponse();
+    this.committed = undefined;
+  }
+
+  appendText(text: string): void {
+    if (!this.enabled || !text || this.overflow) return;
+    const remaining = this.maxLength - this.responseText.length;
+    if (text.length > remaining) {
+      this.responseText = '';
+      this.overflow = true;
+      this.committed = undefined;
+      return;
+    }
+    this.responseText += text;
+  }
+
+  observeFinishReason(finishReason: string | undefined): void {
+    if (!this.enabled) return;
+    const normalized = normalizeAgentFinishReason(finishReason);
+    if (normalized) this.finishReason = normalized;
+  }
+
+  restartAttempt(preserveText: boolean): void {
+    if (!this.enabled) return;
+    if (!preserveText) {
+      this.clearResponse();
+    } else {
+      this.finishReason = undefined;
+    }
+    this.committed = undefined;
+  }
+
+  commitResponse(hasToolCalls: boolean): void {
+    if (
+      !this.enabled ||
+      hasToolCalls ||
+      this.overflow ||
+      this.responseText.trim().length === 0 ||
+      !this.finishReason
+    ) {
+      this.committed = undefined;
+      return;
+    }
+    this.committed = {
+      responseText: this.responseText,
+      finishReason: this.finishReason,
+    };
+  }
+
+  writeToSpan(span: Span | undefined): void {
+    if (!span || !this.committed) return;
+    addAgentOutputMessageAttributes(
+      this.config,
+      span,
+      this.committed.responseText,
+      this.committed.finishReason,
+    );
+  }
+
+  private clearResponse(): void {
+    this.responseText = '';
+    this.finishReason = undefined;
+    this.overflow = false;
+  }
+}
 
 export function addUserPromptAttributes(
   config: Config,
@@ -124,172 +267,160 @@ export function addUserPromptAttributes(
   });
 }
 
-// --- LLM Request Span: System Prompt ---
-
+/**
+ * @deprecated Provider-final requests are captured by the GenAI exchange.
+ */
 export function addSystemPromptAttributes(
   config: Config,
   span: Span,
   systemInstruction: unknown,
 ): void {
-  if (!areSensitiveSpanAttributesEnabled(config) || !systemInstruction) return;
-
-  const text = stringifyContentUnion(systemInstruction);
-  if (!text) return;
-
-  const hash = `sp_${shortHash(text)}`;
-  span.setAttributes({
-    system_prompt_hash: hash,
-    system_prompt_preview: text.slice(0, SYSTEM_PROMPT_PREVIEW_LENGTH),
-    system_prompt_length: text.length,
-  });
-
-  if (!seenHashes.has(hash)) {
-    seenHashes.add(hash);
-    const { content, truncated } = truncateContent(
-      text,
-      getMaxContentSize(config),
-    );
-    span.setAttribute('system_prompt', content);
-    if (truncated) {
-      span.setAttribute('system_prompt_truncated', true);
-    }
+  if (!areSensitiveSpanAttributesEnabled(config)) return;
+  const parts = extractLlmContent({
+    config: { systemInstruction },
+  }).systemInstructions;
+  if (parts !== undefined) {
+    writeJsonAttribute(config, span, 'gen_ai.system_instructions', parts);
   }
 }
 
-// --- LLM Request Span: Tool Schemas ---
-
+/**
+ * @deprecated Provider-final requests are captured by the GenAI exchange.
+ */
 export function addToolSchemaAttributes(
   config: Config,
   span: Span,
   tools: unknown[] | undefined,
 ): void {
-  if (!areSensitiveSpanAttributesEnabled(config) || !tools?.length) return;
-
-  // The Gemini API shape is `[{ functionDeclarations: [...] }]` — a single
-  // wrapper object whose inner array holds the actual per-tool schemas.
-  // Flatten that here so each declaration becomes its own summary entry and
-  // its own deduped tool_schema event, while still falling back to a flat
-  // input shape used by tests.
-  const declarations: unknown[] = [];
-  for (const tool of tools) {
-    const inner = (tool as Record<string, unknown>)['functionDeclarations'];
-    if (Array.isArray(inner)) {
-      declarations.push(...inner);
-    } else {
-      declarations.push(tool);
-    }
+  if (!areSensitiveSpanAttributesEnabled(config) || tools === undefined) return;
+  const providerTools = tools.every(
+    (tool) =>
+      typeof tool === 'object' &&
+      tool !== null &&
+      Object.hasOwn(tool, 'functionDeclarations'),
+  )
+    ? tools
+    : [{ functionDeclarations: tools }];
+  const definitions = extractLlmContent({
+    config: { tools: providerTools },
+  }).toolDefinitions;
+  if (definitions !== undefined) {
+    writeJsonAttribute(config, span, 'gen_ai.tool.definitions', definitions);
   }
-
-  const summary: Array<{ name: string; hash: string }> = [];
-
-  for (const decl of declarations) {
-    const declObj = decl as Record<string, unknown>;
-    const name =
-      typeof declObj['name'] === 'string' ? declObj['name'] : 'unknown_tool';
-    const declJson = safeJsonStringify(decl) ?? `unstringifiable_${name}`;
-    const hash = shortHash(declJson);
-    summary.push({ name, hash });
-
-    const hashKey = `tool_${hash}`;
-    if (!seenHashes.has(hashKey)) {
-      seenHashes.add(hashKey);
-      const { content, truncated } = truncateContent(
-        declJson,
-        getMaxContentSize(config),
-      );
-      span.addEvent('tool_schema', {
-        tool_name: name,
-        tool_hash: hash,
-        tool_definition: content,
-        ...(truncated && {
-          tool_definition_truncated: true,
-          tool_definition_original_length: declJson.length,
-        }),
-      });
-    }
-  }
-
-  span.setAttributes({
-    tools: safeJsonStringify(summary) ?? '[]',
-    tools_count: summary.length,
-  });
 }
 
-// --- LLM Request Span: Model Output ---
-
+/**
+ * @deprecated Provider responses are captured by the GenAI exchange.
+ * This compatibility helper writes nothing without an explicit finish reason.
+ */
 export function addModelOutputAttributes(
   config: Config,
   span: Span,
   responseText: string | undefined,
-  originalLength?: number,
+  originalLengthOrFinishReason?: number | string,
+  finishReason?: string,
 ): void {
-  if (!areSensitiveSpanAttributesEnabled(config) || !responseText) return;
-
-  const responseTextOriginalLength = originalLength ?? responseText.length;
-  const { content, truncated } = truncateContent(
-    responseText,
-    getMaxContentSize(config),
-    responseTextOriginalLength,
-  );
-  span.setAttributes({
-    'response.model_output': content,
-    ...(truncated && {
-      'response.model_output_truncated': true,
-      'response.model_output_original_length': responseTextOriginalLength,
-    }),
-  });
+  if (!areSensitiveSpanAttributesEnabled(config) || responseText === undefined)
+    return;
+  const reason =
+    typeof originalLengthOrFinishReason === 'string'
+      ? originalLengthOrFinishReason
+      : finishReason;
+  if (!reason) return;
+  addAgentOutputMessageAttributes(config, span, responseText, reason);
 }
 
-// --- Tool Span: Input ---
-
+/**
+ * @deprecated Use addToolArgumentsAttributes with the final invocation params.
+ * Only JSON object strings produce a standard arguments attribute.
+ */
 export function addToolInputAttributes(
   config: Config,
   span: Span,
-  toolName: string,
+  _toolName: string,
   toolInput: string,
 ): void {
-  if (!areSensitiveSpanAttributesEnabled(config)) return;
-
-  const { content, truncated, originalLength } = truncatePrefixedContent(
-    `[TOOL INPUT: ${toolName}]\n`,
-    toolInput,
-    getMaxContentSize(config),
-  );
-  span.setAttributes({
-    tool_input: content,
-    ...(truncated && {
-      tool_input_truncated: true,
-      tool_input_original_length: originalLength,
-    }),
-  });
+  let value: unknown;
+  try {
+    value = JSON.parse(toolInput);
+  } catch {
+    return;
+  }
+  addToolArgumentsAttributes(config, span, value);
 }
 
-// --- Tool Span: Result ---
-
+/**
+ * @deprecated Use addToolCallResultAttributes with the final FunctionResponse.
+ * Only JSON object strings produce a standard result attribute.
+ */
 export function addToolResultAttributes(
   config: Config,
   span: Span,
-  toolName: string,
+  _toolName: string,
   toolResult: string,
 ): void {
-  if (!areSensitiveSpanAttributesEnabled(config)) return;
-
-  const { content, truncated, originalLength } = truncatePrefixedContent(
-    `[TOOL RESULT: ${toolName}]\n`,
-    toolResult,
-    getMaxContentSize(config),
-  );
-  span.setAttributes({
-    tool_result: content,
-    ...(truncated && {
-      tool_result_truncated: true,
-      tool_result_original_length: originalLength,
-    }),
-  });
+  let value: unknown;
+  try {
+    value = JSON.parse(toolResult);
+  } catch {
+    return;
+  }
+  addToolCallResultAttributes(config, span, value);
 }
 
-// --- State Management ---
+export function addToolArgumentsAttributes(
+  config: Config,
+  span: Span,
+  argumentsValue: unknown,
+): void {
+  if (!areSensitiveSpanAttributesEnabled(config)) return;
+  writeJsonAttribute(
+    config,
+    span,
+    'gen_ai.tool.call.arguments',
+    argumentsValue,
+    true,
+  );
+}
 
+export function addToolCallResultAttributes(
+  config: Config,
+  span: Span,
+  result: unknown,
+): void {
+  if (!areSensitiveSpanAttributesEnabled(config)) return;
+  writeJsonAttribute(config, span, 'gen_ai.tool.call.result', result, true);
+}
+
+/**
+ * @deprecated Sensitive GenAI attributes no longer use process-global state.
+ */
 export function clearDetailedSpanState(): void {
-  seenHashes.clear();
+  // Compatibility no-op.
+}
+
+function writeJsonAttribute(
+  config: Config,
+  span: Span,
+  key: string,
+  value: unknown,
+  requireObject = false,
+): void {
+  let serialized: string | undefined;
+  try {
+    serialized = stringifyGenAiJson(
+      value,
+      getMaxContentSize(config),
+      requireObject,
+    );
+  } catch {
+    debugLogger.debug(`Failed to serialize ${key} span attribute`);
+    return;
+  }
+  if (serialized === undefined) return;
+  try {
+    span.setAttribute(key, serialized);
+  } catch {
+    debugLogger.debug(`Failed to set ${key} span attribute`);
+  }
 }

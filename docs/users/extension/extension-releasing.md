@@ -73,7 +73,7 @@ To ensure Qwen Code can automatically find the correct release asset for each pl
 
 #### Archive structure
 
-Archives must be fully contained extensions and have all the standard requirements - specifically the `qwen-extension.json` file must be at the root of the archive.
+Archives must be fully contained extensions and have a supported root manifest: `qwen-extension.json` for a native Qwen extension, or `plugin.json` for an [Agent Plugins v1](./agent-plugins.md) package.
 
 The rest of the layout should look exactly the same as a typical extension, see [introduction.md](./introduction.md).
 
@@ -131,7 +131,7 @@ You can publish Qwen Code extensions as scoped npm packages (e.g. `@your-org/my-
 
 ### Package requirements
 
-Your npm package must include a `qwen-extension.json` file at the package root. This is the same config file used by all Qwen Code extensions — the npm tarball is simply another delivery mechanism.
+Your npm package must include a supported manifest at the package root: `qwen-extension.json` for a native Qwen extension, or `plugin.json` for an [Agent Plugins v1](./agent-plugins.md) package. The npm tarball is simply another delivery mechanism.
 
 A minimal package structure looks like:
 
@@ -145,7 +145,7 @@ my-extension/
 └── agents/               # optional custom subagents
 ```
 
-Make sure `qwen-extension.json` is included in your published package (i.e. not excluded by `.npmignore` or the `files` field in `package.json`).
+Make sure the selected root manifest and all referenced package files are included in your published package (i.e. not excluded by `.npmignore` or the `files` field in `package.json`).
 
 ### Publishing
 

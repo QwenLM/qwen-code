@@ -3,12 +3,14 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
 import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
+import { useStatusLine } from './useStatusLine.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
@@ -69,6 +71,10 @@ const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getModelDisplayName: vi.fn(() => 'Test Model'),
+  getModelsConfig: vi.fn(() => ({
+    getModelDisplayName: (model: string) =>
+      model === 'main-model' ? 'Main Model' : 'Test Model',
+  })),
   getCliVersion: vi.fn(() => '1.0.0'),
   getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
@@ -87,6 +93,10 @@ vi.mock('../contexts/VimModeContext.js', () => ({
     setVimMode: vi.fn(),
   }),
   useVimMode: () => mockVimMode,
+}));
+
+vi.mock('./useTerminalSize.js', () => ({
+  useTerminalSize: () => ({ columns: 110, rows: 24 }),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -141,10 +151,7 @@ function setStatusLineConfig(
 }
 
 describe('useStatusLine', () => {
-  // Must import dynamically after mocks are set up
-  let useStatusLine: typeof import('./useStatusLine.js').useStatusLine;
-
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     lastExecCommand = undefined;
@@ -191,13 +198,11 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getModelDisplayName.mockReturnValue('Test Model');
+    mockConfig.getTargetDir.mockReturnValue('/test/dir');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
-
-    // Dynamic import to get fresh module after mocks
-    const mod = await import('./useStatusLine.js');
-    useStatusLine = mod.useStatusLine;
   });
 
   afterEach(() => {
@@ -212,6 +217,27 @@ describe('useStatusLine', () => {
       expect(child_process.exec).not.toHaveBeenCalled();
       expect(result.current.lines).toEqual([
         '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('falls back to config model display name when the preset current model is empty', () => {
+      mockUIState.currentModel = '';
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('renders the session model when config is scoped to a fast subagent', () => {
+      mockUIState.currentModel = 'main-model';
+      mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Main Model \u00b7 131.1k Context 0.1% used',
       ]);
     });
 
@@ -284,6 +310,16 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
+    it('returns hideContextIndicator false when explicitly disabled for command config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        hideContextIndicator: false,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
     it('returns hideContextIndicator true when set in preset config', () => {
       setStatusLineConfig({
         type: 'preset',
@@ -292,6 +328,101 @@ describe('useStatusLine', () => {
       });
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it.each(['context-used', 'context-remaining'])(
+      'hides the footer indicator when an unset preset shows %s',
+      (contextItem) => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model', contextItem],
+        });
+        const { result } = renderHook(() => useStatusLine());
+        expect(result.current.hideContextIndicator).toBe(true);
+      },
+    );
+
+    it.each(['context-used', 'context-remaining'])(
+      'keeps the footer indicator when a preset showing %s sets hideContextIndicator false',
+      (contextItem) => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model', contextItem],
+          hideContextIndicator: false,
+        });
+        const { result } = renderHook(() => useStatusLine());
+        expect(result.current.hideContextIndicator).toBe(false);
+      },
+    );
+
+    it('keeps the footer indicator for a preset without context items', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'git-branch'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('hides the footer indicator for the built-in default preset', () => {
+      setStatusLineConfig(undefined);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('keeps an automatic indicator on narrow displays but honors explicit hiding', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'context-used'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine(true));
+      expect(result.current.hideContextIndicator).toBe(false);
+
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'context-used'],
+        hideContextIndicator: true,
+      });
+      rerender();
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('keeps an automatic indicator when the rendered footer column clips it', () => {
+      mockConfig.getTargetDir.mockReturnValue(
+        '/home/runner/actions-runner-19/_work/qwen-code/qwen-code',
+      );
+      mockConfig.getModelDisplayName.mockReturnValue('Qwen3 Code Plus');
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning', 'current-dir', 'context-used'],
+      });
+      const fullWidth = renderHook(() => useStatusLine());
+      expect(fullWidth.result.current.hideContextIndicator).toBe(true);
+      fullWidth.unmount();
+
+      const { result } = renderHook(() => useStatusLine(false, 60));
+
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('keeps the footer over-limit warning for an automatically hidden preset', () => {
+      mockUIState.sessionStats.lastPromptTokenCount = 131073;
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['context-used'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('keeps the footer indicator when the status line is disabled (null)', () => {
+      setStatusLineConfig(null);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
     });
   });
 
@@ -714,6 +845,17 @@ describe('useStatusLine', () => {
 
       const input = JSON.parse(stdinWrittenData);
       expect(input.model.display_name).toBe('Test Model');
+    });
+
+    it('sends the session model when config is scoped to a fast subagent', () => {
+      mockUIState.currentModel = 'main-model';
+      mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.model.display_name).toBe('Main Model');
     });
   });
 

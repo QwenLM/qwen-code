@@ -8,24 +8,35 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
-const { mockSpawn, mockExecSync } = vi.hoisted(() => ({
+const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockExecSync: vi.fn(),
+  clipboardMockState: { failLoad: false, loadDelayMs: 0 },
 }));
 
 // Mock @teddyzhu/clipboard
-vi.mock('@teddyzhu/clipboard', () => ({
-  default: {
+vi.mock('@teddyzhu/clipboard', async () => {
+  if (clipboardMockState.loadDelayMs > 0) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, clipboardMockState.loadDelayMs),
+    );
+  }
+  if (clipboardMockState.failLoad) {
+    throw new Error('native clipboard module missing');
+  }
+  return {
+    default: {
+      ClipboardManager: vi.fn().mockImplementation(() => ({
+        hasFormat: vi.fn().mockReturnValue(false),
+        getImageData: vi.fn().mockReturnValue({ data: null }),
+      })),
+    },
     ClipboardManager: vi.fn().mockImplementation(() => ({
       hasFormat: vi.fn().mockReturnValue(false),
       getImageData: vi.fn().mockReturnValue({ data: null }),
     })),
-  },
-  ClipboardManager: vi.fn().mockImplementation(() => ({
-    hasFormat: vi.fn().mockReturnValue(false),
-    getImageData: vi.fn().mockReturnValue({ data: null }),
-  })),
-}));
+  };
+});
 
 // Mock node:child_process
 vi.mock('node:child_process', () => ({
@@ -137,11 +148,20 @@ function setupX11Env() {
 
 const originalPlatform = process.platform;
 
+// The beforeEach below resets the module registry and re-imports the module
+// graph for every test; under heavy parallel CI load that can exceed the
+// default hook timeout without any real hang.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 30_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
 describe('clipboardUtils', () => {
   let clipboardHasImage: () => Promise<boolean>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
+  let isWaylandSession: () => boolean;
 
   beforeEach(async () => {
     // Clean up /tmp/test directory from previous runs to ensure
@@ -153,6 +173,8 @@ describe('clipboardUtils', () => {
       );
     await realFs.rm('/tmp/test', { recursive: true, force: true });
 
+    clipboardMockState.failLoad = false;
+    clipboardMockState.loadDelayMs = 0;
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -163,6 +185,7 @@ describe('clipboardUtils', () => {
     saveClipboardImage = mod.saveClipboardImage;
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
+    isWaylandSession = mod.isWaylandSession;
     mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
@@ -184,7 +207,36 @@ describe('clipboardUtils', () => {
     });
   });
 
+  describe('isWaylandSession', () => {
+    it('matches the session type case-insensitively', () => {
+      vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+
+      expect(isWaylandSession()).toBe(true);
+    });
+
+    it('uses WAYLAND_DISPLAY when the session type is unset', () => {
+      delete process.env['XDG_SESSION_TYPE'];
+      vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+
+      expect(isWaylandSession()).toBe(true);
+    });
+  });
+
   describe('clipboardHasImage', () => {
+    it('uses wl-paste for a case-insensitive Wayland session type', async () => {
+      vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('image/png\n', 0));
+
+      await clipboardHasImage();
+
+      expect(mockExecSync).toHaveBeenCalledWith('command -v wl-paste', {
+        stdio: 'ignore',
+      });
+    });
+
     it('should return true when clipboard contains image', async () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
       const mockChild = createMockChild('image/png\nimage/bmp\n', 0);
@@ -525,6 +577,42 @@ describe('clipboardUtils', () => {
   });
 
   describe('macOS/Windows fallback', () => {
+    it('notifies after a cached native module load failure', async () => {
+      clipboardMockState.failLoad = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+
+      await expect(mod.clipboardHasImage()).resolves.toBe(false);
+      const onUnavailable = vi.fn();
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('shares an in-flight native module load without false errors', async () => {
+      clipboardMockState.loadDelayMs = 20;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(
+        Promise.all([
+          mod.clipboardHasImage(onUnavailable),
+          mod.clipboardHasImage(onUnavailable),
+        ]),
+      ).resolves.toEqual([false, false]);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
     it('should return false on non-linux platform when @teddyzhu/clipboard fails', async () => {
       const originalPlatform = process.platform;
       Object.defineProperty(process, 'platform', {

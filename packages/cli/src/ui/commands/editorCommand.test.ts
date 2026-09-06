@@ -26,5 +26,6 @@ describe('editorCommand', () => {
   it('should have the correct name and description', () => {
     expect(editorCommand.name).toBe('editor');
     expect(editorCommand.description).toBe('set external editor preference');
+    expect(editorCommand.canRunDuringStreaming).toBe(true);
   });
 });

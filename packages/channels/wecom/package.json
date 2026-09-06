@@ -1,0 +1,34 @@
+{
+  "name": "@qwen-code/channel-wecom",
+  "version": "0.23.0",
+  "description": "WeCom channel adapter for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/channels/wecom"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "0.23.0",
+    "@wecom/aibot-node-sdk": "^1.0.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

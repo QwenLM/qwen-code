@@ -26,10 +26,7 @@ import {
 } from './store.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import { rebuildUserAutoMemoryIndex } from './indexer.js';
-import {
-  appendManagedAutoMemoryToUserMemory,
-  buildManagedAutoMemoryPrompt,
-} from './prompt.js';
+import { buildManagedAutoMemoryPrompt } from './prompt.js';
 
 describe('user-level auto-memory', () => {
   let tempDir: string;
@@ -299,9 +296,8 @@ describe('user-level auto-memory', () => {
       expect(prompt).toContain('## /tmp/project/.qwen/memory/MEMORY.md');
     });
 
-    it('appendManagedAutoMemoryToUserMemory passes the user section through', () => {
-      const result = appendManagedAutoMemoryToUserMemory(
-        'Project rules from QWEN.md',
+    it('buildManagedAutoMemoryPrompt passes the user section through', () => {
+      const result = buildManagedAutoMemoryPrompt(
         '/tmp/project/.qwen/memory',
         '- [Release](project/release.md) — Release Friday.',
         {
@@ -310,9 +306,15 @@ describe('user-level auto-memory', () => {
         },
       );
 
-      expect(result).toContain('Project rules from QWEN.md');
       expect(result).toContain('USER memory');
       expect(result).toContain('/tmp/global/memories');
+      // Separation guard: the managed auto-memory section is standalone. It is
+      // no longer concatenated onto the user-memory/context blob (the former
+      // `appendManagedAutoMemoryToUserMemory` wrapper was removed), so nothing
+      // is prepended before the `# auto memory` heading — even when a user
+      // section is present. A regression that re-introduced that concatenation
+      // here would push context ahead of the heading and fail this assertion.
+      expect(result.startsWith('# auto memory')).toBe(true);
     });
   });
 });

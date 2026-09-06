@@ -77,6 +77,67 @@ describe('calculateCost', () => {
     expect(cost).toBeNull();
   });
 
+  it('returns zero rather than null for a model priced at zero', () => {
+    const cost = calculateCost({
+      inputTokens: 1_000_000,
+      outputTokens: 500_000,
+      pricing: {
+        inputPerMillionTokens: 0,
+        outputPerMillionTokens: 0,
+      },
+    });
+
+    expect(cost).toBe(0);
+  });
+
+  it('returns a number when only one side is priced at zero', () => {
+    expect(
+      calculateCost({
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        pricing: { inputPerMillionTokens: 0, outputPerMillionTokens: 1.2 },
+      }),
+    ).toBe(0);
+    expect(
+      calculateCost({
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        pricing: { inputPerMillionTokens: 0, outputPerMillionTokens: 1.2 },
+      }),
+    ).toBe(1.2);
+  });
+
+  // Guards against over-correcting. `null` still has to mean "nothing to
+  // report", or the stats table would print `$0.0000` for models the user
+  // never priced and for models with no recorded usage. Both pass before and
+  // after the fix.
+  it('keeps null for an unpriced model regardless of token counts', () => {
+    expect(
+      calculateCost({
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        pricing: {},
+      }),
+    ).toBeNull();
+    expect(
+      calculateCost({
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        pricing: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it('keeps null for an unused model even when it is priced at zero', () => {
+    expect(
+      calculateCost({
+        inputTokens: 0,
+        outputTokens: 0,
+        pricing: { inputPerMillionTokens: 0, outputPerMillionTokens: 0 },
+      }),
+    ).toBeNull();
+  });
+
   it('handles partial tokens correctly', () => {
     const cost = calculateCost({
       inputTokens: 500_000,

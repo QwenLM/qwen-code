@@ -14,16 +14,31 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
+// The docker-sandbox E2E leg builds its image by running this script, so an
+// over-budget package turns main's E2E run red as well as blocking publishing.
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 128 * 1024 * 1024;
+const PACKAGE_TEXT_FILE_RE =
+  /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
+const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
+  ['chrome', 'devtools', 'mcp'].join('-'),
+  ['puppeteer', 'core'].join('-'),
+  ['oastify', 'com'].join('.'),
+  ['webhook', 'site'].join('.'),
+  ['ngrok', 'io'].join('.'),
+  ['ngrok-free', 'app'].join('.'),
+];
 
 export function preparePackage({
   rootDir = defaultRootDir,
   requireNativeAudioCapture = process.env
     .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
+  maxPackageUnpackedBytes = DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES,
 } = {}) {
   const distDir = path.join(rootDir, 'dist');
 
@@ -31,12 +46,12 @@ export function preparePackage({
   copyDocumentationFiles(rootDir, distDir);
   copyLocales(rootDir, distDir);
   copyExtensionExamples(rootDir, distDir);
-  const bundleNativeAudioCapture = copyNativeAudioCapturePackage(
-    rootDir,
-    distDir,
-    { required: requireNativeAudioCapture },
-  );
-  writeDistPackageJson(rootDir, distDir, { bundleNativeAudioCapture });
+  verifyNativeAudioCapturePackage(rootDir, distDir, {
+    required: requireNativeAudioCapture,
+  });
+  writeDistPackageJson(rootDir, distDir);
+  assertNoSensitivePackageScanLiterals(distDir);
+  assertPreparedPackageSize(distDir, maxPackageUnpackedBytes);
   printPackageStructure(distDir);
 }
 
@@ -63,6 +78,7 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'export-transcript-document.js'),
   ];
 
   if (!fs.existsSync(distDir)) {
@@ -140,8 +156,8 @@ function copyExtensionExamples(rootDir, distDir) {
   }
 }
 
-function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
-  console.log('Copying native audio capture package...');
+function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
+  console.log('Verifying native audio capture package...');
 
   const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
   const addonDest = path.join(
@@ -168,7 +184,7 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         );
       }
       console.warn(`Warning: ${message}`);
-      return false;
+      return;
     }
   }
   for (const [artifactPath, description, predicate] of [
@@ -192,7 +208,7 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         );
       }
       console.warn(`Warning: ${message}`);
-      return false;
+      return;
     }
   }
 
@@ -213,16 +229,12 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
       );
     }
     console.warn(`Warning: ${message}`);
-    return false;
+    return;
   }
-  const dependencySources = [];
   const addonRequire = createRequire(path.join(addonSrc, 'package.json'));
   for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
     try {
-      dependencySources.push([
-        dependencyName,
-        path.dirname(addonRequire.resolve(`${dependencyName}/package.json`)),
-      ]);
+      addonRequire.resolve(`${dependencyName}/package.json`);
     } catch {
       const message = `audio capture dependency not resolvable: ${dependencyName}`;
       if (required) {
@@ -232,51 +244,11 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         );
       }
       console.warn(`Warning: ${message}`);
-      return false;
+      return;
     }
   }
 
-  delete addonPkg.scripts;
-  delete addonPkg.devDependencies;
-
-  const copyOpts = {
-    recursive: true,
-    dereference: true,
-    verbatimSymlinks: false,
-  };
-
-  fs.mkdirSync(addonDest, { recursive: true });
-
-  fs.writeFileSync(
-    path.join(addonDest, 'package.json'),
-    JSON.stringify(addonPkg, null, 2) + '\n',
-  );
-  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
-    ...copyOpts,
-    filter: (src) => !TEST_FILE_RE.test(src),
-  });
-  fs.cpSync(
-    path.join(addonSrc, 'prebuilds'),
-    path.join(addonDest, 'prebuilds'),
-    {
-      ...copyOpts,
-      filter: (src) => {
-        const stat = fs.statSync(src);
-        return stat.isDirectory() || src.endsWith('.node');
-      },
-    },
-  );
-
-  for (const [dependencyName, dependencySrc] of dependencySources) {
-    fs.cpSync(
-      dependencySrc,
-      path.join(addonDest, 'node_modules', dependencyName),
-      copyOpts,
-    );
-  }
-
-  console.log('Copied native audio capture package');
-  return true;
+  console.log('Verified native audio capture package');
 }
 
 function hasFileMatching(dir, predicate) {
@@ -292,11 +264,7 @@ function hasFileMatching(dir, predicate) {
   return false;
 }
 
-function writeDistPackageJson(
-  rootDir,
-  distDir,
-  { bundleNativeAudioCapture = false } = {},
-) {
+function writeDistPackageJson(rootDir, distDir) {
   console.log('Creating package.json for distribution...');
 
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
@@ -307,6 +275,31 @@ function writeDistPackageJson(
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
+  let lockfile;
+  try {
+    lockfile = JSON.parse(
+      fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
+    );
+  } catch (error) {
+    throw new Error(`Cannot read package-lock.json: ${error.message}`);
+  }
+  const coreManifest = JSON.parse(
+    fs.readFileSync(
+      path.join(rootDir, 'packages', 'core', 'package.json'),
+      'utf-8',
+    ),
+  );
+  const sharpVersion =
+    lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
+    lockfile.packages?.['node_modules/sharp']?.version;
+  const declared = coreManifest.dependencies?.sharp;
+  if (!sharpVersion || !declared || !semver.satisfies(sharpVersion, declared)) {
+    throw new Error(
+      `sharp version is not locked in package-lock.json ` +
+        `(resolved ${sharpVersion ?? 'none'}, ` +
+        `packages/core declares ${declared ?? 'none'})`,
+    );
+  }
 
   const distPackageJson = {
     name: rootPackageJson.name,
@@ -336,10 +329,19 @@ function writeDistPackageJson(
       'examples',
       'bundled',
       'web-shell',
+      'export-transcript-document.js',
+      // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+      // web-tree-sitter wasm, native render library) are intentionally NOT
+      // published in the npm package — a multi-megabyte tree dominated by the
+      // native render library — against the unpacked-size budget. An npm
+      // install also has no @opentui/core dependency to resolve the assets
+      // against: below the runtime floor (Node < 26.4.0) the renderer gate
+      // never selects opentui, and at or above it, QWEN_TUI_RENDERER=opentui
+      // selects the renderer, the boot fails on the missing asset tree, and
+      // a stderr warning falls back to ink on every startup. The opt-in Bun
+      // standalone flavor (--runtime=bun) carries the assets via
+      // create-standalone-package.js instead.
     ],
-    ...(bundleNativeAudioCapture
-      ? { bundledDependencies: ['@qwen-code/audio-capture'] }
-      : {}),
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {
@@ -357,6 +359,16 @@ function writeDistPackageJson(
       '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
       '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
       '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+      // sharp is a native module externalized in esbuild. Declaring sharp alone
+      // is sufficient: its own optionalDependencies pull in the matching @img
+      // platform binary for every OS/arch npm installs onto, so the platform
+      // packages are not pinned here (pinning them drifts on a sharp bump).
+      // The version is exact-pinned like all other native optional deps in this
+      // manifest — a project-wide convention that keeps the published tarball
+      // reproducible. Sharp's recurring CVE stream means users must wait for a
+      // CLI release to pick up libvips fixes; nightly releases keep the
+      // turnaround short.
+      sharp: sharpVersion,
     },
     engines: rootPackageJson.engines,
   };
@@ -365,6 +377,80 @@ function writeDistPackageJson(
     path.join(distDir, 'package.json'),
     JSON.stringify(distPackageJson, null, 2) + '\n',
   );
+}
+
+function assertNoSensitivePackageScanLiterals(distDir) {
+  for (const filePath of listTextPackageFiles(distDir)) {
+    const contents = fs.readFileSync(filePath, 'utf8');
+    const lowerContents = contents.toLowerCase();
+    for (const literal of PACKAGE_SCAN_FORBIDDEN_LITERALS) {
+      if (!lowerContents.includes(literal.toLowerCase())) continue;
+      const relativePath = path.relative(distDir, filePath);
+      throw new Error(
+        `Prepared package contains forbidden string "${literal}" in ${relativePath}`,
+      );
+    }
+  }
+}
+
+function listTextPackageFiles(dir) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listTextPackageFiles(entryPath));
+    } else if (entry.isFile() && PACKAGE_TEXT_FILE_RE.test(entry.name)) {
+      files.push(entryPath);
+    }
+  }
+  return files;
+}
+
+function assertPreparedPackageSize(distDir, maxUnpackedBytes) {
+  const packageFiles = collectPreparedPackageFiles(distDir);
+  let unpackedBytes = 0;
+  for (const filePath of packageFiles) {
+    unpackedBytes += fs.statSync(filePath).size;
+  }
+  if (unpackedBytes <= maxUnpackedBytes) return;
+  throw new Error(
+    `Prepared package unpacked size ${unpackedBytes} bytes exceeds ${maxUnpackedBytes} bytes`,
+  );
+}
+
+function collectPreparedPackageFiles(distDir) {
+  const distPackageJson = JSON.parse(
+    fs.readFileSync(path.join(distDir, 'package.json'), 'utf8'),
+  );
+  const packageFiles = new Set([path.join(distDir, 'package.json')]);
+
+  for (const entry of distPackageJson.files ?? []) {
+    if (entry === '*.sb') {
+      for (const fileName of fs.readdirSync(distDir)) {
+        if (fileName.endsWith('.sb')) {
+          packageFiles.add(path.join(distDir, fileName));
+        }
+      }
+      continue;
+    }
+
+    const entryPath = path.join(distDir, entry);
+    if (!fs.existsSync(entryPath)) continue;
+    collectFiles(entryPath, packageFiles);
+  }
+
+  return packageFiles;
+}
+
+function collectFiles(entryPath, output) {
+  const stat = fs.statSync(entryPath);
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(entryPath)) {
+      collectFiles(path.join(entryPath, entry), output);
+    }
+  } else if (stat.isFile()) {
+    output.add(entryPath);
+  }
 }
 
 function printPackageStructure(distDir) {

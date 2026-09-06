@@ -8,11 +8,12 @@ import type {
   AgentSideConnection,
   FileSystemCapability,
   ReadTextFileRequest,
-  WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
+  CoreReadTextFileRequest,
+  CoreWriteTextFileRequest,
   FileSystemService,
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
@@ -21,6 +22,7 @@ import {
   getErrorMessage,
   isSubpath,
 } from '@qwen-code/qwen-code-core';
+import { buildToolWriteOriginMeta } from '@qwen-code/qwen-code-core/toolWriteOrigin';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -105,6 +107,29 @@ async function resolveRealPath(value: string): Promise<string | undefined> {
   }
 }
 
+function toAcpReadTextFileRequest(
+  params: CoreReadTextFileRequest,
+  sessionId: string,
+): ReadTextFileRequest {
+  // `maxOutputBytes`, `signal`, and `stats` are core-local concerns that the
+  // current ACP schema cannot represent. Keep this boundary explicit if the
+  // schema grows.
+  const request: ReadTextFileRequest = {
+    path: params.path,
+    sessionId,
+  };
+  if (params._meta !== undefined) {
+    request._meta = params._meta;
+  }
+  if (params.limit !== undefined) {
+    request.limit = params.limit;
+  }
+  if (params.line != null) {
+    request.line = params.line + 1;
+  }
+  return request;
+}
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
     private readonly connection: AgentSideConnection,
@@ -115,18 +140,21 @@ export class AcpFileSystemService implements FileSystemService {
   ) {}
 
   async readTextFile(
-    params: Omit<ReadTextFileRequest, 'sessionId'>,
+    params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
     if (!this.capabilities.readTextFile) {
       return this.fallback.readTextFile(params);
     }
 
+    // Everything below — including the localReadRoots retry in the catch — is
+    // unreachable under `qwen serve`, which advertises this capability as
+    // false. It guards only generic ACP hosts that keep delegation on. Do not
+    // read the retry as a live backstop for daemon reads.
     let response: ReadTextFileResponse;
     try {
-      response = await this.connection.readTextFile({
-        ...params,
-        sessionId: this.sessionId,
-      });
+      response = await this.connection.readTextFile(
+        toAcpReadTextFileRequest(params, this.sessionId),
+      );
     } catch (error) {
       const errorCode = getErrorCode(error);
 
@@ -184,21 +212,24 @@ export class AcpFileSystemService implements FileSystemService {
   }
 
   async writeTextFile(
-    params: Omit<WriteTextFileRequest, 'sessionId'>,
+    params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
     if (!this.capabilities.writeTextFile) {
       return this.fallback.writeTextFile(params);
     }
 
+    const { toolWriteOrigin, _meta: requestMeta, ...wireParams } = params;
     const finalContent =
-      params._meta?.['bom'] && params.content.charCodeAt(0) !== 0xfeff
+      requestMeta?.['bom'] && params.content.charCodeAt(0) !== 0xfeff
         ? '\uFEFF' + params.content
         : params.content;
+    const wireMeta = buildToolWriteOriginMeta(requestMeta, toolWriteOrigin);
 
     try {
       await this.connection.writeTextFile({
-        ...params,
+        ...wireParams,
         content: finalContent,
+        ...(wireMeta !== undefined ? { _meta: wireMeta } : {}),
         sessionId: this.sessionId,
       });
     } catch (error) {

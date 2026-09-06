@@ -5,8 +5,8 @@
  */
 
 import * as childProcess from 'node:child_process';
-import { ProxyAgent } from 'undici';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { loadUndici } from './load-undici.js';
 
 const debugLogger = createDebugLogger('GIT');
 
@@ -92,6 +92,12 @@ export const getLatestGitHubRelease = async (
 
     const endpoint = `https://api.github.com/repos/QwenLM/qwen-code-action/releases/latest`;
 
+    // Lazy-load undici so it stays out of the eager startup closure
+    // (issue #7264).
+    const dispatcher = proxy
+      ? new (await loadUndici()).ProxyAgent(proxy)
+      : undefined;
+
     const response = await fetch(endpoint, {
       method: 'GET',
       headers: {
@@ -99,7 +105,7 @@ export const getLatestGitHubRelease = async (
         'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28',
       },
-      dispatcher: proxy ? new ProxyAgent(proxy) : undefined,
+      dispatcher,
       signal: AbortSignal.any([AbortSignal.timeout(30_000), controller.signal]),
     } as RequestInit);
 

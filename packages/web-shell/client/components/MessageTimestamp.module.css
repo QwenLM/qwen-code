@@ -3,6 +3,10 @@
   padding: 5px 0;
 }
 
+.toolGroupSpacing {
+  padding: 8px 0;
+}
+
 /*
  * Anchored inside the message's top-right corner rather than floating above
  * it: the message list (`.list`) is `overflow-y: auto`, so a tooltip spilling

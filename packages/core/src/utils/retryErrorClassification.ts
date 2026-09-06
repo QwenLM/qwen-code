@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from './auth-type.js';
 import { isAbortError } from './errors.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { getRateLimitErrorDetails, isRateLimitError } from './rateLimit.js';
@@ -194,24 +194,25 @@ function isRetryAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'CanceledError';
 }
 
-function getTransportCode(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null) {
-    return undefined;
-  }
+// SDKs wrap socket-level failures a couple of cause levels deep — e.g. the
+// OpenAI SDK surfaces a pre-header reset as APIConnectionError ->
+// TypeError('fetch failed') -> cause { code: 'ECONNRESET' }. Walk the cause
+// chain so those still reach the transport classification. The bound keeps a
+// malformed or circular chain from an unbounded traversal.
+const MAX_TRANSPORT_CAUSE_DEPTH = 4;
 
-  const directCode = (error as { code?: unknown }).code;
-  if (typeof directCode === 'string' && isTransportCode(directCode)) {
-    return directCode;
-  }
-
-  const cause = error instanceof Error ? error.cause : undefined;
-  if (typeof cause === 'object' && cause !== null) {
-    const causeCode = (cause as { code?: unknown }).code;
-    if (typeof causeCode === 'string' && isTransportCode(causeCode)) {
-      return causeCode;
+export function getTransportCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_TRANSPORT_CAUSE_DEPTH; depth++) {
+    if (typeof current !== 'object' || current === null) {
+      return undefined;
     }
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && isTransportCode(code)) {
+      return code;
+    }
+    current = current instanceof Error ? current.cause : undefined;
   }
-
   return undefined;
 }
 

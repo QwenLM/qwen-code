@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionService,
+  type SessionArchiveState,
+} from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   collectSessionData,
@@ -24,7 +28,13 @@ export type SessionExportFormat = (typeof SESSION_EXPORT_FORMATS)[number];
 
 interface ExportFormatDefinition {
   mimeType: string;
-  render: (data: ExportSessionData) => string;
+  // `records` is required because the HTML path cannot render without it: the
+  // document projector is the only HTML implementation left, and it projects
+  // from original records rather than from the normalized session data. The
+  // other formatters take `ExportSessionData` alone and simply ignore the
+  // second argument, which structural typing allows. Keep the signature shared
+  // so a caller cannot pick a format and then forget to pass records.
+  render: (data: ExportSessionData, records: readonly unknown[]) => string;
 }
 
 const EXPORT_FORMATS: Record<SessionExportFormat, ExportFormatDefinition> = {
@@ -71,12 +81,22 @@ export async function exportSessionTranscript(params: {
   workspaceCwd: string;
   sessionId: string;
   format: SessionExportFormat;
+  archiveState?: SessionArchiveState;
   config?: ExportConfig;
+  runtimeBaseDir?: string;
 }): Promise<SessionExportResult> {
   const { workspaceCwd, sessionId, format } = params;
-  const sessionData = await new SessionService(workspaceCwd).loadSession(
-    sessionId,
-  );
+  const service = new SessionService(workspaceCwd, {
+    ...(params.runtimeBaseDir !== undefined
+      ? { runtimeBaseDir: params.runtimeBaseDir }
+      : {}),
+  });
+  const sessionData =
+    params.archiveState === 'archived'
+      ? await service.loadArchivedSession(sessionId, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        })
+      : await service.loadSession(sessionId);
   if (!sessionData) {
     throw new SessionNotFoundError(sessionId);
   }
@@ -96,6 +116,9 @@ export async function exportSessionTranscript(params: {
     format,
     filename: generateExportFilename(format),
     mimeType: formatDefinition.mimeType,
-    content: formatDefinition.render(normalized),
+    content: formatDefinition.render(
+      normalized,
+      sessionData.conversation.messages,
+    ),
   };
 }

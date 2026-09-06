@@ -49,6 +49,8 @@ describe('HookEventHandler', () => {
   beforeEach(() => {
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getSessionSourceType: vi.fn().mockReturnValue(undefined),
+      getSessionSourceId: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
     } as unknown as Config;
@@ -165,7 +167,70 @@ describe('HookEventHandler', () => {
         .calls;
       const input = mockCalls[0][2] as { prompt: string };
       expect(input.prompt).toBe('my test prompt');
+      expect(input).not.toHaveProperty('submitted_prompt');
     });
+
+    it('should include submitted prompt when provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent(
+        'model prompt',
+        undefined,
+        'submitted prompt',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        prompt: string;
+        submitted_prompt?: string;
+      };
+      expect(input).toMatchObject({
+        prompt: 'model prompt',
+        submitted_prompt: 'submitted prompt',
+      });
+    });
+
+    it.each(['', ' \t\n '])(
+      'should omit an empty submitted prompt',
+      async (submittedPrompt) => {
+        const mockPlan = createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]);
+        vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+          mockPlan,
+        );
+        vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+        vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+          createMockAggregatedResult(true),
+        );
+
+        await hookEventHandler.fireUserPromptSubmitEvent(
+          'model prompt',
+          undefined,
+          submittedPrompt,
+        );
+
+        const input = (mockHookRunner.executeHooksParallel as Mock).mock
+          .calls[0][2] as { submitted_prompt?: string };
+        expect(input).not.toHaveProperty('submitted_prompt');
+      },
+    );
   });
 
   describe('fireInstructionsLoadedEvent', () => {
@@ -410,6 +475,202 @@ describe('HookEventHandler', () => {
       expect(result.success).toBe(true);
       expect(result.finalOutput).toBeUndefined();
     });
+
+    it('should inject background_tasks and crons into Stop input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      const mockRegistry = {
+        getAll: vi.fn().mockReturnValue([
+          {
+            id: 'bg-1',
+            status: 'running',
+            subagentType: 'Explorer',
+            startTime: 1720000000000,
+            description: 'test task',
+          },
+        ]),
+      };
+      const mockScheduler = {
+        list: vi.fn().mockReturnValue([
+          {
+            id: 'cron-1',
+            cronExpr: '0 */2 * * *',
+            prompt: 'check status',
+            recurring: true,
+            fireAtMs: 1720007200000,
+            lastFiredAt: 1720000000000,
+          },
+        ]),
+      };
+      const configWithMocks = mockConfig as unknown as {
+        getBackgroundTaskRegistry: () => typeof mockRegistry;
+        getCronScheduler: () => typeof mockScheduler;
+      };
+      configWithMocks.getBackgroundTaskRegistry = () => mockRegistry;
+      configWithMocks.getCronScheduler = () => mockScheduler;
+
+      // Re-create handler with updated config mocks
+      const handler = new HookEventHandler(
+        mockConfig,
+        mockHookPlanner,
+        mockHookRunner,
+        mockHookAggregator,
+        mockSessionHooksManager,
+      );
+
+      await handler.fireStopEvent(true, 'msg');
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        background_tasks: Array<{
+          id: string;
+          status: string;
+          agent_type: string;
+        }>;
+        crons: Array<{ id: string; schedule: string; prompt: string }>;
+      };
+
+      expect(input.background_tasks).toHaveLength(1);
+      expect(input.background_tasks[0].id).toBe('bg-1');
+      expect(input.background_tasks[0].status).toBe('running');
+      expect(input.background_tasks[0].agent_type).toBe('Explorer');
+
+      expect(input.crons).toHaveLength(1);
+      expect(input.crons[0].id).toBe('cron-1');
+      expect(input.crons[0].schedule).toBe('0 */2 * * *');
+      expect(input.crons[0].prompt).toBe('check status');
+    });
+
+    it('should return empty arrays when registry/scheduler unavailable', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Config without registry/scheduler methods
+      const bareConfig = {
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+        getSessionSourceType: vi.fn().mockReturnValue(undefined),
+        getSessionSourceId: vi.fn().mockReturnValue(undefined),
+        getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+        getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
+      } as unknown as Config;
+
+      const handler = new HookEventHandler(
+        bareConfig,
+        mockHookPlanner,
+        mockHookRunner,
+        mockHookAggregator,
+        mockSessionHooksManager,
+      );
+
+      await handler.fireStopEvent(true, 'msg');
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        background_tasks: unknown[];
+        crons: unknown[];
+      };
+
+      expect(input.background_tasks).toEqual([]);
+      expect(input.crons).toEqual([]);
+    });
+  });
+
+  describe('fireMessageDisplayEvent', () => {
+    it('should execute hooks for MessageDisplay event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireMessageDisplayEvent(
+        'msg-1',
+        'Hello',
+        false,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.MessageDisplay,
+        undefined,
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include message_id, displayed_text, and is_final in hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireMessageDisplayEvent(
+        'msg-42',
+        'Hello, world.',
+        true,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        message_id: string;
+        displayed_text: string;
+        is_final: boolean;
+      };
+      expect(input.message_id).toBe('msg-42');
+      expect(input.displayed_text).toBe('Hello, world.');
+      expect(input.is_final).toBe(true);
+    });
+
+    it('should handle missing finalOutput gracefully', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true, undefined),
+      );
+
+      const result = await hookEventHandler.fireMessageDisplayEvent(
+        'msg-1',
+        '',
+        false,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput).toBeUndefined();
+    });
   });
 
   describe('fireSessionStartEvent', () => {
@@ -468,6 +729,62 @@ describe('HookEventHandler', () => {
       expect(input.source).toBe(SessionStartSource.Resume);
       expect(input.model).toBe('test-model');
       expect(input.agent_type).toBe(AgentType.Bash);
+    });
+
+    it('should include session source fields in the hook input', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('channel');
+      vi.mocked(mockConfig.getSessionSourceId).mockReturnValue('feishu-main');
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'test-model',
+      );
+
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2];
+      expect(input).toMatchObject({
+        source_type: 'channel',
+        source_id: 'feishu-main',
+      });
+    });
+
+    it('should omit session source fields when unavailable', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'test-model',
+      );
+
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2];
+      expect(input).not.toHaveProperty('source_type');
+      expect(input).not.toHaveProperty('source_id');
     });
 
     it('should use default permission mode when not provided', async () => {
@@ -607,6 +924,39 @@ describe('HookEventHandler', () => {
         };
         expect(input.reason).toBe(reason);
       }
+    });
+  });
+
+  describe('fireSessionDeleteEvent', () => {
+    it('should execute hooks with the deleted session id', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      const result =
+        await hookEventHandler.fireSessionDeleteEvent('deleted-session-id');
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.SessionDelete,
+        undefined,
+      );
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2] as {
+        hook_event_name: HookEventName;
+        deleted_session_id: string;
+      };
+      expect(input.hook_event_name).toBe(HookEventName.SessionDelete);
+      expect(input.deleted_session_id).toBe('deleted-session-id');
+      expect(result.success).toBe(true);
     });
   });
 
@@ -865,6 +1215,102 @@ describe('HookEventHandler', () => {
         undefined,
         expect.any(Object),
       );
+    });
+  });
+
+  describe('project-skill trust gate at fire time', () => {
+    // The second side of the gate `applySideEffects` enforces on the way
+    // in: a hook registered from a repository's `.qwen/skills/` frontmatter
+    // fires only while the folder is STILL trusted. `isTrustedFolder()` is
+    // live under an IDE connection, so a revocation mid-session must
+    // silence the hook at its next event — no restart, no unregistration.
+    const gated = {
+      hookId: 'gated',
+      eventName: HookEventName.PreToolUse,
+      matcher: 'shell',
+      config: { type: HookType.Command, command: './exfil.sh' },
+      trustGated: true,
+    };
+    const ungated = {
+      hookId: 'plain',
+      eventName: HookEventName.PreToolUse,
+      matcher: 'shell',
+      config: { type: HookType.Command, command: './mine.sh' },
+    };
+    const trust = (value: boolean) => {
+      (
+        mockConfig as unknown as { isTrustedFolder: () => boolean }
+      ).isTrustedFolder = vi.fn().mockReturnValue(value);
+    };
+    const fire = async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      return hookEventHandler.firePreToolUseEvent(
+        'shell',
+        { command: 'ls' },
+        'toolu_123',
+        PermissionMode.Default,
+      );
+    };
+
+    it('runs the gated hook while the folder is trusted', async () => {
+      trust(true);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+      ] as never);
+      await fire();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [gated.config],
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('skips the gated hook once trust is revoked, and only that one', async () => {
+      trust(false);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+        ungated,
+      ] as never);
+      await fire();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [ungated.config],
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('fires nothing when the gated hook was the only one — and never consults trust without a gated entry', async () => {
+      trust(false);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+      ] as never);
+      const result = await fire();
+      expect(result.success).toBe(true);
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+      // An ungated-only set is executed without touching folder trust: the
+      // gate costs nothing on rounds that registered no project-skill hook.
+      const probe = vi.fn().mockReturnValue(false);
+      (
+        mockConfig as unknown as { isTrustedFolder: () => boolean }
+      ).isTrustedFolder = probe;
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        ungated,
+      ] as never);
+      await fire();
+      expect(probe).not.toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledTimes(1);
     });
   });
 

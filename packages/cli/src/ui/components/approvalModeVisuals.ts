@@ -20,6 +20,7 @@ export function getApprovalModeIndicatorColor(
     case ApprovalMode.YOLO:
       return theme.status.error;
     case ApprovalMode.DEFAULT:
+      return theme.text.secondary;
     default:
       return undefined;
   }

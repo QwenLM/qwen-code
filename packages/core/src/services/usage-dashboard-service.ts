@@ -7,7 +7,7 @@
 import {
   aggregateUsage,
   getTimeRangeBounds,
-  loadUsageHistory,
+  loadUsageHistoryWithLive,
   type TimeRange,
   type UsageSummaryRecord,
 } from './usageHistoryService.js';
@@ -275,14 +275,15 @@ export function buildUsageDashboard(
 
 /**
  * Read-only snapshot of local token usage for the daemon usage-dashboard API.
- * Loads the global cross-project history (`~/.qwen`) via {@link loadUsageHistory}
- * (persisted `usage_record.jsonl`, falling back to transcript replay) and builds
- * the dashboard — consistent with the TUI `/stats` view. The load can be I/O
- * heavy on large histories, so callers should cache (the daemon route caches the
- * loaded records and re-runs {@link buildUsageDashboard} per range).
+ * Loads the global cross-project history (`~/.qwen`) via
+ * {@link loadUsageHistoryWithLive} — the persisted `usage_record.jsonl` unioned
+ * with a replay of recent transcripts — so the totals include daemon / Web Shell
+ * and in-progress sessions that the persisted file never captures. The load can
+ * be I/O heavy on large histories, so callers should cache (the daemon route
+ * caches the loaded records and re-runs {@link buildUsageDashboard} per range).
  */
 export async function loadUsageDashboard(
   options: LoadUsageDashboardOptions = {},
 ): Promise<UsageDashboard> {
-  return buildUsageDashboard(await loadUsageHistory(), options);
+  return buildUsageDashboard(await loadUsageHistoryWithLive(), options);
 }

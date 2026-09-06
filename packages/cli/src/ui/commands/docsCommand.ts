@@ -21,6 +21,7 @@ export const docsCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (context: CommandContext) => {
     const langPath = getCurrentLanguage()?.startsWith('zh') ? 'zh' : 'en';
     const docsUrl = `https://qwenlm.github.io/qwen-code-docs/${langPath}`;

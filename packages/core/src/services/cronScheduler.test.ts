@@ -1026,6 +1026,128 @@ describe('CronScheduler', () => {
         expect(loadedIds.has(d.id)).toBe(true);
       }
     });
+
+    it('fails a legacy task with a condition precondition CLOSED: never installs or fires it, leaves it on disk', async () => {
+      // A pre-removal `isolated` guard task still carrying a `condition`
+      // precondition. `condition` is gone from DurableCronTask, and
+      // durableTaskToJob no longer carries it, so installing this task would
+      // silently turn a "only run if X" gate into an unconditional fire. It
+      // must be skipped entirely (never installed, never fired) but LEFT on
+      // disk so the user can re-create it. `condition` is not part of the type,
+      // so cast past it to seed the on-disk shape an old version wrote.
+      const onFire = vi.fn();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-cond', cron: '* * * * *' }),
+            condition: 'files changed since last run',
+          } as unknown as DurableCronTask,
+          // Control: a plain task with no condition loads and fires normally.
+          seed({ id: 'plain', cron: '* * * * *' }),
+        ]);
+
+        await scheduler.enableDurable('session-1');
+        // The guarded task is filtered out of the job map; the plain one loads.
+        const loadedIds = scheduler.list().map((j) => j.id);
+        expect(loadedIds).toContain('plain');
+        expect(loadedIds).not.toContain('legacy-cond');
+
+        scheduler.start(onFire);
+        // A minute the every-minute cron matches (past any jitter).
+        scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+        const firedIds = onFire.mock.calls.map((c) => (c[0] as CronJob).id);
+        expect(firedIds).toContain('plain');
+        expect(firedIds).not.toContain('legacy-cond');
+
+        // The legacy task is left on disk (fix-or-delete), not silently dropped.
+        expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(
+          'legacy-cond',
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('warns once (operator breadcrumb) the first time a legacy-condition task is skipped', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-warn', cron: '* * * * *' }),
+            condition: 'only when X',
+          } as unknown as DurableCronTask,
+        ]);
+
+        const legacyWarns = () =>
+          warnSpy.mock.calls.filter(
+            (c) =>
+              /legacy precondition/.test(String(c[0])) &&
+              /will NOT fire/.test(String(c[0])),
+          );
+
+        await scheduler.enableDurable('session-1');
+        expect(legacyWarns()).toHaveLength(1);
+        expect(String(legacyWarns()[0]![0])).toContain('legacy-warn');
+
+        // Re-loading the same file must NOT re-warn for an already-reported id.
+        await (
+          scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+        ).loadFileTasks(true);
+        expect(legacyWarns()).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('still fires a bare legacy runMode:isolated task (no condition), warning once', async () => {
+      // A pre-removal task written with `runMode: 'isolated'` and NO
+      // precondition. Unlike a legacy-condition task (a safety gate → fail
+      // closed), this one has no gate: it STILL fires — just no longer in a
+      // fresh per-run session (history now accumulates in its bound session).
+      // The scheduler installs and fires it, but logs a one-time behavior-change
+      // notice. `runMode` is gone from DurableCronTask, so cast past it to seed
+      // the on-disk shape an old version wrote.
+      const onFire = vi.fn();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-runmode', cron: '* * * * *' }),
+            runMode: 'isolated',
+          } as unknown as DurableCronTask,
+        ]);
+
+        const runModeWarns = () =>
+          warnSpy.mock.calls.filter(
+            (c) =>
+              /isolated/.test(String(c[0])) &&
+              /create_sub_session/.test(String(c[0])),
+          );
+
+        await scheduler.enableDurable('session-1');
+        // Unlike a legacy-condition task, this one IS installed…
+        expect(scheduler.list().map((j) => j.id)).toContain('legacy-runmode');
+        // …and the first load logs the one-time behavior-change breadcrumb.
+        expect(runModeWarns()).toHaveLength(1);
+        expect(String(runModeWarns()[0]![0])).toContain('legacy-runmode');
+
+        scheduler.start(onFire);
+        // A minute the every-minute cron matches (past any jitter).
+        scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+        const firedIds = onFire.mock.calls.map((c) => (c[0] as CronJob).id);
+        expect(firedIds).toContain('legacy-runmode');
+
+        // Re-loading the same file must NOT re-warn for an already-reported id.
+        await (
+          scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+        ).loadFileTasks(true);
+        expect(runModeWarns()).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe('durable ownership', () => {
@@ -1129,7 +1251,17 @@ describe('CronScheduler', () => {
     });
 
     it('owner fires durable tasks loaded from disk and persists lastFiredAt', async () => {
-      await writeCronTasks(tmpDir, [diskTask('disktask')]);
+      const delivery = {
+        kind: 'channel' as const,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      };
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('disktask'), sessionId: 'session-1', delivery },
+      ]);
       await scheduler.enableDurable('session-1');
 
       const fired: CronJob[] = [];
@@ -1138,11 +1270,42 @@ describe('CronScheduler', () => {
 
       expect(fired).toHaveLength(1);
       expect(fired[0]!.prompt).toBe('task disktask');
+      expect(fired[0]!.delivery).toEqual(delivery);
 
       // The disk write from tick() is fire-and-forget — wait for it.
       const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
       await vi.waitFor(async () => {
-        expect((await readCronTasks(tmpDir))[0]?.lastFiredAt).toBe(minuteMs);
+        const task = (await readCronTasks(tmpDir))[0];
+        expect(task?.lastFiredAt).toBe(minuteMs);
+        expect(task?.delivery).toEqual(delivery);
+      });
+    });
+
+    it('does not propagate delivery to the fired job for unbound tasks', async () => {
+      const delivery = {
+        kind: 'channel' as const,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      };
+      await writeCronTasks(tmpDir, [{ ...diskTask('unbound'), delivery }]);
+      await scheduler.enableDurable('session-1');
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.delivery).toBeUndefined();
+
+      // The delivery field is preserved on disk for a future session binding.
+      const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0];
+        expect(task?.lastFiredAt).toBe(minuteMs);
+        expect(task?.delivery).toEqual(delivery);
       });
     });
 
@@ -1171,6 +1334,31 @@ describe('CronScheduler', () => {
           { at: secondMinute, kind: 'scheduled', sessionId: 'session-1' },
         ]);
       });
+    });
+
+    it('attributes a per-run fire to its fresh session after dispatch', async () => {
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('fresh1'), sessionMode: 'per_run' },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      const minute = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      await vi.waitFor(async () => {
+        expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
+          { at: minute, kind: 'scheduled' },
+        ]);
+      });
+      expect(fired[0]?.sessionMode).toBe('per_run');
+
+      await scheduler.annotateRunSession('fresh1', minute, {
+        sessionId: 'child-1',
+      });
+      expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
+        { at: minute, kind: 'scheduled', sessionId: 'child-1' },
+      ]);
     });
 
     it('does not accrue run history for a one-shot (deleted on fire)', async () => {
@@ -1228,6 +1416,139 @@ describe('CronScheduler', () => {
       expect(firedB.map((j) => j.id)).toEqual(['taskB']);
 
       await settle(schedB);
+    });
+
+    it('does not classify an armed bound one-shot as missed on watcher reload', async () => {
+      vi.useFakeTimers();
+      try {
+        const createdAt = new Date(2025, 0, 15, 10, 14, 0).getTime();
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 14, 30));
+        await writeCronTasks(tmpDir, [
+          {
+            id: 'armedOneShot',
+            cron: '15 10 * * *',
+            prompt: 'armed prompt',
+            recurring: false,
+            createdAt,
+            lastFiredAt: null,
+            sessionId: 'sess-A',
+            delivery: {
+              kind: 'channel',
+              target: {
+                channelName: 'dingtalk',
+                type: 'user',
+                id: 'user-1',
+              },
+            },
+          },
+        ]);
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        await scheduler.enableDurable('sess-A');
+
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 15, 0, 500));
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+
+        expect(fired).toHaveLength(0);
+        scheduler.tick();
+        expect(fired).toHaveLength(1);
+        expect(fired[0]).toMatchObject({
+          id: 'armedOneShot',
+          prompt: 'armed prompt',
+          delivery: {
+            kind: 'channel',
+            target: {
+              channelName: 'dingtalk',
+              type: 'user',
+              id: 'user-1',
+            },
+          },
+        });
+        expect(fired[0]!.missed).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('classifies an armed one-shot as missed after its live tick window expires', async () => {
+      vi.useFakeTimers();
+      try {
+        const createdAt = new Date(2025, 0, 15, 10, 14, 0).getTime();
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 14, 30));
+        await writeCronTasks(tmpDir, [
+          {
+            id: 'staleArmedOneShot',
+            cron: '15 10 * * *',
+            prompt: 'armed prompt',
+            recurring: false,
+            createdAt,
+            lastFiredAt: null,
+            sessionId: 'sess-A',
+          },
+        ]);
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        await scheduler.enableDurable('sess-A');
+
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 16, 30));
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(true);
+
+        expect(fired).toHaveLength(1);
+        expect(fired[0]).toMatchObject({ missed: true });
+        await (
+          scheduler as unknown as {
+            pendingPersist: Promise<void>;
+          }
+        ).pendingPersist;
+        expect(await readCronTasks(tmpDir)).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('leaves an early-jittered armed one-shot to tick while its cron slot is still visible', async () => {
+      vi.useFakeTimers();
+      try {
+        const createdAt = new Date(2025, 0, 15, 9, 58, 0).getTime();
+        vi.setSystemTime(new Date(2025, 0, 15, 9, 58, 30));
+        await writeCronTasks(tmpDir, [
+          {
+            id: 'jitter-10',
+            cron: '0 10 * * *',
+            prompt: 'jittered prompt',
+            recurring: false,
+            createdAt,
+            lastFiredAt: null,
+            sessionId: 'sess-A',
+          },
+        ]);
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        await scheduler.enableDurable('sess-A');
+
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 30));
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(true);
+
+        expect(fired).toHaveLength(0);
+        scheduler.tick();
+        expect(fired).toHaveLength(1);
+        expect(fired[0]).toMatchObject({ id: 'jitter-10' });
+        expect(fired[0]!.missed).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('a non-owner session catches up its own overdue bound task', async () => {
@@ -1674,6 +1995,17 @@ describe('CronScheduler', () => {
       expect(tasks[0]!.prompt).toBe('headless durable');
     });
 
+    it('createDurable leaves tasks unbound even after enableDurable', async () => {
+      // Regression guard: durable tasks created via cron_create must stay
+      // unbound so non-daemon paths (TUI/ACP/headless) keep the shared-lock
+      // model. Binding is the daemon keepalive's job, not createDurable's.
+      await scheduler.enableDurable('session-1');
+      await scheduler.createDurable('* * * * *', 'unbound', true);
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.sessionId).toBeUndefined();
+    });
+
     it('non-owner loads durable tasks for listing but does not fire them', async () => {
       await lockAsOtherSession();
       await writeCronTasks(tmpDir, [diskTask('foreign1')]);
@@ -1753,6 +2085,14 @@ describe('CronScheduler', () => {
           recurring: false,
           createdAt: Date.now() - 5 * 60_000,
           lastFiredAt: null,
+          delivery: {
+            kind: 'channel',
+            target: {
+              channelName: 'dingtalk',
+              type: 'user',
+              id: 'user-1',
+            },
+          },
         },
       ]);
 
@@ -1766,6 +2106,7 @@ describe('CronScheduler', () => {
       // delivered wrapped in a confirm-first notice, never raw.
       expect(fired[0]!.prompt).toContain('late one-shot');
       expect(fired[0]!.prompt).toContain('Do NOT execute this prompt yet');
+      expect(fired[0]!.delivery).toBeUndefined();
       // Delivered late, not installed as a live job.
       expect(scheduler.list()).toHaveLength(0);
       await vi.waitFor(async () => {

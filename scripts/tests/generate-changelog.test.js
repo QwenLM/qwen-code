@@ -123,6 +123,19 @@ describe('parseReleaseEntries', () => {
     ]);
   });
 
+  it('parses entries with an additional collaborator credit', () => {
+    const body =
+      '* fix(ci): retry publishing by @alice with @Copilot in ' + PR(6574);
+    expect(parseReleaseEntries(body)).toEqual([
+      {
+        title: 'fix(ci): retry publishing',
+        author: 'alice',
+        prUrl: PR(6574),
+        prNumber: '6574',
+      },
+    ]);
+  });
+
   it('binds the trailing " by @… in …" to the last occurrence', () => {
     const body = '* fix: stop saying "done" by @carol in ' + PR(5);
     expect(parseReleaseEntries(body)).toEqual([
@@ -213,6 +226,134 @@ describe('formatRelease', () => {
       '_See [GitHub release](https://example.com/v0.0.2) for details._',
     );
     expect(block).not.toContain('###');
+  });
+
+  it('preserves curated release notes below the changelog version heading', () => {
+    const block = formatRelease({
+      version: '1.2.3',
+      date: '2026-01-02',
+      htmlUrl: 'https://example.com/v1.2.3',
+      body: [
+        '<!-- qwen-release-notes:v1 -->',
+        '',
+        '## Highlights',
+        '',
+        '- Easier session recovery. ([#1](https://example.com/pr/1))',
+        '',
+        '## Complete Change List',
+        '',
+        '### Bug Fixes',
+        '',
+        '- Preserves tool results. ([#1](https://example.com/pr/1))',
+      ].join('\n'),
+      entries: [],
+    });
+
+    expect(block).toContain('### Highlights');
+    expect(block).toContain('### Complete Change List');
+    expect(block).toContain('#### Bug Fixes');
+    expect(block).not.toContain('qwen-release-notes:v1');
+    expect(block).not.toContain('_See [GitHub release]');
+  });
+
+  it('does not trust a curated marker embedded in an ordinary PR title', () => {
+    const block = formatRelease({
+      version: '1.2.3',
+      date: '2026-01-02',
+      htmlUrl: 'https://example.com/v1.2.3',
+      body: `## What's Changed\n* feat: ${'<'}!-- qwen-release-notes:v1 --${'>'} by @alice in ${PR(1)}`,
+      entries: [
+        {
+          title: 'feat: ordinary change',
+          prNumber: '1',
+          prUrl: PR(1),
+        },
+      ],
+    });
+
+    expect(block).toContain('### Added');
+    expect(block).not.toContain("### What's Changed");
+  });
+
+  it('preserves curated release notes from the raw GitHub release model', () => {
+    const block = formatRelease(
+      toReleaseModel({
+        tag: 'v1.2.3',
+        date: '2026-01-02T00:00:00Z',
+        url: 'https://example.com/v1.2.3',
+        body: [
+          '<!-- qwen-release-notes:v1 -->',
+          '',
+          '## Highlights',
+          '',
+          '- Easier session recovery. ([#1](https://example.com/pr/1))',
+        ].join('\n'),
+      }),
+    );
+
+    expect(block).toContain('### Highlights');
+    expect(block).toContain('Easier session recovery.');
+  });
+
+  it('unwraps the v2 digest appendix and drops its screenshots', () => {
+    const block = formatRelease({
+      version: '1.2.3',
+      date: '2026-01-02',
+      htmlUrl: 'https://example.com/v1.2.3',
+      body: [
+        '<!-- qwen-release-notes:v2 -->',
+        '',
+        '## Highlights',
+        '',
+        '- Easier session recovery. ([#1](https://example.com/pr/1))',
+        '',
+        '## Web Shell',
+        '',
+        '- Upload files from the composer. ([#2](https://example.com/pr/2))',
+        '  ![before](https://github.com/user-attachments/assets/abc-123)',
+        '',
+        '---',
+        '',
+        '## 中文摘要',
+        '',
+        '### 亮点',
+        '',
+        '- 会话恢复更容易。 ([#1](https://example.com/pr/1))',
+        '',
+        '<details>',
+        '<summary>Complete Change List (2 pull requests)</summary>',
+        '',
+        '### Features',
+        '',
+        '- web-shell: upload files ([#2](https://example.com/pr/2)) by @alice',
+        '',
+        '</details>',
+        '',
+        '**Full Changelog**: https://example.com/compare/v1...v2',
+      ].join('\n'),
+      entries: [],
+    });
+
+    expect(block).toContain('### Highlights');
+    expect(block).toContain('### Web Shell');
+    expect(block).toContain('### 中文摘要');
+    expect(block).toContain('#### 亮点');
+    // The collapsed appendix becomes a plain heading and keeps its entries,
+    // landing at the same sibling rank v1's Complete Change List reaches.
+    expect(block).toContain('\n### Complete Change List (2 pull requests)\n');
+    expect(block).toContain('\n#### Features\n');
+    expect(block).not.toContain('#### Complete Change List');
+    expect(block).not.toContain('##### Features');
+    expect(block).toContain(
+      'web-shell: upload files ([#2](https://example.com/pr/2)) by @alice',
+    );
+    expect(block).not.toContain('<details>');
+    expect(block).not.toContain('</details>');
+    expect(block).not.toContain('<summary>');
+    expect(block).not.toContain('user-attachments');
+    // The release-page divider before the Chinese block is release chrome.
+    expect(block).not.toContain('\n---\n');
+    expect(block).not.toContain('qwen-release-notes:v2');
   });
 });
 

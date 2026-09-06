@@ -121,9 +121,13 @@ export function substituteHookVariables(
 /**
  * Perform variable replacement in all markdown and shell script files of the extension.
  * This is done during the conversion phase to avoid modifying files during every extension load.
- * @param extensionPath - The path to the extension directory
+ * @param extensionPath - The path to the extension directory to edit
+ * @param pluginRoot - The installed path to substitute for ${CLAUDE_PLUGIN_ROOT}
  */
-export function performVariableReplacement(extensionPath: string): void {
+export function performVariableReplacement(
+  extensionPath: string,
+  pluginRoot = extensionPath,
+): void {
   // Process markdown files
   const mdGlobPattern = '**/*.md';
   const mdGlobOptions = {
@@ -143,7 +147,7 @@ export function performVariableReplacement(extensionPath: string): void {
         // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path
         const updatedContent = content.replace(
           /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-          extensionPath,
+          () => pluginRoot,
         );
 
         // Replace Markdown shell syntax ```! ... ``` with system-recognized !{...} syntax

@@ -1,14 +1,14 @@
-# Plan C — CDP 隧道：复用 chrome-devtools-mcp 全套工具驱动真实浏览器
+# Plan C — CDP 隧道：复用 DevTools MCP 工具驱动真实浏览器
 
 > 设计文档（可行性 + 实施方案）。配套：[`05-daemon-direct-architecture.md`](./05-daemon-direct-architecture.md)（Phase 1/2 已落地：side panel + 逆向工具通道 `chrome-tools`）。
 > 关联 issue #5626 / PR #5777。
 
 ## 0. TL;DR
 
-- **问题**：当前 `chrome-tools` 逆向通道（Plan A）在扩展端用 `chrome.*` **重新实现** chrome-devtools-mcp 已有的能力（console / network / screenshot…），每加一个新能力都要手写 executor。
-- **Plan C**：扩展只用 `chrome.debugger` 把真实标签页的 **CDP 协议**透传给 daemon，daemon 暴露一个 CDP endpoint 让 **chrome-devtools-mcp（puppeteer）连进来** —— 复用它现成的全套工具，操作用户**真实**浏览器，不再逐个手写。
-- **结论：有条件可行**。能让 puppeteer 连上单 tab（命题 A，可行）；但「把*未改的* chrome-devtools-mcp 直接接上」（命题 B）**不可行 —— 必须给它打一个小补丁**（patch-package，~2 处 / 十几行 diff）。
-- **形态**：不扣代码、不 submodule。`chrome-devtools-mcp` 从 `npx @latest` 改成仓库 pin 依赖 `1.4.0` + 一个 `patches/chrome-devtools-mcp+1.4.0.patch`（与现有 `ink+7.0.3.patch` 同形态）。
+- **问题**：当前 `chrome-tools` 逆向通道（Plan A）在扩展端用 `chrome.*` **重新实现**上游 DevTools MCP server 已有的能力（console / network / screenshot…），每加一个新能力都要手写 executor。
+- **Plan C**：扩展只用 `chrome.debugger` 把真实标签页的 **CDP 协议**透传给 daemon，daemon 暴露一个 CDP endpoint 让 **外部 DevTools MCP adapter 连进来** —— 复用它现成的全套工具，操作用户**真实**浏览器，不再逐个手写。
+- **结论：有条件可行**。能让浏览器自动化运行时连上单 tab（命题 A，可行）；但「把*未改的*上游 adapter 直接接上」（命题 B）**不可行 —— 必须给它打一个小补丁**（patch-package，~2 处 / 十几行 diff）。
+- **形态（历史方案，已不作为主包方案）**：早期评估过 pin 上游 adapter + patch-package。0.19.4 的包扫描问题证明这类依赖、patch 和安装钩子不应进入主 CLI 包；后续应走显式外部 adapter 命令。
 - **建议**：先做 Phase 0 半天 spike 钉死那堵墙，再决定是否全量上。
 
 ## 1. 决定性发现：为什么「零改造复用」不行（已逐行核实 1.4.0 源码）
@@ -41,7 +41,7 @@
 ## 2. 架构
 
 ```
-chrome-devtools-mcp(fork)      qwen serve daemon              扩展(MV3)        真实 tab
+DevTools MCP adapter           qwen serve daemon              扩展(MV3)        真实 tab
  puppeteer.connect   browser级  ┌ /cdp WS endpoint ┐  reverse  cdp-bridge   chrome.
  ({browserWS}) ───CDP───────▶  │ CdpBrowserEmulator│   WS /acp  chrome.      debugger
                                │ ①本地应答browser域│ cdp_command .debugger ──▶ Page/DOM
@@ -54,7 +54,7 @@ chrome-devtools-mcp(fork)      qwen serve daemon              扩展(MV3)       
 
 组件：
 
-- **chrome-devtools-mcp (patched) + puppeteer-core**：`puppeteer.connect({ browserWSEndpoint: 'ws://127.0.0.1:PORT/cdp' })`。
+- **DevTools MCP adapter + browser automation runtime**：通过 `browserWSEndpoint: 'ws://127.0.0.1:PORT/cdp'` 连接 daemon 暴露的 CDP endpoint。
 - **daemon `/cdp` WS endpoint（新增）**：raw CDP 帧 + `CdpBrowserEmulator`（browser-level 合成 + sessionId 打/解标签）。
 - **daemon 现有 `/acp` reverse WS**：扩展已建立、过了 ACP-initialize 鉴权的那条 socket，新增 `cdp_*` 帧。
 - **cdp-reverse-link**：把 `/cdp` puppeteer socket 与扩展 `/acp` 连接配对（单 daemon = 单扩展 = 单 browser）。
@@ -85,20 +85,13 @@ chrome-devtools-mcp(fork)      qwen serve daemon              扩展(MV3)       
 | remorses/playwriter（MIT, 3.6k★, 活跃）                              | 扩展 + WS CDP relay，外部 client `connectOverCDP` 驱动真实已登录浏览器。                                                                                        |
 | 本仓库 `/acp` reverse 通道                                           | `WebSocketServer({noServer:true})` + pathname 分支 + `clientMcpOverWs` 式 feature-flag + `mcp_*` 帧拦截 —— `cdp_*` 帧照搬，鉴权/CSRF/origin/maxPayload 全复用。 |
 
-## 5. patch-package 形态（不扣代码、不 submodule）
+## 5. 历史 patch-package 形态（不再作为主包方案）
 
-本仓库已用 patch-package（`postinstall: patch-package` + `patches/ink+7.0.3.patch` 样例）。
-
-```jsonc
-// package.json
-"dependencies": { "chrome-devtools-mcp": "1.4.0" }   // pin，不再 npx @latest
-```
-
-流程：改 `node_modules/chrome-devtools-mcp/build/src/McpContext.js`（try-catch 包 #init:81-82）→ `npx patch-package chrome-devtools-mcp` → 生成 `patches/chrome-devtools-mcp+1.4.0.patch`（进 git）→ `npm install` 自动应用。puppeteer-core pin 25.2.0（ExtensionTransport 拓扑硬编码，避免版本漂移）。
+早期方案考虑过把上游 adapter 作为 pin 依赖并用 patch-package 修补启动路径。这个形态会把浏览器自动化依赖、依赖 patch 和安装钩子放进主包/安装图，容易触发包扫描器。当前方案不再把 adapter 打进主 CLI 包，而是通过显式外部命令接入。
 
 ## 6. 分阶段实施
 
-- **Phase 0 — spike（0.5–1 天）**：独立脚本起最小 `/cdp` + ExtensionTransport 4 命令合成，跑*未改的* `chrome-devtools-mcp@1.4.0 --wsEndpoint ws://…/cdp` 调一次 `take_snapshot`，**确认它在 `McpContext.from()` 抛 `CDPSession creation failed.`** → 钉死 fork 范围。
+- **Phase 0 — spike（0.5–1 天）**：独立脚本起最小 `/cdp` + ExtensionTransport 4 命令合成，跑*未改的*上游 adapter 调一次 `take_snapshot`，**确认它在 `McpContext.from()` 抛 `CDPSession creation failed.`** → 钉死 fork 范围。
 - **Phase 1 — MVP（5–8 天）**：单 tab `take_snapshot`/`click` 跑通。
   - daemon 新增 `packages/cli/src/serve/cdp-tunnel/{cdp-ws,cdp-browser-emulator,cdp-reverse-link}.ts`。
   - daemon 改 `acp-http/index.ts`（upgrade 加 `/cdp` 分支，复用 auth/CSRF/origin）+ reverse WS 加 `isCdpFrameType` 守卫；`run-qwen-serve.ts`/`server.ts`/`serve/types.ts`/`serve/capabilities.ts` 加 `cdpTunnelOverWs` flag（仿 `clientMcpOverWs`，默认 OFF）。
@@ -122,7 +115,7 @@ chrome-devtools-mcp(fork)      qwen serve daemon              扩展(MV3)       
 | 调试 banner / DevTools 互斥                    | 中(UX)   | onDetach 重连 + 用户提示                                                       |
 | 受管 Chrome 策略 `DeveloperToolsAvailability`  | 中(部署) | 部署前核查策略允许 chrome.debugger（force-installed 扩展 114+ 默认禁，需值 1） |
 | 大 payload(截图/getResponseBody) vs maxPayload | 中       | `/cdp` 抬高 maxPayload 或分块                                                  |
-| puppeteer 版本漂移                             | 低       | pin cdp-mcp 1.4.0 + puppeteer-core 25.2.0                                      |
+| 浏览器自动化运行时版本漂移                     | 低       | 外部 adapter 自己 pin 版本；主 CLI 包不携带该依赖                              |
 
 **回退**：Phase 0 失败 → 放弃 C 回 A；Phase 1 失败 → 回 A（合成层/透传可作 A 底座）；Phase 2/3 失败 → 退守单 tab 只读快照/点击形态，仍省大量工具实现。
 

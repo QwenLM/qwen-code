@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -21,7 +21,10 @@ import {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -65,6 +68,26 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  function withQwen3TaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      model: 'qwen3.8-max',
+      responseParsingOptions: {
+        contentOnlyThinkingTagLeaks: true,
+        taggedThinkingTagsAfterReasoning: true,
+      },
+    };
+  }
+
+  function openAIStreamChunk(
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+  ): OpenAI.Chat.ChatCompletionChunk {
+    return {
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+  }
+
   function hasOpenAIToolCalls(
     message: OpenAI.Chat.ChatCompletionMessageParam,
   ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
@@ -96,6 +119,52 @@ describe('OpenAIContentConverter', () => {
   }
 
   describe('stream-local parser state', () => {
+    const streamChunk = (
+      id: string,
+      delta: Record<string, unknown>,
+      finishReason: string | null = null,
+    ) =>
+      ({
+        id,
+        created: 1,
+        model: 'test',
+        choices: [{ index: 0, delta, finish_reason: finishReason }],
+      }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const emitReasoning = (stream: RequestContext) =>
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        stream,
+      );
+
+    const emitToolCall = (
+      stream: RequestContext,
+      content: string,
+      toolArguments = '{}',
+    ) =>
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('tool-call', {
+          content,
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: toolArguments },
+            },
+          ],
+        }),
+        stream,
+      );
+
+    const finishStream = (
+      stream: RequestContext,
+      finishReason = 'tool_calls',
+    ) =>
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('finish', {}, finishReason),
+        stream,
+      );
+
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
       const ctx2 = new StreamingToolCallParser();
@@ -103,6 +172,15 @@ describe('OpenAIContentConverter', () => {
       expect(ctx1).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx2).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx1).not.toBe(ctx2);
+    });
+
+    it('preserves the provider model from stream chunks', () => {
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk('model', { content: 'ok' }),
+        withStreamParser(),
+      );
+
+      expect(response.modelVersion).toBe('test');
     });
 
     it('isolates two contexts so writes to one do not leak into the other', () => {
@@ -264,16 +342,16 @@ describe('OpenAIContentConverter', () => {
 
       // Interleave the two streams. Pre-fix this produced corrupt JSON
       // because every chunk fed the same shared parser.
-      converter.convertOpenAIChunkToGemini(openerA, streamA);
-      converter.convertOpenAIChunkToGemini(openerB, streamB);
-      converter.convertOpenAIChunkToGemini(contA, streamA);
-      converter.convertOpenAIChunkToGemini(contB, streamB);
+      converter.convertOpenAIChunkToLlm(openerA, streamA);
+      converter.convertOpenAIChunkToLlm(openerB, streamB);
+      converter.convertOpenAIChunkToLlm(contA, streamA);
+      converter.convertOpenAIChunkToLlm(contB, streamB);
 
-      const resultA = converter.convertOpenAIChunkToGemini(
+      const resultA = converter.convertOpenAIChunkToLlm(
         finisher('A-finish'),
         streamA,
       );
-      const resultB = converter.convertOpenAIChunkToGemini(
+      const resultB = converter.convertOpenAIChunkToLlm(
         finisher('B-finish'),
         streamB,
       );
@@ -340,8 +418,8 @@ describe('OpenAIContentConverter', () => {
         ],
       } as unknown as OpenAI.Chat.ChatCompletionChunk;
 
-      converter.convertOpenAIChunkToGemini(opener, stream);
-      const result = converter.convertOpenAIChunkToGemini(finisher, stream);
+      converter.convertOpenAIChunkToLlm(opener, stream);
+      const result = converter.convertOpenAIChunkToLlm(finisher, stream);
 
       const fn = result.candidates?.[0]?.content?.parts?.find(
         (p: Part) => p.functionCall,
@@ -351,9 +429,890 @@ describe('OpenAIContentConverter', () => {
       expect(fn?.args).toEqual({});
       expect(fn?.id).toBe('call_noargs');
     });
+
+    it('ignores a phantom slot beside a valid tool call', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('open', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_edit',
+              function: { name: 'edit', arguments: '{}' },
+            },
+            { index: 1, function: {} },
+          ],
+        }),
+        stream,
+      );
+
+      const result = converter.convertOpenAIChunkToLlm(
+        streamChunk('finish', {}, 'tool_calls'),
+        stream,
+      );
+
+      expect(result.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_edit', name: 'edit', args: {} },
+        },
+      ]);
+      expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+
+    it('rejects a tool-call finish without a completed named call', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('open', { tool_calls: [{ index: 0, function: {} }] }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+    });
+
+    it('rejects a tool call that never provides a function name', () => {
+      const stream = withStreamParser();
+      const partial = converter.convertOpenAIChunkToLlm(
+        streamChunk('open', {
+          content: 'discard me',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_without_name',
+              function: { arguments: '{"path":"a.ts"}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(partial.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+    });
+
+    it('rejects a protocol-tag recovery with a whitespace-only function name', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('tool-call', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_blank',
+              function: { name: '   ', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('rejects the recorded cross-channel thinking-tag leak', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('content', { content: 'the result\n</think>\n' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects the recorded content-only nested thinking-tag leak', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const opening = converter.convertOpenAIChunkToLlm(
+        streamChunk('opening', { content: '<think>\n\n' }),
+        stream,
+      );
+      const repeatedOpening = converter.convertOpenAIChunkToLlm(
+        streamChunk('repeated-opening', { content: '</think><thi' }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(repeatedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      const nestedOpening = converter.convertOpenAIChunkToLlm(
+        streamChunk('nested-opening', { content: 'nk>9<think>-3' }),
+        stream,
+      );
+
+      expect(nestedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('rejects the recorded production unclosed <thinking> content leak (issue #6666)', () => {
+      // Production capture shape (sanitized): a hybrid-thinking model
+      // skipped the reasoning channel entirely and streamed its thinking as
+      // literal <thinking> text inside content — no reasoning_content on
+      // any chunk, no tool calls, and the tag is never closed before stop.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const opening = converter.convertOpenAIChunkToLlm(
+        streamChunk('opening', { content: '<thi' }),
+        stream,
+      );
+      const body = converter.convertOpenAIChunkToLlm(
+        streamChunk('body', {
+          content:
+            'nking>\nThe user wants to query the compute resources for ' +
+            'project space 10088. Let me check the available APIs.',
+        }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(body.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('holds a long confirmed opening tag until its closing tag arrives', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const text = `<thinking>${'x'.repeat(200)}</thinking>`;
+
+      const opening = converter.convertOpenAIChunkToLlm(
+        streamChunk('long-balanced', {
+          content: `<thinking>${'x'.repeat(200)}`,
+        }),
+        stream,
+      );
+      const closing = converter.convertOpenAIChunkToLlm(
+        streamChunk('long-balanced', { content: '</thinking>' }, 'stop'),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it('leaks the production <thinking> shape without provider provenance', () => {
+      // Control for the test above: without contentOnlyThinkingTagLeaks the
+      // same stream passes through verbatim — the defense is provider-gated,
+      // so endpoints whose provider does not opt in remain exposed.
+      const stream = withStreamParser();
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk(
+          'literal',
+          {
+            content:
+              '<thinking>\nThe user wants to query the compute resources.',
+          },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        {
+          text: '<thinking>\nThe user wants to query the compute resources.',
+        },
+      ]);
+    });
+
+    it.each([
+      ['split literal block', ['<thi', 'nk>literal</think>']],
+      ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],
+      [
+        'two split valid blocks',
+        ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
+      ],
+      ['long empty block', [`<thinking>${' '.repeat(128)}</thinking>`, '']],
+    ])('preserves content-only %s', (_name, chunks) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            `literal-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+      expect(parts.every((part) => part.thought !== true)).toBe(true);
+    });
+
+    it('releases a long unconfirmed prefix before the stream finishes', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const text = `<think${' '.repeat(257)}`;
+
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk('literal', { content: text }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it('rejects an unclosed whitespace-only block at stream finish', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk('unclosed', {
+          content: `<thinking>${' '.repeat(128)}`,
+        }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('preserves a leak-shaped literal without provider provenance', () => {
+      const stream = withStreamParser();
+      const text = '<think>\n\n</think><think>9<think>-3';
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk('literal', { content: text }, 'stop'),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it.each([
+      [
+        'at the start of the stream',
+        ['<think></think><think>outer <think>literal', '</think></think>'],
+      ],
+      [
+        'after visible content',
+        [
+          'Explanation: ',
+          '<think></think><think>outer <think>literal</think></think>',
+        ],
+      ],
+    ])('preserves balanced nested literals %s', (_name, chunks) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            `balanced-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+    });
+
+    it('rejects an unclosed outer block containing a balanced nested block', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk(
+            'nested-unclosed',
+            {
+              content: '<thinking><thinking>inner</thinking>outer text',
+            },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed for a long suspicious prefix at stream finish', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const content = '<think></think><think>9<think>' + 'x'.repeat(257);
+
+      const response = converter.convertOpenAIChunkToLlm(
+        streamChunk('long-leak', { content }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it.each([
+      '<thinking></thinking><thinking>9<thinking>-3',
+      '<think ></think ><think >9<think >-3',
+    ])('rejects provider-tag grammar variant %s', (content) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('variant', { content }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects closing-tag recovery after a tag leaked in reasoning', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+      emitToolCall(stream, '</think>');
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it.each([
+      ['think', '\n</think>\n\n'],
+      ['thinking', ' </thinking> '],
+    ] as const)(
+      'sanitizes a standalone closing %s tag with complete tool calls',
+      (tagName, tag) => {
+        const stream = withStreamParser();
+        const reasoning = emitReasoning(stream);
+        const leakedTag = emitToolCall(stream, tag);
+        const finish = finishStream(stream);
+
+        expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+          { thought: true, text: 'Let me check.' },
+        ]);
+        expect(leakedTag.candidates?.[0]?.content?.parts).toEqual([]);
+        expect(finish.candidates?.[0]?.content?.parts).toEqual([
+          {
+            functionCall: { id: 'call_read', name: 'read_file', args: {} },
+          },
+        ]);
+        expect(stream.protocolTagSanitized).toEqual({
+          tagName,
+          toolCallCount: 1,
+        });
+      },
+    );
+
+    it('sanitizes a standalone closing thinking tag split across chunks', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const firstHalf = converter.convertOpenAIChunkToLlm(
+        streamChunk('tag-start', { content: '\n</thi' }),
+        stream,
+      );
+      const secondHalf = emitToolCall(stream, 'nk>\n');
+      const finish = finishStream(stream);
+
+      expect(firstHalf.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(secondHalf.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('sanitizes a standalone closing thinking tag with multiple tool calls', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('tool-calls', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+            {
+              index: 1,
+              id: 'call_list',
+              function: { name: 'list_directory', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = finishStream(stream);
+
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+        {
+          functionCall: { id: 'call_list', name: 'list_directory', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 2,
+      });
+    });
+
+    it('recovers complete same-index tool calls with distinct IDs', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('tool-calls', {
+          content: '</think>',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+            {
+              index: 0,
+              id: 'call_list',
+              function: { name: 'list_directory', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+      const finish = finishStream(stream);
+
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+        {
+          functionCall: {
+            id: 'call_list',
+            name: 'list_directory',
+            args: {},
+          },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 2,
+      });
+    });
+
+    it.each([
+      ['complete', '{"path":"old.txt"}', ''],
+      ['incomplete', '{"path":"old.txt"', '}'],
+    ] as const)(
+      'rejects a protocol-tag recovery when a new id relabels %s nameless arguments',
+      (_state, oldArguments, newArguments) => {
+        const stream = withStreamParser();
+        emitReasoning(stream);
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('old-arguments', {
+            content: '</think>',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_old',
+                function: { arguments: oldArguments },
+              },
+            ],
+          }),
+          stream,
+        );
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('new-name', {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_new',
+                function: { name: 'read_file', arguments: newArguments },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        expect(() => finishStream(stream)).toThrowError(
+          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+        );
+        expect(stream.protocolTagSanitized).toBeUndefined();
+      },
+    );
+
+    it('buffers leading whitespace before a split standalone closing tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const whitespace = converter.convertOpenAIChunkToLlm(
+        streamChunk('whitespace', { content: '\n' }),
+        stream,
+      );
+      const tag = emitToolCall(stream, '</think>');
+      const finish = finishStream(stream);
+
+      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(tag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('buffers long whitespace without treating it as a protocol tag', () => {
+      const stream = withStreamParser();
+      const whitespace = ' '.repeat(129);
+      emitReasoning(stream);
+
+      const pending = converter.convertOpenAIChunkToLlm(
+        streamChunk('whitespace', { content: whitespace }),
+        stream,
+      );
+      const finish = finishStream(stream, 'stop');
+
+      expect(pending.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { text: whitespace },
+      ]);
+    });
+
+    it('emits trailing whitespace when the stream finishes', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const whitespace = converter.convertOpenAIChunkToLlm(
+        streamChunk('whitespace', { content: ' \n' }),
+        stream,
+      );
+      const finish = finishStream(stream, 'stop');
+
+      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([{ text: ' \n' }]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('ignores an exact cumulative replay of a deferred closing tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('tag', { content: '</THINK>' }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToLlm(
+        streamChunk(
+          'finish',
+          {
+            content: '</THINK>',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_read',
+                function: { name: 'read_file', arguments: '{}' },
+              },
+            ],
+          },
+          'tool_calls',
+        ),
+        stream,
+      );
+
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('ignores cumulative replays of an incomplete closing tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const first = converter.convertOpenAIChunkToLlm(
+        streamChunk('tag-prefix', { content: '</thi' }),
+        stream,
+      );
+      const replay = converter.convertOpenAIChunkToLlm(
+        streamChunk('tag-prefix-replay', { content: '</thi' }),
+        stream,
+      );
+      const tag = emitToolCall(stream, '</think>');
+      const finish = finishStream(stream);
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(tag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('rejects an invalid tool-call index on a stop finish', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('invalid-tool-call', {
+          tool_calls: [
+            {
+              index: Number.MAX_SAFE_INTEGER + 1,
+              id: 'call_invalid',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
+      );
+    });
+
+    it('rejects valid tool calls accompanied by an invalid index', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('mixed-tool-calls', {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_read',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+            {
+              index: Number.MAX_SAFE_INTEGER + 1,
+              id: 'call_invalid',
+              function: { name: 'write_file', arguments: '{}' },
+            },
+          ],
+        }),
+        stream,
+      );
+
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
+      );
+    });
+
+    it('releases a split tag-like prefix when it becomes ordinary text', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
+        stream,
+      );
+      const prefix = converter.convertOpenAIChunkToLlm(
+        streamChunk('prefix', { content: '</thi' }),
+        stream,
+      );
+      const suffix = converter.convertOpenAIChunkToLlm(
+        streamChunk('suffix', { content: 'ng is not a tag.' }),
+        stream,
+      );
+
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(suffix.candidates?.[0]?.content?.parts).toEqual([
+        { text: '</thing is not a tag.' },
+      ]);
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('does not accumulate whitespace after a complete closing tag candidate', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      emitToolCall(stream, '</think>');
+
+      for (let i = 0; i < 1_000; i++) {
+        converter.convertOpenAIChunkToLlm(
+          streamChunk(`whitespace-${i}`, { content: ' ' }),
+          stream,
+        );
+      }
+
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '</think>',
+        closingTagName: 'think',
+      });
+      finishStream(stream);
+      expect(stream.protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 1,
+      });
+    });
+
+    it('rejects a standalone closing thinking tag without a complete tool call', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      const leakedTag = converter.convertOpenAIChunkToLlm(
+        streamChunk('content', { content: '</think>' }),
+        stream,
+      );
+
+      expect(leakedTag.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it.each(['stop', 'length', 'content_filter', 'unknown'])(
+      'rejects recovery when the stream finishes with %s',
+      (finishReason) => {
+        const stream = withStreamParser();
+        emitReasoning(stream);
+        emitToolCall(stream, '</think>');
+
+        expect(() => finishStream(stream, finishReason)).toThrowError(
+          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+        );
+        expect(stream.protocolTagSanitized).toBeUndefined();
+      },
+    );
+
+    it('rejects visible content after a deferred closing thinking tag', () => {
+      const stream = withStreamParser();
+      emitReasoning(stream);
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('content', { content: '</think>' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('content-after-tag', { content: 'unexpected' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    });
+
+    it.each(['{"path":', '{bad}', 'null', '[]', '42', '   '])(
+      'rejects a standalone closing thinking tag with unsafe tool arguments %s',
+      (toolArguments) => {
+        const stream = withStreamParser();
+        emitReasoning(stream);
+        emitToolCall(stream, '</think>', toolArguments);
+
+        expect(() => finishStream(stream)).toThrowError(
+          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+        );
+        expect(stream.protocolTagSanitized).toBeUndefined();
+      },
+    );
+
+    it('rejects a closing tag split after a visible line break', () => {
+      const stream = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', {
+          reasoning_content: 'Let me check<think>',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('content', { content: 'the result\n' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('blank-lines', { content: '\n'.repeat(256) }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('closing-tag', { content: '</think>\n' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('preserves a split literal closing tag after ordinary reasoning', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
+        stream,
+      );
+      const prefix = converter.convertOpenAIChunkToLlm(
+        streamChunk('prefix', { content: 'Use ' }),
+        stream,
+      );
+      const closingTag = converter.convertOpenAIChunkToLlm(
+        streamChunk('closing-tag', { content: '</think> to close the tag.' }),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'Explain the syntax.' },
+      ]);
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Use ' },
+      ]);
+      expect(closingTag.candidates?.[0]?.content?.parts).toEqual([
+        { text: '</think> to close the tag.' },
+      ]);
+    });
+
+    it('releases inline thinking-tag references in both channels', () => {
+      const stream = withStreamParser();
+      const reasoning = converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', {
+          reasoning_content: 'The format may contain <think> tags.',
+        }),
+        stream,
+      );
+      const content = converter.convertOpenAIChunkToLlm(
+        streamChunk('content', { content: 'Use </think> to close the tag.' }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToLlm(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(content.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'The format may contain <think> tags.' },
+        { text: 'Use </think> to close the tag.' },
+      ]);
+    });
   });
 
-  describe('convertGeminiRequestToOpenAI', () => {
+  describe('convertLlmRequestToOpenAI', () => {
     const createRequestWithFunctionResponse = (
       response: Record<string, unknown>,
     ): GenerateContentParameters => {
@@ -389,6 +1348,48 @@ describe('OpenAIContentConverter', () => {
       };
     };
 
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_legacy_mcp',
+                  name: 'mcp__zybio__literature.search_pubmed',
+                  args: { query: 'IVD' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_legacy_mcp',
+                  name: 'mcp__zybio__literature.search_pubmed',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+      const name = assistant?.tool_calls[0]?.function.name;
+
+      expect(name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+      expect(name).not.toContain('.');
+    });
+
     it('preserves ordered multi-part startup reminder user content', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -403,7 +1404,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
+      const messages = converter.convertLlmRequestToOpenAI(request, {
         ...requestContext,
         splitToolMedia: true,
       });
@@ -424,7 +1425,7 @@ describe('OpenAIContentConverter', () => {
         output: 'Raw output text',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
+      const messages = converter.convertLlmRequestToOpenAI(request, {
         ...requestContext,
         splitToolMedia: true,
       });
@@ -445,7 +1446,7 @@ describe('OpenAIContentConverter', () => {
         error: 'Command failed',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -466,7 +1467,7 @@ describe('OpenAIContentConverter', () => {
         data: { value: 42 },
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -521,7 +1522,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -598,7 +1599,7 @@ describe('OpenAIContentConverter', () => {
         ...requestContext,
         splitToolMedia: true,
       };
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -688,7 +1689,7 @@ describe('OpenAIContentConverter', () => {
         ...requestContext,
         splitToolMedia: true,
       };
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -790,7 +1791,7 @@ describe('OpenAIContentConverter', () => {
         ...requestContext,
         splitToolMedia: true,
       };
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -844,7 +1845,7 @@ describe('OpenAIContentConverter', () => {
         ...requestContext,
         splitToolMedia: true,
       };
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -890,7 +1891,7 @@ describe('OpenAIContentConverter', () => {
         ...requestContext,
         splitToolMedia: true,
       };
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -949,7 +1950,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
+      const messages = converter.convertLlmRequestToOpenAI(request, {
         ...requestContext,
         splitToolMedia: false,
       });
@@ -993,7 +1994,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
+      const messages = converter.convertLlmRequestToOpenAI(request, {
         ...requestContext,
         splitToolMedia: false,
         toolResultContentFormat: 'string',
@@ -1053,7 +2054,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1118,7 +2119,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1185,7 +2186,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1254,7 +2255,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1317,7 +2318,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1380,7 +2381,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1447,7 +2448,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1509,7 +2510,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1570,7 +2571,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1596,7 +2597,7 @@ describe('OpenAIContentConverter', () => {
         output: 'Plain text output',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1622,7 +2623,7 @@ describe('OpenAIContentConverter', () => {
         output: 'Plain text output',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
+      const messages = converter.convertLlmRequestToOpenAI(request, {
         ...requestContext,
         toolResultContentFormat: 'string',
       });
@@ -1668,7 +2669,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1764,7 +2765,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1814,7 +2815,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1855,7 +2856,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1921,7 +2922,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -1980,7 +2981,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2037,7 +3038,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(request, {
+      const messages = converter.convertLlmRequestToOpenAI(request, {
         ...requestContext,
         splitToolMedia: true,
       });
@@ -2091,7 +3092,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2140,7 +3141,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2212,7 +3213,7 @@ describe('OpenAIContentConverter', () => {
         splitToolMedia: true,
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -2278,7 +3279,7 @@ describe('OpenAIContentConverter', () => {
         splitToolMedia: true,
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         strictContext,
       );
@@ -2356,7 +3357,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2401,7 +3402,7 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(
+        const messages = converter.convertLlmRequestToOpenAI(
           request,
           requestContext,
         );
@@ -2438,7 +3439,7 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(
+        const messages = converter.convertLlmRequestToOpenAI(
           request,
           requestContext,
         );
@@ -2484,7 +3485,7 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(
+        const messages = converter.convertLlmRequestToOpenAI(
           request,
           requestContext,
         );
@@ -2510,7 +3511,7 @@ describe('OpenAIContentConverter', () => {
           ],
         };
 
-        const messages = converter.convertGeminiRequestToOpenAI(
+        const messages = converter.convertLlmRequestToOpenAI(
           request,
           requestContext,
         );
@@ -2576,7 +3577,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2647,7 +3648,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2715,7 +3716,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -2735,9 +3736,9 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
-  describe('convertOpenAIResponseToGemini', () => {
+  describe('convertOpenAIResponseToLlm', () => {
     it('should handle empty choices array without crashing', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-empty',
@@ -2749,13 +3750,77 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates).toEqual([]);
+      expect(response.modelVersion).toBe('test-model');
     });
 
-    it('keeps the estimated prompt/completion split summing to total tokens', () => {
-      // When a provider reports only total_tokens, the 70/30 estimate must
-      // still add back up to the total instead of rounding each half on its
-      // own (5 would otherwise become 4 + 2 = 6).
-      const response = converter.convertOpenAIResponseToGemini(
+    it('maps uppercase finish_reason values case-insensitively', () => {
+      const stop = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-stop',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'done' },
+              finish_reason: 'STOP',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+      const truncated = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-max-tokens',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'cut off' },
+              finish_reason: 'MAX_TOKENS',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(stop.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(truncated.candidates?.[0]?.finishReason).toBe(
+        FinishReason.MAX_TOKENS,
+      );
+    });
+
+    it('does not throw on a non-string finish_reason from a malformed gateway', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-malformed',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'done' },
+              finish_reason: 42,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.candidates?.[0]?.finishReason).toBe(
+        FinishReason.FINISH_REASON_UNSPECIFIED,
+      );
+    });
+
+    it('omits the input/output breakdown when only total tokens are reported', () => {
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-usage',
@@ -2776,15 +3841,399 @@ describe('OpenAIContentConverter', () => {
 
       const usage = response.usageMetadata;
       expect(usage?.totalTokenCount).toBe(5);
-      expect(
-        (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
-      ).toBe(5);
+      expect(usage?.promptTokenCount).toBeUndefined();
+      expect(usage?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        cachedInputTokensReported: false,
+      });
     });
+
+    it('omits the streaming input/output breakdown when only total tokens are reported', () => {
+      const response = converter.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(),
+      );
+
+      const usage = response.usageMetadata;
+      expect(usage?.totalTokenCount).toBe(5);
+      expect(usage?.promptTokenCount).toBeUndefined();
+      expect(usage?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        cachedInputTokensReported: false,
+      });
+    });
+
+    it('distinguishes an absent cache field from an explicitly reported zero', () => {
+      const base = {
+        object: 'chat.completion',
+        id: 'chatcmpl-cache',
+        created: 123,
+        model: 'provider-model',
+        choices: [],
+      } as const;
+      const absent = converter.convertOpenAIResponseToLlm(
+        {
+          ...base,
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+      const zero = converter.convertOpenAIResponseToLlm(
+        {
+          ...base,
+          usage: {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(absent.modelVersion).toBe('provider-model');
+      expect(
+        getGenAiUsageProvenance(absent.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
+      expect(
+        getGenAiUsageProvenance(zero.usageMetadata)?.cachedInputTokensReported,
+      ).toBe(true);
+    });
+
+    it('estimates missing reasoning tokens from non-streaming content', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning_content: '先仔细想',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
+    it('estimates missing reasoning tokens from non-streaming reasoning field', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-field-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning: '先仔细想',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
+    it('clamps estimated non-streaming reasoning tokens to completion tokens', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-clamped-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning_content: '想'.repeat(10),
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(3);
+    });
+
+    it.each([0, 42])(
+      'preserves provider reasoning tokens for non-streaming content: %s',
+      (reasoningTokens) => {
+        const response = converter.convertOpenAIResponseToLlm(
+          {
+            object: 'chat.completion',
+            id: 'chatcmpl-provider-reasoning-usage',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: 'answer',
+                  reasoning_content: '先仔细想',
+                },
+                finish_reason: 'stop',
+                logprobs: null,
+              },
+            ],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 10,
+              total_tokens: 11,
+              completion_tokens_details: {
+                reasoning_tokens: reasoningTokens,
+              },
+            },
+          } as unknown as OpenAI.Chat.ChatCompletion,
+          requestContext,
+        );
+
+        expect(response.usageMetadata?.thoughtsTokenCount).toBe(
+          reasoningTokens,
+        );
+      },
+    );
+
+    it('estimates reasoning tokens past the streaming detection window', () => {
+      const context = withStreamParser();
+      const reasoningChunk = (id: string, reasoning_content: string) =>
+        ({
+          object: 'chat.completion.chunk',
+          id,
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      converter.convertOpenAIChunkToLlm(
+        reasoningChunk('chunk-reasoning-1', '想'.repeat(1024)),
+        context,
+      );
+      converter.convertOpenAIChunkToLlm(
+        reasoningChunk('chunk-reasoning-2', '想'),
+        context,
+      );
+      const response = converter.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: {
+            prompt_tokens: 1,
+            completion_tokens: 1200,
+            total_tokens: 1201,
+          },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(1128);
+    });
+
+    it('estimates reasoning tokens for short streaming content', () => {
+      const context = withStreamParser();
+      const reasoningChunk = (id: string, reasoning_content: string) =>
+        ({
+          object: 'chat.completion.chunk',
+          id,
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      converter.convertOpenAIChunkToLlm(
+        reasoningChunk('chunk-short-reasoning-1', '先'),
+        context,
+      );
+      converter.convertOpenAIChunkToLlm(
+        reasoningChunk('chunk-short-reasoning-2', '仔细想'),
+        context,
+      );
+      const response = converter.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-short-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
+    it('estimates normalized cumulative reasoning without a completion count', () => {
+      const context = withStreamParser();
+      for (const reasoning_content of ['先仔细想', '先仔细想再检查']) {
+        converter.convertOpenAIChunkToLlm(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-cumulative-reasoning',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+      }
+      const response = converter.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cumulative-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(8);
+    });
+
+    it('clamps estimated streaming reasoning tokens to completion tokens', () => {
+      const context = withStreamParser();
+      converter.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-clamped-reasoning',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: '想'.repeat(10) },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const response = converter.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-clamped-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(3);
+    });
+
+    it.each([0, 42])(
+      'preserves provider reasoning tokens for streaming content: %s',
+      (reasoningTokens) => {
+        const context = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-provider-reasoning',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content: '先仔细想' },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+        const response = converter.convertOpenAIChunkToLlm(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-provider-reasoning-usage',
+            created: 123,
+            model: 'test-model',
+            choices: [],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 10,
+              total_tokens: 11,
+              completion_tokens_details: {
+                reasoning_tokens: reasoningTokens,
+              },
+            },
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+
+        expect(response.usageMetadata?.thoughtsTokenCount).toBe(
+          reasoningTokens,
+        );
+      },
+    );
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {
     it('should convert reasoning_content to a thought part for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-1',
@@ -2817,7 +4266,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert reasoning to a thought part for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-2',
@@ -2850,7 +4299,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert streaming reasoning_content delta to a thought part', () => {
-      const chunk = converter.convertOpenAIChunkToGemini(
+      const chunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-1',
@@ -2882,7 +4331,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert streaming reasoning delta to a thought part', () => {
-      const chunk = converter.convertOpenAIChunkToGemini(
+      const chunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-1b',
@@ -2913,7 +4362,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should not throw when streaming chunk has no delta', () => {
-      const chunk = converter.convertOpenAIChunkToGemini(
+      const chunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-2',
@@ -2946,7 +4395,7 @@ describe('OpenAIContentConverter', () => {
       ];
 
       const emitted = chunks.map((content, index) => {
-        const chunk = converter.convertOpenAIChunkToGemini(
+        const chunk = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-cumulative-${index}`,
@@ -2985,7 +4434,7 @@ describe('OpenAIContentConverter', () => {
       const content =
         'The following section starts with more than enough text for cumulative-mode detection.';
       const emitted = [content, content].map((chunkContent, index) => {
-        const chunk = converter.convertOpenAIChunkToGemini(
+        const chunk = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-cumulative-repeat-${index}`,
@@ -3012,7 +4461,7 @@ describe('OpenAIContentConverter', () => {
     it('should preserve repeated short incremental content chunks', () => {
       const ctx = withStreamParser();
       const emitted = ['ha', 'ha'].map((content, index) => {
-        const chunk = converter.convertOpenAIChunkToGemini(
+        const chunk = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-repeat-${index}`,
@@ -3045,7 +4494,7 @@ describe('OpenAIContentConverter', () => {
       ];
 
       const emitted = chunks.map((reasoning_content, index) => {
-        const chunk = converter.convertOpenAIChunkToGemini(
+        const chunk = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-reasoning-cumulative-${index}`,
@@ -3087,7 +4536,7 @@ describe('OpenAIContentConverter', () => {
       ];
 
       const emitted = chunks.map((content, index) => {
-        const chunk = converter.convertOpenAIChunkToGemini(
+        const chunk = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-cumulative-exit-${index}`,
@@ -3130,7 +4579,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-reentry-${index}`,
@@ -3165,7 +4614,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-short-repeat-${index}`,
@@ -3205,7 +4654,7 @@ describe('OpenAIContentConverter', () => {
       ];
 
       const emitted = chunks.map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToGemini(
+        const part = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-reasoning-cumulative2-${index}`,
@@ -3248,7 +4697,7 @@ describe('OpenAIContentConverter', () => {
       const reasoning =
         'The reasoning section also starts with more than enough text to pass detection.';
       const emitted = [reasoning, reasoning].map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToGemini(
+        const part = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-reasoning-repeat-${index}`,
@@ -3285,7 +4734,7 @@ describe('OpenAIContentConverter', () => {
       ];
 
       const emitted = chunks.map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToGemini(
+        const part = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-reasoning-exit-${index}`,
@@ -3337,7 +4786,7 @@ describe('OpenAIContentConverter', () => {
       ];
 
       const emitted = chunks.map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToGemini(
+        const part = converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: `chunk-reasoning-reentry-${index}`,
@@ -3390,7 +4839,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (delta, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-interleaved-${index}`,
@@ -3432,7 +4881,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-threshold64-${index}`,
@@ -3471,7 +4920,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-threshold63-${index}`,
@@ -3511,7 +4960,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-import-${index}`,
@@ -3561,7 +5010,7 @@ describe('OpenAIContentConverter', () => {
       );
       const allEmitted = incrementalChunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-cap-${index}`,
@@ -3599,7 +5048,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = [firstChunk, secondChunk, thirdChunk].map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-large-first-${index}`,
@@ -3650,7 +5099,7 @@ describe('OpenAIContentConverter', () => {
 
       const incrementalEmitted = incremental.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-hybrid-incr-${index}`,
@@ -3670,7 +5119,7 @@ describe('OpenAIContentConverter', () => {
       );
 
       const cumulativeEmitted =
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: 'chunk-hybrid-cum',
@@ -3706,7 +5155,7 @@ describe('OpenAIContentConverter', () => {
 
       const emitted = chunks.map(
         (content, index) =>
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             {
               object: 'chat.completion.chunk',
               id: `chunk-rewind-${index}`,
@@ -3746,7 +5195,7 @@ describe('OpenAIContentConverter', () => {
       const ctx = withStreamParser();
       // 1) Prefix-extension chunk pair establishes cumulative mode and primes
       //    `emittedText` so the next exact-repeat is the cumulative branch.
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-cum-empty-finish-0',
@@ -3763,7 +5212,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         ctx,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-cum-empty-finish-1',
@@ -3785,7 +5234,7 @@ describe('OpenAIContentConverter', () => {
       //    `finish_reason: 'stop'`. The normalized delta is '' (cumulative
       //    suffix-of-self), but the finish_reason must still drive
       //    convertOpenAITextToParts.
-      const finalChunk = converter.convertOpenAIChunkToGemini(
+      const finalChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-cum-empty-finish-2',
@@ -3819,8 +5268,9 @@ describe('OpenAIContentConverter', () => {
 
     it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
       const ctx = withStreamParser();
+      ctx.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const part =
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           {
             object: 'chat.completion.chunk',
             id: 'chunk-dual-1',
@@ -3851,7 +5301,7 @@ describe('OpenAIContentConverter', () => {
 
   describe('OpenAI -> Gemini tagged thinking content', () => {
     it('should convert MiniMax <think> content to thought parts for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-minimax-1',
@@ -3879,7 +5329,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should preserve ordering around <thinking> blocks', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-minimax-2',
@@ -3908,7 +5358,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should parse multiple tagged thinking blocks case-insensitively', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-minimax-3',
@@ -3937,7 +5387,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should leave tags visible when tagged thinking parsing is disabled', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-openai-1',
@@ -3955,7 +5405,10 @@ describe('OpenAIContentConverter', () => {
             },
           ],
         } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
+        {
+          ...requestContext,
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+        },
       );
 
       expect(response.candidates?.[0]?.content?.parts).toEqual([
@@ -3964,7 +5417,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should preserve incomplete tags as visible text on final non-streaming parse', () => {
-      const response = converter.convertOpenAIResponseToGemini(
+      const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
           id: 'chatcmpl-minimax-4',
@@ -3993,7 +5446,7 @@ describe('OpenAIContentConverter', () => {
     it('should parse streaming tags split across chunks', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-minimax-1',
@@ -4010,7 +5463,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const secondChunk = converter.convertOpenAIChunkToGemini(
+      const secondChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-minimax-2',
@@ -4027,7 +5480,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const finalChunk = converter.convertOpenAIChunkToGemini(
+      const finalChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-minimax-3',
@@ -4059,7 +5512,7 @@ describe('OpenAIContentConverter', () => {
     it('should suppress reasoning_content when the same streaming chunk has tagged thinking content', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const chunk = converter.convertOpenAIChunkToGemini(
+      const chunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-dual-tagged',
@@ -4089,7 +5542,7 @@ describe('OpenAIContentConverter', () => {
     it('should suppress late reasoning_content after streaming tagged thinking content', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-late-reasoning-1',
@@ -4106,7 +5559,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const secondChunk = converter.convertOpenAIChunkToGemini(
+      const secondChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-late-reasoning-2',
@@ -4133,7 +5586,7 @@ describe('OpenAIContentConverter', () => {
     it('should suppress buffered reasoning_content when later streaming content has tagged thinking', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-reasoning-1',
@@ -4150,7 +5603,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const secondChunk = converter.convertOpenAIChunkToGemini(
+      const secondChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-reasoning-2',
@@ -4167,7 +5620,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const finalChunk = converter.convertOpenAIChunkToGemini(
+      const finalChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-reasoning-3',
@@ -4197,7 +5650,7 @@ describe('OpenAIContentConverter', () => {
     it('should flush buffered content before later tagged thinking content', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-content-before-tag-1',
@@ -4217,7 +5670,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const secondChunk = converter.convertOpenAIChunkToGemini(
+      const secondChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-content-before-tag-2',
@@ -4246,7 +5699,7 @@ describe('OpenAIContentConverter', () => {
     it('should flush buffered content before current content when reasoning flushes on finish', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-content-order-1',
@@ -4266,7 +5719,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const finalChunk = converter.convertOpenAIChunkToGemini(
+      const finalChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-buffered-content-order-2',
@@ -4295,7 +5748,7 @@ describe('OpenAIContentConverter', () => {
     it('should flush buffered reasoning_content when tagged streaming content has no thinking tags', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-reasoning-only-1',
@@ -4315,7 +5768,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const finalChunk = converter.convertOpenAIChunkToGemini(
+      const finalChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-reasoning-only-2',
@@ -4347,7 +5800,7 @@ describe('OpenAIContentConverter', () => {
     it('should flush reasoning-only chunks when tagged streaming content has no thinking tags', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const firstChunk = converter.convertOpenAIChunkToGemini(
+      const firstChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-reasoning-only-no-content-1',
@@ -4364,7 +5817,7 @@ describe('OpenAIContentConverter', () => {
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,
       );
-      const finalChunk = converter.convertOpenAIChunkToGemini(
+      const finalChunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-glm-reasoning-only-no-content-2',
@@ -4391,7 +5844,7 @@ describe('OpenAIContentConverter', () => {
     it('should flush unclosed streaming thinking content on finish', () => {
       const context = withTaggedThinkingStreamParser();
 
-      const chunk = converter.convertOpenAIChunkToGemini(
+      const chunk = converter.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-minimax-unclosed',
@@ -4414,11 +5867,382 @@ describe('OpenAIContentConverter', () => {
         { text: 'still thinking', thought: true },
       ]);
     });
+
+    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      const reasoningChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const contentChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'answer' }),
+        context,
+      );
+
+      expect(reasoningChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+      ]);
+      expect(contentChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should parse a balanced Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const openingChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: '<thi' }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'nking>step 2</thinking>answer' }, 'stop'),
+        context,
+      );
+
+      expect(openingChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 2', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should reject an unclosed Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: '<thinking>step 2' }, 'stop'),
+          context,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('should suppress a replayed short Qwen3 thinking block', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const replayedBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(replayedBlock.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('should suppress a replayed short Qwen3 thinking opener', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const opener = '<think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const replayedOpener = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'x</think>answer' }, 'stop'),
+        context,
+      );
+
+      expect(replayedOpener.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should suppress a replayed Qwen3 snapshot beyond the detection window', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = `<thinking>${'x'.repeat(1200)}</thinking>answer`;
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      for (let offset = 0; offset < block.length; offset += 100) {
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: block.slice(offset, offset + 100) }),
+          context,
+        );
+      }
+
+      const replay = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const rewind = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block.slice(0, -1) }),
+        context,
+      );
+      const extension = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: `${block}!` }),
+        context,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(rewind.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(extension.candidates?.[0]?.content?.parts).toEqual([
+        { text: '!' },
+      ]);
+    });
+
+    it('should preserve repeated short blocks for eager tagged parsing', () => {
+      const context = withTaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const secondBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(secondBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+    });
   });
 
-  describe('convertGeminiToolsToOpenAI', () => {
+  describe('convertLlmToolsToOpenAI', () => {
+    it('compiles a stable tool schema only once', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'stable', parametersJsonSchema },
+          ],
+        },
+      ] as Tool[];
+      const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');
+
+      try {
+        await converter.convertLlmToolsToOpenAI(tools);
+        await converter.convertLlmToolsToOpenAI(tools);
+        expect(compileStrict).toHaveBeenCalledTimes(1);
+      } finally {
+        compileStrict.mockRestore();
+      }
+    });
+
+    it('removes uniqueItems from function-calling wire schemas', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          blockedBy: {
+            type: 'array',
+            uniqueItems: true,
+            items: { type: 'string' },
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'todo_write',
+              description: 'Update the todo list',
+              parametersJsonSchema,
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'todo_write',
+            description: 'Update the todo list',
+            parameters: {
+              type: 'object',
+              properties: {
+                blockedBy: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      ]);
+      expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
+    });
+
+    it('only relaxes grammar constraints backed by local validation', async () => {
+      const supportedSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedSchema = {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedVocabularySchema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'supported', parametersJsonSchema: supportedSchema },
+            { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
+            {
+              name: 'unsupported_vocabulary',
+              parametersJsonSchema: unsupportedVocabularySchema,
+            },
+            {
+              name: 'without_local_schema',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {},
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        { name: 'supported', description: '', parameters: { type: 'object' } },
+        {
+          name: 'unsupported',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'unsupported_vocabulary',
+          description: '',
+          parameters: unsupportedVocabularySchema,
+        },
+        {
+          name: 'without_local_schema',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ]);
+      expect(supportedSchema).toEqual({
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      });
+      expect(unsupportedSchema.$schema).toBe(
+        'https://json-schema.org/draft/2019-09/schema',
+      );
+      expect(
+        unsupportedVocabularySchema.properties.tuple.prefixItems[0]
+          .additionalProperties,
+      ).toBe(false);
+    });
+
+    it('keeps grammar constraints for schemas with a top-level $id', async () => {
+      const sharedId = 'https://qwen-code.test/shared-tool-schema';
+      const makeSchema = () => ({
+        $id: sharedId,
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      });
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'first', parametersJsonSchema: makeSchema() },
+            { name: 'second', parametersJsonSchema: makeSchema() },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'first',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+        {
+          name: 'second',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+      ]);
+    });
+
     it('should convert Gemini tools with parameters field', async () => {
-      const geminiTools = [
+      const llmTools = [
         {
           functionDeclarations: [
             {
@@ -4436,7 +6260,7 @@ describe('OpenAIContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToOpenAI(geminiTools);
+      const result = await converter.convertLlmToolsToOpenAI(llmTools);
 
       expect(result).toHaveLength(1);
       expect(result[0]).toEqual({
@@ -4453,6 +6277,66 @@ describe('OpenAIContentConverter', () => {
           },
         },
       });
+    });
+
+    // Regression for #7315: the wire schema must not carry
+    // additionalProperties:false on levels with optional properties —
+    // OpenAI-compatible gateways promote every property to required,
+    // forcing mutually exclusive optional fields (Agent working_dir vs
+    // isolation) into every call.
+    it('relaxes additionalProperties:false for schemas with optional fields', async () => {
+      const agentLikeTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'agent',
+              description: 'Launch a new agent',
+              parametersJsonSchema: {
+                $schema: 'http://json-schema.org/draft-07/schema#',
+                type: 'object',
+                properties: {
+                  description: { type: 'string' },
+                  prompt: { type: 'string' },
+                  working_dir: { type: 'string' },
+                  isolation: { type: 'string', enum: ['worktree'] },
+                },
+                required: ['description', 'prompt'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(agentLikeTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBeUndefined();
+      expect(params['$schema']).toBeUndefined();
+      // Required stays exactly as authored — optional fields remain optional.
+      expect(params['required']).toEqual(['description', 'prompt']);
+    });
+
+    it('keeps additionalProperties:false when every property is required', async () => {
+      const strictTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'strict_tool',
+              description: 'All fields required',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(strictTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBe(false);
     });
 
     it('should convert MCP tools with parametersJsonSchema field', async () => {
@@ -4475,7 +6359,7 @@ describe('OpenAIContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToOpenAI(mcpTools);
+      const result = await converter.convertLlmToolsToOpenAI(mcpTools);
 
       expect(result).toHaveLength(1);
       expect(result[0]).toEqual({
@@ -4512,14 +6396,14 @@ describe('OpenAIContentConverter', () => {
         },
       ] as CallableTool[];
 
-      const result = await converter.convertGeminiToolsToOpenAI(callableTools);
+      const result = await converter.convertLlmToolsToOpenAI(callableTools);
 
       expect(result).toHaveLength(1);
       expect(result[0].function.name).toBe('dynamic_tool');
     });
 
     it('should preserve functions without description and skip functions without name', async () => {
-      const geminiTools = [
+      const llmTools = [
         {
           functionDeclarations: [
             {
@@ -4538,7 +6422,7 @@ describe('OpenAIContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToOpenAI(geminiTools);
+      const result = await converter.convertLlmToolsToOpenAI(llmTools);
 
       expect(result).toHaveLength(2);
       expect(result[0].function.name).toBe('valid_tool');
@@ -4550,13 +6434,13 @@ describe('OpenAIContentConverter', () => {
     it('should handle tools without functionDeclarations', async () => {
       const emptyTools: Tool[] = [{} as Tool, { functionDeclarations: [] }];
 
-      const result = await converter.convertGeminiToolsToOpenAI(emptyTools);
+      const result = await converter.convertLlmToolsToOpenAI(emptyTools);
 
       expect(result).toHaveLength(0);
     });
 
     it('should handle functions without parameters', async () => {
-      const geminiTools: Tool[] = [
+      const llmTools: Tool[] = [
         {
           functionDeclarations: [
             {
@@ -4567,7 +6451,7 @@ describe('OpenAIContentConverter', () => {
         },
       ];
 
-      const result = await converter.convertGeminiToolsToOpenAI(geminiTools);
+      const result = await converter.convertLlmToolsToOpenAI(llmTools);
 
       expect(result).toHaveLength(1);
       expect(result[0].function.parameters).toBeUndefined();
@@ -4590,7 +6474,7 @@ describe('OpenAIContentConverter', () => {
         } as Tool,
       ];
 
-      const result = await converter.convertGeminiToolsToOpenAI(mcpTools);
+      const result = await converter.convertLlmToolsToOpenAI(mcpTools);
 
       // Verify the result is a copy, not the same reference
       expect(result[0].function.parameters).not.toBe(originalSchema);
@@ -4598,7 +6482,7 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
-  describe('convertGeminiToolParametersToOpenAI', () => {
+  describe('convertLlmToolParametersToOpenAI', () => {
     it('should convert type names to lowercase', () => {
       const params = {
         type: 'OBJECT',
@@ -4609,7 +6493,7 @@ describe('OpenAIContentConverter', () => {
         },
       };
 
-      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const result = converter.convertLlmToolParametersToOpenAI(params);
 
       expect(result).toEqual({
         type: 'object',
@@ -4619,6 +6503,35 @@ describe('OpenAIContentConverter', () => {
           name: { type: 'string' },
         },
       });
+    });
+
+    it('converts subschemas of properties named after schema keywords', () => {
+      // A tool can declare a parameter literally called `maximum` or
+      // `minItems`. Those are property NAMES, not constraints, so their
+      // subschemas must still be converted like any other property.
+      const params = {
+        type: 'OBJECT',
+        properties: {
+          maximum: {
+            type: 'INTEGER',
+            description: 'upper bound',
+            minimum: '5',
+          },
+          minItems: { type: 'STRING' },
+          normalProp: { type: 'STRING' },
+        },
+      };
+
+      const result = converter.convertLlmToolParametersToOpenAI(params);
+      const properties = result?.['properties'] as Record<string, unknown>;
+
+      expect(properties?.['maximum']).toEqual({
+        type: 'integer',
+        description: 'upper bound',
+        minimum: 5,
+      });
+      expect(properties?.['minItems']).toEqual({ type: 'string' });
+      expect(properties?.['normalProp']).toEqual({ type: 'string' });
     });
 
     it('should convert string numeric constraints to numbers', () => {
@@ -4634,7 +6547,7 @@ describe('OpenAIContentConverter', () => {
         },
       };
 
-      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const result = converter.convertLlmToolParametersToOpenAI(params);
       const properties = result?.['properties'] as Record<string, unknown>;
 
       expect(properties?.['value']).toEqual({
@@ -4662,7 +6575,7 @@ describe('OpenAIContentConverter', () => {
         },
       };
 
-      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const result = converter.convertLlmToolParametersToOpenAI(params);
       const properties = result?.['properties'] as Record<string, unknown>;
 
       expect(properties?.['text']).toEqual({
@@ -4694,7 +6607,7 @@ describe('OpenAIContentConverter', () => {
         },
       };
 
-      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const result = converter.convertLlmToolParametersToOpenAI(params);
       const properties = result?.['properties'] as Record<string, unknown>;
 
       expect(properties?.['text']).toEqual({
@@ -4725,7 +6638,7 @@ describe('OpenAIContentConverter', () => {
         },
       };
 
-      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const result = converter.convertLlmToolParametersToOpenAI(params);
       const properties = result?.['properties'] as Record<string, unknown>;
       const nested = properties?.['nested'] as Record<string, unknown>;
       const nestedProperties = nested?.['properties'] as Record<
@@ -4747,7 +6660,7 @@ describe('OpenAIContentConverter', () => {
         },
       };
 
-      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const result = converter.convertLlmToolParametersToOpenAI(params);
 
       expect(result).toEqual({
         type: 'array',
@@ -4759,12 +6672,12 @@ describe('OpenAIContentConverter', () => {
 
     it('should return undefined for null or non-object input', () => {
       expect(
-        converter.convertGeminiToolParametersToOpenAI(
+        converter.convertLlmToolParametersToOpenAI(
           null as unknown as Record<string, unknown>,
         ),
       ).toBeNull();
       expect(
-        converter.convertGeminiToolParametersToOpenAI(
+        converter.convertLlmToolParametersToOpenAI(
           undefined as unknown as Record<string, unknown>,
         ),
       ).toBeUndefined();
@@ -4779,7 +6692,7 @@ describe('OpenAIContentConverter', () => {
       };
       const originalCopy = JSON.parse(JSON.stringify(original));
 
-      converter.convertGeminiToolParametersToOpenAI(original);
+      converter.convertLlmToolParametersToOpenAI(original);
 
       expect(original).toEqual(originalCopy);
     });
@@ -4807,7 +6720,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -4836,7 +6749,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -4865,7 +6778,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -4930,7 +6843,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
         {
@@ -4965,7 +6878,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -4991,7 +6904,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -5019,7 +6932,7 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
+      const messages = converter.convertLlmRequestToOpenAI(
         request,
         requestContext,
       );
@@ -5102,7 +7015,7 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(
+    const messages = converter.convertLlmRequestToOpenAI(
       request,
       requestContext,
     );
@@ -5175,7 +7088,7 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(
+    const messages = converter.convertLlmRequestToOpenAI(
       request,
       requestContext,
     );
@@ -5240,7 +7153,7 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(
+    const messages = converter.convertLlmRequestToOpenAI(
       request,
       requestContext,
     );
@@ -5308,7 +7221,7 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
       model: 'models/test',
       contents,
     };
-    const messages = converter.convertGeminiRequestToOpenAI(
+    const messages = converter.convertLlmRequestToOpenAI(
       request,
       requestContext,
     );
@@ -5376,7 +7289,7 @@ describe('Truncated tool call detection in streaming', () => {
 
     // Feed argument chunks (no finish_reason yet)
     for (const tc of toolCallChunks) {
-      conv.convertOpenAIChunkToGemini(
+      conv.convertOpenAIChunkToLlm(
         {
           object: 'chat.completion.chunk',
           id: 'chunk-stream',
@@ -5408,7 +7321,7 @@ describe('Truncated tool call detection in streaming', () => {
     }
 
     // Final chunk with finish_reason
-    return conv.convertOpenAIChunkToGemini(
+    return conv.convertOpenAIChunkToLlm(
       {
         object: 'chat.completion.chunk',
         id: 'chunk-final',
@@ -5426,6 +7339,357 @@ describe('Truncated tool call detection in streaming', () => {
       ctx,
     );
   }
+
+  it('emits tool preparation metadata before the complete function call', () => {
+    const context = createStreamingRequestContext();
+    const opener = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-open',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call-1',
+                  type: 'function',
+                  function: { name: 'read_file', arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const args = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-args',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: { arguments: '{"file_path":"a.sql"}' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const finish = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-finish',
+        created: 102,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+
+    expect(getToolCallPreparations(opener)).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    expect(getToolCallPreparations(args)).toEqual([]);
+    expect(getToolCallPreparations(finish)).toEqual([]);
+    expect(opener.functionCalls).toBeUndefined();
+    expect(finish.functionCalls).toEqual([
+      { id: 'call-1', name: 'read_file', args: { file_path: 'a.sql' } },
+    ]);
+  });
+
+  it('does not duplicate tool preparation metadata for a replayed opener', () => {
+    const context = createStreamingRequestContext();
+    const opener = {
+      object: 'chat.completion.chunk',
+      id: 'chunk-open',
+      created: 100,
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'read_file', arguments: '' },
+              },
+            ],
+          },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+    const first = converter.convertOpenAIChunkToLlm(opener, context);
+    const replay = converter.convertOpenAIChunkToLlm(opener, context);
+
+    expect(getToolCallPreparations(first)).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    expect(getToolCallPreparations(replay)).toEqual([]);
+  });
+
+  it('emits preparation after split identity deltas using the remapped parser index', () => {
+    const context = createStreamingRequestContext();
+
+    const firstCall = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-first-call',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call-1',
+                  type: 'function',
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"a.sql"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const secondCallId = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-second-id',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, id: 'call-2', type: 'function' }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const secondCallName = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-second-name',
+        created: 102,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: {
+                    name: 'write_file',
+                    arguments: '{"file_path":"b.sql"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const thirdCallName = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-third-name',
+        created: 103,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: {
+                    name: 'delete_file',
+                    arguments: '',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const thirdCallArguments = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-third-arguments',
+        created: 104,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function',
+                  function: { arguments: '{"file_path":"c.sql"}' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const thirdCallId = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-third-id',
+        created: 105,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, id: 'call-3', type: 'function' }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+    const finish = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-finish',
+        created: 106,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      context,
+    );
+
+    expect(getToolCallPreparations(firstCall)).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    expect(getToolCallPreparations(secondCallId)).toEqual([]);
+    expect(getToolCallPreparations(secondCallName)).toEqual([
+      { callId: 'call-2', toolName: 'write_file' },
+    ]);
+    expect(getToolCallPreparations(thirdCallName)).toEqual([]);
+    expect(getToolCallPreparations(thirdCallArguments)).toEqual([]);
+    expect(getToolCallPreparations(thirdCallId)).toEqual([
+      { callId: 'call-3', toolName: 'delete_file' },
+    ]);
+    expect(firstCall.functionCalls).toBeUndefined();
+    expect(secondCallId.functionCalls).toBeUndefined();
+    expect(secondCallName.functionCalls).toBeUndefined();
+    expect(thirdCallName.functionCalls).toBeUndefined();
+    expect(thirdCallArguments.functionCalls).toBeUndefined();
+    expect(thirdCallId.functionCalls).toBeUndefined();
+    expect(finish.functionCalls).toEqual([
+      { id: 'call-1', name: 'read_file', args: { file_path: 'a.sql' } },
+      { id: 'call-2', name: 'write_file', args: { file_path: 'b.sql' } },
+      { id: 'call-3', name: 'delete_file', args: { file_path: 'c.sql' } },
+    ]);
+  });
+
+  it.each([
+    {
+      label: 'call ID is missing',
+      toolCall: {
+        index: 0,
+        type: 'function' as const,
+        function: { name: 'read_file', arguments: '' },
+      },
+    },
+    {
+      label: 'tool name is missing',
+      toolCall: {
+        index: 0,
+        id: 'call-1',
+        type: 'function' as const,
+        function: { arguments: '' },
+      },
+    },
+  ])('does not emit tool preparation metadata when $label', ({ toolCall }) => {
+    const response = converter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-open',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [toolCall] },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      createStreamingRequestContext(),
+    );
+
+    expect(getToolCallPreparations(response)).toEqual([]);
+  });
 
   it('should override finishReason to MAX_TOKENS when tool call JSON is truncated and provider reports "stop"', () => {
     // Simulate: write_file call truncated mid-JSON, provider says "stop"
@@ -5528,7 +7792,7 @@ describe('Truncated tool call detection in streaming', () => {
     const ctx = createStreamingRequestContext();
 
     // Chunk 1: start of JSON with tool metadata
-    conv.convertOpenAIChunkToGemini(
+    conv.convertOpenAIChunkToLlm(
       {
         object: 'chat.completion.chunk',
         id: 'c1',
@@ -5556,7 +7820,7 @@ describe('Truncated tool call detection in streaming', () => {
     );
 
     // Chunk 2: more arguments
-    conv.convertOpenAIChunkToGemini(
+    conv.convertOpenAIChunkToLlm(
       {
         object: 'chat.completion.chunk',
         id: 'c2',
@@ -5582,7 +7846,7 @@ describe('Truncated tool call detection in streaming', () => {
     );
 
     // Final chunk: finish_reason "stop" but JSON is still incomplete
-    const result = conv.convertOpenAIChunkToGemini(
+    const result = conv.convertOpenAIChunkToLlm(
       {
         object: 'chat.completion.chunk',
         id: 'c3',
@@ -5604,7 +7868,7 @@ describe('Truncated tool call detection in streaming', () => {
   });
 });
 
-describe('mapGeminiFinishReasonToOpenAI', () => {
+describe('mapLlmFinishReasonToOpenAI', () => {
   it.each([
     [FinishReason.STOP, 'stop'],
     [FinishReason.MAX_TOKENS, 'length'],
@@ -5619,10 +7883,10 @@ describe('mapGeminiFinishReasonToOpenAI', () => {
     [FinishReason.IMAGE_OTHER, 'content_filter'],
     [FinishReason.NO_IMAGE, 'stop'],
     [undefined, 'stop'],
-  ])('maps %s to %s', (geminiReason, expected) => {
-    const response = OpenAIContentConverter.convertGeminiResponseToOpenAI(
+  ])('maps %s to %s', (llmReason, expected) => {
+    const response = OpenAIContentConverter.convertLlmResponseToOpenAI(
       {
-        candidates: [{ finishReason: geminiReason, content: { parts: [] } }],
+        candidates: [{ finishReason: llmReason, content: { parts: [] } }],
       } as unknown as GenerateContentResponse,
       {
         model: 'test-model',
@@ -5680,7 +7944,7 @@ describe('modality filtering', () => {
         displayName: 'screenshot.png',
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('deepseek-chat', {}),
     );
@@ -5691,20 +7955,24 @@ describe('modality filtering', () => {
     expect(parts[0].text).toContain('does not support image input');
   });
 
-  it('keeps image when image modality is enabled', () => {
+  it('keeps BMP image data when image modality is enabled', () => {
     const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
-        inlineData: { mimeType: 'image/png', data: 'abc123' },
+        inlineData: { mimeType: 'image/bmp', data: 'abc123' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('gpt-4o', { image: true }),
     );
-    const parts = getUserContentParts(messages);
+    const parts = getUserContentParts(messages) as Array<{
+      type: string;
+      image_url?: { url: string };
+    }>;
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('image_url');
+    expect(parts[0].image_url?.url).toBe('data:image/bmp;base64,abc123');
   });
 
   it('replaces PDF with placeholder when pdf modality is disabled', () => {
@@ -5718,7 +7986,7 @@ describe('modality filtering', () => {
         },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('test-model', { image: true }),
     );
@@ -5740,7 +8008,7 @@ describe('modality filtering', () => {
         },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('claude-sonnet', { image: true, pdf: true }),
     );
@@ -5756,7 +8024,7 @@ describe('modality filtering', () => {
         inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('test-model', {}),
     );
@@ -5773,7 +8041,7 @@ describe('modality filtering', () => {
         inlineData: { mimeType: 'audio/wav', data: 'audio-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('test-model', {}),
     );
@@ -5794,7 +8062,7 @@ describe('modality filtering', () => {
         inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('gpt-4o', { image: true }),
     );
@@ -5814,7 +8082,7 @@ describe('modality filtering', () => {
         inlineData: { mimeType: 'image/png', data: 'img-data' },
       } as unknown as Part,
     ]);
-    const messages = conv.convertGeminiRequestToOpenAI(
+    const messages = conv.convertLlmRequestToOpenAI(
       request,
       makeRequestContext('unknown-model', {}),
     );

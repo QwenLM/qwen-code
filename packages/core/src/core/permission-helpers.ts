@@ -8,7 +8,7 @@
  * Shared permission-evaluation and persistence helpers.
  *
  * These are used by both `coreToolScheduler` (CLI mode) and the ACP
- * `Session` (VS Code / webui mode) so that the L3→L4→L5 permission flow
+ * `Session` (VS Code / browser mode) so that the L3→L4→L5 permission flow
  * and the "Always Allow" persistence logic stay in sync.
  */
 
@@ -36,6 +36,7 @@ export function buildPermissionCheckContext(
   toolName: string,
   toolParams: Record<string, unknown>,
   targetDir: string,
+  toolAliases?: readonly string[],
 ): PermissionCheckContext {
   const rawCommand =
     'command' in toolParams ? String(toolParams['command']) : undefined;
@@ -88,7 +89,16 @@ export function buildPermissionCheckContext(
           ? toolParams['server_name']
           : undefined;
 
-  return { toolName, command, cwd, filePath, domain, specifier, toolParams };
+  return {
+    toolName,
+    toolAliases,
+    command,
+    cwd,
+    filePath,
+    domain,
+    specifier,
+    toolParams,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +202,13 @@ export async function persistPermissionOutcome(
   pm: PermissionManager | null | undefined,
   payload?: ToolConfirmationPayload,
 ): Promise<void> {
+  if (
+    confirmationDetails.type !== 'exec' &&
+    confirmationDetails.type !== 'mcp' &&
+    confirmationDetails.type !== 'info'
+  ) {
+    return;
+  }
   if (
     outcome !== ToolConfirmationOutcome.ProceedAlways &&
     outcome !== ToolConfirmationOutcome.ProceedAlwaysProject &&

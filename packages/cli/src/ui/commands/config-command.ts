@@ -19,7 +19,7 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+} from '../../config/settingsUtils.js';
 
 const SETTABLE_TYPES = new Set(['boolean', 'string', 'number', 'enum']);
 
@@ -114,11 +114,13 @@ function coerceValue(
       };
     }
 
-    case 'number': {
+    case 'number':
+    case 'integer': {
       if (!rawValue || rawValue.trim() === '') {
         return {
           value: undefined,
-          error: t('Invalid number value: "{{value}}".', {
+          error: t('Invalid {{type}} value: "{{value}}".', {
+            type: def.type,
             value: String(rawValue),
           }),
         };
@@ -127,7 +129,8 @@ function coerceValue(
       if (Number.isNaN(parsed) || !Number.isFinite(parsed)) {
         return {
           value: undefined,
-          error: t('Invalid number value: "{{value}}".', {
+          error: t('Invalid {{type}} value: "{{value}}".', {
+            type: def.type,
             value: String(rawValue),
           }),
         };

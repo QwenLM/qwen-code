@@ -29,7 +29,7 @@ export type {
   SkillErrorCode,
 } from './types.js';
 
-export { SkillError } from './types.js';
+export { SkillError, validateSkillName } from './types.js';
 
 // Main management class
 export { SkillManager } from './skill-manager.js';
@@ -42,3 +42,6 @@ export {
   SkillActivationRegistry,
   splitConditionalSkills,
 } from './skill-activation.js';
+
+// Project auto-skill lifecycle maintenance
+export * from './skill-curator.js';

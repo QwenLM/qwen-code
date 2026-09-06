@@ -1,8 +1,9 @@
 .question {
   position: relative;
+  container-type: inline-size;
   margin: 12px auto;
   width: 100%;
-  max-width: min(800px, var(--chat-content-width, 800px));
+  max-width: min(100%, var(--chat-content-width, 1000px));
   box-sizing: border-box;
   padding: 16px;
   border: 1.5px solid var(--border);
@@ -33,7 +34,6 @@
   gap: 6px;
   min-height: 22px;
   margin-bottom: 16px;
-  padding-right: 72px;
 }
 
 .icon {
@@ -52,15 +52,57 @@
 }
 
 .tabs {
-  position: absolute;
-  top: 16px;
-  right: 16px;
   display: flex;
   gap: 4px;
   margin: 0;
   border-bottom: 0;
   padding: 0;
   flex-wrap: nowrap;
+  align-items: center;
+}
+
+.topRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.collapseButton {
+  display: flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.collapseButton:hover {
+  color: var(--foreground);
+}
+
+.collapseIcon {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+
+.collapseIconCollapsed {
+  transform: rotate(-90deg);
+}
+
+.collapsed {
+  padding: 10px 16px;
+}
+
+.collapsed .titleLine {
+  margin-bottom: 0;
 }
 
 .tab {
@@ -72,7 +114,6 @@
   border-radius: 999px;
   background: var(--secondary);
   color: transparent;
-  cursor: pointer;
 }
 
 .tabActive {
@@ -94,7 +135,6 @@
 
 .text {
   margin: 0;
-  padding-right: 72px;
   color: var(--foreground);
   font-size: 14px;
   font-weight: 500;
@@ -127,25 +167,45 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  width: 100%;
   min-height: 36px;
   padding: 7px 12px;
+  border: 0;
   border-radius: 12px;
+  background: transparent;
   color: var(--foreground);
   cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
+  text-align: left;
+  appearance: none;
 }
 
-.optionActive,
-.optionSelected {
+.option:hover:not(.optionSelected) {
   background: var(--accent);
+}
+
+.option:disabled,
+.customTrigger:disabled {
+  cursor: not-allowed;
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
+}
+
+.optionSelected {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--primary) 22%, transparent);
   color: var(--foreground);
 }
 
-.optionActive .optionLabel {
-  font-weight: 500;
-  color: var(--foreground);
+.optionSelected:hover {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
 .pointer {
@@ -189,13 +249,11 @@
   stroke-width: 1.25;
 }
 
-.optionActive .optionNum,
 .optionSelected .optionNum {
   background: var(--primary);
   color: var(--primary-foreground);
 }
 
-.optionActive .editIcon,
 .optionSelected .editIcon {
   background: var(--primary);
   color: var(--primary-foreground);
@@ -232,26 +290,69 @@
 .customInput {
   flex: 1;
   min-width: 0;
-  padding: 4px 0;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0;
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--border);
   color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
+  line-height: 22px;
   outline: none;
+}
+
+/* The "Other" row's clickable label when not editing — a real <button> so it's
+   keyboard-reachable, styled to read like the option label it replaces. */
+.customTrigger {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+
+.customTrigger:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
 }
 
 .customInput:focus {
   border-bottom-color: var(--agent-blue-500);
 }
 
+.shortcuts {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0 auto 0 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 16px;
+  gap: 8px;
   margin-top: 24px;
+}
+
+.actions > button {
+  flex: 0 0 auto;
 }
 
 .button {
@@ -281,12 +382,36 @@
 }
 
 .submitButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: var(--primary);
   color: var(--primary-foreground);
   border-color: transparent;
 }
 
+.actions > [data-shortcut]::after {
+  height: 16px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 4px;
+  content: attr(data-shortcut);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 14px;
+  opacity: 0.65;
+}
+
+.submitSpinner {
+  width: 14px;
+  height: 14px;
+}
+
 .ignoreButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: 28px;
   padding: 0;
   border: 0;
@@ -301,4 +426,15 @@
 
 .ignoreButton:hover {
   color: var(--foreground);
+}
+
+.ignoreButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+@container (max-width: 420px) {
+  .actions > [data-shortcut]::after {
+    display: none;
+  }
 }

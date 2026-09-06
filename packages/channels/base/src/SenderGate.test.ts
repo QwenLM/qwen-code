@@ -5,7 +5,7 @@ import type { PairingStore } from './PairingStore.js';
 function mockPairingStore(overrides: Partial<PairingStore> = {}): PairingStore {
   return {
     isApproved: vi.fn().mockReturnValue(false),
-    createRequest: vi.fn().mockReturnValue('ABCD1234'),
+    createRequest: vi.fn().mockReturnValue({ code: 'ABCD1234' }),
     approve: vi.fn(),
     listPending: vi.fn().mockReturnValue([]),
     getAllowlist: vi.fn().mockReturnValue([]),
@@ -36,7 +36,7 @@ describe('SenderGate', () => {
       const gate = new SenderGate('allowlist', ['alice']);
       const result = gate.check('eve');
       expect(result.allowed).toBe(false);
-      expect(result.pairingCode).toBeUndefined();
+      expect(result.pairing).toBeUndefined();
     });
 
     it('works with empty allowlist', () => {
@@ -48,6 +48,13 @@ describe('SenderGate', () => {
       const gate = new SenderGate('allowlist', ['alice']);
       expect(gate.isAllowed('alice')).toBe(true);
       expect(gate.isAllowed('eve')).toBe(false);
+    });
+
+    it('replaceAllowedUsers swaps the snapshotted allowlist', () => {
+      const gate = new SenderGate('allowlist', ['alice']);
+      gate.replaceAllowedUsers(['10001']);
+      expect(gate.check('10001').allowed).toBe(true);
+      expect(gate.check('alice').allowed).toBe(false);
     });
   });
 
@@ -70,26 +77,36 @@ describe('SenderGate', () => {
 
     it('generates pairing code for unknown sender', () => {
       const store = mockPairingStore({
-        createRequest: vi.fn().mockReturnValue('XYZW5678'),
+        createRequest: vi.fn().mockReturnValue({ code: 'XYZW5678' }),
       });
       const gate = new SenderGate('pairing', [], store);
       const result = gate.check('stranger', 'Stranger Name');
       expect(result.allowed).toBe(false);
-      expect(result.pairingCode).toBe('XYZW5678');
+      expect(result.pairing).toEqual({ code: 'XYZW5678' });
       expect(store.createRequest).toHaveBeenCalledWith(
         'stranger',
         'Stranger Name',
       );
     });
 
-    it('returns null pairingCode when cap reached', () => {
+    it('passes through the store rejection when the cap is reached', () => {
       const store = mockPairingStore({
-        createRequest: vi.fn().mockReturnValue(null),
+        createRequest: vi.fn().mockReturnValue({ rejected: 'cap_reached' }),
       });
       const gate = new SenderGate('pairing', [], store);
       const result = gate.check('stranger');
       expect(result.allowed).toBe(false);
-      expect(result.pairingCode).toBeNull();
+      expect(result.pairing).toEqual({ rejected: 'cap_reached' });
+    });
+
+    it('passes through the rejection when the sender already holds a request', () => {
+      const store = mockPairingStore({
+        createRequest: vi.fn().mockReturnValue({ rejected: 'sender_pending' }),
+      });
+      const gate = new SenderGate('pairing', [], store);
+      const result = gate.check('stranger');
+      expect(result.allowed).toBe(false);
+      expect(result.pairing).toEqual({ rejected: 'sender_pending' });
     });
 
     it('uses senderId as senderName fallback', () => {
@@ -103,7 +120,7 @@ describe('SenderGate', () => {
       const gate = new SenderGate('pairing');
       const result = gate.check('anyone');
       expect(result.allowed).toBe(false);
-      expect(result.pairingCode).toBeNull();
+      expect(result.pairing).toEqual({ rejected: 'cap_reached' });
     });
 
     it('passively checks pairing authorization without creating requests', () => {

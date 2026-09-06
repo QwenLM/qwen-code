@@ -1,4 +1,15 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useCallback,
+  useMemo,
+  type ReactNode,
+  type ClipboardEventHandler,
+  type DragEventHandler,
+} from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import {
   Decoration,
   EditorView,
@@ -27,12 +38,16 @@ import {
   type Completion,
 } from '@codemirror/autocomplete';
 import { minimalSetup } from 'codemirror';
+import {
+  isCoarsePointerDevice,
+  useIsTouchComposer,
+} from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import {
   useOptionalWorkspace,
   type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
@@ -44,8 +59,16 @@ import {
   DEFAULT_COMMAND_CATEGORY_ORDER,
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
-import { useInputHistory } from '../hooks/useInputHistory';
-import { useAtMentionMenu, type AtMentionMenuState } from './useAtMentionMenu';
+import {
+  getPromptHistoryStorageKey,
+  pushInputHistoryEntry,
+  useInputHistory,
+} from '../hooks/useInputHistory';
+import {
+  useAtMentionMenu,
+  type AtMentionMenuState,
+  type AtMentionWorkspaceActions,
+} from './useAtMentionMenu';
 import { useI18n } from '../i18n';
 import {
   inputHighlight,
@@ -53,21 +76,54 @@ import {
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from '../components/composerTagIcons';
+import {
+  createInputAnnotationsFromComposerTags,
+  getComposerTagDisplay,
+  getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagSerialized,
+  getComposerTagValue,
+  isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
+  parseUserMessageContentSafely,
+} from '../utils/composerTag';
+// Re-exported for existing importers; the definitions moved to
+// utils/composerTag.ts so read-only consumers can reach them without pulling
+// CodeMirror in (#11031).
+export {
+  getComposerTagDisplay,
+  getComposerTagLabel,
+  getComposerTagValue,
+} from '../utils/composerTag';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import { isSafeImageSrc } from '../components/messages/Markdown';
 import type {
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
+  UserMessageContentParser,
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
   WebShellComposerTagIconMap,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
+  WebShellBuiltinAtProvidersConfig,
   WebShellAtProvider,
 } from '../customization';
+import { useWebShellPortalRoot } from '../portalRoot';
+import {
+  dedupeAttachmentName,
+  extractFiles,
+  extractFileTransfer,
+  hasFileTransferPayload,
+  MAX_IMAGE_ATTACHMENT_DATA_BYTES,
+  MAX_FILE_ATTACHMENT_DATA_BYTES,
+  readImageTransfer,
+  readFileTransfer,
+  sanitizeAttachmentName,
+  type ExtractedFileTransfer,
+} from '../utils/imageIngestion';
 
-// ---- Large paste handling (shared utilities) ----
-
-const LARGE_PASTE_CHAR_THRESHOLD = 1000;
-const LARGE_PASTE_LINE_THRESHOLD = 10;
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
 [data-web-shell-tooltip-portal] {
@@ -277,12 +333,22 @@ const TOOLTIP_STYLES = `
 }
 `;
 
-function ensureTooltipStyles() {
-  if (document.getElementById(TOOLTIP_STYLE_ID)) return;
-  const style = document.createElement('style');
+function ensureTooltipStyles(root: Document | ShadowRoot) {
+  if (root.getElementById(TOOLTIP_STYLE_ID)) return;
+  const ownerDocument = root instanceof Document ? root : root.ownerDocument;
+  const style = ownerDocument.createElement('style');
   style.id = TOOLTIP_STYLE_ID;
   style.textContent = TOOLTIP_STYLES;
-  document.head.appendChild(style);
+  if (root instanceof Document) {
+    root.head.appendChild(style);
+  } else {
+    root.appendChild(style);
+  }
+}
+
+function getTooltipStyleRoot(parent: HTMLElement): Document | ShadowRoot {
+  const root = parent.getRootNode();
+  return root instanceof ShadowRoot ? root : parent.ownerDocument;
 }
 
 /**
@@ -415,87 +481,14 @@ function renderCompletionHoverInfo(completion: Completion): HTMLElement | null {
   return anchor;
 }
 
-export function normalizePastedText(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-export function isLargePaste(text: string): boolean {
-  return (
-    [...text].length > LARGE_PASTE_CHAR_THRESHOLD ||
-    text.split('\n').length > LARGE_PASTE_LINE_THRESHOLD
-  );
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export interface LargePastePlaceholderResult {
-  placeholderText: string;
-  nextPasteId: number;
-}
-
-export function createLargePastePlaceholder(
-  pendingPastes: Map<string, string>,
-  nextPasteId: number,
-  pasted: string,
-): LargePastePlaceholderResult {
-  const charCount = [...pasted].length;
-  const base = `[Pasted Content ${charCount} chars]`;
-  const placeholderText = nextPasteId === 1 ? base : `${base} #${nextPasteId}`;
-  pendingPastes.set(placeholderText, pasted);
-  return { placeholderText, nextPasteId: nextPasteId + 1 };
-}
-
-export function prunePendingPastes(
-  pendingPastes: Map<string, string>,
-  docText: string,
-): number | null {
-  for (const placeholderText of pendingPastes.keys()) {
-    if (!docText.includes(placeholderText)) {
-      pendingPastes.delete(placeholderText);
-    }
-  }
-  return pendingPastes.size === 0 ? 1 : null;
-}
-
-export function expandLargePastePlaceholders(
-  pendingPastes: Map<string, string>,
-  text: string,
-): string {
-  if (pendingPastes.size === 0) return text;
-  const placeholders = [...pendingPastes.keys()].sort(
-    (a, b) => b.length - a.length,
-  );
-  const pattern = new RegExp(placeholders.map(escapeRegExp).join('|'), 'g');
-  return text.replace(
-    pattern,
-    (placeholderText) => pendingPastes.get(placeholderText) ?? placeholderText,
-  );
-}
-
 // ---- Tag serialization (shared) ----
 
 export function serializeComposerTag(tag: WebShellComposerTag): string {
-  return (
-    tag.serialized?.trim() || tag.value?.trim() || tag.label?.trim() || tag.id
-  );
+  return getComposerTagSerialized(tag);
 }
 
 function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
   return tags.map(serializeComposerTag).join('\n');
-}
-
-export function getComposerTagLabel(tag: WebShellComposerTag): string {
-  return tag.label?.trim() ?? '';
-}
-
-export function getComposerTagValue(tag: WebShellComposerTag): string {
-  return tag.value?.trim() ?? '';
-}
-
-export function getComposerTagDisplay(tag: WebShellComposerTag): string {
-  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
 }
 
 export function buildComposerPrompt(
@@ -506,6 +499,50 @@ export function buildComposerPrompt(
   if (!tagText) return text;
   if (!text) return tagText;
   return `${tagText}\n\n${text}`;
+}
+
+export interface InlineTagPlacement {
+  start: number;
+  end: number;
+  tag: WebShellComposerTag;
+}
+
+export function buildComposerPromptWithInlineTagPlacements(
+  text: string,
+  topTags: readonly WebShellComposerTag[],
+  inlineTags: readonly InlineTagPlacement[],
+): string {
+  return buildComposerPrompt(
+    replaceInlineTagPlacements(text, inlineTags),
+    topTags,
+  );
+}
+
+export function replaceInlineTagPlacements(
+  text: string,
+  inlineTags: readonly InlineTagPlacement[],
+): string {
+  const placements = inlineTags
+    .filter(
+      (placement) =>
+        placement.start >= 0 &&
+        placement.end > placement.start &&
+        placement.end <= text.length,
+    )
+    .slice()
+    .sort((left, right) => left.start - right.start);
+  if (placements.length === 0) return text;
+
+  let cursor = 0;
+  const parts: string[] = [];
+  for (const placement of placements) {
+    if (placement.start < cursor) continue;
+    parts.push(text.slice(cursor, placement.start));
+    parts.push(serializeComposerTag(placement.tag));
+    cursor = placement.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join('');
 }
 
 // ---- Inline tag CodeMirror extension (shared) ----
@@ -520,11 +557,21 @@ interface InlineTagDecorationSpec {
   tag: InlineComposerTag;
 }
 
-type InlineComposerTag = WebShellComposerTag & { iconUrl?: string };
+type InlineComposerTag = WebShellComposerTag & {
+  iconUrl?: string;
+  renderContent?: ComposerTagRenderer;
+  tooltip?: ReactNode;
+  tooltipText?: string;
+  onClick?: ComposerTagClickHandler;
+};
 
 function toPublicComposerTag(tag: InlineComposerTag): WebShellComposerTag {
   const publicTag = { ...tag };
   delete publicTag.iconUrl;
+  delete publicTag.renderContent;
+  delete publicTag.tooltip;
+  delete publicTag.tooltipText;
+  delete publicTag.onClick;
   return publicTag;
 }
 
@@ -536,7 +583,25 @@ export const removeInlineTagEffect = StateEffect.define<{
 }>();
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
+function normalizeInlineTagRemovalChanges(
+  view: EditorView,
+  changes: Array<{ from: number; to: number; insert: string }>,
+) {
+  let remaining = view.state.doc.toString();
+  for (const change of changes.slice().reverse()) {
+    remaining = remaining.slice(0, change.from) + remaining.slice(change.to);
+  }
+  return remaining.trim().length === 0
+    ? [{ from: 0, to: view.state.doc.length, insert: '' }]
+    : changes;
+}
+
+let nextComposerTagTooltipId = 0;
+
 class ComposerTagWidget extends WidgetType {
+  private contentRoot: Root | null = null;
+  private tooltipRoot: Root | null = null;
+
   constructor(private readonly tag: InlineComposerTag) {
     super();
   }
@@ -547,29 +612,122 @@ class ComposerTagWidget extends WidgetType {
       this.tag.label === other.tag.label &&
       this.tag.value === other.tag.value &&
       this.tag.kind === other.tag.kind &&
+      this.tag.icon === other.tag.icon &&
       this.tag.serialized === other.tag.serialized &&
       this.tag.removable === other.tag.removable &&
-      this.tag.iconUrl === other.tag.iconUrl
+      this.tag.iconUrl === other.tag.iconUrl &&
+      this.tag.renderContent === other.tag.renderContent &&
+      this.tag.tooltip === other.tag.tooltip &&
+      this.tag.tooltipText === other.tag.tooltipText &&
+      this.tag.onClick === other.tag.onClick
     );
   }
 
   toDOM(view: EditorView): HTMLElement {
     const chip = document.createElement('span');
+    const publicTag = toPublicComposerTag(this.tag);
     chip.style.cssText =
-      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
+      'position:relative;display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
+    if (this.tag.onClick) {
+      chip.setAttribute('role', 'button');
+      chip.tabIndex = 0;
+      chip.style.cursor = 'pointer';
+      chip.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      chip.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      chip.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.tag.onClick?.({
+          tag: publicTag,
+          placement: 'composer',
+          readonly: false,
+          anchorRect: chip.getBoundingClientRect(),
+        });
+      });
+      chip.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        this.tag.onClick?.({
+          tag: publicTag,
+          placement: 'composer',
+          readonly: false,
+          anchorRect: chip.getBoundingClientRect(),
+        });
+      });
+    }
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
+    const safeIconUrl =
+      iconUrl &&
+      (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+        ? iconUrl
+        : undefined;
+    let customContent: ReactNode | null | undefined;
+    try {
+      customContent = this.tag.renderContent?.({
+        tag: publicTag,
+        placement: 'composer',
+        readonly: false,
+      });
+    } catch (error) {
+      console.warn('[WebShell] inline tag renderContent failed', error);
+    }
 
-    if (iconUrl) {
+    let renderedCustomContent = false;
+    if (customContent !== undefined && customContent !== null) {
+      const content = document.createElement('span');
+      content.style.cssText =
+        'display:inline-flex;align-items:center;min-width:0;max-width:100%;';
+      try {
+        this.contentRoot = createRoot(content);
+        this.contentRoot.render(customContent);
+        chip.appendChild(content);
+        renderedCustomContent = true;
+      } catch (error) {
+        this.contentRoot?.unmount();
+        this.contentRoot = null;
+        console.warn('[WebShell] inline tag renderContent failed', error);
+      }
+    }
+
+    if (!renderedCustomContent && safeIconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
-      icon.style.setProperty('--composer-tag-icon-url', cssUrlValue(iconUrl));
+      icon.style.setProperty(
+        '--composer-tag-icon-url',
+        cssUrlValue(safeIconUrl),
+      );
       chip.appendChild(icon);
     }
 
+    if (!renderedCustomContent) {
+      this.appendDefaultContent(chip, tagLabel, tagValue);
+    }
+
+    if (this.tag.tooltip !== undefined && this.tag.tooltip !== null) {
+      this.appendTooltip(chip, this.tag.tooltip);
+    }
+
+    if (this.tag.removable !== false) {
+      this.appendRemoveButton(chip, view);
+    }
+
+    return chip;
+  }
+
+  private appendDefaultContent(
+    chip: HTMLElement,
+    tagLabel: string,
+    tagValue: string,
+  ) {
     if (tagLabel) {
       const label = document.createElement('span');
       label.style.cssText =
@@ -591,49 +749,96 @@ class ComposerTagWidget extends WidgetType {
       fallback.textContent = this.tag.id;
       chip.appendChild(fallback);
     }
+  }
 
-    if (this.tag.removable !== false) {
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.setAttribute(
-        'aria-label',
-        `Remove ${getComposerTagDisplay(this.tag)}`,
-      );
-      remove.style.cssText =
-        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--muted-foreground);font:inherit;line-height:22px;cursor:pointer;';
-      remove.textContent = '×';
-      remove.addEventListener('mousedown', (event) => event.preventDefault());
-      remove.addEventListener('click', (event) => {
-        event.stopPropagation();
-        const changes: Array<{ from: number; to: number; insert: string }> = [];
-        view.state
-          .field(inlineComposerTagField)
-          .between(0, view.state.doc.length, (from, to, value) => {
-            const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-            if (tag?.id === this.tag.id && tag.removable !== false) {
-              changes.push({ from, to, insert: '' });
-            }
-          });
-        if (changes.length === 0) return;
-        view.dispatch({
-          changes,
-          effects: removeInlineTagEffect.of({
-            predicate: (tag) => tag.id === this.tag.id,
-          }),
-          scrollIntoView: true,
-        });
-        view.focus();
-      });
-      remove.addEventListener('mouseenter', () => {
-        remove.style.color = 'var(--error-color)';
-      });
-      remove.addEventListener('mouseleave', () => {
-        remove.style.color = 'var(--muted-foreground)';
-      });
-      chip.appendChild(remove);
+  private appendTooltip(chip: HTMLElement, tooltip: ReactNode) {
+    const tooltipElement = document.createElement('span');
+    tooltipElement.setAttribute('role', 'tooltip');
+    tooltipElement.style.cssText =
+      'position:absolute;z-index:calc(var(--web-shell-tooltip-z-index,1000) + 1);top:calc(100% + 6px);left:0;display:none;min-width:160px;max-width:min(320px,80vw);padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--background);box-shadow:0 8px 24px rgba(0,0,0,0.18);color:var(--foreground);font-family:var(--font-sans,system-ui,sans-serif);font-size:12px;line-height:1.5;white-space:normal;';
+    try {
+      this.tooltipRoot = createRoot(tooltipElement);
+      this.tooltipRoot.render(tooltip);
+      chip.appendChild(tooltipElement);
+      tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
+      chip.setAttribute('aria-describedby', tooltipElement.id);
+    } catch (error) {
+      this.tooltipRoot?.unmount();
+      this.tooltipRoot = null;
+      if (this.tag.tooltipText) {
+        chip.title = this.tag.tooltipText;
+      }
+      console.warn('[WebShell] inline tag tooltip render failed', error);
+      return;
     }
+    const show = () => {
+      tooltipElement.style.display = 'block';
+    };
+    const hide = () => {
+      tooltipElement.style.display = 'none';
+    };
+    chip.addEventListener('mouseenter', show);
+    chip.addEventListener('mouseleave', hide);
+    chip.addEventListener('focusin', show);
+    chip.addEventListener('focusout', hide);
+  }
 
-    return chip;
+  private appendRemoveButton(chip: HTMLElement, view: EditorView) {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.setAttribute(
+      'aria-label',
+      `Remove ${getComposerTagDisplay(this.tag)}`,
+    );
+    remove.style.cssText =
+      'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--muted-foreground);font:inherit;line-height:22px;cursor:pointer;';
+    remove.textContent = '×';
+    remove.addEventListener('mousedown', (event) => event.preventDefault());
+    remove.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.stopPropagation();
+        return;
+      }
+      if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+      event.preventDefault();
+      event.stopPropagation();
+      remove.click();
+    });
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const changes: Array<{ from: number; to: number; insert: string }> = [];
+      view.state
+        .field(inlineComposerTagField)
+        .between(0, view.state.doc.length, (from, to, value) => {
+          const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+          if (tag?.id === this.tag.id && tag.removable !== false) {
+            changes.push({ from, to, insert: '' });
+          }
+        });
+      if (changes.length === 0) return;
+      view.dispatch({
+        changes: normalizeInlineTagRemovalChanges(view, changes),
+        effects: removeInlineTagEffect.of({
+          predicate: (tag) => tag.id === this.tag.id,
+        }),
+        scrollIntoView: true,
+      });
+      view.focus();
+    });
+    remove.addEventListener('mouseenter', () => {
+      remove.style.color = 'var(--error-color)';
+    });
+    remove.addEventListener('mouseleave', () => {
+      remove.style.color = 'var(--muted-foreground)';
+    });
+    chip.appendChild(remove);
+  }
+
+  destroy() {
+    this.contentRoot?.unmount();
+    this.tooltipRoot?.unmount();
+    this.contentRoot = null;
+    this.tooltipRoot = null;
   }
 
   ignoreEvent(): boolean {
@@ -681,13 +886,42 @@ const inlineComposerTagField = StateField.define<DecorationSet>({
 
 export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   const tags: WebShellComposerTag[] = [];
+  const inlineTags = view.state.field(inlineComposerTagField, false);
+  inlineTags?.between(0, view.state.doc.length, (_from, _to, value) => {
+    const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+    if (tag) tags.push(toPublicComposerTag(tag));
+  });
+  return tags;
+}
+
+function hasInlineComposerTags(view: EditorView): boolean {
+  const tags = view.state.field(inlineComposerTagField, false);
+  if (!tags) return false;
+  let hasTags = false;
+  tags.between(0, view.state.doc.length, () => {
+    hasTags = true;
+    return false;
+  });
+  return hasTags;
+}
+
+function getInlineComposerTagPlacements(
+  view: EditorView,
+): InlineTagPlacement[] {
+  const placements: InlineTagPlacement[] = [];
   view.state
     .field(inlineComposerTagField)
-    .between(0, view.state.doc.length, (_from, _to, value) => {
+    .between(0, view.state.doc.length, (from, to, value) => {
       const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-      if (tag) tags.push(toPublicComposerTag(tag));
+      if (tag) {
+        placements.push({
+          start: from,
+          end: to,
+          tag: toPublicComposerTag(tag),
+        });
+      }
     });
-  return tags;
+  return placements;
 }
 
 // ---- EditorHandle type (shared) ----
@@ -696,9 +930,14 @@ export interface EditorHandle extends WebShellComposerApi {
   clearText(): void;
   focus(): void;
   getText(): string;
+  hasAttachments(): boolean;
   hasInput(): boolean;
   retryLast(): void;
   restoreImages(images: readonly PromptImage[]): void;
+  restoreFiles(files: readonly PromptFile[]): void;
+  restoreInputAnnotations?(
+    inputAnnotations: readonly DaemonInputAnnotation[],
+  ): void;
 }
 
 // ---- Compartments (shared) ----
@@ -724,6 +963,55 @@ function getFollowupRemainder(
   if (!completion || text.length === 0) return null;
   const remainder = completion.slice(text.length);
   return remainder.length > 0 ? remainder : null;
+}
+
+function mapRestoredInputAnnotationsAfterTextChange(
+  annotations: readonly DaemonInputAnnotation[],
+  previousText: string,
+  nextText: string,
+): DaemonInputAnnotation[] {
+  if (previousText === nextText) return [...annotations];
+  if (previousText && nextText.endsWith(`\n${previousText}`)) {
+    const offset = nextText.length - previousText.length;
+    return annotations.map((annotation) => ({
+      ...annotation,
+      start: annotation.start + offset,
+      end: annotation.end + offset,
+    }));
+  }
+
+  let from = 0;
+  while (
+    from < previousText.length &&
+    from < nextText.length &&
+    previousText[from] === nextText[from]
+  ) {
+    from += 1;
+  }
+  let previousTo = previousText.length;
+  let nextTo = nextText.length;
+  while (
+    previousTo > from &&
+    nextTo > from &&
+    previousText[previousTo - 1] === nextText[nextTo - 1]
+  ) {
+    previousTo -= 1;
+    nextTo -= 1;
+  }
+  const delta = nextTo - previousTo;
+
+  return annotations.flatMap((annotation) => {
+    let start = annotation.start;
+    let end = annotation.end;
+    if (previousTo <= start) {
+      start += delta;
+      end += delta;
+    } else if (from < end) {
+      return [];
+    }
+    if (nextText.slice(start, end) !== annotation.text) return [];
+    return [{ ...annotation, start, end }];
+  });
 }
 
 class FollowupGhostWidget extends WidgetType {
@@ -792,19 +1080,36 @@ function createFollowupGhostExtension(suggestion: string | null) {
 
 export type ComposerSubmitCommit = () => void;
 
+export interface ComposerSubmitMetadata {
+  inputAnnotations?: DaemonInputAnnotation[];
+}
+
 export interface UseComposerCoreOptions {
   onSubmit: (
     text: string,
     images?: PromptImage[],
+    files?: PromptFile[],
     commitAccepted?: ComposerSubmitCommit,
+    metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
+  cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /**
+   * Whether the composer may react to FILE drags at all (drag highlight and
+   * drop ingestion on the inline image/text lane). `false` leaves paste
+   * working but makes file drag-and-drop inert, matching a host that
+   * force-disables file upload via `fileUploadEnabled={false}`. Defaults to
+   * `true`.
+   */
+  fileDragEnabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
@@ -814,13 +1119,89 @@ export interface UseComposerCoreOptions {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionId?: string;
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
+  atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
+  attachmentsEnabled?: boolean;
+  workspaceFeaturesEnabled?: boolean;
   composerTagIcons?: WebShellComposerTagIconMap;
+  parseUserMessageContent?: UserMessageContentParser;
+  renderComposerTag?: ComposerTagRenderer;
+  renderComposerTagTooltip?: ComposerTagRenderer;
+  onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /**
+   * Invoked when the user selects the @ panel's "Upload file" item, with the
+   * directory currently being browsed and a callback that re-inserts the
+   * removed mention query when the picker closes without an upload. The
+   * composer opens a file picker and uploads into that directory. When
+   * absent, the upload item is hidden.
+   */
+  onFileUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
+  /**
+   * True while a workspace file upload is pending or in flight. Gates
+   * submit exactly like the image lane's pending batches, so a prompt cannot
+   * go out before the upload's `@file` reference has been inserted.
+   */
+  workspaceUploadBusy?: boolean;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
+}
+
+const SESSION_DRAFT_STORAGE_PREFIX = 'qwen-web-shell-session-draft:';
+const PENDING_TASK_DRAFT_STORAGE_PREFIX = 'qwen-web-shell-pending-task-draft:';
+const COMPOSER_DRAFT_SAVE_DELAY_MS = 2000;
+
+function getComposerDraftStorageKey(
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+): string | undefined {
+  if (sessionId) {
+    return `${SESSION_DRAFT_STORAGE_PREFIX}${encodeURIComponent(sessionId)}`;
+  }
+  if (workspaceCwd) {
+    return `${PENDING_TASK_DRAFT_STORAGE_PREFIX}${encodeURIComponent(workspaceCwd)}`;
+  }
+  return undefined;
+}
+
+function loadComposerDraft(storageKey: string | undefined): string | null {
+  if (!storageKey) return null;
+  try {
+    return localStorage.getItem(storageKey);
+  } catch {
+    return null;
+  }
+}
+
+function saveComposerDraft(storageKey: string | undefined, text: string): void {
+  if (!storageKey) return;
+  try {
+    if (text) {
+      localStorage.setItem(storageKey, text);
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Ignore storage failures in private browsing or restricted contexts.
+  }
+}
+
+function clearComposerDraftIfMatches(
+  storageKey: string | undefined,
+  text: string,
+): void {
+  if (!storageKey) return;
+  if (loadComposerDraft(storageKey) === text) {
+    saveComposerDraft(storageKey, '');
+  }
 }
 
 export interface SearchState {
@@ -833,6 +1214,7 @@ export interface SearchState {
   openHistorySearch: () => void;
   closeSearch: (restoreDraft: boolean, keepFocus?: boolean) => void;
   submitSearchMatch: (match: string) => void;
+  restoreSearchMatch?: (match: string) => void;
   handleSearchKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   handleSearchInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
   handleSearchCompositionEnd: (
@@ -842,6 +1224,35 @@ export interface SearchState {
 
 export interface SlashMenuState extends SlashCommandCompletionResult {
   selectedIndex: number;
+}
+
+function shallowEqualSlashMenu(
+  current: SlashMenuState | null,
+  next: SlashMenuState | null,
+): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  const keys = Object.keys(current) as Array<keyof SlashMenuState>;
+  return (
+    keys.length === Object.keys(next).length &&
+    keys.every((key) => {
+      if (key !== 'items') return Object.is(current[key], next[key]);
+      return (
+        current.items.length === next.items.length &&
+        current.items.every((item, index) => {
+          const nextItem = next.items[index];
+          if (!nextItem) return false;
+          const itemKeys = Object.keys(item) as Array<keyof typeof item>;
+          return (
+            itemKeys.length === Object.keys(nextItem).length &&
+            itemKeys.every((itemKey) =>
+              Object.is(item[itemKey], nextItem[itemKey]),
+            )
+          );
+        })
+      );
+    })
+  );
 }
 
 type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
@@ -885,18 +1296,68 @@ function handleMultilineHistoryBoundary(
   return 'history';
 }
 
+/**
+ * Editor backend for touch devices: instead of a CodeMirror EditorView, the
+ * composer renders a plain controlled `<textarea>` wired to these fields.
+ * Mobile virtual keyboards and IMEs interact poorly with CodeMirror's
+ * contenteditable (see #5958), while a native textarea gets the platform's
+ * full input stack for free. Null on desktop.
+ */
+export interface MobileComposerBackend {
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  value: string;
+  onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
+  onBlur: () => void;
+  placeholder: string;
+}
+
+export interface ComposerImageTransferHandlers {
+  onPasteCapture: ClipboardEventHandler<HTMLDivElement>;
+  onDragEnterCapture: DragEventHandler<HTMLDivElement>;
+  onDragOverCapture: DragEventHandler<HTMLDivElement>;
+  onDragLeaveCapture: DragEventHandler<HTMLDivElement>;
+  onDropCapture: DragEventHandler<HTMLDivElement>;
+}
+
+interface ImageIngestionLane {
+  generation: number;
+  tail: Promise<void>;
+  pendingBatches: number;
+  activeReaders: Set<FileReader>;
+}
+
+function createImageIngestionLane(generation: number): ImageIngestionLane {
+  return {
+    generation,
+    tail: Promise.resolve(),
+    pendingBatches: 0,
+    activeReaders: new Set(),
+  };
+}
+
 export interface UseComposerCoreReturn {
   containerRef: React.RefObject<HTMLDivElement | null>;
   viewRef: React.RefObject<EditorView | null>;
+  workspaceActionsRef: React.RefObject<AtMentionWorkspaceActions | undefined>;
+  mobileComposer: MobileComposerBackend | null;
   focus: () => void;
   submitText: () => void;
   clearText: () => void;
   getText: () => string;
   hasInput: () => boolean;
+  hasAttachments: boolean;
   hasContent: boolean;
+  canSubmit: boolean;
+  pendingImageBatchCount: number;
+  imageDragActive: boolean;
+  clearImageDragState: () => void;
+  ingestFiles: (files: readonly File[]) => boolean;
+  imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
   removeImage: (index: number) => void;
+  pastedFiles: PromptFile[];
+  removeFile: (index: number) => void;
   composerTags: WebShellComposerTag[];
   removeTopTag: (id: string) => void;
   addTags: (
@@ -924,9 +1385,10 @@ export interface UseComposerCoreReturn {
   onAcceptFollowup: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
   slashMenu: SlashMenuState | null;
+  openSlashMenu: () => boolean;
   closeSlashMenu: () => void;
   selectSlashCompletion: (index: number) => boolean;
-  acceptSlashCompletion: (index?: number) => boolean;
+  acceptSlashCompletion: (index?: number, submit?: boolean) => boolean;
   atMenu: AtMentionMenuState | null;
   closeAtMenu: () => void;
   selectAtCompletion: (index: number) => boolean;
@@ -934,6 +1396,7 @@ export interface UseComposerCoreReturn {
   enterAtCategory: (index?: number) => boolean;
   backAtCategories: () => false | 'items' | 'categories';
   updateAtSearch: (query: string) => boolean;
+  selectAtTab: (tabId: string) => boolean;
 }
 
 export function useComposerCore(
@@ -941,13 +1404,17 @@ export function useComposerCore(
 ): UseComposerCoreReturn {
   const {
     onSubmit,
+    onInputTextChange,
     onCycleMode,
+    cycleModeOnTab = false,
     onToggleShortcuts,
     disabled = false,
+    fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
     skills = [],
     slashCommandCategoryOrder,
+    autoSubmitSlashCommands = false,
     queuedMessages = [],
     onPopQueuedMessages,
     currentMode = 'default',
@@ -956,26 +1423,126 @@ export function useComposerCore(
     followupState,
     onAcceptFollowup,
     onDismissFollowup,
+    sessionId,
     sessionName,
     composerInput,
     composerInputVersion,
+    builtinAtProviders,
     atProviders,
+    atWorkspaceCwd,
+    composerScopeKey,
+    disableLegacyHistoryFallback = false,
+    attachmentsEnabled = true,
+    workspaceFeaturesEnabled = true,
     composerTagIcons,
+    parseUserMessageContent,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    onComposerTagClick,
+    onFileTagClick,
+    onImageIngestionNotice,
+    onFileUploadRequest,
+    workspaceUploadBusy = false,
     editorTheme,
   } = options;
 
   const workspace = useOptionalWorkspace();
   const { language, t } = useI18n();
+  const portalRoot = useWebShellPortalRoot();
+  const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
+  const promptHistoryStorageKey = getPromptHistoryStorageKey(storageScopeKey);
+  const legacyPromptHistoryStorageKey = getPromptHistoryStorageKey();
+  const promptHistoryFallbackStorageKey =
+    disableLegacyHistoryFallback ||
+    promptHistoryStorageKey === legacyPromptHistoryStorageKey
+      ? undefined
+      : legacyPromptHistoryStorageKey;
+  const composerDraftStorageKey = getComposerDraftStorageKey(
+    sessionId,
+    storageScopeKey,
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  // Mobile textarea backend (#5958). When active, no EditorView is ever
+  // created: ChatEditor renders a plain controlled <textarea> instead, and
+  // the imperative methods below branch on `isTouchComposer`. The draft is
+  // mirrored into a ref so submit/getText read synchronously.
+  const isTouchComposer = useIsTouchComposer();
+  const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const mobileMaxHeightRef = useRef<number | null>(null);
+  const [mobileText, setMobileTextState] = useState(() =>
+    isTouchComposer ? (loadComposerDraft(composerDraftStorageKey) ?? '') : '',
+  );
+  const mobileTextRef = useRef(mobileText);
+  const mobileTextVersionRef = useRef(0);
+  const restoredInputAnnotationsRef = useRef<DaemonInputAnnotation[]>([]);
+  const skipNextRestoredAnnotationMappingRef = useRef(false);
+  const draftIdentityRef = useRef({
+    sessionId,
+    workspaceCwd: storageScopeKey,
+    storageKey: composerDraftStorageKey,
+  });
+  const unscopedDraftEditedRef = useRef(false);
+  const saveCurrentDraftRef = useRef<() => void>(() => undefined);
+  const scheduleDraftSaveRef = useRef<() => void>(() => undefined);
+  const composerIdentityRef = useRef({
+    sessionId,
+    promptHistoryStorageKey,
+    promptHistoryFallbackStorageKey,
+    draftStorageKey: composerDraftStorageKey,
+  });
+  composerIdentityRef.current = {
+    sessionId,
+    promptHistoryStorageKey,
+    promptHistoryFallbackStorageKey,
+    draftStorageKey: composerDraftStorageKey,
+  };
+  const tooltipPortalRef = useRef<HTMLDivElement | null>(null);
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+  const onInputTextChangeRef = useRef(onInputTextChange);
+  onInputTextChangeRef.current = onInputTextChange;
+  // Mirrors the CodeMirror updateListener contract: every draft change —
+  // typing or programmatic (setText, clear, history restore, post-submit
+  // clear) — notifies onInputTextChange, so parent trackers never go stale.
+  const setMobileText = useCallback((text: string) => {
+    restoredInputAnnotationsRef.current =
+      mapRestoredInputAnnotationsAfterTextChange(
+        restoredInputAnnotationsRef.current,
+        mobileTextRef.current,
+        text,
+      );
+    mobileTextVersionRef.current += 1;
+    mobileTextRef.current = text;
+    setMobileTextState(text);
+    if (draftIdentityRef.current.storageKey === undefined) {
+      unscopedDraftEditedRef.current = true;
+    }
+    if (!historyBrowseActiveRef.current && !searchModeRef.current) {
+      scheduleDraftSaveRef.current();
+    }
+    onInputTextChangeRef.current?.(text);
+  }, []);
+  useEffect(() => {
+    if (isTouchComposer && mobileTextRef.current) {
+      onInputTextChangeRef.current?.(mobileTextRef.current);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
+  const cycleModeOnTabRef = useRef(cycleModeOnTab);
+  cycleModeOnTabRef.current = cycleModeOnTab;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const fileDragEnabledRef = useRef(fileDragEnabled);
+  fileDragEnabledRef.current = fileDragEnabled;
+  const attachmentsEnabledRef = useRef(attachmentsEnabled);
+  attachmentsEnabledRef.current = attachmentsEnabled;
+  const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
+  workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
@@ -994,21 +1561,106 @@ export function useComposerCore(
   onAcceptFollowupRef.current = onAcceptFollowup;
   const onDismissFollowupRef = useRef(onDismissFollowup);
   onDismissFollowupRef.current = onDismissFollowup;
+  const onImageIngestionNoticeRef = useRef(onImageIngestionNotice);
+  onImageIngestionNoticeRef.current = onImageIngestionNotice;
   const onFocusFooterRef = useRef(onFocusFooter);
   onFocusFooterRef.current = onFocusFooter;
   const languageRef = useRef(language);
   languageRef.current = language;
-  const workspaceActionsRef = useRef(workspace?.actions);
-  workspaceActionsRef.current = workspace?.actions;
+  const workspaceActionsRef = useRef<AtMentionWorkspaceActions | undefined>(
+    undefined,
+  );
+  if (!workspaceFeaturesEnabled) {
+    workspaceActionsRef.current = undefined;
+  } else if (workspace && atWorkspaceCwd) {
+    const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
+    workspaceActionsRef.current = {
+      ...workspace.actions,
+      async globWorkspace(pattern, options) {
+        options?.signal?.throwIfAborted();
+        const result = (await client.glob(pattern, {
+          maxResults: options?.maxResults,
+          signal: options?.signal,
+        })) as { matches?: unknown[] };
+        options?.signal?.throwIfAborted();
+        const matches = Array.isArray(result.matches)
+          ? result.matches.filter(
+              (match): match is string => typeof match === 'string',
+            )
+          : [];
+        return { matches };
+      },
+      async listDirectory(dirPath, options) {
+        if (options?.signal?.aborted) {
+          return { kind: 'list', path: dirPath, entries: [], truncated: false };
+        }
+        const result = (await client.dirList(dirPath)) as {
+          kind: 'list';
+          path: string;
+          entries: Array<{
+            name: string;
+            kind: 'file' | 'directory' | 'symlink' | 'other';
+            ignored: boolean;
+          }>;
+          truncated: boolean;
+        };
+        if (options?.signal?.aborted) {
+          return { kind: 'list', path: dirPath, entries: [], truncated: false };
+        }
+        return result;
+      },
+    };
+  } else {
+    workspaceActionsRef.current = workspace?.actions;
+  }
   const composerTagIconsRef = useRef(composerTagIcons);
   composerTagIconsRef.current = composerTagIcons;
+  const parseUserMessageContentRef = useRef(parseUserMessageContent);
+  parseUserMessageContentRef.current = parseUserMessageContent;
+  const renderComposerTagRef = useRef(renderComposerTag);
+  renderComposerTagRef.current = renderComposerTag;
+  const renderComposerTagTooltipRef = useRef(renderComposerTagTooltip);
+  renderComposerTagTooltipRef.current = renderComposerTagTooltip;
+  const onComposerTagClickRef = useRef(onComposerTagClick);
+  onComposerTagClickRef.current = onComposerTagClick;
+  const onFileTagClickRef = useRef(onFileTagClick);
+  onFileTagClickRef.current = onFileTagClick;
   const resolveComposerTagIcon = useCallback(
     (tag: WebShellComposerTag): InlineComposerTag => {
-      const iconUrl = getComposerTagIconUrl(
-        tag.kind,
-        composerTagIconsRef.current,
-      );
-      return iconUrl ? { ...tag, iconUrl } : tag;
+      const iconUrl =
+        tag.icon ??
+        getComposerTagIconUrl(tag.kind, composerTagIconsRef.current);
+      const info = {
+        tag,
+        placement: 'composer' as const,
+        readonly: false,
+      };
+      let tooltip: ReactNode | null | undefined;
+      try {
+        tooltip = renderComposerTagTooltipRef.current?.(info);
+      } catch (error) {
+        console.warn('[WebShell] inline tag tooltip render failed', error);
+      }
+      const tooltipText =
+        typeof tooltip === 'string' || typeof tooltip === 'number'
+          ? String(tooltip)
+          : undefined;
+      const onClick =
+        tag.kind === 'file'
+          ? isPreviewableFileComposerTag(tag)
+            ? (onFileTagClickRef.current ?? onComposerTagClickRef.current)
+            : onComposerTagClickRef.current
+          : onComposerTagClickRef.current;
+      return {
+        ...tag,
+        ...(iconUrl ? { iconUrl } : {}),
+        ...(renderComposerTagRef.current
+          ? { renderContent: renderComposerTagRef.current }
+          : {}),
+        ...(tooltip !== undefined && tooltip !== null ? { tooltip } : {}),
+        ...(tooltipText ? { tooltipText } : {}),
+        ...(onClick ? { onClick } : {}),
+      };
     },
     [],
   );
@@ -1020,7 +1672,10 @@ export function useComposerCore(
     disabledRef,
     shellModeRef,
     workspaceActionsRef,
+    workspaceKey: atWorkspaceCwd,
+    builtinProviders: builtinAtProviders,
     providers: atProviders,
+    onUploadRequest: onFileUploadRequest,
     createInlineTagEffect: (range) =>
       addInlineTagEffect.of({
         ...range,
@@ -1049,7 +1704,13 @@ export function useComposerCore(
       });
     if (effects.length === 1) return;
     view.dispatch({ effects });
-  }, [composerTagIcons, resolveComposerTagIcon]);
+  }, [
+    composerTagIcons,
+    onComposerTagClick,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    resolveComposerTagIcon,
+  ]);
 
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
@@ -1062,23 +1723,391 @@ export function useComposerCore(
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
+  const searchModeRef = useRef(searchMode);
+  searchModeRef.current = searchMode;
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchUiRef = useRef<HTMLDivElement>(null);
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
-  const pendingPastesRef = useRef<Map<string, string>>(new Map());
-  const nextPasteIdRef = useRef(1);
+  const [pastedFiles, setPastedFiles] = useState<PromptFile[]>([]);
+  const pastedFilesRef = useRef<PromptFile[]>([]);
+  const [pendingImageBatchCount, setPendingImageBatchCount] = useState(0);
+  const [imageDragActive, setImageDragActive] = useState(false);
+  const imageDragDepthRef = useRef(0);
+  const imageIngestionLaneRef = useRef<ImageIngestionLane>(
+    createImageIngestionLane(0),
+  );
+  const clearImageDragState = useCallback(() => {
+    imageDragDepthRef.current = 0;
+    setImageDragActive(false);
+  }, []);
+  const resetImageIngestion = useCallback((updateState = true) => {
+    const previousLane = imageIngestionLaneRef.current;
+    imageIngestionLaneRef.current = createImageIngestionLane(
+      previousLane.generation + 1,
+    );
+    pastedImagesRef.current = [];
+    pastedFilesRef.current = [];
+    for (const reader of previousLane.activeReaders) {
+      reader.abort();
+    }
+    previousLane.activeReaders.clear();
+    imageDragDepthRef.current = 0;
+    if (updateState) {
+      setPastedImages([]);
+      setPastedFiles([]);
+      setPendingImageBatchCount(0);
+      setImageDragActive(false);
+    }
+  }, []);
+  const emitImageIngestionNotice = useCallback(
+    (tone: 'warning' | 'error', message: string) => {
+      const handler = onImageIngestionNoticeRef.current;
+      if (handler) {
+        try {
+          handler(tone, message);
+        } catch (error) {
+          console.error('[WebShell] image ingestion notice failed', error);
+        }
+      } else if (tone === 'error') {
+        console.error(message);
+      } else {
+        console.warn(message);
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    if (attachmentsEnabled) return;
+    const hadAttachments =
+      pastedImagesRef.current.length > 0 || pastedFilesRef.current.length > 0;
+    resetImageIngestion();
+    if (hadAttachments) {
+      emitImageIngestionNotice('warning', t('composerAdd.file.attachDisabled'));
+    }
+  }, [attachmentsEnabled, emitImageIngestionNotice, resetImageIngestion, t]);
+  const enqueueExtractedTransfer = useCallback(
+    (transfer: ExtractedFileTransfer) => {
+      if (!transfer.claimed) return false;
+      if (!attachmentsEnabledRef.current) {
+        emitImageIngestionNotice(
+          'warning',
+          tRef.current('composerAdd.file.attachDisabled'),
+        );
+        return true;
+      }
+      if (disabledRef.current) return true;
+
+      const lane = imageIngestionLaneRef.current;
+      lane.pendingBatches += 1;
+      setPendingImageBatchCount(lane.pendingBatches);
+      lane.tail = lane.tail
+        .then(async () => {
+          if (imageIngestionLaneRef.current !== lane) return;
+          const readerLifecycle = {
+            onReaderCreated: (reader: FileReader) =>
+              lane.activeReaders.add(reader),
+            onReaderSettled: (reader: FileReader) =>
+              lane.activeReaders.delete(reader),
+          };
+          const imageResult = await readImageTransfer(
+            transfer.imageCandidates,
+            {
+              ...readerLifecycle,
+              maxBytes: MAX_IMAGE_ATTACHMENT_DATA_BYTES,
+            },
+          );
+          if (imageIngestionLaneRef.current !== lane) return;
+          const fileResult = await readFileTransfer(transfer.fileCandidates, {
+            maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
+          });
+          if (imageIngestionLaneRef.current !== lane) return;
+          if (imageResult.accepted.length > 0) {
+            const next = [...pastedImagesRef.current, ...imageResult.accepted];
+            pastedImagesRef.current = next;
+            setPastedImages(next);
+          }
+          if (fileResult.accepted.length > 0) {
+            const taken = new Set(
+              pastedFilesRef.current.map((file) => file.name),
+            );
+            const named = fileResult.accepted.map((file) => {
+              const name = dedupeAttachmentName(
+                sanitizeAttachmentName(file.name),
+                taken,
+              );
+              taken.add(name);
+              return { ...file, name };
+            });
+            const next = [...pastedFilesRef.current, ...named];
+            pastedFilesRef.current = next;
+            setPastedFiles(next);
+          }
+          const rejected = [
+            ...transfer.rejected,
+            ...imageResult.rejected,
+            ...fileResult.rejected,
+          ];
+          const skipped = rejected.filter(
+            ({ reason }) => reason !== 'read-failed' && reason !== 'too-large',
+          ).length;
+          const tooLarge = rejected.filter(
+            ({ reason }) => reason === 'too-large',
+          ).length;
+          const failed = rejected.filter(
+            ({ reason }) => reason === 'read-failed',
+          ).length;
+          if (skipped > 0) {
+            emitImageIngestionNotice(
+              'warning',
+              tRef.current('editor.imagesSkipped', { count: skipped }),
+            );
+          }
+          if (failed > 0) {
+            emitImageIngestionNotice(
+              'error',
+              tRef.current('editor.imagesReadFailed', { count: failed }),
+            );
+          }
+          if (tooLarge > 0) {
+            emitImageIngestionNotice(
+              'warning',
+              tRef.current('editor.imagesTooLarge', { count: tooLarge }),
+            );
+          }
+        })
+        .catch(() => {
+          if (imageIngestionLaneRef.current === lane) {
+            emitImageIngestionNotice(
+              'error',
+              tRef.current('editor.imagesReadFailed', { count: 1 }),
+            );
+          }
+        })
+        .then(() => {
+          if (imageIngestionLaneRef.current !== lane) return;
+          lane.pendingBatches = Math.max(0, lane.pendingBatches - 1);
+          setPendingImageBatchCount(lane.pendingBatches);
+        });
+      return true;
+    },
+    [emitImageIngestionNotice],
+  );
+  const enqueueImageTransfer = useCallback(
+    (dataTransfer: DataTransfer, source: 'paste' | 'drop') =>
+      enqueueExtractedTransfer(extractFileTransfer(dataTransfer, source)),
+    [enqueueExtractedTransfer],
+  );
+  const ingestFiles = useCallback(
+    (files: readonly File[]) => enqueueExtractedTransfer(extractFiles(files)),
+    [enqueueExtractedTransfer],
+  );
+  const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
+    () => ({
+      onPasteCapture: (event) => {
+        if (enqueueImageTransfer(event.clipboardData, 'paste')) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      },
+      onDragEnterCapture: (event) => {
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
+        event.preventDefault();
+        imageDragDepthRef.current += 1;
+        if (!disabledRef.current) setImageDragActive(true);
+      },
+      onDragOverCapture: (event) => {
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      },
+      onDragLeaveCapture: (event) => {
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
+        imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
+        const nextTarget = event.relatedTarget;
+        if (
+          !(nextTarget instanceof Node) ||
+          !event.currentTarget.contains(nextTarget)
+        ) {
+          clearImageDragState();
+        }
+      },
+      onDropCapture: (event) => {
+        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (!fileDragEnabledRef.current) {
+          // File drags are inert, but still cancel the drop so the browser
+          // cannot navigate to the file. Capture-phase preventDefault does
+          // not stop propagation, so a host handler can still react.
+          event.preventDefault();
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        clearImageDragState();
+        if (disabledRef.current) return;
+        enqueueImageTransfer(event.dataTransfer, 'drop');
+        if (isTouchComposer) {
+          mobileTextareaRef.current?.focus();
+        } else {
+          viewRef.current?.focus();
+        }
+      },
+    }),
+    [clearImageDragState, enqueueImageTransfer, isTouchComposer],
+  );
+  useEffect(() => {
+    if (!imageDragActive) return;
+    window.addEventListener('dragend', clearImageDragState);
+    window.addEventListener('blur', clearImageDragState);
+    return () => {
+      window.removeEventListener('dragend', clearImageDragState);
+      window.removeEventListener('blur', clearImageDragState);
+    };
+  }, [clearImageDragState, imageDragActive]);
+  useEffect(() => {
+    if (disabled) clearImageDragState();
+  }, [clearImageDragState, disabled]);
+  useEffect(() => {
+    // A host flipping `fileUploadEnabled` to false mid-drag gates the
+    // leave handler, so a depth already counted would never drain; clear
+    // the highlight explicitly instead of waiting for dragend/blur.
+    if (fileDragEnabled === false) clearImageDragState();
+  }, [clearImageDragState, fileDragEnabled]);
+  useEffect(
+    () => () => {
+      resetImageIngestion(false);
+    },
+    [resetImageIngestion],
+  );
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
+  const [hasInlineTags, setHasInlineTags] = useState(false);
+  const hasInlineTagsRef = useRef(false);
+  const historyDraftComposerTagsRef = useRef<WebShellComposerTag[] | null>(
+    null,
+  );
+  const rememberPromptHistoryDraftTags = useCallback(() => {
+    if (historyDraftComposerTagsRef.current !== null) return;
+    historyDraftComposerTagsRef.current = [...composerTagsRef.current];
+  }, []);
+  const restorePromptHistoryDraftTags = useCallback(() => {
+    const tags = historyDraftComposerTagsRef.current;
+    if (tags === null) return;
+    historyDraftComposerTagsRef.current = null;
+    const restoredTags = [...tags];
+    composerTagsRef.current = restoredTags;
+    setComposerTags(restoredTags);
+  }, []);
+  const clearPromptHistoryDraftTags = useCallback(() => {
+    historyDraftComposerTagsRef.current = null;
+  }, []);
+  const clearRestoredComposerTags = useCallback(() => {
+    composerTagsRef.current = [];
+    setComposerTags([]);
+  }, []);
+  const restoreRawHistoryEntry = useCallback(
+    (view: EditorView, text: string) => {
+      clearRestoredComposerTags();
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        effects: clearInlineTagsEffect.of(),
+        selection: { anchor: text.length },
+      });
+    },
+    [clearRestoredComposerTags],
+  );
+  const restorePromptHistoryEntry = useCallback(
+    (view: EditorView, text: string) => {
+      const parts = parseUserMessageContentSafely(
+        text,
+        parseUserMessageContentRef.current,
+        '[WebShell] failed to parse composer history content',
+        { requireSourcePreservation: true },
+      );
+      const hasTags = parts?.some((part) => part.type === 'tag') ?? false;
+      if (!parts || !hasTags) {
+        restoreRawHistoryEntry(view, text);
+        return;
+      }
+
+      const effects: StateEffect<unknown>[] = [clearInlineTagsEffect.of()];
+      let restoredText = '';
+      for (const part of parts) {
+        if (part.type === 'text') {
+          restoredText += part.text;
+          continue;
+        }
+        const serialized = getComposerTagSerialized(part.tag);
+        const from = restoredText.length;
+        restoredText += serialized;
+        effects.push(
+          addInlineTagEffect.of({
+            from,
+            to: restoredText.length,
+            tag: resolveComposerTagIcon(part.tag),
+          }),
+        );
+      }
+      clearRestoredComposerTags();
+      view.dispatch({
+        changes: {
+          from: 0,
+          to: view.state.doc.length,
+          insert: restoredText,
+        },
+        effects,
+        selection: { anchor: restoredText.length },
+      });
+    },
+    [clearRestoredComposerTags, resolveComposerTagIcon, restoreRawHistoryEntry],
+  );
+  const restoreHistoryEntry = useCallback(
+    (view: EditorView, text: string) => {
+      if (shellModeRef.current) {
+        restoreRawHistoryEntry(view, text);
+        return;
+      }
+      restorePromptHistoryEntry(view, text);
+    },
+    [restorePromptHistoryEntry, restoreRawHistoryEntry],
+  );
+  const restoreSelectedHistoryMatch = useCallback(
+    (text: string) => {
+      const view = viewRef.current;
+      if (!view) {
+        if (isTouchComposer) {
+          // Plain-text restore: inline tag chips are not recreated on the
+          // textarea backend.
+          setMobileText(text);
+        }
+        return;
+      }
+      restoreHistoryEntry(view, text);
+    },
+    [isTouchComposer, restoreHistoryEntry, setMobileText],
+  );
   const composerInputRef = useRef(composerInput);
   composerInputRef.current = composerInput;
   const submitTextRef = useRef<
     (
-      view: EditorView,
+      view: EditorView | null,
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
+      suppressFollowupCompletion?: boolean,
     ) => boolean
   >(() => true);
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
@@ -1093,7 +2122,73 @@ export function useComposerCore(
   // keymap handlers.
   const historyBrowseActiveRef = useRef(false);
 
+  useEffect(() => {
+    let draftSaveTimer: number | undefined;
+    let draftSaveDeadline = 0;
+    let draftDirty = false;
+    const clearDraftSaveTimer = () => {
+      if (draftSaveTimer !== undefined) {
+        window.clearTimeout(draftSaveTimer);
+        draftSaveTimer = undefined;
+      }
+    };
+    const saveCurrentDraft = (): boolean => {
+      if (historyBrowseActiveRef.current || searchModeRef.current) {
+        return false;
+      }
+      const currentView = viewRef.current;
+      const text = currentView
+        ? currentView.state.doc.toString()
+        : mobileTextRef.current;
+      saveComposerDraft(draftIdentityRef.current.storageKey, text);
+      return true;
+    };
+    const flushCurrentDraft = () => {
+      clearDraftSaveTimer();
+      draftSaveDeadline = 0;
+      if (draftDirty && saveCurrentDraft()) {
+        draftDirty = false;
+      }
+    };
+    const flushDraftAfterIdle = () => {
+      const remaining = draftSaveDeadline - Date.now();
+      if (remaining > 0) {
+        draftSaveTimer = window.setTimeout(flushDraftAfterIdle, remaining);
+        return;
+      }
+      draftSaveTimer = undefined;
+      flushCurrentDraft();
+    };
+    const scheduleDraftSave = () => {
+      draftDirty = true;
+      draftSaveDeadline = Date.now() + COMPOSER_DRAFT_SAVE_DELAY_MS;
+      if (draftSaveTimer === undefined) {
+        draftSaveTimer = window.setTimeout(
+          flushDraftAfterIdle,
+          COMPOSER_DRAFT_SAVE_DELAY_MS,
+        );
+      }
+    };
+    saveCurrentDraftRef.current = flushCurrentDraft;
+    scheduleDraftSaveRef.current = scheduleDraftSave;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushCurrentDraft();
+    };
+    const handlePageHide = () => flushCurrentDraft();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      flushCurrentDraft();
+      saveCurrentDraftRef.current = () => undefined;
+      scheduleDraftSaveRef.current = () => undefined;
+    };
+  }, []);
+
   const setSlashMenu = useCallback((next: SlashMenuState | null) => {
+    if (shallowEqualSlashMenu(slashMenuRef.current, next)) return;
     slashMenuRef.current = next;
     setSlashMenuState(next);
   }, []);
@@ -1124,6 +2219,46 @@ export function useComposerCore(
     closeAtMenuState();
   }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
 
+  const openSlashMenu = useCallback(() => {
+    const view = viewRef.current;
+    if (
+      !view ||
+      disabledRef.current ||
+      shellModeRef.current ||
+      historyBrowseActiveRef.current
+    ) {
+      return false;
+    }
+    closeAtMenu();
+    let cursor = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(cursor);
+    if (!line.text.startsWith('/')) {
+      if (view.state.doc.length > 0) return false;
+      view.dispatch({
+        changes: { from: cursor, to: cursor, insert: '/' },
+        selection: { anchor: cursor + 1 },
+        scrollIntoView: true,
+      });
+      cursor += 1;
+    }
+    const result = getSlashCommandCompletionResult(
+      view.state.doc.toString(),
+      cursor,
+      commandsRef.current,
+      skillsRef.current,
+      languageRef.current,
+      tRef.current,
+      slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+    );
+    if (!result) return false;
+    setSlashMenu({
+      ...result,
+      selectedIndex: 0,
+    });
+    view.focus();
+    return true;
+  }, [closeAtMenu, setSlashMenu]);
+
   const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
   const closeAtMenuIfOpen = useCallback(() => {
     const result = closeAtMenuIfOpenFn();
@@ -1152,19 +2287,29 @@ export function useComposerCore(
         setSlashMenu(null);
         return;
       }
-      const result = getSlashCommandCompletionResult(
-        view.state.doc.toString(),
-        selection.head,
+      const line = view.state.doc.lineAt(selection.head);
+      if (!line.text.startsWith('/')) {
+        setSlashMenu(null);
+        return;
+      }
+      const relativeResult = getSlashCommandCompletionResult(
+        line.text,
+        selection.head - line.from,
         commandsRef.current,
         skillsRef.current,
         languageRef.current,
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
       );
-      if (!result) {
+      if (!relativeResult) {
         setSlashMenu(null);
         return;
       }
+      const result = {
+        ...relativeResult,
+        from: line.from + relativeResult.from,
+        to: line.from + relativeResult.to,
+      };
       closeAtMenu();
       const currentIndex =
         preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
@@ -1210,46 +2355,72 @@ export function useComposerCore(
     [setSlashMenu],
   );
 
-  const acceptSlashCompletion = useCallback((index?: number) => {
-    const view = viewRef.current;
-    const current = slashMenuRef.current;
-    if (!view || !current) return false;
-    const item = current.items[index ?? current.selectedIndex];
-    if (!item) return false;
-    view.dispatch({
-      changes: { from: current.from, to: current.to, insert: item.apply },
-      selection: { anchor: current.from + item.apply.length },
-      scrollIntoView: true,
-    });
-    view.focus();
-    return true;
-  }, []);
+  const acceptSlashCompletion = useCallback(
+    (index?: number, submit = false) => {
+      const view = viewRef.current;
+      const current = slashMenuRef.current;
+      if (!view || !current) return false;
+      const item = current.items[index ?? current.selectedIndex];
+      if (!item) return false;
+      const commandReplacesEntireDraft =
+        current.from === 0 && current.to === view.state.doc.length;
+      view.dispatch({
+        changes: { from: current.from, to: current.to, insert: item.apply },
+        selection: { anchor: current.from + item.apply.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      if (
+        submit &&
+        autoSubmitSlashCommands &&
+        item.autoSubmit &&
+        commandReplacesEntireDraft
+      ) {
+        submitTextRef.current(view);
+      }
+      return true;
+    },
+    [autoSubmitSlashCommands],
+  );
 
   // Track whether editor has content for send button state
   const [hasContent, setHasContent] = useState(false);
+  const hasContentRef = useRef(false);
+  const updateHasContent = useCallback((next: boolean) => {
+    if (hasContentRef.current === next) return;
+    hasContentRef.current = next;
+    setHasContent(next);
+  }, []);
 
   // Update hasContent when tags or images change
   useEffect(() => {
     const view = viewRef.current;
-    const text = view?.state.doc.toString() ?? '';
+    const text = view ? view.state.doc.toString() : mobileText;
     const followupCompletion = getFollowupCompletion(
       text,
       followupState?.isVisible ? followupState.suggestion : null,
     );
-    setHasContent(
+    updateHasContent(
       text.trim().length > 0 ||
         !!followupCompletion ||
         composerTags.length > 0 ||
-        pastedImages.length > 0,
+        pastedImages.length > 0 ||
+        pastedFiles.length > 0,
     );
   }, [
     composerTags,
     pastedImages,
+    pastedFiles,
+    mobileText,
     followupState?.isVisible,
     followupState?.suggestion,
+    updateHasContent,
   ]);
 
-  const promptHistory = useInputHistory();
+  const promptHistory = useInputHistory(
+    promptHistoryStorageKey,
+    promptHistoryFallbackStorageKey,
+  );
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
 
   const {
@@ -1284,8 +2455,6 @@ export function useComposerCore(
   };
   const shellHistoryActionsRef = useRef(shellHistory);
   shellHistoryActionsRef.current = shellHistory;
-  pastedImagesRef.current = pastedImages;
-
   const getSearchMatches = useCallback((query: string) => {
     const isShellMode = shellModeRef.current;
     const history = isShellMode
@@ -1300,10 +2469,11 @@ export function useComposerCore(
   const openHistorySearch = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
-    if (!view) return;
+    if (!view && !isTouchComposer) return;
+    saveCurrentDraftRef.current();
     closeSlashMenu();
     closeAtMenu();
-    const query = view.state.doc.toString();
+    const query = view ? view.state.doc.toString() : mobileTextRef.current;
     searchDraftRef.current = query;
     setSearchMode(true);
     setSearchQuery('');
@@ -1314,7 +2484,7 @@ export function useComposerCore(
     setSearchActiveIndex(0);
     history.resetSearch();
     setTimeout(() => searchInputRef.current?.focus(), 0);
-  }, [closeAtMenu, closeSlashMenu, getSearchMatches]);
+  }, [closeAtMenu, closeSlashMenu, getSearchMatches, isTouchComposer]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
 
@@ -1335,15 +2505,19 @@ export function useComposerCore(
       ? shellHistoryActionsRef.current
       : historyActionsRef.current;
     const current = view.state.doc.toString();
+    if (!history.isNavigating()) {
+      saveCurrentDraftRef.current();
+    }
     const prev = history.navigateUp(current);
     if (prev !== null) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: prev },
-        selection: { anchor: prev.length },
-      });
+      historyBrowseActiveRef.current = true;
+      if (!shellModeRef.current) {
+        rememberPromptHistoryDraftTags();
+      }
+      restoreHistoryEntry(view, prev);
     }
     view.focus();
-  }, []);
+  }, [rememberPromptHistoryDraftTags, restoreHistoryEntry]);
 
   const navigateNextHistory = useCallback(() => {
     if (disabledRef.current) return;
@@ -1363,20 +2537,260 @@ export function useComposerCore(
       : historyActionsRef.current;
     const next = history.navigateDown();
     if (next !== null) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: next },
-        selection: { anchor: next.length },
-      });
+      const returningToPromptDraft =
+        !shellModeRef.current && !history.isNavigating();
+      historyBrowseActiveRef.current = history.isNavigating();
+      restoreHistoryEntry(view, next);
+      if (returningToPromptDraft) {
+        restorePromptHistoryDraftTags();
+      }
     }
     view.focus();
-  }, []);
+  }, [restoreHistoryEntry, restorePromptHistoryDraftTags]);
+
+  const handleMobileChange = useCallback(
+    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setMobileText(event.target.value);
+    },
+    [setMobileText],
+  );
+
+  useLayoutEffect(() => {
+    if (!isTouchComposer) return;
+    const el = mobileTextareaRef.current;
+    if (!el) return;
+    const cap = parseFloat(getComputedStyle(el).maxHeight);
+    mobileMaxHeightRef.current =
+      Number.isFinite(cap) && cap > 0 ? cap : Number.POSITIVE_INFINITY;
+  }, [isTouchComposer]);
+
+  // Auto-grow the mobile textarea with its content, capped by the CSS
+  // max-height (the cap is read from the computed style so a deployment
+  // overriding --chat-editor-input-max-height stays authoritative). Without
+  // this the rows={1} textarea would show ~1.5 lines with inner scrolling.
+  useEffect(() => {
+    if (!isTouchComposer) return;
+    const el = mobileTextareaRef.current;
+    if (!el) return;
+    if (
+      typeof CSS !== 'undefined' &&
+      CSS.supports?.('field-sizing', 'content')
+    ) {
+      el.style.height = '';
+      return;
+    }
+    el.style.height = 'auto';
+    if (el.scrollHeight > 0) {
+      const cap = mobileMaxHeightRef.current ?? Number.POSITIVE_INFINITY;
+      const next = Math.min(el.scrollHeight, cap);
+      el.style.height = `${next}px`;
+    }
+  }, [isTouchComposer, mobileText]);
+
+  // Lives in the render scope (not the editor-creation effect) so the mobile
+  // textarea backend, which never instantiates an EditorView, can reuse the
+  // exact same submit pipeline with `view === null`.
+  const submitComposerText = (
+    view: EditorView | null,
+    textOverride?: string,
+    tagsOverride?: readonly WebShellComposerTag[],
+    suppressFollowupCompletion = false,
+  ) => {
+    if (
+      disabledRef.current ||
+      imageIngestionLaneRef.current.pendingBatches > 0 ||
+      workspaceUploadBusyRef.current
+    ) {
+      return true;
+    }
+    const inlineTags =
+      tagsOverride === undefined && view
+        ? getInlineComposerTagPlacements(view)
+        : [];
+    const editorText = view ? view.state.doc.toString() : mobileTextRef.current;
+    const followup = followupStateRef.current;
+    const followupCompletion =
+      textOverride === undefined &&
+      !suppressFollowupCompletion &&
+      inlineTags.length === 0 &&
+      followup?.isVisible
+        ? getFollowupCompletion(editorText, followup.suggestion)
+        : null;
+    const sourceText = textOverride ?? followupCompletion ?? editorText;
+    const leadingTrimLength = sourceText.length - sourceText.trimStart().length;
+    const rawText = sourceText.trim();
+    const normalizedInlineTags =
+      textOverride === undefined && followupCompletion === null
+        ? inlineTags
+            .map((placement) => ({
+              ...placement,
+              start: placement.start - leadingTrimLength,
+              end: placement.end - leadingTrimLength,
+            }))
+            .filter((placement) => placement.end > 0)
+            .map((placement) => ({
+              ...placement,
+              start: Math.max(0, placement.start),
+            }))
+        : [];
+    const tags = tagsOverride ?? composerTagsRef.current;
+    const images = pastedImagesRef.current;
+    const files = pastedFilesRef.current;
+    if (
+      !attachmentsEnabledRef.current &&
+      (images.length > 0 || files.length > 0)
+    ) {
+      emitImageIngestionNotice('warning', t('composerAdd.file.attachDisabled'));
+      resetImageIngestion();
+      return true;
+    }
+    if (
+      !rawText &&
+      tags.length === 0 &&
+      inlineTags.length === 0 &&
+      images.length === 0 &&
+      files.length === 0
+    ) {
+      return true;
+    }
+    const textWithInlineTags =
+      tagsOverride === undefined
+        ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
+        : rawText;
+    const text = textWithInlineTags;
+    const prompt = buildComposerPrompt(text, tags);
+    const isShellMode = shellModeRef.current;
+    const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
+    const generatedInputAnnotations = createInputAnnotationsFromComposerTags(
+      promptText,
+      [...tags, ...normalizedInlineTags.map((placement) => placement.tag)],
+    );
+    const inputAnnotations = [...generatedInputAnnotations];
+    const annotationKeys = new Set(
+      generatedInputAnnotations.map(
+        (annotation) =>
+          `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`,
+      ),
+    );
+    for (const annotation of restoredInputAnnotationsRef.current) {
+      if (
+        annotation.start < 0 ||
+        annotation.end > promptText.length ||
+        promptText.slice(annotation.start, annotation.end) !== annotation.text
+      ) {
+        continue;
+      }
+      const key = `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`;
+      if (annotationKeys.has(key)) continue;
+      annotationKeys.add(key);
+      inputAnnotations.push(annotation);
+    }
+    inputAnnotations.sort((left, right) => left.start - right.start);
+    const submissionIdentity = { ...composerIdentityRef.current };
+    const draftTextAtSubmit = editorText;
+    const editorDocAtSubmit = view?.state.doc;
+    const mobileTextVersionAtSubmit = mobileTextVersionRef.current;
+    const composerTagsAtSubmit = composerTagsRef.current;
+    const pastedImagesAtSubmit = pastedImagesRef.current;
+    const pastedFilesAtSubmit = pastedFilesRef.current;
+    const restoredInputAnnotationsAtSubmit =
+      restoredInputAnnotationsRef.current;
+    const shellModeAtSubmit = shellModeRef.current;
+    let committed = false;
+    const commitAccepted = () => {
+      if (committed) return;
+      committed = true;
+      const currentIdentity = composerIdentityRef.current;
+      const sourceChanged =
+        viewRef.current !== view ||
+        currentIdentity.sessionId !== submissionIdentity.sessionId ||
+        currentIdentity.promptHistoryStorageKey !==
+          submissionIdentity.promptHistoryStorageKey;
+      if (sourceChanged) {
+        if (isShellMode) {
+          shellHistoryActionsRef.current.push(text);
+        } else if (
+          currentIdentity.promptHistoryStorageKey ===
+          submissionIdentity.promptHistoryStorageKey
+        ) {
+          historyActionsRef.current.push(text);
+        } else {
+          pushInputHistoryEntry(
+            submissionIdentity.promptHistoryStorageKey,
+            text,
+            submissionIdentity.promptHistoryFallbackStorageKey,
+          );
+        }
+        clearComposerDraftIfMatches(
+          submissionIdentity.draftStorageKey,
+          draftTextAtSubmit,
+        );
+        return;
+      }
+      onDismissFollowupRef.current?.();
+      if (isShellMode) {
+        shellHistoryActionsRef.current.push(text);
+        shellHistoryActionsRef.current.reset();
+      } else {
+        historyActionsRef.current.push(text);
+        historyActionsRef.current.reset();
+      }
+      const composerUnchanged =
+        (view
+          ? view.state.doc === editorDocAtSubmit
+          : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
+        composerTagsRef.current === composerTagsAtSubmit &&
+        pastedImagesRef.current === pastedImagesAtSubmit &&
+        pastedFilesRef.current === pastedFilesAtSubmit &&
+        restoredInputAnnotationsRef.current ===
+          restoredInputAnnotationsAtSubmit &&
+        shellModeRef.current === shellModeAtSubmit;
+      historyBrowseActiveRef.current = false;
+      if (!composerUnchanged) return;
+
+      saveComposerDraft(submissionIdentity.draftStorageKey, '');
+      setSlashMenu(null);
+      if (followupCompletion) {
+        onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+      }
+      onDismissFollowupRef.current?.();
+      clearPromptHistoryDraftTags();
+      setComposerTags([]);
+      pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
+      setPastedImages([]);
+      setPastedFiles([]);
+      if (view) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: '' },
+          effects: clearInlineTagsEffect.of(),
+        });
+      } else {
+        setMobileText('');
+      }
+    };
+    const accepted = onSubmitRef.current(
+      promptText,
+      images.length > 0 ? [...images] : undefined,
+      files.length > 0 ? [...files] : undefined,
+      commitAccepted,
+      inputAnnotations.length > 0 ? { inputAnnotations } : undefined,
+    );
+    if (accepted === false) return true;
+    commitAccepted();
+    return true;
+  };
+  submitTextRef.current = submitComposerText;
 
   // ---- Create CodeMirror EditorView ----
   useEffect(() => {
     if (!containerRef.current) return;
 
-    ensureTooltipStyles();
+    const tooltipParent = portalRoot ?? document.body;
+    ensureTooltipStyles(getTooltipStyleRoot(tooltipParent));
     const tooltipPortal = document.createElement('div');
+    tooltipPortalRef.current = tooltipPortal;
     tooltipPortal.setAttribute('data-web-shell-tooltip-portal', '');
     tooltipPortal.style.position = 'fixed';
     tooltipPortal.style.inset = '0';
@@ -1419,7 +2833,7 @@ export function useComposerCore(
       }
     };
     syncTheme();
-    document.body.appendChild(tooltipPortal);
+    tooltipParent.appendChild(tooltipPortal);
 
     const observer = new MutationObserver(syncTheme);
     let el: Element | null = containerRef.current;
@@ -1436,59 +2850,14 @@ export function useComposerCore(
       view: EditorView,
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
-    ) => {
-      const editorText = view.state.doc.toString();
-      const followup = followupStateRef.current;
-      const followupCompletion =
-        textOverride === undefined && followup?.isVisible
-          ? getFollowupCompletion(editorText, followup.suggestion)
-          : null;
-      const rawText = (textOverride ?? followupCompletion ?? editorText).trim();
-      const tags = tagsOverride ?? composerTagsRef.current;
-      if (!rawText && tags.length === 0) return true;
-      const text = expandLargePastePlaceholders(
-        pendingPastesRef.current,
-        rawText,
+      suppressFollowupCompletion = false,
+    ) =>
+      submitTextRef.current(
+        view,
+        textOverride,
+        tagsOverride,
+        suppressFollowupCompletion,
       );
-      const prompt = buildComposerPrompt(text, tags);
-      const images = pastedImagesRef.current;
-      const isShellMode = shellModeRef.current;
-      let committed = false;
-      const commitAccepted = () => {
-        if (committed) return;
-        committed = true;
-        setSlashMenu(null);
-        if (followupCompletion) {
-          onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-        }
-        onDismissFollowupRef.current?.();
-        pendingPastesRef.current.clear();
-        nextPasteIdRef.current = 1;
-        if (isShellMode) {
-          shellHistoryActionsRef.current.push(text);
-          shellHistoryActionsRef.current.reset();
-        } else {
-          historyActionsRef.current.push(text);
-          historyActionsRef.current.reset();
-        }
-        historyBrowseActiveRef.current = false;
-        setComposerTags([]);
-        setPastedImages([]);
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: '' },
-          effects: clearInlineTagsEffect.of(),
-        });
-      };
-      const accepted = onSubmitRef.current(
-        isShellMode ? `!${prompt}` : prompt,
-        images.length > 0 ? [...images] : undefined,
-        commitAccepted,
-      );
-      if (accepted === false) return true;
-      commitAccepted();
-      return true;
-    };
-    submitTextRef.current = submitText;
 
     const insertNewline = (view: EditorView) => {
       view.dispatch(view.state.replaceSelection('\n'));
@@ -1570,14 +2939,38 @@ export function useComposerCore(
             return true;
           }
           if (slashMenuRef.current) {
-            return acceptSlashCompletion();
+            return acceptSlashCompletion(undefined, true);
           }
           if (completionStatus(view.state) === 'active') return false;
-          const followup = followupStateRef.current;
-          const followupCompletion = getFollowupCompletion(
-            view.state.doc.toString(),
-            followup?.suggestion,
+          const text = view.state.doc.toString();
+          const subcommandResult = getSlashCommandCompletionResult(
+            `${text} `,
+            text.length + 1,
+            commandsRef.current,
+            skillsRef.current,
+            languageRef.current,
+            (key) => tRef.current(key),
+            slashCommandCategoryOrderRef.current ??
+              DEFAULT_COMMAND_CATEGORY_ORDER,
           );
+          if (
+            /^\/[^\s/]+$/.test(text) &&
+            subcommandResult?.kind === 'subcommand'
+          ) {
+            view.dispatch({
+              changes: { from: text.length, insert: ' ' },
+              selection: { anchor: text.length + 1 },
+            });
+            return true;
+          }
+          const followup = followupStateRef.current;
+          const hasInlineTags = hasInlineComposerTags(view);
+          const followupCompletion = hasInlineTags
+            ? null
+            : getFollowupCompletion(
+                view.state.doc.toString(),
+                followup?.suggestion,
+              );
           if (followup?.isVisible && followupCompletion) {
             onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
             return submitText(view, followupCompletion);
@@ -1660,13 +3053,11 @@ export function useComposerCore(
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
             const current = view.state.doc.toString();
+            if (!isBrowsingHistory) saveCurrentDraftRef.current();
             const prev = history.navigateUp(current);
             if (prev === null) return true;
             historyBrowseActiveRef.current = true;
-            view.dispatch({
-              changes: { from: 0, to: view.state.doc.length, insert: prev },
-              selection: { anchor: prev.length },
-            });
+            restoreHistoryEntry(view, prev);
             return true;
           }
           if (queuedMessagesRef.current.length > 0) {
@@ -1675,13 +3066,14 @@ export function useComposerCore(
             }
           }
           const current = view.state.doc.toString();
+          if (!isBrowsingHistory) {
+            saveCurrentDraftRef.current();
+          }
           const prev = history.navigateUp(current);
           if (prev === null) return false;
+          rememberPromptHistoryDraftTags();
           historyBrowseActiveRef.current = true;
-          view.dispatch({
-            changes: { from: 0, to: view.state.doc.length, insert: prev },
-            selection: { anchor: prev.length },
-          });
+          restoreHistoryEntry(view, prev);
           return true;
         },
       },
@@ -1716,21 +3108,19 @@ export function useComposerCore(
             const next = history.navigateDown();
             if (next === null) return true;
             historyBrowseActiveRef.current = history.isNavigating();
-            view.dispatch({
-              changes: { from: 0, to: view.state.doc.length, insert: next },
-              selection: { anchor: next.length },
-            });
+            restoreHistoryEntry(view, next);
             return true;
           }
           const next = history.navigateDown();
           if (next === null) {
             return onFocusFooterRef.current?.() ?? false;
           }
-          historyBrowseActiveRef.current = history.isNavigating();
-          view.dispatch({
-            changes: { from: 0, to: view.state.doc.length, insert: next },
-            selection: { anchor: next.length },
-          });
+          const returningToPromptDraft = !history.isNavigating();
+          historyBrowseActiveRef.current = !returningToPromptDraft;
+          restoreHistoryEntry(view, next);
+          if (returningToPromptDraft) {
+            restorePromptHistoryDraftTags();
+          }
           return true;
         },
       },
@@ -1751,10 +3141,12 @@ export function useComposerCore(
             return true;
           }
           if (slashMenuRef.current) {
-            return acceptSlashCompletion();
+            if (acceptSlashCompletion()) return true;
+            if (!cycleModeOnTabRef.current) return false;
           }
           if (completionStatus(view.state) === 'active') {
-            return acceptCompletion(view);
+            if (acceptCompletion(view)) return true;
+            if (!cycleModeOnTabRef.current) return false;
           }
           const text = view.state.doc.toString();
           const implicitResult = getImplicitTabCompletion(
@@ -1788,6 +3180,9 @@ export function useComposerCore(
             });
             return true;
           }
+          if (cycleModeOnTabRef.current) {
+            onCycleModeRef.current?.();
+          }
           return true;
         },
       },
@@ -1812,16 +3207,17 @@ export function useComposerCore(
       },
     ]);
 
-    const composerUpdateListener = EditorView.updateListener.of((update) => {
-      if (update.docChanged && pendingPastesRef.current.size > 0) {
-        const nextPasteId = prunePendingPastes(
-          pendingPastesRef.current,
-          update.state.doc.toString(),
-        );
-        if (nextPasteId !== null) {
-          nextPasteIdRef.current = nextPasteId;
-        }
+    let cachedDoc: EditorState['doc'] | null = null;
+    let cachedDocText = '';
+    const getDocText = (state: EditorState) => {
+      if (cachedDoc !== state.doc) {
+        cachedDoc = state.doc;
+        cachedDocText = state.doc.toString();
       }
+      return cachedDocText;
+    };
+
+    const composerUpdateListener = EditorView.updateListener.of((update) => {
       // A genuine edit (typing/deleting/pasting) ends history-browse mode, so
       // arrows go back to driving any open menu. Programmatic history recall
       // dispatches carry no user event, so they do not clear the flag.
@@ -1884,8 +3280,11 @@ export function useComposerCore(
       }
     });
 
+    const initialDraft =
+      loadComposerDraft(draftIdentityRef.current.storageKey) ?? '';
     const state = EditorState.create({
-      doc: '',
+      doc: initialDraft,
+      selection: { anchor: initialDraft.length },
       extensions: [
         Prec.highest(submitKeymap),
         minimalSetup,
@@ -1944,18 +3343,54 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
+          const inlineTagsChanged =
+            update.docChanged ||
+            update.transactions.some((transaction) =>
+              transaction.effects.some(
+                (effect) =>
+                  effect.is(addInlineTagEffect) ||
+                  effect.is(removeInlineTagEffect) ||
+                  effect.is(clearInlineTagsEffect),
+              ),
+            );
+          if (inlineTagsChanged) {
+            const nextHasInlineTags = hasInlineComposerTags(update.view);
+            if (hasInlineTagsRef.current !== nextHasInlineTags) {
+              hasInlineTagsRef.current = nextHasInlineTags;
+              setHasInlineTags(nextHasInlineTags);
+            }
+          }
           if (update.docChanged) {
-            const text = update.state.doc.toString();
+            const text = getDocText(update.state);
+            if (skipNextRestoredAnnotationMappingRef.current) {
+              skipNextRestoredAnnotationMappingRef.current = false;
+            } else if (restoredInputAnnotationsRef.current.length > 0) {
+              restoredInputAnnotationsRef.current =
+                restoredInputAnnotationsRef.current.flatMap((annotation) => {
+                  const start = update.changes.mapPos(annotation.start, 1);
+                  const end = update.changes.mapPos(annotation.end, -1);
+                  if (text.slice(start, end) !== annotation.text) return [];
+                  return [{ ...annotation, start, end }];
+                });
+            }
+            if (draftIdentityRef.current.storageKey === undefined) {
+              unscopedDraftEditedRef.current = true;
+            }
+            if (!historyBrowseActiveRef.current && !searchModeRef.current) {
+              scheduleDraftSaveRef.current();
+            }
+            onInputTextChangeRef.current?.(text);
             const followup = followupStateRef.current;
             const followupCompletion = getFollowupCompletion(
               text,
               followup?.isVisible ? followup.suggestion : null,
             );
-            setHasContent(
+            updateHasContent(
               text.trim().length > 0 ||
                 !!followupCompletion ||
                 composerTagsRef.current.length > 0 ||
-                pastedImagesRef.current.length > 0,
+                pastedImagesRef.current.length > 0 ||
+                pastedFilesRef.current.length > 0,
             );
           }
         }),
@@ -2000,65 +3435,6 @@ export function useComposerCore(
             }, 0);
             return false;
           },
-          paste(event) {
-            const items = event.clipboardData?.items;
-            if (!items) return false;
-            let hasImage = false;
-            for (const item of items) {
-              if (
-                item.type.startsWith('image/') &&
-                /^image\/(png|jpeg|gif|webp)$/i.test(item.type)
-              ) {
-                hasImage = true;
-                const file = item.getAsFile();
-                if (!file) continue;
-                const mediaType = item.type;
-                const reader = new FileReader();
-                reader.onload = () => {
-                  const base64 = (reader.result as string).split(',')[1];
-                  setPastedImages((prev) => [
-                    ...prev,
-                    { data: base64, media_type: mediaType },
-                  ]);
-                };
-                reader.readAsDataURL(file);
-              }
-            }
-            if (hasImage) {
-              event.preventDefault();
-              return true;
-            }
-            const pasted = normalizePastedText(
-              event.clipboardData?.getData('text/plain') ?? '',
-            );
-            if (!pasted || !isLargePaste(pasted)) return false;
-
-            event.preventDefault();
-            if (
-              view.state.doc.toString() === '' &&
-              followupStateRef.current?.isVisible
-            ) {
-              onDismissFollowupRef.current?.();
-            }
-            const { placeholderText: pt, nextPasteId } =
-              createLargePastePlaceholder(
-                pendingPastesRef.current,
-                nextPasteIdRef.current,
-                pasted,
-              );
-            nextPasteIdRef.current = nextPasteId;
-            const selection = view.state.selection.main;
-            view.dispatch({
-              changes: {
-                from: selection.from,
-                to: selection.to,
-                insert: pt,
-              },
-              selection: { anchor: selection.from + pt.length },
-              scrollIntoView: true,
-            });
-            return true;
-          },
         }),
         EditorView.theme(editorTheme),
       ],
@@ -2070,23 +3446,128 @@ export function useComposerCore(
     });
 
     viewRef.current = view;
-    view.focus();
+    const handleDraftBlur = () => saveCurrentDraftRef.current();
+    view.dom.addEventListener('blur', handleDraftBlur, true);
+    // Programmatic (non-gesture) focus is suppressed on touch devices even
+    // when CodeMirror is forced via ?composer=codemirror: on iOS it claims
+    // document.activeElement without opening the keyboard, and later taps may
+    // then never fire the focus event that would (#5958).
+    if (!isCoarsePointerDevice()) {
+      view.focus();
+    }
 
     // Initial check
-    const initialText = view.state.doc.toString().trim();
-    setHasContent(
+    const initialTextValue = view.state.doc.toString();
+    const initialText = initialTextValue.trim();
+    if (initialTextValue) {
+      onInputTextChangeRef.current?.(initialTextValue);
+    }
+    updateHasContent(
       initialText.length > 0 ||
         composerTagsRef.current.length > 0 ||
-        pastedImagesRef.current.length > 0,
+        pastedImagesRef.current.length > 0 ||
+        pastedFilesRef.current.length > 0,
     );
 
     return () => {
+      view.dom.removeEventListener('blur', handleDraftBlur, true);
+      saveCurrentDraftRef.current();
+      view.dispatch({ effects: clearInlineTagsEffect.of() });
       view.destroy();
       viewRef.current = null;
       observer.disconnect();
       tooltipPortal.remove();
+      tooltipPortalRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const previousDraftIdentity = draftIdentityRef.current;
+    const view = viewRef.current;
+    const sessionChanged = previousDraftIdentity.sessionId !== sessionId;
+    const workspaceChanged =
+      previousDraftIdentity.workspaceCwd !== storageScopeKey;
+    const draftStorageChanged =
+      previousDraftIdentity.storageKey !== composerDraftStorageKey;
+    const wasBrowsingHistory = historyBrowseActiveRef.current;
+    const wasSearchingHistory = searchModeRef.current;
+
+    if (!sessionChanged && !workspaceChanged) return;
+
+    resetImageIngestion();
+    restoredInputAnnotationsRef.current = [];
+    historyActionsRef.current.reset();
+    shellHistoryActionsRef.current.reset();
+    historyBrowseActiveRef.current = false;
+    clearPromptHistoryDraftTags();
+    searchDraftRef.current = '';
+    setSearchMode(false);
+    setSearchQuery('');
+    setSearchMatches([]);
+    setSearchActiveIndex(0);
+
+    const currentText = view
+      ? view.state.doc.toString()
+      : mobileTextRef.current;
+    if (draftStorageChanged && !wasBrowsingHistory && !wasSearchingHistory) {
+      saveComposerDraft(previousDraftIdentity.storageKey, currentText);
+    }
+    draftIdentityRef.current = {
+      sessionId,
+      workspaceCwd: storageScopeKey,
+      storageKey: composerDraftStorageKey,
+    };
+
+    if (!draftStorageChanged || (!view && !isTouchComposer)) return;
+
+    const storedDraft = loadComposerDraft(composerDraftStorageKey);
+    const adoptUnscopedInMemoryDraft =
+      !wasBrowsingHistory &&
+      !wasSearchingHistory &&
+      previousDraftIdentity.sessionId === undefined &&
+      sessionId === undefined &&
+      previousDraftIdentity.workspaceCwd === undefined &&
+      previousDraftIdentity.storageKey === undefined &&
+      storageScopeKey !== undefined &&
+      (unscopedDraftEditedRef.current || storedDraft === null);
+    unscopedDraftEditedRef.current = false;
+    const nextText = adoptUnscopedInMemoryDraft
+      ? currentText
+      : (storedDraft ?? '');
+    if (adoptUnscopedInMemoryDraft) {
+      saveComposerDraft(composerDraftStorageKey, currentText);
+    }
+
+    setComposerTags([]);
+    if (view) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: nextText },
+        effects: clearInlineTagsEffect.of(),
+        selection: { anchor: nextText.length },
+      });
+    } else {
+      setMobileText(nextText);
+    }
+    if (composerDraftStorageKey === undefined) {
+      unscopedDraftEditedRef.current = false;
+    }
+  }, [
+    storageScopeKey,
+    clearPromptHistoryDraftTags,
+    composerDraftStorageKey,
+    isTouchComposer,
+    resetImageIngestion,
+    sessionId,
+    setMobileText,
+  ]);
+
+  useEffect(() => {
+    const tooltipPortal = tooltipPortalRef.current;
+    if (!tooltipPortal) return;
+    const tooltipParent = portalRoot ?? document.body;
+    ensureTooltipStyles(getTooltipStyleRoot(tooltipParent));
+    tooltipParent.appendChild(tooltipPortal);
+  }, [portalRoot]);
 
   // ---- Reactions to prop changes ----
 
@@ -2098,37 +3579,33 @@ export function useComposerCore(
         EditorView.editable.of(!disabled),
       ),
     });
-    if (!disabled) {
+    if (!disabled && !isCoarsePointerDevice()) {
       view.focus();
     }
   }, [disabled]);
 
+  // Computed in the render scope so the mobile textarea backend can share the
+  // exact placeholder the CodeMirror path shows.
+  const followupSuggestion =
+    !disabled && followupState?.isVisible && followupState.suggestion
+      ? followupState.suggestion
+      : null;
+  const composerPlaceholder =
+    followupSuggestion ??
+    (shellMode ? t('editor.shellPlaceholder') : placeholderText);
+
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const followupSuggestion =
-      !disabled && followupState?.isVisible && followupState.suggestion
-        ? followupState.suggestion
-        : null;
-    const nextPlaceholder =
-      followupSuggestion ??
-      (shellMode ? t('editor.shellPlaceholder') : placeholderText);
     view.dispatch({
       effects: [
-        placeholderCompartment.reconfigure(placeholder(nextPlaceholder)),
+        placeholderCompartment.reconfigure(placeholder(composerPlaceholder)),
         followupGhostCompartment.reconfigure(
           createFollowupGhostExtension(followupSuggestion),
         ),
       ],
     });
-  }, [
-    disabled,
-    placeholderText,
-    shellMode,
-    t,
-    followupState?.isVisible,
-    followupState?.suggestion,
-  ]);
+  }, [composerPlaceholder, followupSuggestion]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -2147,15 +3624,22 @@ export function useComposerCore(
         [
           command.name,
           command.description ?? '',
+          command.completionLabel ?? '',
+          command.completionSection ?? '',
           command.source ?? '',
           command.displayCategory ?? '',
           command.argumentHint ?? '',
           command.subcommands?.join(',') ?? '',
+          command.autoSubmit ? '1' : '0',
         ].join('\u0000'),
       )
       .join('\u0001'),
     skills
-      .map((skill) => [skill.name, skill.description].join('\u0000'))
+      .map((skill) =>
+        [skill.name, skill.description, skill.argumentHint ?? ''].join(
+          '\u0000',
+        ),
+      )
       .join('\u0001'),
     slashCommandCategoryOrder?.join('|') ?? '',
   ].join('\u0002');
@@ -2173,7 +3657,7 @@ export function useComposerCore(
       closeSlashMenu();
       closeAtMenu();
       view.contentDOM.blur();
-    } else {
+    } else if (!isCoarsePointerDevice()) {
       view.focus();
     }
   }, [closeAtMenu, dialogOpen, closeSlashMenu]);
@@ -2294,11 +3778,44 @@ export function useComposerCore(
   // ---- Imperative methods ----
 
   const focus = useCallback(() => {
+    if (isTouchComposer) {
+      mobileTextareaRef.current?.focus();
+      return;
+    }
     viewRef.current?.focus();
-  }, []);
+  }, [isTouchComposer]);
 
   const insertText = useCallback(
     (text: string, options?: WebShellComposerTextOptions) => {
+      if (isTouchComposer) {
+        if (text) {
+          if (options?.mode === 'replace') {
+            setMobileText(text);
+          } else {
+            // No slash/at menus on the textarea backend: '/' and '@' are
+            // inserted literally and interpreted from the submitted text.
+            const el = mobileTextareaRef.current;
+            const current = mobileTextRef.current;
+            const start = el ? el.selectionStart : current.length;
+            const end = el ? el.selectionEnd : current.length;
+            const caret = start + text.length;
+            setMobileText(current.slice(0, start) + text + current.slice(end));
+            // A controlled textarea resets the caret to the end when its
+            // value changes; put it back after React re-renders, matching
+            // the CodeMirror path's explicit selection anchor.
+            const restoreCaret = () => {
+              mobileTextareaRef.current?.setSelectionRange(caret, caret);
+            };
+            if (typeof requestAnimationFrame === 'function') {
+              requestAnimationFrame(restoreCaret);
+            } else {
+              window.setTimeout(restoreCaret, 0);
+            }
+          }
+        }
+        mobileTextareaRef.current?.focus();
+        return;
+      }
       const view = viewRef.current;
       if (!view || !text) {
         view?.focus();
@@ -2376,24 +3893,52 @@ export function useComposerCore(
         }, 0);
       }
     },
-    [closeSlashMenu, refreshAtMenuForView, refreshSlashMenuForView],
+    [
+      closeSlashMenu,
+      isTouchComposer,
+      refreshAtMenuForView,
+      refreshSlashMenuForView,
+      setMobileText,
+    ],
   );
 
   const getText = useCallback(() => {
+    if (isTouchComposer) return mobileTextRef.current;
     return viewRef.current?.state.doc.toString() ?? '';
-  }, []);
+  }, [isTouchComposer]);
 
-  const setText = useCallback((text: string) => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: text },
-      effects: clearInlineTagsEffect.of(),
-      selection: { anchor: text.length },
-      scrollIntoView: true,
-    });
-    view.focus();
-  }, []);
+  const setText = useCallback(
+    (text: string) => {
+      if (isTouchComposer) {
+        // Unlike the CodeMirror path, no focus: on touch devices a
+        // programmatic focus would pop the virtual keyboard unexpectedly.
+        setMobileText(text);
+        return;
+      }
+      const view = viewRef.current;
+      if (!view) return;
+      if (restoredInputAnnotationsRef.current.length > 0) {
+        const currentText = view.state.doc.toString();
+        if (currentText !== text) {
+          restoredInputAnnotationsRef.current =
+            mapRestoredInputAnnotationsAfterTextChange(
+              restoredInputAnnotationsRef.current,
+              currentText,
+              text,
+            );
+          skipNextRestoredAnnotationMappingRef.current = true;
+        }
+      }
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        effects: clearInlineTagsEffect.of(),
+        selection: { anchor: text.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+    },
+    [isTouchComposer, setMobileText],
+  );
 
   const removeInlineTags = useCallback(
     (predicate?: (tag: WebShellComposerTag) => boolean) => {
@@ -2408,8 +3953,9 @@ export function useComposerCore(
             changes.push({ from, to, insert: '' });
           }
         });
+      if (changes.length === 0) return;
       view.dispatch({
-        ...(changes.length > 0 ? { changes } : {}),
+        changes: normalizeInlineTagRemovalChanges(view, changes),
         effects: removeInlineTagEffect.of({ predicate }),
         scrollIntoView: true,
       });
@@ -2428,10 +3974,12 @@ export function useComposerCore(
           effects: clearInlineTagsEffect.of(),
         });
       }
+      if (clearTextOpt && isTouchComposer) {
+        setMobileText('');
+      }
       if (clearTextOpt) {
-        setPastedImages([]);
-        pendingPastesRef.current.clear();
-        nextPasteIdRef.current = 1;
+        restoredInputAnnotationsRef.current = [];
+        resetImageIngestion();
       }
       if (clearTags) {
         setComposerTags([]);
@@ -2440,7 +3988,7 @@ export function useComposerCore(
         }
       }
     },
-    [removeInlineTags],
+    [isTouchComposer, removeInlineTags, resetImageIngestion, setMobileText],
   );
 
   const clearText = useCallback(() => {
@@ -2453,11 +4001,24 @@ export function useComposerCore(
       tagOptions?: WebShellComposerTagOptions,
     ) => {
       if (tags.length === 0) return;
-      if (tagOptions?.placement === 'inline') {
+      // The textarea backend has no inline tag chips; inline requests fall
+      // through to the top placement below.
+      if (tagOptions?.placement === 'inline' && !isTouchComposer) {
         const view = viewRef.current;
         if (!view) return;
+        const appendToEnd = tagOptions.position === 'end';
         const selection = view.state.selection.main;
-        let at = selection.from;
+        const insertAt = appendToEnd ? view.state.doc.length : selection.from;
+        const replaceTo = appendToEnd ? view.state.doc.length : selection.to;
+        // The mention parser needs a boundary before `@`, so separate an
+        // appended reference from preceding non-whitespace text.
+        const separator =
+          appendToEnd &&
+          view.state.doc.length > 0 &&
+          !/\s/.test(view.state.doc.sliceString(view.state.doc.length - 1))
+            ? ' '
+            : '';
+        let at = insertAt + separator.length;
         const ranges: InlineTagRange[] = [];
         const insert = tags
           .map((tag) => {
@@ -2467,9 +4028,9 @@ export function useComposerCore(
             return tagText;
           })
           .join(' ');
-        const text = insert ? `${insert} ` : '';
+        const text = insert ? `${separator}${insert} ` : '';
         view.dispatch({
-          changes: { from: selection.from, to: selection.to, insert: text },
+          changes: { from: insertAt, to: replaceTo, insert: text },
           effects:
             ranges.length > 0
               ? ranges.map((range) =>
@@ -2479,10 +4040,16 @@ export function useComposerCore(
                   }),
                 )
               : undefined,
-          selection: { anchor: selection.from + text.length },
-          scrollIntoView: true,
+          // End placement serves async completions (uploads): never move the
+          // caret or scroll the viewport while the user types elsewhere.
+          selection: appendToEnd
+            ? undefined
+            : { anchor: insertAt + text.length },
+          scrollIntoView: !appendToEnd,
         });
-        view.focus();
+        // An asynchronous completion (upload) must not steal focus from
+        // whatever control the user moved to while it was in flight.
+        if (!appendToEnd || view.hasFocus) view.focus();
         return;
       }
       setComposerTags((current) => {
@@ -2498,77 +4065,109 @@ export function useComposerCore(
         return next;
       });
     },
-    [resolveComposerTagIcon],
+    [isTouchComposer, resolveComposerTagIcon],
   );
 
   const removeTopTag = useCallback(
     (id: string) => {
-      setComposerTags((current) =>
-        current.filter((tag) => tag.id !== id || tag.removable === false),
-      );
+      setComposerTags((current) => {
+        const next = current.filter(
+          (tag) => tag.id !== id || tag.removable === false,
+        );
+        return next.length === current.length ? current : next;
+      });
       removeInlineTags((tag) => tag.id === id && tag.removable !== false);
     },
     [removeInlineTags],
   );
 
   const hasInput = useCallback(() => {
+    const text = isTouchComposer
+      ? mobileTextRef.current
+      : (viewRef.current?.state.doc.toString() ?? '');
     return (
-      (viewRef.current?.state.doc.toString().trim().length ?? 0) > 0 ||
+      text.trim().length > 0 ||
       composerTagsRef.current.length > 0 ||
-      pastedImagesRef.current.length > 0
+      pastedImagesRef.current.length > 0 ||
+      pastedFilesRef.current.length > 0
+    );
+  }, [isTouchComposer]);
+
+  const hasAttachments = useCallback(() => {
+    const inlineTags = viewRef.current
+      ? getInlineComposerTags(viewRef.current)
+      : [];
+    return (
+      inlineTags.length > 0 ||
+      composerTagsRef.current.length > 0 ||
+      pastedImagesRef.current.length > 0 ||
+      pastedFilesRef.current.length > 0
     );
   }, []);
 
-  const submit = useCallback((input?: WebShellComposerInput) => {
-    const view = viewRef.current;
-    if (!view) return;
-    const inlineTags = getInlineComposerTags(view);
-    if (input?.tagPlacement === 'inline') {
+  const submit = useCallback(
+    (input?: WebShellComposerInput) => {
+      const view = viewRef.current;
+      if (!view && !isTouchComposer) return;
+      const inlineTags = view ? getInlineComposerTags(view) : [];
+      if (input?.tagPlacement === 'inline') {
+        submitTextRef.current(view, input.text ?? '', input.tags ?? inlineTags);
+        return;
+      }
+      if (
+        input?.text !== undefined &&
+        input.tags === undefined &&
+        inlineTags.length > 0
+      ) {
+        submitTextRef.current(view, input.text, inlineTags);
+        return;
+      }
       submitTextRef.current(
         view,
-        buildComposerPrompt(input.text ?? '', input.tags ?? inlineTags),
-        [],
+        input?.text,
+        input ? (input.tags ?? []) : undefined,
       );
-      return;
-    }
-    if (
-      input?.text !== undefined &&
-      input.tags === undefined &&
-      inlineTags.length > 0
-    ) {
-      submitTextRef.current(
-        view,
-        buildComposerPrompt(input.text, inlineTags),
-        [],
-      );
-      return;
-    }
-    submitTextRef.current(
-      view,
-      input?.text,
-      input ? (input.tags ?? []) : undefined,
-    );
-  }, []);
+    },
+    [isTouchComposer],
+  );
 
   const retryLast = useCallback(() => {
+    if (
+      disabledRef.current ||
+      imageIngestionLaneRef.current.pendingBatches > 0 ||
+      workspaceUploadBusyRef.current
+    ) {
+      return;
+    }
     const last = historyActionsRef.current.getLastEntry(
       (e) => !e.startsWith('/') && !e.startsWith('!'),
     );
     if (!last) return;
     const accepted = onSubmitRef.current(last);
     if (accepted === false) return;
+    pastedImagesRef.current = [];
+    pastedFilesRef.current = [];
+    restoredInputAnnotationsRef.current = [];
     setPastedImages([]);
+    setPastedFiles([]);
   }, []);
 
-  const replaceEditorText = useCallback((text: string) => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: text },
-      selection: { anchor: text.length },
-      scrollIntoView: true,
-    });
-  }, []);
+  const replaceEditorText = useCallback(
+    (text: string) => {
+      if (isTouchComposer) {
+        setMobileText(text);
+        return;
+      }
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        selection: { anchor: text.length },
+        scrollIntoView: true,
+      });
+    },
+    [isTouchComposer, setMobileText],
+  );
 
   // ---- composerInput sync ----
 
@@ -2576,11 +4175,42 @@ export function useComposerCore(
     const input = composerInputRef.current;
     if (!input) return;
     const view = viewRef.current;
-    if (!view) return;
+    if (!view && !isTouchComposer) return;
+
+    if (input.clearAttachments) {
+      pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
+      setPastedImages([]);
+      setPastedFiles([]);
+    }
 
     const tagPlacement = input.tagPlacement ?? 'top';
     if (input.tags !== undefined && tagPlacement === 'top') {
       setComposerTags([...input.tags]);
+    }
+    if (!view) {
+      // Mobile textarea backend: inline tag chips are not supported, so
+      // inline tags fall back to the top placement and only the plain text
+      // is seeded. No programmatic focus — that would pop the virtual
+      // keyboard outside a user gesture.
+      if (input.tags !== undefined && tagPlacement === 'inline') {
+        setComposerTags([...input.tags]);
+      }
+      if (input.text !== undefined) {
+        setMobileText(input.text);
+      }
+      let submitTimer: number | null = null;
+      if (input.submit) {
+        submitTimer = window.setTimeout(() => {
+          submit(input);
+        }, 0);
+      }
+      return () => {
+        if (submitTimer !== null) {
+          window.clearTimeout(submitTimer);
+        }
+      };
     }
     if (input.text !== undefined || tagPlacement === 'inline') {
       const inlineTags =
@@ -2616,7 +4246,10 @@ export function useComposerCore(
     } else {
       view.dispatch({ effects: clearInlineTagsEffect.of() });
     }
-    if (input.text !== undefined || input.submit) {
+    if (
+      (input.text !== undefined || input.submit) &&
+      !isCoarsePointerDevice()
+    ) {
       view.focus();
     }
     let submitTimer: number | null = null;
@@ -2632,7 +4265,13 @@ export function useComposerCore(
         window.clearTimeout(submitTimer);
       }
     };
-  }, [composerInputVersion, resolveComposerTagIcon, submit]);
+  }, [
+    composerInputVersion,
+    isTouchComposer,
+    resolveComposerTagIcon,
+    setMobileText,
+    submit,
+  ]);
 
   // ---- Search state ----
 
@@ -2677,33 +4316,50 @@ export function useComposerCore(
 
   const submitSearchMatch = useCallback(
     (match: string) => {
+      if (
+        disabledRef.current ||
+        imageIngestionLaneRef.current.pendingBatches > 0 ||
+        workspaceUploadBusyRef.current
+      ) {
+        return;
+      }
       const view = viewRef.current;
-      if (!view) return;
+      if (!view && !isTouchComposer) return;
       closeSearch(false);
+      if (!shellModeRef.current) {
+        restoreSelectedHistoryMatch(match);
+        submitTextRef.current(view, undefined, undefined, true);
+        return;
+      }
       const text = match.trim();
       if (!text) return;
       const images = pastedImagesRef.current;
-      const isShellMode = shellModeRef.current;
+      const files = pastedFilesRef.current;
       const accepted = onSubmitRef.current(
-        isShellMode ? `!${text}` : text,
+        `!${text}`,
         images.length > 0 ? [...images] : undefined,
+        files.length > 0 ? [...files] : undefined,
       );
       if (accepted === false) {
-        replaceEditorText(match);
+        restoreSelectedHistoryMatch(match);
         return;
       }
       onDismissFollowupRef.current?.();
-      if (isShellMode) {
-        shellHistoryActionsRef.current.push(text);
-        shellHistoryActionsRef.current.reset();
-      } else {
-        historyActionsRef.current.push(text);
-        historyActionsRef.current.reset();
-      }
+      shellHistoryActionsRef.current.push(text);
+      shellHistoryActionsRef.current.reset();
+      pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
       setPastedImages([]);
+      setPastedFiles([]);
       replaceEditorText('');
     },
-    [closeSearch, replaceEditorText],
+    [
+      closeSearch,
+      isTouchComposer,
+      replaceEditorText,
+      restoreSelectedHistoryMatch,
+    ],
   );
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -2717,7 +4373,7 @@ export function useComposerCore(
       e.preventDefault();
       const match = searchMatches[searchActiveIndex];
       if (match) {
-        replaceEditorText(match);
+        restoreSelectedHistoryMatch(match);
       }
       closeSearch(false);
     } else if (e.key === 'Enter') {
@@ -2761,11 +4417,24 @@ export function useComposerCore(
   };
 
   const removeImage = useCallback((index: number) => {
-    setPastedImages((prev) => prev.filter((_, idx) => idx !== index));
+    const next = pastedImagesRef.current.filter((_, idx) => idx !== index);
+    pastedImagesRef.current = next;
+    setPastedImages(next);
+  }, []);
+
+  const removeFile = useCallback((index: number) => {
+    const next = pastedFilesRef.current.filter((_, idx) => idx !== index);
+    pastedFilesRef.current = next;
+    setPastedFiles(next);
   }, []);
 
   // ---- Computed ----
 
+  const canSubmit =
+    !disabled &&
+    pendingImageBatchCount === 0 &&
+    !workspaceUploadBusy &&
+    hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
@@ -2775,39 +4444,120 @@ export function useComposerCore(
 
   // ---- Imperative handle ----
 
-  const handle: EditorHandle = {
-    clearText,
+  const restoreImages = useCallback((images: readonly PromptImage[]) => {
+    const next = [...pastedImagesRef.current, ...images];
+    pastedImagesRef.current = next;
+    setPastedImages(next);
+  }, []);
+  const restoreFiles = useCallback((files: readonly PromptFile[]) => {
+    const taken = new Set(pastedFilesRef.current.map((file) => file.name));
+    const named = files.map((file) => {
+      const name = dedupeAttachmentName(
+        sanitizeAttachmentName(file.name),
+        taken,
+      );
+      taken.add(name);
+      return { ...file, name };
+    });
+    const next = [...pastedFilesRef.current, ...named];
+    pastedFilesRef.current = next;
+    setPastedFiles(next);
+  }, []);
+  const restoreInputAnnotations = useCallback(
+    (inputAnnotations: readonly DaemonInputAnnotation[]) => {
+      const restored = new Map(
+        restoredInputAnnotationsRef.current.map((annotation) => [
+          `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`,
+          annotation,
+        ]),
+      );
+      for (const annotation of inputAnnotations) {
+        restored.set(
+          `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`,
+          annotation,
+        );
+      }
+      restoredInputAnnotationsRef.current = [...restored.values()].sort(
+        (left, right) => left.start - right.start,
+      );
+    },
+    [],
+  );
+  const handle = useMemo<EditorHandle>(() => {
+    return {
+      clearText,
+      clear,
+      focus,
+      getText,
+      hasAttachments,
+      hasInput,
+      setText,
+      addTags,
+      removeTag: removeTopTag,
+      insertText,
+      retryLast,
+      restoreImages,
+      restoreFiles,
+      restoreInputAnnotations,
+      submit,
+    };
+  }, [
+    addTags,
     clear,
+    clearText,
     focus,
     getText,
+    hasAttachments,
     hasInput,
-    setText,
-    addTags,
-    removeTag: removeTopTag,
     insertText,
+    removeTopTag,
+    restoreImages,
+    restoreFiles,
+    restoreInputAnnotations,
     retryLast,
-    restoreImages: (images) => {
-      setPastedImages((prev) => [...prev, ...images]);
-    },
+    setText,
     submit,
-  };
+  ]);
 
   return {
     containerRef,
     viewRef,
+    workspaceActionsRef,
+    mobileComposer: isTouchComposer
+      ? {
+          textareaRef: mobileTextareaRef,
+          value: mobileText,
+          onChange: handleMobileChange,
+          onBlur: () => saveCurrentDraftRef.current(),
+          placeholder: composerPlaceholder,
+        }
+      : null,
     focus,
     submitText: useCallback(() => {
       const view = viewRef.current;
-      if (!view) return;
+      if (!view && !isTouchComposer) return;
       submitTextRef.current(view);
-    }, []),
+    }, [isTouchComposer]),
     clearText,
     getText,
     hasInput,
+    hasAttachments:
+      hasInlineTags ||
+      composerTags.length > 0 ||
+      pastedImages.length > 0 ||
+      pastedFiles.length > 0,
     hasContent,
+    canSubmit,
+    pendingImageBatchCount,
+    imageDragActive,
+    clearImageDragState,
+    ingestFiles,
+    imageTransferHandlers,
     handle,
     pastedImages,
     removeImage,
+    pastedFiles,
+    removeFile,
     composerTags,
     removeTopTag,
     addTags,
@@ -2833,6 +4583,7 @@ export function useComposerCore(
       openHistorySearch,
       closeSearch,
       submitSearchMatch,
+      restoreSearchMatch: restoreSelectedHistoryMatch,
       handleSearchKeyDown,
       handleSearchInput,
       handleSearchCompositionEnd,
@@ -2848,6 +4599,7 @@ export function useComposerCore(
     onDismissFollowup:
       onDismissFollowup as UseDaemonFollowupSuggestionReturn['onDismissFollowup'],
     slashMenu,
+    openSlashMenu,
     closeSlashMenu,
     selectSlashCompletion,
     acceptSlashCompletion,
@@ -2858,5 +4610,6 @@ export function useComposerCore(
     enterAtCategory: atMenu.enterCategory,
     backAtCategories: atMenu.backToCategories,
     updateAtSearch: atMenu.updateSearch,
+    selectAtTab: atMenu.selectTab,
   };
 }

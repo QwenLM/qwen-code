@@ -92,7 +92,7 @@ export async function negotiateTransport(
       const { AcpWsTransport } = await import('./AcpWsTransport.js');
       // Convert http(s) → ws(s) for the WS URL.
       const wsUrl = baseUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
-      const transport = new AcpWsTransport(wsUrl + '/acp', token);
+      const transport = new AcpWsTransport(wsUrl + '/acp', token, fetchFn);
       // Probe: try to connect with a timeout.
       const probeTimer = setTimeout(() => {
         /* timeout — handled by race */

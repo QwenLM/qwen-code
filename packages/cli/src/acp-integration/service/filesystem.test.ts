@@ -26,6 +26,7 @@ import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
 import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { promises as fs } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { realpath as fsRealpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -103,6 +104,39 @@ describe('AcpFileSystemService', () => {
       expect(result).toEqual(mockResponse);
       expect(client.readTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
+        sessionId: 'session-1',
+      });
+    });
+
+    it('converts core-only read params at the ACP boundary', async () => {
+      const mockResponse = {
+        content: 'slice',
+        _meta: { bom: false, encoding: 'utf-8' },
+      };
+      const client = {
+        readTextFile: vi.fn().mockResolvedValue(mockResponse),
+      } as unknown as AgentSideConnection;
+      const signal = new AbortController().signal;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-1',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.readTextFile({
+        path: '/some/file.txt',
+        line: 0,
+        limit: 5,
+        maxOutputBytes: 1024,
+        signal,
+      });
+
+      expect(client.readTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        line: 1,
+        limit: 5,
         sessionId: 'session-1',
       });
     });
@@ -932,9 +966,13 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('uses fallback when readTextFile capability is disabled', async () => {
+    // Split from the write case below on purpose: this half is the one that
+    // protects the capability's core behavior, so deleting "the write test"
+    // later must not silently drop read coverage with it.
+    it('routes reads to the local fallback when readTextFile capability is disabled', async () => {
       const client = {
         readTextFile: vi.fn(),
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
       } as unknown as AgentSideConnection;
 
       const fallback = createFallback();
@@ -953,13 +991,64 @@ describe('AcpFileSystemService', () => {
         fallback,
       );
 
-      const result = await svc.readTextFile({ path: '/some/file.txt' });
+      const signal = new AbortController().signal;
+      const stats = {} as Stats;
+      const result = await svc.readTextFile({
+        path: '/some/file.txt',
+        line: 0,
+        limit: 7,
+        maxOutputBytes: 2048,
+        signal,
+        stats,
+        _meta: { request: 'same-host' },
+      });
 
       expect(result).toEqual(fallbackResponse);
       expect(fallback.readTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
+        line: 0,
+        limit: 7,
+        maxOutputBytes: 2048,
+        signal,
+        stats,
+        _meta: { request: 'same-host' },
       });
       expect(client.readTextFile).not.toHaveBeenCalled();
+    });
+
+    it('keeps writes delegated when readTextFile capability is disabled', async () => {
+      const client = {
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+      const svc = new AcpFileSystemService(
+        client,
+        'session-3',
+        { readTextFile: false, writeTextFile: true },
+        fallback,
+      );
+
+      // A defined `_meta` round trip: `toEqual` ignores undefined-valued
+      // properties, so asserting `{ _meta: undefined }` also passes for `{}`
+      // and would not catch the field being dropped. `bom: true` additionally
+      // pins the BOM prepend on the delegated content.
+      const meta = { bom: true };
+      const writeResult = await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'updated content',
+        _meta: meta,
+      });
+
+      expect(writeResult).toEqual({ _meta: meta });
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: '\uFEFFupdated content',
+        sessionId: 'session-3',
+        _meta: meta,
+      });
+      expect(fallback.writeTextFile).not.toHaveBeenCalled();
     });
   });
 
@@ -986,6 +1075,67 @@ describe('AcpFileSystemService', () => {
         path: '/some/file.txt',
         content: 'hello',
         sessionId: 'session-4',
+      });
+    });
+
+    it('serializes trusted tool provenance into ACP metadata', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const svc = new AcpFileSystemService(
+        client,
+        'session-origin',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+        toolWriteOrigin: 'write_file',
+        _meta: { encoding: 'utf-16le' },
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+        sessionId: 'session-origin',
+        _meta: {
+          encoding: 'utf-16le',
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+    });
+
+    it('strips caller-supplied provenance without a trusted core origin', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const svc = new AcpFileSystemService(
+        client,
+        'session-untrusted-origin',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+        sessionId: 'session-untrusted-origin',
       });
     });
 
@@ -1060,6 +1210,7 @@ describe('AcpFileSystemService', () => {
       const result = await svc.writeTextFile({
         path: '/some/file.txt',
         content: '\uFEFFHello',
+        toolWriteOrigin: 'edit',
         _meta: { bom: true },
       });
 
@@ -1067,6 +1218,7 @@ describe('AcpFileSystemService', () => {
       expect(fallback.writeTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
         content: '\uFEFFHello',
+        toolWriteOrigin: 'edit',
         _meta: { bom: true },
       });
       expect(client.writeTextFile).not.toHaveBeenCalled();

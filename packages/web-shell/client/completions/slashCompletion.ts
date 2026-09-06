@@ -19,6 +19,7 @@ import {
 export interface SkillInfo {
   name: string;
   description: string;
+  argumentHint?: string;
 }
 
 export type SlashCommandCompletionKind = 'command' | 'subcommand';
@@ -28,9 +29,11 @@ export interface SlashCommandCompletionItem {
   label: string;
   apply: string;
   detail?: string;
+  argumentHint?: string;
   category?: CommandDisplayCategory;
   section?: string;
   type?: 'command-info' | 'skill';
+  autoSubmit?: boolean;
 }
 
 export interface SlashCommandCompletionResult {
@@ -47,6 +50,7 @@ const COMMAND_NAME_PATTERN = String.raw`([^\s/]+)`;
 interface SubcommandNode {
   name: string;
   description: string;
+  argumentHint?: string;
   children?: SubcommandNode[];
 }
 
@@ -74,11 +78,19 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
         { name: 'zh-CN', description: '中文' },
       ],
     },
-    { name: 'output', description: '设置 LLM 输出语言' },
+    {
+      name: 'output',
+      description: '设置 LLM 输出语言',
+      argumentHint: '<语言>',
+    },
   ],
   extensions: [
     { name: 'manage', description: '管理扩展' },
-    { name: 'install', description: '安装扩展' },
+    {
+      name: 'install',
+      description: '安装扩展',
+      argumentHint: '<来源>',
+    },
   ],
 };
 
@@ -106,11 +118,19 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
         { name: 'zh-CN', description: '中文' },
       ],
     },
-    { name: 'output', description: 'Set LLM output language' },
+    {
+      name: 'output',
+      description: 'Set LLM output language',
+      argumentHint: '<language>',
+    },
   ],
   extensions: [
     { name: 'manage', description: 'Manage installed extensions' },
-    { name: 'install', description: 'Install an extension from a source' },
+    {
+      name: 'install',
+      description: 'Install an extension from a source',
+      argumentHint: '<source>',
+    },
   ],
 };
 
@@ -168,12 +188,14 @@ function resolveSubcommands(
   dynamicSkills: SkillInfo[] | undefined,
   language: WebShellLanguage,
   commandSubcommands?: string[],
+  commandArgumentHint?: string,
 ): SubcommandNode[] | null {
   if (cmdName === 'skills' && parts.length === 0) {
     if (!dynamicSkills || dynamicSkills.length === 0) return null;
     return dynamicSkills.map((s) => ({
       name: s.name,
       description: s.description,
+      ...(s.argumentHint ? { argumentHint: s.argumentHint } : {}),
     }));
   }
 
@@ -189,10 +211,14 @@ function resolveSubcommands(
   }
 
   if (!nodes && parts.length === 0 && commandSubcommands?.length) {
-    nodes = commandSubcommands.map((name) => ({
-      name,
-      description: '',
-    }));
+    nodes = commandSubcommands.map((name) => {
+      const argumentHint = getSubcommandArgumentHint(commandArgumentHint, name);
+      return {
+        name,
+        description: '',
+        ...(argumentHint ? { argumentHint } : {}),
+      };
+    });
   }
 
   if (!nodes) return null;
@@ -203,6 +229,23 @@ function resolveSubcommands(
     nodes = match.children;
   }
   return nodes;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Preserve an argument-bearing suffix from a server command's hint. */
+function getSubcommandArgumentHint(
+  argumentHint: string | undefined,
+  name: string,
+): string | undefined {
+  if (!argumentHint) return undefined;
+  const match = argumentHint.match(
+    new RegExp(`(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`),
+  );
+  const suffix = match?.[1]?.trim();
+  return suffix || undefined;
 }
 
 function comparePrefixFirst(a: string, b: string, query: string): number {
@@ -220,9 +263,23 @@ function compareSlashCommands(
   query: string,
   categoryOrder: CommandDisplayCategoryOrder,
 ): number {
+  const priority = (a.completionPriority ?? 0) - (b.completionPriority ?? 0);
+  if (priority !== 0) return priority;
   const order = compareCommandsByCategory(a, b, categoryOrder);
   if (order !== 0) return order;
   return query ? comparePrefixFirst(a.name, b.name, query) : 0;
+}
+
+function hasSubcommandPicker(
+  command: CommandInfo,
+  language: WebShellLanguage,
+): boolean {
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  return (
+    command.name === 'skills' ||
+    Boolean(command.subcommands?.length) ||
+    Boolean(tree[command.name])
+  );
 }
 
 const COMMAND_SECTION_KEYS: Record<CommandDisplayCategory, string> = {
@@ -230,6 +287,7 @@ const COMMAND_SECTION_KEYS: Record<CommandDisplayCategory, string> = {
   skill: 'slash.category.skill',
   system: 'slash.category.system',
 };
+const COMPLETION_ITEM_LIMIT = 50;
 
 function renderCommandSectionHeader(section: CompletionSection): HTMLElement {
   const header = document.createElement('completion-section');
@@ -294,12 +352,41 @@ export function getSlashCommandArgumentHint(
   commands: CommandInfo[],
   language: WebShellLanguage,
 ): string | null {
-  const match = text.match(new RegExp(`^/${COMMAND_NAME_PATTERN}(\\s*)$`));
+  const match = text.match(
+    new RegExp(`^/${COMMAND_NAME_PATTERN}(?:\\s+(.*?))?\\s*$`),
+  );
   if (!match) return null;
 
   const cmdName = match[1];
   const cmd = commands.find((c) => c.name === cmdName);
   if (!cmd) return null;
+
+  const subcommandPath = match[2]?.trim();
+  if (subcommandPath) {
+    const parts = subcommandPath.split(/\s+/);
+    if (cmdName === 'skills' && parts.length === 1) {
+      return (
+        commands.find((command) => command.name === parts[0])?.argumentHint ??
+        null
+      );
+    }
+
+    let nodes = resolveSubcommands(
+      cmdName,
+      [],
+      [],
+      language,
+      cmd.subcommands,
+      cmd.argumentHint,
+    );
+    let selected: SubcommandNode | undefined;
+    for (const part of parts) {
+      selected = nodes?.find((node) => node.name === part);
+      if (!selected) return null;
+      nodes = selected.children ?? null;
+    }
+    return selected?.argumentHint?.trim() || null;
+  }
 
   const argumentHint = cmd.argumentHint?.trim();
   if (argumentHint) return argumentHint;
@@ -442,6 +529,7 @@ export function getSlashCommandCompletionResult(
       skills,
       language,
       cmd?.subcommands,
+      cmd?.argumentHint,
     );
     if (!nodes) return null;
 
@@ -455,16 +543,22 @@ export function getSlashCommandCompletionResult(
         currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
       );
     const isSkillList = cmdName === 'skills' && completedParts.length === 0;
-    const items = filteredNodes.map((node): SlashCommandCompletionItem => {
-      const command = `${prefix}${node.name}`;
-      return {
-        id: command,
-        label: node.name,
-        detail: node.description || undefined,
-        apply: `${command} `,
-        ...(isSkillList ? { type: 'skill' as const } : {}),
-      };
-    });
+    const items = filteredNodes
+      .slice(0, COMPLETION_ITEM_LIMIT)
+      .map((node): SlashCommandCompletionItem => {
+        const command = `${prefix}${node.name}`;
+        return {
+          id: command,
+          label: node.name,
+          detail: node.description || undefined,
+          ...(node.argumentHint ? { argumentHint: node.argumentHint } : {}),
+          apply: `${command} `,
+          ...(isSkillList ? { type: 'skill' as const } : {}),
+          ...(!node.children?.length && !node.argumentHint
+            ? { autoSubmit: true }
+            : {}),
+        };
+      });
 
     if (items.length === 0) return null;
     return {
@@ -490,27 +584,39 @@ export function getSlashCommandCompletionResult(
       )
     : fuzzyRankCommands(commands, prefix);
 
-  const items = filteredCommands.map((command): SlashCommandCompletionItem => {
-    const apply = `/${command.name} `;
-    const category = getCommandDisplayCategory(command);
-    const showCommandInfo = category === 'custom' || category === 'skill';
-    return {
-      id: command.name,
-      label: `/${command.name}`,
-      detail: command.description || undefined,
-      apply,
-      category,
-      // Section headers only make sense while browsing the category-ordered
-      // list; a relevance-ranked result set interleaves categories, so headers
-      // would appear before nearly every row. Drop them during search.
-      ...(isBrowsing
-        ? { section: translate(COMMAND_SECTION_KEYS[category]) }
-        : {}),
-      ...(showCommandInfo && command.description
-        ? { type: 'command-info' as const }
-        : {}),
-    };
-  });
+  const items = filteredCommands
+    .slice(0, COMPLETION_ITEM_LIMIT)
+    .map((command): SlashCommandCompletionItem => {
+      const apply = `/${command.name} `;
+      const category = getCommandDisplayCategory(command);
+      const showCommandInfo = category === 'custom' || category === 'skill';
+      return {
+        id: command.name,
+        label: command.completionLabel || `/${command.name}`,
+        detail: command.description || undefined,
+        ...(!command.autoSubmit && command.argumentHint
+          ? { argumentHint: command.argumentHint }
+          : {}),
+        apply,
+        category,
+        // Section headers only make sense while browsing the category-ordered
+        // list; a relevance-ranked result set interleaves categories, so headers
+        // would appear before nearly every row. Drop them during search.
+        ...(isBrowsing
+          ? {
+              section:
+                command.completionSection ||
+                translate(COMMAND_SECTION_KEYS[category]),
+            }
+          : {}),
+        ...(showCommandInfo && command.description
+          ? { type: 'command-info' as const }
+          : {}),
+        ...(command.autoSubmit && !hasSubcommandPicker(command, language)
+          ? { autoSubmit: true }
+          : {}),
+      };
+    });
 
   if (items.length === 0) return null;
   return {
@@ -575,6 +681,7 @@ export function slashCompletionSource(
         getSkills(),
         language,
         cmd?.subcommands,
+        cmd?.argumentHint,
       );
       if (!nodes) return null;
 
@@ -601,7 +708,9 @@ export function slashCompletionSource(
               }
             : {}),
           detail: n.description || undefined,
+          ...(n.argumentHint ? { argumentHint: n.argumentHint } : {}),
           apply: `${command} `,
+          ...(n.children?.length || n.argumentHint ? {} : { autoSubmit: true }),
         };
       });
 

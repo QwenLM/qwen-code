@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { render } from 'ink-testing-library';
 import { render as inkRender } from 'ink';
@@ -452,7 +453,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     // Enter on the nested row opens the MCP detail view with Extension source.
     stdin.write('\x1B[B'); // down: alpha -> alpha-mcp
     await waitFor(() => {
-      expect(lastFrame()).toMatch(/●\s+└ alpha-mcp/);
+      expect(lastFrame()).toMatch(/●\uFE0E\s+└ alpha-mcp/);
     });
     stdin.write('\r');
     await waitFor(() => {
@@ -499,7 +500,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     });
     stdin.write('\x1B[B'); // down: alpha -> alpha-mcp
     await waitFor(() => {
-      expect(lastFrame()).toMatch(/●\s+└ alpha-mcp/);
+      expect(lastFrame()).toMatch(/●\uFE0E\s+└ alpha-mcp/);
     });
     stdin.write(' '); // Space -> disable just this server
     await waitFor(() => {
@@ -611,7 +612,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     stdin.write('\x1B[B');
     stdin.write('\x1B[B');
     await waitFor(() => {
-      expect(lastFrame()).toContain('● Skills');
+      expect(lastFrame()).toContain('●\uFE0E Skills');
     });
     stdin.write('\r'); // Enter -> open detail
     await waitFor(() => {
@@ -660,7 +661,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     stdin.write('\x1B[B');
     stdin.write('\x1B[B');
     await waitFor(() => {
-      expect(lastFrame()).toContain('● Skills');
+      expect(lastFrame()).toContain('●\uFE0E Skills');
     });
     stdin.write('\r'); // open detail
     await waitFor(() => {
@@ -698,7 +699,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     stdin.write('\x1B[B');
     stdin.write('\x1B[B');
     await waitFor(() => {
-      expect(lastFrame()).toContain('● Skills');
+      expect(lastFrame()).toContain('●\uFE0E Skills');
     });
     stdin.write('\r'); // open detail -> first load fails
     await waitFor(() => {
@@ -759,7 +760,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     stdin.write('\x1B[B');
     stdin.write('\x1B[B');
     await waitFor(() => {
-      expect(lastFrame()).toContain('● Skills');
+      expect(lastFrame()).toContain('●\uFE0E Skills');
     });
     stdin.write('\r'); // Enter -> detail
     await waitFor(() => {

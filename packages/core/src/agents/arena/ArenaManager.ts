@@ -13,7 +13,13 @@ import {
   type ApprovalMode,
   type Config,
 } from '../../config/config.js';
-import { getCoreSystemPrompt } from '../../core/prompts.js';
+import {
+  assembleSystemPrompt,
+  getCoreSystemPrompt,
+  resolveMainSessionOutputStyle,
+} from '../../core/prompts.js';
+import type { OutputStyleDefinition } from '../../core/output-styles.js';
+import { resolveEffectiveOutputStyle } from '../../core/output-styles.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -46,6 +52,7 @@ import {
   isTerminalStatus,
   isSettledStatus,
   isSuccessStatus,
+  lastVisibleAnswer,
 } from '../runtime/agent-types.js';
 import {
   logArenaSessionStarted,
@@ -1009,6 +1016,23 @@ export class ArenaManager {
   }
 
   /**
+   * The output style an arena peer inherits from the main session.
+   *
+   * A peer is a headless agent whose whole job is to produce a diff, so it
+   * follows the main session's own rules — no style when a custom system
+   * prompt replaces the base one, and the headless drop — and additionally
+   * refuses a style that removes the software-engineering guidance the peers
+   * are judged on.
+   */
+  private resolvePeerOutputStyle(): OutputStyleDefinition | undefined {
+    const style = resolveEffectiveOutputStyle(
+      resolveMainSessionOutputStyle(this.config),
+      'headless',
+    );
+    return style?.keepCodingInstructions ? style : undefined;
+  }
+
+  /**
    * Build the spawn configuration for an agent subprocess.
    *
    * The agent is launched as a full interactive CLI instance, running in
@@ -1075,10 +1099,22 @@ export class ArenaManager {
         approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt: getCoreSystemPrompt(
-              this.config.getUserMemory(),
-              model.modelId,
-            ),
+            // Stable base + context only. The volatile auto-memory section is
+            // appended once by AgentCore.buildChatSystemPrompt when the
+            // in-process worker builds its system instruction; classifying it
+            // here too would duplicate the section (the per-agent Config
+            // inherits a non-empty getAutoMemoryPrompt() from this base).
+            systemPrompt: assembleSystemPrompt({
+              base: getCoreSystemPrompt(
+                undefined,
+                model.modelId,
+                undefined,
+                'headless',
+                this.resolvePeerOutputStyle(),
+                this.config.isTodoWriteEnabled(),
+              ),
+              contextFiles: this.config.getUserMemory(),
+            }),
           },
           modelConfig: { model: model.modelId },
           runConfig: {
@@ -1660,19 +1696,9 @@ export class ArenaManager {
     transcript: ArenaTranscriptEntry[] | undefined,
   ): string | undefined {
     if (!transcript) return undefined;
-
-    for (let i = transcript.length - 1; i >= 0; i--) {
-      const message = transcript[i]!;
-      if (
-        message.role === 'assistant' &&
-        !message.thought &&
-        message.content.trim()
-      ) {
-        return message.content.trim();
-      }
-    }
-
-    return undefined;
+    // Shared with TeamManager's pre-attach recovery: the most recent
+    // non-empty, non-thought assistant message wins.
+    return lastVisibleAnswer(transcript);
   }
 
   private async addApproachSummaries(

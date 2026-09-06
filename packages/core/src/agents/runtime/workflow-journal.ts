@@ -21,9 +21,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`) with object keys sorted, so
- * cosmetic opt differences (a re-ordered schema, a `label` change) don't
- * bust the cache.
+ * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
+ * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
+ * don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -32,8 +32,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { constants, promises as fs } from 'node:fs';
+import path from 'node:path';
 import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
@@ -66,14 +69,25 @@ export interface JournalReplay {
 
 /**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` change what the dispatch
- * does; `label` / `phase` / `stallMs` are cosmetic or operational and must
- * NOT bust the cache. Object keys are sorted recursively so a re-serialized
- * schema with reordered keys hashes the same.
+ * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
+ * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
+ * operational and must NOT bust the cache. Object keys are sorted recursively
+ * so a re-serialized schema with reordered keys hashes the same.
+ *
+ * `workingDir` is dispatch-affecting for the same reason it exists: the same
+ * prompt run against two different worktrees is two different questions. Were
+ * it projected away, a resume that changed only the directory would replay
+ * the previous tree's answers as if they were this one's.
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of ['schema', 'model', 'isolation', 'agentType'] as const) {
+  for (const k of [
+    'schema',
+    'model',
+    'isolation',
+    'agentType',
+    'workingDir',
+  ] as const) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
@@ -168,7 +182,70 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
  * failure must not fail the dispatch).
  */
 export class WorkflowJournal {
-  constructor(readonly path: string) {}
+  private pending = Promise.resolve();
+  readonly path: string;
+
+  constructor(
+    journalPath: string,
+    private readonly root = path.dirname(path.dirname(journalPath)),
+  ) {
+    this.path = journalPath;
+  }
+
+  private async hasSymlinkedPath(): Promise<boolean> {
+    if (
+      (await isSymlinkedRoot(this.root)) ||
+      (await isSymlinkedRoot(path.dirname(this.path)))
+    ) {
+      return true;
+    }
+    return fs
+      .lstat(this.path)
+      .then((stat) => stat.isSymbolicLink())
+      .catch(() => false);
+  }
+
+  /** Ensure the advertised journal path exists without affecting the run. */
+  async ensureExists(): Promise<boolean> {
+    try {
+      if (await this.hasSymlinkedPath()) return false;
+      await fs.mkdir(path.dirname(this.path), { recursive: true });
+      if (await this.hasSymlinkedPath()) return false;
+      const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+      const file = await fs.open(
+        this.path,
+        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow,
+        0o600,
+      );
+      try {
+        await file.chmod(0o600);
+      } finally {
+        await file.close();
+      }
+      return true;
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.ensureExists failed for ${this.path}: ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /** Remove a never-registered run's journal file, best-effort. */
+  async remove(): Promise<void> {
+    try {
+      if (await this.hasSymlinkedPath()) return;
+      await fs.rm(this.path, { force: true });
+      await fs.rmdir(path.dirname(this.path)).catch((error) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw error;
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.remove failed for ${this.path}: ${error}`,
+      );
+    }
+  }
 
   /** Load + parse all entries into replay maps. Empty maps if no file. */
   async load(): Promise<JournalReplay> {
@@ -183,6 +260,13 @@ export class WorkflowJournal {
 
   /** Append one entry. Rejects only on I/O error (callers `.catch`). */
   append(entry: JournalEntry): Promise<void> {
-    return writeLine(this.path, entry);
+    const operation = this.pending.then(() => writeLine(this.path, entry));
+    this.pending = operation.catch(() => undefined);
+    return operation;
+  }
+
+  /** Wait until every append issued so far has settled. */
+  drain(): Promise<void> {
+    return this.pending;
   }
 }

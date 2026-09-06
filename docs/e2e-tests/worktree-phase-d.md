@@ -168,7 +168,7 @@ or "git init".
 ### B1: sidecar written with all six fields
 
 ```bash
-SESSION_ID=$(uuidgen)
+SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 $QWEN --worktree b1-test --session-id "$SESSION_ID" "say hi" \
   --approval-mode yolo --output-format json 2>/dev/null > /tmp/b1.out
 
@@ -220,7 +220,7 @@ is inside the worktree.
 
 ```bash
 # Run 1: create a session with worktree "first"
-SESSION_ID=$(uuidgen)
+SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 $QWEN --worktree first --session-id "$SESSION_ID" "say hi" \
   --approval-mode yolo --output-format json 2>/dev/null > /tmp/c1-run1.out
 
@@ -246,7 +246,7 @@ ls -d "$TEST_DIR/.qwen/worktrees/"*
 ### C2: stale sidecar (manually deleted dir) + `--worktree` → fresh worktree
 
 ```bash
-SESSION_ID=$(uuidgen)
+SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 $QWEN --worktree c2 --session-id "$SESSION_ID" "say hi" \
   --approval-mode yolo --output-format json 2>/dev/null > /tmp/c2-run1.out
 
@@ -312,7 +312,7 @@ tmux kill-session -t d2
 ### D3: Dialog → Remove → worktree + branch + sidecar all gone
 
 ```bash
-SESSION_ID=$(uuidgen)
+SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 tmux new-session -d -s d3 -x 200 -y 50 \
   "cd $TEST_DIR && $QWEN --worktree d3-test --session-id $SESSION_ID --approval-mode yolo"
 sleep 3
@@ -541,7 +541,7 @@ readlink "$TEST_DIR/.qwen/worktrees/pr-4174/node_modules"
 > the dry-run, or skip G1 entirely in baseline mode.
 
 ```bash
-SESSION_ID=$(uuidgen)
+SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 tmux new-session -d -s g1 -x 200 -y 50 \
   "cd $TEST_DIR && $QWEN --worktree g1-test --session-id $SESSION_ID --approval-mode yolo 2>&1 | tee /tmp/g1-stderr.out"
 sleep 3
@@ -698,7 +698,7 @@ not an implementation issue. **Ready for Phase 7 code review.**
 | ----------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Re-attach to existing worktree (G1.b)                       | `packages/cli/src/startup/worktreeStartup.ts`      | Added pre-create check: if dir is a registered worktree on the expected branch, skip create + chdir                                                     |
 | `getRegisteredWorktreeBranch()` helper                      | `packages/core/src/services/gitWorktreeService.ts` | Probes `git rev-parse --abbrev-ref HEAD` against the candidate path                                                                                     |
-| Path normalization before chdir (G2)                        | `packages/cli/src/gemini.tsx`                      | Resolves `mcpConfig`, `openaiLoggingDir`, `jsonFile`, `inputFile`, `telemetryOutfile`, `includeDirectories` against launch cwd when `--worktree` is set |
+| Path normalization before chdir (G2)                        | `packages/cli/src/llm.tsx`                         | Resolves `mcpConfig`, `openaiLoggingDir`, `jsonFile`, `inputFile`, `telemetryOutfile`, `includeDirectories` against launch cwd when `--worktree` is set |
 | Documentation: yargs flag ordering tip + Limitations update | `docs/users/features/worktree.md`                  | Quick Start tip + new Limitations bullets (cross-slug, path-arg behavior)                                                                               |
 | Unit tests for re-attach                                    | `packages/cli/src/startup/worktreeStartup.test.ts` | Added 2 tests: happy re-attach + "different branch occupies slot" guard                                                                                 |
 

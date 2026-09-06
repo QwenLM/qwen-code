@@ -71,6 +71,111 @@ describe('normalizeSessionData', () => {
     ]);
   });
 
+  it('exports the diff path from filePath rather than the fileName basename', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-2',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2',
+              name: 'edit_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-2',
+        resultDisplay: {
+          fileName: 'Foo.kt',
+          filePath: '/workspace/app/src/main/java/com/example/Foo.kt',
+          fileDiff: '--- Foo.kt\n+++ Foo.kt\n',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'diff',
+        path: '/workspace/app/src/main/java/com/example/Foo.kt',
+        oldText: 'old',
+        newText: 'new',
+      },
+    ]);
+  });
+
+  it('falls back to the fileName basename when filePath is absent (pre-fix persisted sessions)', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-2b',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2b',
+              name: 'edit_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-2b',
+        resultDisplay: {
+          fileName: 'Foo.kt',
+          fileDiff: '--- Foo.kt\n+++ Foo.kt\n',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'diff',
+        path: 'Foo.kt',
+        oldText: 'old',
+        newText: 'new',
+      },
+    ]);
+  });
+
   it('accepts the minimal daemon export config shape', () => {
     const minimalConfig: ExportConfig = {};
     const record: ChatRecord = {
@@ -110,6 +215,127 @@ describe('normalizeSessionData', () => {
     );
 
     expect(normalized.messages[0].toolCall?.title).toBe('read_file');
+  });
+
+  it.each([
+    { failed: false, expectedStatus: 'completed' },
+    { failed: true, expectedStatus: 'failed' },
+  ] as const)(
+    'exports the vision bridge disclosure when failed=$failed',
+    ({ failed, expectedStatus }) => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: failed
+          ? 'Failed to read PDF after rendering pages 20-23'
+          : 'Transcribed PDF pages 20-23; remaining pages 24-25',
+        notice: failed
+          ? 'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.'
+          : 'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+      };
+      const output = failed
+        ? 'Cannot extract text from PDF'
+        : 'Page 20: transcribed content';
+      const record: ChatRecord = {
+        uuid: `tool-pdf-${expectedStatus}`,
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2025-01-01T00:00:00.000Z',
+        type: 'tool_result',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: `call-pdf-${expectedStatus}`,
+                name: 'read_file',
+                response: { output },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: `call-pdf-${expectedStatus}`,
+          resultDisplay,
+          ...(failed && { error: new Error('No extractable text layer.') }),
+        },
+      };
+
+      const normalized = normalizeSessionData(
+        {
+          sessionId: 'session-1',
+          startTime: '2025-01-01T00:00:00.000Z',
+          messages: [],
+        },
+        [record],
+        config,
+      );
+
+      expect(normalized.messages[0].toolCall?.status).toBe(expectedStatus);
+      expect(normalized.messages[0].toolCall?.content).toEqual([
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+          },
+        },
+        {
+          type: 'content',
+          content: { type: 'text', text: output },
+        },
+      ]);
+    },
+  );
+
+  it('sanitizes terminal control characters in exported vision bridge disclosures', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-pdf-sanitized',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-pdf-sanitized',
+              name: 'read_file',
+              response: { output: 'Page content' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-pdf-sanitized',
+        resultDisplay: {
+          type: 'vision_bridge_notice',
+          summary: 'Read PDF \u001b[31mreport.pdf\u001b[0m',
+          notice: 'Converted via \u202eqwen-vl',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+    expect(normalized.messages[0].toolCall?.content?.[0]).toEqual({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Read PDF \\u001b[31mreport.pdf\\u001b[0m\nConverted via qwen-vl',
+      },
+    });
   });
 
   it('matches tool results by functionResponse id when callId is absent', () => {

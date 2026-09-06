@@ -220,18 +220,33 @@ export function colorizeLine(
  *
  * @param code The code string to highlight.
  * @param language The language identifier (e.g., 'javascript', 'css', 'html')
- * @param tabWidth The number of spaces to replace each tab character with, default is 4
+ * @param availableHeight Optional cap on rendered rows (older lines are clipped).
+ * @param maxWidth Optional cap on rendered width.
+ * @param options Presentation overrides:
+ *   - `theme` — theme to use (defaults to the active theme)
+ *   - `settings` — loaded settings (drives showLineNumbers)
+ *   - `tabWidth` — spaces per tab, default 4
+ *   - `startLineNumber` — the number shown for the first line, default 1. Lets a
+ *     code block that was split across streaming commits (see splitFencedMarkdown)
+ *     continue its gutter numbering instead of restarting at 1.
  * @returns A React.ReactNode containing Ink <Text> elements for the highlighted code.
  */
+export interface ColorizeCodeOptions {
+  theme?: Theme;
+  settings?: LoadedSettings;
+  tabWidth?: number;
+  startLineNumber?: number;
+}
+
 export function colorizeCode(
   code: string,
   language: string | null,
   availableHeight?: number,
   maxWidth?: number,
-  theme?: Theme,
-  settings?: LoadedSettings,
-  tabWidth = 4,
+  options: ColorizeCodeOptions = {},
 ): React.ReactNode {
+  const { theme, settings, tabWidth = 4, startLineNumber = 1 } = options;
+  const firstLineNumber = Math.max(1, Math.trunc(startLineNumber));
   const codeToHighlight = code
     .replace(/\n$/, '')
     .replace(/\t/g, ' '.repeat(tabWidth));
@@ -247,7 +262,8 @@ export function colorizeCode(
     // Render the HAST tree using the adapted theme
     // Apply the theme's default foreground color to the top-level Text element
     let lines = codeToHighlight.split('\n');
-    const padWidth = String(lines.length).length; // Calculate padding width based on number of lines
+    // Pad to the widest gutter number, accounting for a non-1 start offset.
+    const padWidth = String(lines.length + firstLineNumber - 1).length;
 
     let hiddenLinesCount = 0;
 
@@ -279,11 +295,10 @@ export function colorizeCode(
           return (
             <Box key={index}>
               {showLineNumbers && (
-                <Text color={activeTheme.colors.Gray}>
-                  {`${String(index + 1 + hiddenLinesCount).padStart(
-                    padWidth,
-                    ' ',
-                  )} `}
+                <Text color={activeTheme.colors.Gray} selectable={false}>
+                  {`${String(
+                    index + firstLineNumber + hiddenLinesCount,
+                  ).padStart(padWidth, ' ')} `}
                 </Text>
               )}
               <Text color={activeTheme.defaultColor} wrap="wrap">
@@ -302,7 +317,7 @@ export function colorizeCode(
     // Fall back to plain text with default color on error
     // Also display line numbers in fallback
     const lines = codeToHighlight.split('\n');
-    const padWidth = String(lines.length).length; // Calculate padding width based on number of lines
+    const padWidth = String(lines.length + firstLineNumber - 1).length;
     return (
       <MaxSizedBox
         maxHeight={availableHeight}
@@ -312,8 +327,8 @@ export function colorizeCode(
         {lines.map((line, index) => (
           <Box key={index}>
             {showLineNumbers && (
-              <Text color={activeTheme.defaultColor}>
-                {`${String(index + 1).padStart(padWidth, ' ')} `}
+              <Text color={activeTheme.defaultColor} selectable={false}>
+                {`${String(index + firstLineNumber).padStart(padWidth, ' ')} `}
               </Text>
             )}
             <Text color={activeTheme.colors.Gray}>{line}</Text>

@@ -26,6 +26,11 @@ vi.mock('../debugLogger.js', () => ({
 
 describe('Ignore', () => {
   describe('getDirectoryFilter', () => {
+    it('should return a fresh predicate for each call', () => {
+      const ig = new Ignore();
+      expect(ig.getDirectoryFilter()).not.toBe(ig.getDirectoryFilter());
+    });
+
     it('should ignore directories matching directory patterns', () => {
       const ig = new Ignore().add(['foo/', 'bar/']);
       const dirFilter = ig.getDirectoryFilter();

@@ -7,6 +7,7 @@
 import os from 'node:os';
 import {
   detectRuntime,
+  formatMemoryUsage,
   redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -14,17 +15,6 @@ import {
   type ServeEnvCell,
   type ServeWorkspaceEnvStatus,
 } from '@qwen-code/acp-bridge/status';
-
-function formatMemoryUsage(bytes: number): string {
-  const gb = bytes / (1024 * 1024 * 1024);
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  return `${gb.toFixed(2)} GB`;
-}
 
 /**
  * Whitelisted environment variables whose **presence** the daemon will
@@ -66,6 +56,10 @@ const PROXY_VARS = [
   'NO_PROXY',
   'ALL_PROXY',
 ] as const;
+
+export function snapshotProcessEnv(): Record<string, string | undefined> {
+  return { ...process.env };
+}
 
 /**
  * Resolve a proxy env var, preferring the uppercase canonical form and
@@ -135,13 +129,25 @@ export function buildEnvStatusFromProcess(
   workspaceCwd: string,
   acpChannelLive: boolean,
 ): ServeWorkspaceEnvStatus {
+  return buildEnvStatusFromEnv(
+    workspaceCwd,
+    acpChannelLive,
+    snapshotProcessEnv(),
+  );
+}
+
+export function buildEnvStatusFromEnv(
+  workspaceCwd: string,
+  acpChannelLive: boolean,
+  sourceEnv: Readonly<NodeJS.ProcessEnv>,
+): ServeWorkspaceEnvStatus {
   // `process.env` is shared mutable state — any concurrent code path
   // (auth flow, settings reload, child boot) can mutate it mid-snapshot.
   // Snapshot once at function entry so all 14+ cells observe the same
   // env, and a client polling `/workspace/env` can never see a torn
   // half-pre-init / half-post-init snapshot. Copy is cheap (a few hundred
   // string refs) and atomic from JS' single-threaded execution model.
-  const env = { ...process.env };
+  const env = { ...sourceEnv };
   const cells: ServeEnvCell[] = [];
 
   // Under Bun, `process.versions.node` is the pinned node-compat shim

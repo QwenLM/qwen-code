@@ -18,6 +18,7 @@ import type { SkillHooksSettings, SkillConfig } from '../skills/types.js';
 import {
   HookType,
   type HookEventName,
+  type HookConfig,
   type CommandHookConfig,
   type HttpHookConfig,
 } from './types.js';
@@ -71,12 +72,34 @@ export function registerSkillHooks(
           skill.skillRoot,
         );
 
+        // Skip hooks this skill already registered earlier in the session.
+        // Unloading a skill body (/unskill, eviction sync) never unregisters
+        // its session hooks, so without this dedup every unload/reload cycle
+        // would push a duplicate entry and the hook would fire once per cycle.
+        const alreadyRegistered = sessionHooksManager
+          .getHooksForEvent(sessionId, eventName)
+          .some(
+            (entry) =>
+              entry.matcher === matcherPattern &&
+              entry.skillRoot === skill.skillRoot &&
+              hookConfigKey(entry.config) === hookConfigKey(hookConfig),
+          );
+        if (alreadyRegistered) {
+          debugLogger.debug(
+            `Hook for ${eventName} with matcher '${matcherPattern}' from skill '${skill.name}' already registered; skipping duplicate`,
+          );
+          continue;
+        }
+
+        // A project skill's hooks are repo-supplied: they register only
+        // while the folder is trusted (the caller's gate) and fire only
+        // while it still is (the event handler re-checks at fire time).
         sessionHooksManager.addSessionHook(
           sessionId,
           eventName,
           matcherPattern,
           hookConfig,
-          { skillRoot: skill.skillRoot },
+          { skillRoot: skill.skillRoot, trustGated: skill.level === 'project' },
         );
 
         registeredCount++;
@@ -94,6 +117,18 @@ export function registerSkillHooks(
   }
 
   return registeredCount;
+}
+
+/**
+ * Identity key for dedup: the whole prepared config. Keying on only
+ * type + command/url silently drops distinct hooks the frontmatter
+ * admits per matcher (same command with different timeout/shell, same
+ * URL with different headers) — the second of the pair is skipped even
+ * on first registration. Prepared configs from frontmatter carry no
+ * functions, so a structural key is stable across reload cycles.
+ */
+function hookConfigKey(hook: HookConfig): string {
+  return `${hook.type}:${JSON.stringify(hook)}`;
 }
 
 /**
@@ -126,7 +161,9 @@ function prepareHookConfig(
  *
  * Note: This is typically not needed as session hooks are cleared
  * when the session ends. However, it can be useful for cleanup
- * in certain scenarios.
+ * in certain scenarios. Folder-trust revocation does not go through it:
+ * a project skill's hooks are registered trust-gated and re-checked at
+ * fire time, so no per-skill tracking is needed to silence them.
  *
  * @param sessionHooksManager - The session hooks manager instance
  * @param sessionId - The current session ID

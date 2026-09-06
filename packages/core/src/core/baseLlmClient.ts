@@ -14,8 +14,13 @@ import type {
   Tool,
   Schema,
 } from '@google/genai';
+import { FunctionCallingConfigMode } from './genai-compat.js';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from './contentGenerator.js';
+import type {
+  ContentGenerator,
+  ContentGeneratorConfig,
+  PromptCacheSharingParameters,
+} from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
@@ -33,6 +38,8 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -59,6 +66,7 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
  */
 export interface ResolvedGeneratorForModel {
   contentGenerator: ContentGenerator;
+  contentGeneratorConfig: ContentGeneratorConfig;
   retryAuthType: string | undefined;
   retryErrorCodes?: readonly number[];
   model: string;
@@ -74,17 +82,15 @@ export interface GenerateTextOptions {
   model: string;
   /**
    * Task-specific system instructions. Passed through to the underlying
-   * content generator without the geminiClient main-prompt fallback or
+   * content generator without the llmClient main-prompt fallback or
    * user-memory wrapping that `getCustomSystemPrompt` applies.
    */
-  systemInstruction?: string | Part | Part[] | Content;
+  systemInstruction?: GenerateContentConfig['systemInstruction'];
   /**
-   * Overrides for generation configuration (e.g., temperature, thinkingConfig).
+   * Overrides for generation configuration (e.g., temperature, thinkingConfig,
+   * or cache-prefix-preserving tool declarations).
    */
-  config?: Omit<
-    GenerateContentConfig,
-    'systemInstruction' | 'tools' | 'abortSignal'
-  >;
+  config?: Omit<GenerateContentConfig, 'systemInstruction' | 'abortSignal'>;
   /** Signal for cancellation. */
   abortSignal: AbortSignal;
   /**
@@ -104,6 +110,12 @@ export interface GenerateTextOptions {
    */
   stream?: boolean;
   /**
+   * Let the OpenAI adapter mark the unchanged history prefix for cache reuse.
+   * This is only for requests ending in a non-reusable trailing directive;
+   * the adapter deliberately excludes the final message from cache marking.
+   */
+  promptCacheSharing?: boolean;
+  /**
    * When true, throw instead of silently falling back to the main generator if
    * a distinct generator for `model` can't be created (model not registered, or
    * generator creation fails — e.g. a missing cross-provider credential). The
@@ -120,6 +132,8 @@ export interface GenerateTextOptions {
 export interface GenerateTextResult {
   text: string;
   usage: GenerateContentResponseUsageMetadata | undefined;
+  /** Whether the response contained a function call. No call is executed here. */
+  hadToolCall?: boolean;
 }
 
 /**
@@ -200,7 +214,7 @@ export class BaseLlmClient {
    */
   private readonly perModelGeneratorCache = new Map<
     string,
-    Promise<ContentGenerator>
+    Promise<RuntimeContentGeneratorView>
   >();
 
   constructor(
@@ -246,10 +260,15 @@ export class BaseLlmClient {
 
     const {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
+    const requestContents = slimCompactionInput(
+      contents,
+      contentGeneratorConfig.modalities,
+    ).slimmedHistory;
 
     try {
       const apiCall = () =>
@@ -259,8 +278,17 @@ export class BaseLlmClient {
             config: {
               ...requestConfig,
               tools,
+              // Force the model to call the respond_in_schema tool rather
+              // than free-texting. Without this, Anthropic-native and
+              // some OpenAI-compat providers default to tool_choice=auto
+              // and may skip the tool call entirely — especially
+              // adaptive-thinking models that consume the tiny output
+              // budget on thinking before producing any tool_use.
+              toolConfig: {
+                functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+              },
             },
-            contents,
+            contents: requestContents,
           },
           promptId ?? '',
         );
@@ -337,7 +365,7 @@ export class BaseLlmClient {
   /**
    * Free-form text generation primitive used by `runSideQuery` text mode.
    *
-   * Distinct from `GeminiClient.generateContent`: this calls the underlying
+   * Distinct from `LlmClient.generateContent`: this calls the underlying
    * `ContentGenerator` directly, so the caller's `systemInstruction` is sent
    * through verbatim — no `getCustomSystemPrompt` wrapping (which would append
    * user memory) and no main-session-prompt fallback when omitted. Side queries
@@ -364,16 +392,22 @@ export class BaseLlmClient {
 
     const {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model, { failClosed: options.failClosed });
+    const requestContents = slimCompactionInput(
+      contents,
+      contentGeneratorConfig.modalities,
+    ).slimmedHistory;
 
     try {
-      const request = {
+      const request: PromptCacheSharingParameters = {
         model: requestModel,
         config: requestConfig,
-        contents,
+        contents: requestContents,
+        ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single
@@ -392,13 +426,15 @@ export class BaseLlmClient {
             // the final chunk (last one wins), matching the non-streaming read.
             let text = '';
             let usage: GenerateContentResponseUsageMetadata | undefined;
+            let hadToolCall = false;
             for await (const chunk of responseStream) {
               text += getResponseText(chunk) ?? '';
+              hadToolCall ||= (getFunctionCalls(chunk)?.length ?? 0) > 0;
               if (chunk.usageMetadata) {
                 usage = chunk.usageMetadata;
               }
             }
-            return { text, usage };
+            return { text, usage, hadToolCall };
           }
         : async () => {
             const result = await contentGenerator.generateContent(
@@ -408,6 +444,7 @@ export class BaseLlmClient {
             return {
               text: getResponseText(result) ?? '',
               usage: result.usageMetadata,
+              hadToolCall: (getFunctionCalls(result)?.length ?? 0) > 0,
             };
           };
 
@@ -441,6 +478,7 @@ export class BaseLlmClient {
       return {
         text: result.text.trim(),
         usage: result.usage,
+        hadToolCall: result.hadToolCall,
       };
     } catch (error) {
       if (abortSignal.aborted) {
@@ -534,18 +572,20 @@ export class BaseLlmClient {
     ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: mainGeneratorConfig,
         retryAuthType: mainAuthType,
         retryErrorCodes: mainRetryErrorCodes,
         model: requestModel,
       };
     }
 
-    const contentGenerator = await this.createContentGeneratorForModel(
-      requested.model,
-      selector,
-      opts?.failClosed ?? false,
-      requested.baseUrl,
-    );
+    const { contentGenerator, contentGeneratorConfig } =
+      await this.createRuntimeViewForModel(
+        requested.model,
+        selector,
+        opts?.failClosed ?? false,
+        requested.baseUrl,
+      );
     const resolvedModel = this.resolveModelAcrossAuthTypes(
       requested.model,
       selector,
@@ -558,6 +598,7 @@ export class BaseLlmClient {
 
     return {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: resolvedModel?.id ?? requestModel,
@@ -618,19 +659,39 @@ export class BaseLlmClient {
     return undefined;
   }
 
-  private async createContentGeneratorForModel(
+  private async createRuntimeViewForModel(
     model: string,
     selector: ResolvedModelId | undefined,
     failClosed = false,
     modelBaseUrl?: string,
-  ): Promise<ContentGenerator> {
-    const cacheKey = selector
+  ): Promise<RuntimeContentGeneratorView> {
+    const routeKey = selector
       ? modelBaseUrl === undefined
         ? `${selector.authType ?? ''}:${selector.modelId}`
         : `${selector.authType ?? ''}:${selector.modelId}\0${modelBaseUrl}`
       : model;
+    const cacheKey = routeKey;
     const cached = this.perModelGeneratorCache.get(cacheKey);
-    if (cached) return cached;
+    const normalizeGeneratorError = (err: unknown) =>
+      err instanceof Error
+        ? err
+        : new Error(
+            `Failed to create content generator for model "${model}": ${String(err)}`,
+          );
+    const fallbackAfterGeneratorError = (
+      err: unknown,
+    ): RuntimeContentGeneratorView => {
+      if (failClosed) throw normalizeGeneratorError(err);
+      debugLogger.warn(
+        `Failed to create content generator for model "${model}", falling back to main generator.`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+      };
+    };
+    if (cached) return cached.catch(fallbackAfterGeneratorError);
 
     const resolvedModel = this.resolveModelAcrossAuthTypes(
       model,
@@ -656,7 +717,10 @@ export class BaseLlmClient {
       // runtime view from AsyncLocalStorage, which can differ between calls
       // (e.g. inside a subagent vs. on the main session). Caching here would
       // pin the first-call view's generator under this selector key.
-      return this.getCurrentContentGenerator();
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+      };
     }
 
     const generatorPromise = (async () => {
@@ -673,29 +737,27 @@ export class BaseLlmClient {
             baseUrl: resolvedModel.baseUrl,
           },
         );
-
-        return await createContentGenerator(targetConfig, this.config);
+        if (resolvedModel.capabilities?.vision) {
+          targetConfig.modalities = {
+            ...targetConfig.modalities,
+            image: true,
+          };
+        }
+        return {
+          contentGenerator: await createContentGenerator(
+            targetConfig,
+            this.config,
+          ),
+          contentGeneratorConfig: targetConfig,
+        };
       } catch (err: unknown) {
         this.perModelGeneratorCache.delete(cacheKey);
-        if (failClosed) {
-          // Surface the creation failure rather than routing image payloads at
-          // the main (text-only) generator. The caller fails the conversion.
-          throw err instanceof Error
-            ? err
-            : new Error(
-                `Failed to create content generator for model "${model}": ${String(err)}`,
-              );
-        }
-        debugLogger.warn(
-          `Failed to create content generator for model "${model}", falling back to main generator.`,
-          err instanceof Error ? err.message : String(err),
-        );
-        return this.getCurrentContentGenerator();
+        throw normalizeGeneratorError(err);
       }
     })();
 
     this.perModelGeneratorCache.set(cacheKey, generatorPromise);
-    return generatorPromise;
+    return generatorPromise.catch(fallbackAfterGeneratorError);
   }
 
   private resolveModelSelector(model: string): ResolvedModelId | undefined {

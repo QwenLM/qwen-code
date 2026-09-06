@@ -44,6 +44,27 @@ function makeBreakdown(
 }
 
 describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', () => {
+  it('keeps a positive estimated count in the numeric usage view', () => {
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe')}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+        isEstimated={true}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Token usage is estimated');
+    expect(frame).toContain('Used');
+    expect(frame).toContain('Messages');
+    expect(frame).not.toContain('No API response yet');
+  });
+
   it('renders the new three-tier section with all four threshold rows', () => {
     const { lastFrame } = render(
       <ContextUsage

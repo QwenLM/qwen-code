@@ -9,12 +9,14 @@ import {
   McpClientManager,
   type McpClientManagerOptions,
 } from './mcp-client-manager.js';
-import { McpClient } from './mcp-client.js';
+import { McpClient, populateMcpServerCommand } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { MCPServerConfig, type Config } from '../config/config.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { connectionIdOf } from './mcp-pool-key.js';
+import { listDescendantPids, sigtermPids } from './pid-descendants.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 vi.mock('./mcp-client.js', async () => {
   const originalModule = await vi.importActual('./mcp-client.js');
@@ -25,6 +27,11 @@ vi.mock('./mcp-client.js', async () => {
     populateMcpServerCommand: vi.fn((servers) => servers),
   };
 });
+
+vi.mock('./pid-descendants.js', () => ({
+  listDescendantPids: vi.fn().mockResolvedValue([]),
+  sigtermPids: vi.fn().mockReturnValue(0),
+}));
 
 /**
  * F2 (#4175 commit 6 review fix — wenshao R9 / PR A): test factory
@@ -47,6 +54,7 @@ function mkManager(
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -65,6 +73,29 @@ function mkManager(
 describe('McpClientManager', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('reports status from its own client instance', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const manager = mkManager();
+    const clients = (
+      manager as unknown as {
+        clients: Map<
+          string,
+          {
+            getStatus(): (typeof MCPServerStatus)[keyof typeof MCPServerStatus];
+          }
+        >;
+      }
+    ).clients;
+    clients.set('docs', {
+      getStatus: () => MCPServerStatus.CONNECTED,
+    });
+
+    expect(manager.getServerStatus('docs')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getServerStatus('missing')).toBe(
+      MCPServerStatus.DISCONNECTED,
+    );
   });
 
   it('routes discovery through the pool when one is injected (F2 commit 4)', async () => {
@@ -93,6 +124,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -105,6 +137,11 @@ describe('McpClientManager', () => {
       options: { pool: fakePool },
     });
     await manager.discoverAllMcpTools(mockConfig);
+    expect(populateMcpServerCommand).toHaveBeenCalledWith(
+      { srv: {} },
+      undefined,
+      '/session/worktree',
+    );
     expect(acquireSpy).toHaveBeenCalledTimes(1);
     expect(acquireSpy).toHaveBeenCalledWith(
       'srv',
@@ -156,6 +193,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srvA: {}, srvB: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -191,6 +229,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ gated: {}, ok: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -225,6 +264,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () => ({ removePromptsByServer }),
       getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}),
@@ -254,6 +294,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () => ({ removePromptsByServer }),
       getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}),
@@ -313,6 +354,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -372,6 +414,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -418,6 +461,7 @@ describe('McpClientManager', () => {
         isTrustedFolder: () => true,
         getMcpServers: () => ({}),
         getMcpServerCommand: () => undefined,
+        getTargetDir: () => '/session/worktree',
         getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
         getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
         getWorkspaceContext: () => ({}),
@@ -471,6 +515,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -530,6 +575,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -544,6 +590,141 @@ describe('McpClientManager', () => {
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     expect(acquireSpy).toHaveBeenCalledTimes(1);
     expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('refreshes metadata on a retained unpooled connection without transport churn', async () => {
+    let serverConfig = {
+      command: 'node',
+      includeTools: ['first'],
+    } as MCPServerConfig;
+    const transportId = connectionIdOf('srv', serverConfig);
+    const release = vi.fn();
+    const updateConfig = vi.fn();
+    const connection = {
+      release,
+      updateConfig,
+      on: vi.fn(),
+      off: vi.fn(),
+      id: 'srv::unpooled-0',
+      transportId,
+      serverName: 'srv',
+      entryIndex: 0,
+      toolsSnapshot: [],
+      promptsSnapshot: [],
+      resourcesSnapshot: [],
+    };
+    const acquire = vi.fn().mockResolvedValue(connection);
+    const fakePool = {
+      acquire,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: serverConfig }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
+
+    await manager.discoverAllMcpTools(mockConfig);
+    serverConfig = {
+      command: 'node',
+      includeTools: ['second'],
+      trust: true,
+      alwaysLoadTools: true,
+    } as MCPServerConfig;
+    await manager.discoverAllMcpTools(mockConfig);
+
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(updateConfig).toHaveBeenCalledOnce();
+    expect(updateConfig).toHaveBeenCalledWith(serverConfig);
+
+    serverConfig = { command: 'different-node' } as MCPServerConfig;
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('isolates retained connection metadata refresh failures between servers', async () => {
+    let serverConfigs = {
+      srvA: { command: 'node', includeTools: ['first-a'] } as MCPServerConfig,
+      srvB: { command: 'node', includeTools: ['first-b'] } as MCPServerConfig,
+    };
+    const updateA = vi.fn();
+    const updateB = vi.fn();
+    const connections = {
+      srvA: {
+        release: vi.fn(),
+        updateConfig: updateA,
+        on: vi.fn(),
+        off: vi.fn(),
+        id: 'srvA::unpooled-0',
+        transportId: connectionIdOf('srvA', serverConfigs.srvA),
+        serverName: 'srvA',
+        entryIndex: 0,
+      },
+      srvB: {
+        release: vi.fn(),
+        updateConfig: updateB,
+        on: vi.fn(),
+        off: vi.fn(),
+        id: 'srvB::unpooled-0',
+        transportId: connectionIdOf('srvB', serverConfigs.srvB),
+        serverName: 'srvB',
+        entryIndex: 0,
+      },
+    };
+    const acquire = vi.fn((name: 'srvA' | 'srvB') =>
+      Promise.resolve(connections[name]),
+    );
+    const fakePool = {
+      acquire,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => serverConfigs,
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
+    await manager.discoverAllMcpTools(mockConfig);
+
+    serverConfigs = {
+      srvA: { command: 'node', includeTools: ['second-a'] } as MCPServerConfig,
+      srvB: { command: 'node', includeTools: ['second-b'] } as MCPServerConfig,
+    };
+    updateA.mockImplementationOnce(() => {
+      throw new Error('refresh A failed');
+    });
+
+    await expect(manager.discoverAllMcpTools(mockConfig)).resolves.toBe(
+      undefined,
+    );
+    expect(updateA).toHaveBeenCalledWith(serverConfigs.srvA);
+    expect(updateB).toHaveBeenCalledWith(serverConfigs.srvB);
+    expect(acquire).toHaveBeenCalledTimes(2);
   });
 
   it('routes single-server discovery through the pool when injected', async () => {
@@ -563,6 +744,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -605,6 +787,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -666,6 +849,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -733,6 +917,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -783,6 +968,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -825,6 +1011,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -851,6 +1038,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -885,6 +1073,7 @@ describe('McpClientManager', () => {
         'without-instructions': {},
       }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -914,6 +1103,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => false,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -940,6 +1130,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => false,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -970,6 +1161,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'pending-server': { scope: 'project' } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -1000,6 +1192,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'approved-server': { scope: 'project' } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -1032,6 +1225,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {}, 'another-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1070,6 +1264,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1104,6 +1299,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1146,6 +1342,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1208,6 +1405,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1279,6 +1477,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1329,6 +1528,65 @@ describe('McpClientManager', () => {
     }
   });
 
+  it('unrefs health-check timers so they never hold the event loop open (issue #9944)', async () => {
+    // `qwen mcp reconnect` (and other short-lived Config consumers) call
+    // `config.shutdown()` while an incremental discovery pass is still in
+    // flight; that pass's `finally` block re-arms health checks AFTER
+    // `stop()` cleared them. Pre-fix those intervals were ref'd, so the
+    // process hung forever. Health monitoring is background bookkeeping —
+    // the timer must be unref'd so it never keeps the loop alive on its own.
+    // Real timers here: the assertion is about `hasRef()`, which fake timers
+    // do not model faithfully.
+    const client = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(client as unknown as McpClient);
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+    } as unknown as Config;
+    const manager = mkManager({
+      config: mockConfig,
+      options: {
+        healthConfig: {
+          autoReconnect: true,
+          // Long interval: we only inspect the armed timer, we never let it
+          // fire.
+          checkIntervalMs: 60_000,
+          maxConsecutiveFailures: 3,
+          reconnectDelayMs: 10,
+        },
+      },
+    });
+
+    try {
+      await manager.discoverMcpToolsForServer(
+        'test-server',
+        {} as unknown as Config,
+      );
+      const timer = (
+        manager as unknown as {
+          healthCheckTimers: Map<string, NodeJS.Timeout>;
+        }
+      ).healthCheckTimers.get('test-server');
+      expect(timer).toBeDefined();
+      expect(timer?.hasRef()).toBe(false);
+    } finally {
+      await manager.stop();
+    }
+  });
+
   it('should clear in-flight discovery tracking when stopping', async () => {
     let resolveConnect!: () => void;
     const connectPromise = new Promise<void>((resolve) => {
@@ -1348,6 +1606,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1399,6 +1658,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1438,6 +1698,7 @@ describe('McpClientManager', () => {
         broken: { command: 'node', args: [], discoveryTimeoutMs: 50 },
       }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1459,7 +1720,7 @@ describe('McpClientManager', () => {
     expect(elapsed).toBeGreaterThanOrEqual(40);
     // Generous upper bound — the 50ms timeout should fire well within 2s
     // even on a heavily-loaded CI runner.
-    expect(elapsed).toBeLessThan(2000);
+    expectWithinLatencyBudget(elapsed, 2000);
     // discoveryAllMcpToolsIncremental must always settle the state, even
     // when every server times out. Otherwise the cli's deferred-finalize
     // path would hang forever.
@@ -1469,6 +1730,73 @@ describe('McpClientManager', () => {
 
     // Cleanup the stuck connect so test doesn't leak a pending promise.
     neverResolve();
+  });
+
+  it('runs automatic OAuth outside the discovery timeout before reconnecting', async () => {
+    const order: string[] = [];
+    const connect = vi.fn().mockImplementation(async () => {
+      order.push('connect');
+    });
+    const discover = vi.fn().mockImplementation(async () => {
+      order.push('discover');
+    });
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect,
+          discover,
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const mcpClientModule = await import('./mcp-client.js');
+    const authenticate = vi
+      .spyOn(mcpClientModule, 'attemptAutomaticMcpOAuth')
+      .mockImplementation(async () => {
+        order.push('authenticate');
+        return true;
+      });
+    const probe = vi
+      .spyOn(mcpClientModule, 'probeMcpServerForOAuth')
+      .mockImplementation(async () => {
+        order.push('probe');
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return true;
+      });
+    const serverConfig = {
+      httpUrl: 'https://example.com/mcp',
+      discoveryTimeoutMs: 50,
+    };
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ oauth: serverConfig }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isInteractive: () => true,
+      isBrowserLaunchSuppressed: () => false,
+    } as unknown as Config;
+    const manager = mkManager({ config: mockConfig });
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    expect(probe).toHaveBeenCalledWith('oauth', serverConfig);
+    expect(authenticate).toHaveBeenCalledWith('oauth', serverConfig, true);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(order).toEqual([
+      'connect',
+      'discover',
+      'probe',
+      'authenticate',
+      'connect',
+      'discover',
+    ]);
   });
 
   it('discoverAllMcpToolsIncremental skips servers flagged as disabled', async () => {
@@ -1494,6 +1822,7 @@ describe('McpClientManager', () => {
         disabled: { command: 'node', args: [] },
       }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1539,6 +1868,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ foo: { command: 'node', args: [] } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1598,6 +1928,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ foo: { command: 'node', args } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer }),
@@ -1662,6 +1993,7 @@ describe('McpClientManager', () => {
       // identical; only the per-session filter changes.
       getMcpServers: () => ({ foo: { command: 'node', includeTools } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1683,6 +2015,92 @@ describe('McpClientManager', () => {
     // discovery-aware key differs → reconnect so discover() re-applies it.
     includeTools = ['allowed_tool'];
     await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('normalizes duplicate filters but reconnects when alwaysLoadTools changes', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn().mockReturnValue(MCPServerStatus.CONNECTED),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    let serverConfig = {
+      command: 'node',
+      includeTools: ['alpha(args)', 'alpha(args)', 'beta'],
+      alwaysLoadTools: false,
+    } as MCPServerConfig;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ foo: serverConfig }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = mkManager({ config: mockConfig });
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    serverConfig = {
+      command: 'node',
+      includeTools: ['beta', 'alpha'],
+      alwaysLoadTools: false,
+    } as MCPServerConfig;
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.disconnect).not.toHaveBeenCalled();
+
+    serverConfig = { ...serverConfig, alwaysLoadTools: true };
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconnects legacy discovery when includeTools changes from absent to empty', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn().mockReturnValue(MCPServerStatus.CONNECTED),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const settings: { includeTools?: string[] } = {};
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        foo: {
+          command: 'node',
+          includeTools: settings.includeTools,
+        } as MCPServerConfig,
+      }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = mkManager({ config: mockConfig });
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    settings.includeTools = [];
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
     expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
     expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
   });
@@ -1717,6 +2135,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ foo: { command: 'node', args } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer }),
@@ -1778,6 +2197,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'broken-auth': { command: 'node', args: [] } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1837,6 +2257,7 @@ describe('McpClientManager', () => {
         huge: { command: 'node', args: [], discoveryTimeoutMs: 10_000_000 },
       }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1894,6 +2315,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ wsServer: { tcp: 'ws://example.test' } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -1912,6 +2334,117 @@ describe('McpClientManager', () => {
 
     expect(calls).toContain(5_000);
     expect(calls).not.toContain(30_000);
+  });
+
+  describe('discovery timeout process cleanup', () => {
+    function makeTimedOutClient(rootPid?: number) {
+      return {
+        connect: vi.fn(() => new Promise<void>(() => {})),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(),
+        getTransportPid: vi.fn(() => rootPid),
+      };
+    }
+
+    async function runTimedOutDiscovery(
+      mockedMcpClient: ReturnType<typeof makeTimedOutClient>,
+      serverConfig: MCPServerConfig,
+    ): Promise<void> {
+      vi.mocked(McpClient).mockReturnValue(
+        mockedMcpClient as unknown as McpClient,
+      );
+      const config = {
+        isTrustedFolder: () => true,
+        getMcpServers: () => ({ slow: serverConfig }),
+        getMcpServerCommand: () => undefined,
+        getTargetDir: () => '/session/worktree',
+        getPromptRegistry: () =>
+          ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+        getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+        getWorkspaceContext: () => ({}) as WorkspaceContext,
+        getDebugMode: () => false,
+        isMcpServerDisabled: () => false,
+      } as unknown as Config;
+      const manager = mkManager({ config });
+
+      await manager.discoverAllMcpToolsIncremental(config);
+    }
+
+    it('signals stdio wrapper descendants before disconnecting after timeout', async () => {
+      const events: string[] = [];
+      const mockedMcpClient = makeTimedOutClient(101);
+      mockedMcpClient.disconnect.mockImplementationOnce(async () => {
+        events.push('disconnect');
+      });
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+      vi.mocked(listDescendantPids).mockResolvedValueOnce([201, 301]);
+      vi.mocked(sigtermPids).mockImplementationOnce(() => {
+        events.push('signal');
+        return 2;
+      });
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).toHaveBeenCalledWith([201, 301]);
+      expect(events).toEqual(['signal', 'disconnect']);
+    });
+
+    it('disconnects remote transports without enumerating pids', async () => {
+      const mockedMcpClient = makeTimedOutClient();
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        httpUrl: 'https://example.test/mcp',
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).not.toHaveBeenCalled();
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it('skips signaling when a stdio transport has no descendants', async () => {
+      const mockedMcpClient = makeTimedOutClient(101);
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it('still disconnects when descendant enumeration fails', async () => {
+      const mockedMcpClient = makeTimedOutClient(101);
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+      vi.mocked(listDescendantPids).mockRejectedValueOnce(
+        new Error('process table unavailable'),
+      );
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
   });
 
   it('runWithDiscoveryTimeout disconnects the client AND drops registered tools on timeout', async () => {
@@ -1947,6 +2480,7 @@ describe('McpClientManager', () => {
         slow: { command: 'node', args: [], discoveryTimeoutMs: 100 },
       }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -2003,6 +2537,7 @@ describe('McpClientManager', () => {
         slow: { command: 'node', args: [], discoveryTimeoutMs: 100 },
       }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -2071,6 +2606,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: { command: 'node', args: [] } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -2137,6 +2673,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => servers,
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -2468,6 +3005,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => mcpServers,
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -2639,6 +3177,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ foo: { command: 'node', args } }),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer }),
@@ -3280,6 +3819,7 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => servers,
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -3809,6 +4349,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
@@ -3932,7 +4473,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     expect(fakePool.acquire).not.toHaveBeenCalled();
   });
 
-  it('case 4: replace same name + same fingerprint → replaced=true, pool.acquire NOT re-called', async () => {
+  it('case 4: same-fingerprint runtime replace refreshes metadata without re-acquiring', async () => {
     const serverConfig = {
       command: 'echo',
       args: ['hi'],
@@ -3942,10 +4483,16 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     const realId = connectionIdOf('dup-srv', serverConfig);
 
     const releaseSpyConn1 = vi.fn();
+    const updateConfig = vi.fn();
     const conn1 = {
       release: releaseSpyConn1,
+      updateConfig,
       on: vi.fn(),
-      id: realId,
+      // Distinct lifecycle id: if the same-fingerprint comparison below
+      // regressed from `transportId` back to `id`, the replace would tear
+      // down and re-acquire the transport, and this test would catch it.
+      id: 'dup-srv::unpooled-0',
+      transportId: realId,
       serverName: 'dup-srv',
       entryIndex: 0,
       toolsSnapshot: [
@@ -3963,26 +4510,56 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
 
     const config = mkRuntimeConfig();
-    const manager = mkManager({ config, options: { pool: fakePool } });
+    // The refresh re-filters the session; the reported count must be the
+    // session-visible one, not the unfiltered snapshot size.
+    const sessionTools = [{ name: 'tool-b' }];
+    const toolRegistry = {
+      removeMcpToolsByServer: vi.fn(),
+      getToolsByServer: vi.fn().mockReturnValue(sessionTools),
+    } as unknown as ToolRegistry;
+    const manager = mkManager({
+      config,
+      toolRegistry,
+      options: { pool: fakePool },
+    });
 
     // First add
     await manager.addRuntimeMcpServer('dup-srv', serverConfig, 'client-4');
     expect(acquireSpy).toHaveBeenCalledTimes(1);
 
-    // Second add with SAME config (same fingerprint)
+    // Second add changes only per-session metadata, so the transport
+    // fingerprint remains identical while the session view must refresh.
     acquireSpy.mockClear();
+    const updatedConfig = {
+      ...serverConfig,
+      includeTools: ['tool-b'],
+      trust: true,
+      alwaysLoadTools: true,
+    } as MCPServerConfig;
     const result = await manager.addRuntimeMcpServer(
       'dup-srv',
-      serverConfig,
+      updatedConfig,
       'client-4',
     );
 
-    // pool.acquire should NOT have been re-called (idempotent no-op)
+    // The existing handle refreshes in place; the transport is not reacquired.
     expect(acquireSpy).not.toHaveBeenCalled();
+    expect(updateConfig).toHaveBeenCalledOnce();
+    expect(updateConfig).toHaveBeenCalledWith(updatedConfig);
+    // The overlay write persists the refresh across reconciliations, and it
+    // lands AFTER the refresh so a throwing refresh cannot persist config
+    // the session view never received.
+    const addRuntimeSpy = config.addRuntimeMcpServer as ReturnType<
+      typeof vi.fn
+    >;
+    expect(addRuntimeSpy).toHaveBeenLastCalledWith('dup-srv', updatedConfig);
+    expect(updateConfig.mock.invocationCallOrder[0]).toBeLessThan(
+      addRuntimeSpy.mock.invocationCallOrder.at(-1)!,
+    );
     expect(result).toMatchObject({
       name: 'dup-srv',
       replaced: false,
-      toolCount: 3,
+      toolCount: 1,
     });
   });
 

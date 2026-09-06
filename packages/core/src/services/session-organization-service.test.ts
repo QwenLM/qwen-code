@@ -83,6 +83,26 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('accepts and normalizes custom hex colors for named groups', async () => {
+    const group = await service.createGroup({
+      name: 'Custom',
+      color: ' #12ABef ' as never,
+    });
+    expect(group.color).toBe('#12abef');
+
+    const updated = await service.updateGroup(group.id, {
+      color: ' #FEDCBA ' as never,
+    });
+    expect(updated.color).toBe('#fedcba');
+
+    const catalog = await service.listGroups();
+    expect(catalog.groups[0]?.color).toBe('#fedcba');
+    expect(catalog.colorOptions).toEqual(GROUP_COLOR_OPTIONS);
+
+    const restarted = new SessionOrganizationService(cwd);
+    expect((await restarted.listGroups()).groups[0]?.color).toBe('#fedcba');
+  });
+
   it('rejects invalid group names and colors', async () => {
     await expect(
       service.createGroup({ name: 'Bad\tName', color: 'blue' }),
@@ -114,6 +134,13 @@ describe('SessionOrganizationService', () => {
 
     await expect(
       service.createGroup({ name: 'Feature', color: 'pink' as never }),
+    ).rejects.toMatchObject({
+      code: 'invalid_group_color',
+      field: 'color',
+    });
+
+    await expect(
+      service.createGroup({ name: 'Short Hex', color: '#abc' }),
     ).rejects.toMatchObject({
       code: 'invalid_group_color',
       field: 'color',
@@ -386,6 +413,18 @@ describe('SessionOrganizationService', () => {
         color: 'pink' as never,
       }),
     ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
+
+    await expect(
+      service.updateSessionOrganization(sessionIdA, {
+        color: '#12abef' as never,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
+
+    await expect(
+      service.updateSessionOrganization(sessionIdA, {
+        color: ' blue ' as never,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
   });
 
   it('keeps color, group, and pin independent in the store', async () => {
@@ -554,6 +593,20 @@ describe('SessionOrganizationService', () => {
 
     const snapshot = await service.readSnapshot();
     expect(snapshot.sessions.has(sessionIdA)).toBe(false);
+  });
+
+  it('checks the runtime generation before removing an organization entry', async () => {
+    await service.updateSessionOrganization(sessionIdA, { isPinned: true });
+    const generationClosed = new Error('generation closed');
+
+    await expect(
+      service.removeSession(sessionIdA, {
+        assertCanCommit: () => {
+          throw generationClosed;
+        },
+      }),
+    ).rejects.toBe(generationClosed);
+    expect((await service.readSnapshot()).sessions.has(sessionIdA)).toBe(true);
   });
 
   it('removes multiple session organization entries in one call', async () => {

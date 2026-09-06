@@ -2,87 +2,35 @@
  * DingTalk markdown normalization.
  *
  * DingTalk's markdown renderer is a limited subset with quirks:
- * - Tables don't render consistently - convert to pipe-separated plain text
  * - Max message length ~3800 chars — split into chunks
  * - Code fences must be closed/reopened across chunk boundaries
  */
 
-const CHUNK_LIMIT = 3800;
+export const DINGTALK_CHUNK_LIMIT = 3800;
 
-// --- Table conversion ---
-
-function isTableSeparator(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed.includes('-')) return false;
-  const cells = trimmed
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
-  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
-}
-
-function isTableRow(line: string): boolean {
-  const trimmed = line.trim();
-  return trimmed.includes('|') && !trimmed.startsWith('```');
-}
-
-function parseTableRow(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
-}
-
-function renderTable(lines: string[]): string {
-  const rows = lines.map(parseTableRow).filter((cells) => cells.length > 0);
-  return rows.map((cells) => cells.join(' | ')).join('  \n');
-}
-
-export function convertTables(text: string): string {
-  const lines = text.split('\n');
-  const output: string[] = [];
-  let i = 0;
-  let inCode = false;
-
-  while (i < lines.length) {
-    const line = lines[i] || '';
-    if (line.trim().startsWith('```')) {
-      inCode = !inCode;
-      output.push(line);
-      i++;
-      continue;
-    }
-
-    if (
-      !inCode &&
-      i + 1 < lines.length &&
-      isTableRow(line) &&
-      isTableSeparator(lines[i + 1] || '')
-    ) {
-      const tableLines = [line];
-      i += 2;
-      while (i < lines.length && isTableRow(lines[i] || '')) {
-        tableLines.push(lines[i] || '');
-        i++;
-      }
-      output.push(renderTable(tableLines));
-      continue;
-    }
-
-    output.push(line);
-    i++;
-  }
-
-  return output.join('\n');
+export function escapeDingTalkMarkdown(value: string): string {
+  return value.replace(/([\\`*_[\]{}()#+.!|>~:-])/gu, '\\$1');
 }
 
 // --- Chunk splitting ---
 
-export function splitChunks(text: string): string[] {
-  if (!text || text.length <= CHUNK_LIMIT) {
+function safeUtf16SliceEnd(value: string, end: number): number {
+  if (end <= 0 || end >= value.length) return end;
+  const previous = value.charCodeAt(end - 1);
+  const next = value.charCodeAt(end);
+  return previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    next >= 0xdc00 &&
+    next <= 0xdfff
+    ? end - 1
+    : end;
+}
+
+export function splitChunks(
+  text: string,
+  chunkLimit = DINGTALK_CHUNK_LIMIT,
+): string[] {
+  if (!text || text.length <= chunkLimit) {
     return [text];
   }
 
@@ -112,17 +60,23 @@ export function splitChunks(text: string): string[] {
     while (remaining.length > 0 || prefixPending) {
       const prefix = prefixPending ? '\n' : '';
       const fitsAsFinalPiece =
-        remaining.length <= CHUNK_LIMIT - buf.length - prefix.length;
+        remaining.length <= chunkLimit - buf.length - prefix.length;
       const closeFenceOverhead =
         (inCode && !(closesCodeFence && fitsAsFinalPiece)) ||
         (!inCode && leavesCodeFenceOpen)
           ? '\n```'.length
           : 0;
       const available =
-        CHUNK_LIMIT - closeFenceOverhead - buf.length - prefix.length;
+        chunkLimit - closeFenceOverhead - buf.length - prefix.length;
 
       if (available <= 0) {
-        flush(inCode || lineOpenedFenceInBuffer);
+        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
+        if (buf === (keepCodeOpen ? '```' : '')) {
+          throw new RangeError(
+            'chunk limit cannot contain one Unicode character',
+          );
+        }
+        flush(keepCodeOpen);
         continue;
       }
 
@@ -142,9 +96,16 @@ export function splitChunks(text: string): string[] {
           }
         }
       }
+      pieceLength = safeUtf16SliceEnd(remaining, pieceLength);
 
       if (pieceLength === 0 && remaining.length > 0) {
-        flush(inCode || lineOpenedFenceInBuffer);
+        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
+        if (!buf || (keepCodeOpen && buf === '```')) {
+          throw new RangeError(
+            'chunk limit cannot contain one Unicode character',
+          );
+        }
+        flush(keepCodeOpen);
         continue;
       }
 
@@ -194,7 +155,10 @@ export function extractTitle(text: string): string {
   return cleaned || 'Reply';
 }
 
-/** Full normalization pipeline: tables, then chunks. */
-export function normalizeDingTalkMarkdown(text: string): string[] {
-  return splitChunks(convertTables(text));
+/** Split long Markdown messages without changing their formatting. */
+export function normalizeDingTalkMarkdown(
+  text: string,
+  chunkLimit = DINGTALK_CHUNK_LIMIT,
+): string[] {
+  return splitChunks(text, chunkLimit);
 }

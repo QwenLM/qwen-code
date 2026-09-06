@@ -7,6 +7,7 @@
 import type {
   CompactionThresholds,
   CompressionStatus,
+  FindingsResultDisplay,
   MCPServerConfig,
   ThoughtSummary,
   ToolCallConfirmationDetails,
@@ -14,14 +15,16 @@ import type {
   ToolResultDisplay,
   AgentStatus,
   ArenaDiffSummary,
+  GoalSnapshotV2,
+  GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
-import { type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
 export type { ThoughtSummary };
 
 export enum AuthState {
-  // Attemtping to authenticate or re-authenticate
+  // Attempting to authenticate or re-authenticate
   Unauthenticated = 'unauthenticated',
   // Auth dialog is open for user to select auth method
   Updating = 'updating',
@@ -37,7 +40,7 @@ export enum StreamingState {
 }
 
 // Copied from server/src/core/turn.ts for CLI usage
-export enum GeminiEventType {
+export enum LlmEventType {
   Content = 'content',
   ToolCallRequest = 'tool_call_request',
   // Add other event types if the UI hook needs to handle them
@@ -50,6 +53,11 @@ export enum ToolCallStatus {
   Executing = 'Executing',
   Success = 'Success',
   Error = 'Error',
+}
+
+export interface InlineImageData {
+  data: string;
+  mimeType: string;
 }
 
 export interface ToolCallEvent {
@@ -66,7 +74,39 @@ export interface IndividualToolCallDisplay {
   callId: string;
   name: string;
   description: string;
+  /**
+   * Raw tool-call arguments, rendered inline under the header when
+   * `ui.showToolCallArgs` is on. `description` is only ever a human summary
+   * (`invocation.getDescription()`) — for most built-in tools it drops the
+   * actual parameters (Edit shows just the filename), which is what the
+   * setting exists to recover.
+   *
+   * Holds the same object reference as the scheduler's `request.args` — no
+   * copy, so it costs nothing in memory. Undefined on the daemon path, which
+   * never carries args across the boundary; the args row is then skipped.
+   */
+  args?: Record<string, unknown>;
   resultDisplay: ToolResultDisplay | string | undefined;
+  visionBridgeNotice?: string;
+  /**
+   * Full tool-result text for the Ctrl+O full-detail transcript (§4.9).
+   * Derived (NOT persisted) — extracted via `getToolResponseDisplayText` from
+   * the already-persisted `functionResponse` parts at live/resume/replay time.
+   * Used only when `fullDetail && isCollapsibleTool(name)` to replace the
+   * summary `resultDisplay` for read/search/list tools whose `returnDisplay`
+   * is only a count. Undefined → fall back to the summary.
+   */
+  detailedDisplay?: string;
+  /**
+   * The findings display a later report_findings call replaced. Kept so a
+   * rewind past the replacing call can restore this report's checklist;
+   * dropped by history compaction together with resultDisplay.
+   */
+  supersededFindingsDisplay?: FindingsResultDisplay;
+  /** Inline images carried by this tool's persisted response parts. */
+  images?: InlineImageData[];
+  /** Images hidden after the per-row rendering limit. */
+  omittedImageCount?: number;
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
@@ -81,6 +121,21 @@ export interface CompressionProps {
   originalTokenCount: number | null;
   newTokenCount: number | null;
   compressionStatus: CompressionStatus | null;
+  /**
+   * Which compression path produced this item. 'summarize' replaces the
+   * pre-marker history with a synthetic summary prefix; 'fast' (rule-based,
+   * no LLM summary) removes no user prompts from the API history, so its
+   * marker must not be treated as a rewind boundary. Absent on items from
+   * older sessions, which are treated as 'summarize'.
+   */
+  compressionKind?: 'summarize' | 'fast';
+  /**
+   * Token-count provenance (#9309). The compression paths measure on
+   * different scales, so estimated numbers are rendered with a '~' prefix
+   * to keep consecutive banners from reading as lost context.
+   */
+  originalTokenCountIsEstimated?: boolean;
+  newTokenCountIsEstimated?: boolean;
 }
 
 export interface SummaryProps {
@@ -123,24 +178,28 @@ export type HistoryItemUser = HistoryItemBase & {
   sentToModel?: boolean;
 };
 
-export type HistoryItemGemini = HistoryItemBase & {
+export type HistoryItemLlm = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   timestamp?: number;
 };
 
-export type HistoryItemGeminiContent = HistoryItemBase & {
+export type HistoryItemLlmContent = HistoryItemBase & {
   type: 'gemini_content';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
 };
 
-export type HistoryItemGeminiThought = HistoryItemBase & {
+export type HistoryItemLlmThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
   durationMs?: number;
 };
 
-export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
+export type HistoryItemLlmThoughtContent = HistoryItemBase & {
   type: 'gemini_thought_content';
   text: string;
 };
@@ -218,6 +277,9 @@ export type HistoryItemStats = HistoryItemBase & {
  */
 export interface DiffRenderRow {
   filename: string;
+  /** Pre-rename path when this row is a rename; absent otherwise. `filename`
+   *  is the current (post-rename) path used to address the file. */
+  oldPath?: string;
   /** `undefined` for binary files; a line count (lower bound if `truncated`)
    *  otherwise. */
   added?: number;
@@ -283,6 +345,16 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Identity of the scheduler batch that produced this group (#9420).
+   * Minted when the batch is scheduled and stamped on both the live
+   * pending copy and the committed copy, so the transient double render
+   * of one batch collapses by identity — never by callIds, which collide
+   * across unrelated batches. Unique per mount, so ids persisted in
+   * checkpoints can never match newly minted ones; adapter-built groups
+   * carry no id. Neither is ever collapsed.
+   */
+  batchId?: string;
 };
 
 /**
@@ -326,6 +398,12 @@ export interface ToolDefinition {
   name: string;
   displayName: string;
   description?: string;
+  /**
+   * Registered, but its schema is not in the eager model request — the tool
+   * is reached on demand via `tool_search`. Set for `shouldDefer` tools and
+   * for tools the `tools.eager` allowlist omits (#9827, #10075).
+   */
+  deferred?: boolean;
 }
 
 export interface SkillDefinition {
@@ -447,7 +525,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   mcpTools: ContextToolDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
-  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
   isEstimated?: boolean;
   /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
   showDetails?: boolean;
@@ -504,6 +582,20 @@ export interface BtwProps {
 export type HistoryItemBtw = HistoryItemBase & {
   type: 'btw';
   btw: BtwProps;
+};
+
+/**
+ * Independent second-opinion review rendered by `/advisor`. `text` is the
+ * reviewer's markdown; `model` is the resolved model id that produced it,
+ * shown in the header. An unknown `advisorModel` is passed to the provider
+ * as-is and surfaces as an error if rejected; only unresolvable alias
+ * selectors fall back to the main model. Configured model fallbacks are not
+ * used for advisor requests.
+ */
+export type HistoryItemAdvisor = HistoryItemBase & {
+  type: 'advisor';
+  text: string;
+  model: string;
 };
 
 /**
@@ -566,7 +658,31 @@ export type HistoryItemDoctor = HistoryItemBase & {
 };
 
 export type GoalStatusKind =
-  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
+  | 'set'
+  | 'achieved'
+  | 'cleared'
+  | 'failed'
+  | 'aborted'
+  | 'paused'
+  | 'checking';
+
+export const GOAL_STATUS_KINDS = [
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'paused',
+  'checking',
+] as const satisfies readonly GoalStatusKind[];
+
+/** Narrows an untrusted value (e.g. a persisted transcript field). */
+export function isGoalStatusKind(value: unknown): value is GoalStatusKind {
+  return (
+    typeof value === 'string' &&
+    (GOAL_STATUS_KINDS as readonly string[]).includes(value)
+  );
+}
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',
@@ -593,6 +709,12 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   lastReason?: string;
 };
 
+export type HistoryItemGoalState = HistoryItemBase & {
+  type: 'goal_state';
+  snapshot: GoalSnapshotV2;
+  cause?: GoalStateCause;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -601,10 +723,10 @@ export type HistoryItemWithoutId =
   | HistoryItemUser
   | HistoryItemNotification
   | HistoryItemUserShell
-  | HistoryItemGemini
-  | HistoryItemGeminiContent
-  | HistoryItemGeminiThought
-  | HistoryItemGeminiThoughtContent
+  | HistoryItemLlm
+  | HistoryItemLlmContent
+  | HistoryItemLlmThought
+  | HistoryItemLlmThoughtContent
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
@@ -632,6 +754,7 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw
+  | HistoryItemAdvisor
   | HistoryItemMemorySaved
   | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
@@ -639,9 +762,22 @@ export type HistoryItemWithoutId =
   | HistoryItemStopHookSystemMessage
   | HistoryItemDoctor
   | HistoryItemDiffStats
-  | HistoryItemGoalStatus;
+  | HistoryItemGoalStatus
+  | HistoryItemGoalState;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
+
+/**
+ * Shared visibility predicate: an item collapsed on session resume
+ * (`ui.history.collapseOnResume`) sets `display.suppressOnRestore` and is
+ * represented only by its collapse-summary row. Both the main view
+ * (MainContent) and the Ctrl+O transcript (AppContainer's freeze snapshot)
+ * filter on this, so keep the single source of truth here to prevent the two
+ * surfaces from diverging.
+ */
+export const isHistoryItemVisibleAfterRestore = (
+  item: Pick<HistoryItem, 'display'>,
+): boolean => !item.display?.suppressOnRestore;
 
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
@@ -669,9 +805,11 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  ADVISOR = 'advisor',
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  GOAL_STATE = 'goal_state',
   VISION_NOTICE = 'vision_notice',
 }
 
@@ -772,13 +910,15 @@ export interface ConsoleMessageItem {
 
 /**
  * Result type for a slash command that should immediately result in a prompt
- * being submitted to the Gemini model.
+ * being submitted to the model.
  */
 export interface SubmitPromptResult {
   type: 'submit_prompt';
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. Applies to this submitted prompt (and its
    * tool-call continuations) only — no session change, no persistence.
@@ -787,7 +927,7 @@ export interface SubmitPromptResult {
 }
 
 /**
- * Defines the result of the slash command processor for its consumer (useGeminiStream).
+ * Defines the result of the slash command processor for its consumer (useLlmStream).
  */
 export type SlashCommandProcessorResult =
   | {

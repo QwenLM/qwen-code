@@ -13,13 +13,15 @@ import {
 } from 'node:fs';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
+import type { PermissionSuggestion } from '../nonInteractive/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
+import { reportChatRecordingFailureToAdapter } from '../nonInteractive/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 
@@ -49,8 +51,9 @@ export const SUPPORTED_EVENTS = [
  *
  * History:
  *   1 — initial release (session_start, session_end, full stream-json).
+ *   2 — textual tool_result content is bounded for transport.
  */
-export const DUAL_OUTPUT_PROTOCOL_VERSION = 1;
+export const DUAL_OUTPUT_PROTOCOL_VERSION = 2;
 
 /**
  * Maximum bytes buffered in the Node.js WriteStream before the bridge
@@ -85,6 +88,7 @@ export class DualOutputBridge {
   private readonly sessionId: string;
   private active = true;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   constructor(
     config: Config,
@@ -176,6 +180,12 @@ export class DualOutputBridge {
       true, // includePartialMessages — always emit streaming events
       this.stream,
     );
+    this.unsubscribeRecordingFailure =
+      typeof config.onChatRecordingFailure === 'function'
+        ? config.onChatRecordingFailure((event) => {
+            this.emitRecordingFailure(event);
+          })
+        : () => {};
 
     // Announce the session immediately so consumers can correlate the channel
     // with a session before any other event arrives. The data payload also
@@ -195,7 +205,7 @@ export class DualOutputBridge {
     }
   }
 
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
     if (!this.active) return;
@@ -283,6 +293,7 @@ export class DualOutputBridge {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
@@ -294,6 +305,7 @@ export class DualOutputBridge {
         toolUseId,
         input,
         blockedPath,
+        permissionSuggestions,
       );
     } catch (err) {
       debugLogger.error('DualOutput emitPermissionRequest error:', err);
@@ -348,8 +360,23 @@ export class DualOutputBridge {
     }
   }
 
+  private emitRecordingFailure(
+    event: Parameters<typeof reportChatRecordingFailureToAdapter>[1],
+  ): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
+    try {
+      reportChatRecordingFailureToAdapter(this.adapter, event);
+    } catch (err) {
+      debugLogger.error('DualOutput recording failure output error:', err);
+      this.active = false;
+    }
+  }
+
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    this.unsubscribeRecordingFailure();
     // Try to emit session_end before tearing the stream down so consumers
     // get a definitive termination signal rather than inferring it from
     // EPIPE. Failures here are swallowed — the stream may already be in an

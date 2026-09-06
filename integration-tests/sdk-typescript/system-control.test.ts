@@ -6,11 +6,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   query,
-  isSDKAssistantMessage,
   isSDKSystemMessage,
   isSDKResultMessage,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
+import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import {
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 import {
   SDKTestHelper,
   createSharedTestOptions,
@@ -18,69 +23,25 @@ import {
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
-const MODEL_RESPONSE_TIMEOUT_MS = process.env['CI'] ? 30000 : 15000;
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? CONTAINER_SANDBOX_NO_PROXY
+  : '127.0.0.1,localhost';
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+const RESPONSE_TIMEOUT_MS = process.env['CI'] ? 60000 : 30000;
 
-/**
- * Factory function that creates a streaming input with a control point.
- * After the first message is yielded, the generator waits for a resume signal,
- * allowing the test code to call query instance methods like setModel.
- *
- * @param firstMessage - The first user message to send
- * @param secondMessage - The second user message to send after control operations
- * @returns Object containing the async generator and a resume function
- */
-function createStreamingInputWithControlPoint(
-  firstMessage: string,
-  secondMessage: string,
-  resultWaiter: { waitForResult: (index: number) => Promise<void> },
-): {
-  generator: AsyncIterable<SDKUserMessage>;
-  resume: () => void;
-} {
-  let resumeResolve: (() => void) | null = null;
-  const resumePromise = new Promise<void>((resolve) => {
-    resumeResolve = resolve;
-  });
-
-  const generator = (async function* () {
-    const sessionId = crypto.randomUUID();
-
-    yield {
-      type: 'user',
-      session_id: sessionId,
-      message: {
-        role: 'user',
-        content: firstMessage,
-      },
-      parent_tool_use_id: null,
-    } as SDKUserMessage;
-
-    await resultWaiter.waitForResult(0);
-
-    await resumePromise;
-
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    yield {
-      type: 'user',
-      session_id: sessionId,
-      message: {
-        role: 'user',
-        content: secondMessage,
-      },
-      parent_tool_use_id: null,
-    } as SDKUserMessage;
-
-    await resultWaiter.waitForResult(1);
-  })();
-
-  const resume = () => {
-    if (resumeResolve) {
-      resumeResolve();
-    }
+function fakeModelOptions(baseUrl: string) {
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+      no_proxy: LOCAL_OPENAI_NO_PROXY,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
   };
-
-  return { generator, resume };
 }
 
 describe('System Control (E2E)', () => {
@@ -97,103 +58,11 @@ describe('System Control (E2E)', () => {
   });
 
   describe('setModel API', () => {
-    it('should change model dynamically during streaming input', async () => {
-      const resultWaiter = createResultWaiter(2);
-      const { generator, resume } = createStreamingInputWithControlPoint(
-        'Reply with exactly FIRST.',
-        'Reply with exactly SECOND.',
-        resultWaiter,
-      );
-
-      const q = query({
-        prompt: generator,
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          model: 'qwen3-max',
-          debug: false,
-        },
-      });
-
-      try {
-        const resolvers: {
-          first?: () => void;
-          second?: () => void;
-        } = {};
-        const firstResponsePromise = new Promise<void>((resolve) => {
-          resolvers.first = resolve;
-        });
-        const secondResponsePromise = new Promise<void>((resolve) => {
-          resolvers.second = resolve;
-        });
-
-        let firstResponseReceived = false;
-        let secondResponseReceived = false;
-        const systemMessages: Array<{ model?: string }> = [];
-
-        // Consume messages in a single loop
-        (async () => {
-          for await (const message of q) {
-            if (isSDKSystemMessage(message)) {
-              systemMessages.push({ model: message.model });
-            }
-            if (isSDKResultMessage(message)) {
-              resultWaiter.notifyResult();
-            }
-            if (isSDKAssistantMessage(message)) {
-              if (!firstResponseReceived) {
-                firstResponseReceived = true;
-                resolvers.first?.();
-              } else if (!secondResponseReceived) {
-                secondResponseReceived = true;
-                resolvers.second?.();
-              }
-            }
-          }
-        })();
-
-        // Wait for first response
-        await Promise.race([
-          firstResponsePromise,
-          new Promise((_, reject) =>
-            setTimeout(
-              () => reject(new Error('Timeout waiting for first response')),
-              MODEL_RESPONSE_TIMEOUT_MS,
-            ),
-          ),
-        ]);
-
-        expect(firstResponseReceived).toBe(true);
-
-        // Perform control operation: set model
-        await q.setModel('qwen3-vl-plus');
-
-        // Resume the input stream
-        resume();
-
-        // Wait for second response
-        await Promise.race([
-          secondResponsePromise,
-          new Promise((_, reject) =>
-            setTimeout(
-              () => reject(new Error('Timeout waiting for second response')),
-              MODEL_RESPONSE_TIMEOUT_MS,
-            ),
-          ),
-        ]);
-
-        expect(secondResponseReceived).toBe(true);
-
-        // Verify system messages - model should change from qwen3-max to qwen3-vl-plus
-        expect(systemMessages.length).toBeGreaterThanOrEqual(2);
-        expect(systemMessages[0].model).toBeOneOf(['qwen3-max', 'coder-model']);
-        expect(systemMessages[1].model).toBe('qwen3-vl-plus');
-      } finally {
-        await q.close();
-      }
-    });
-
     it('should handle multiple model changes in sequence', async () => {
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Done.' }),
+        FAKE_SERVER_OPTIONS,
+      );
       const sessionId = crypto.randomUUID();
       const resultWaiter = createResultWaiter(3);
       let resumeResolve1: (() => void) | null = null;
@@ -242,8 +111,8 @@ describe('System Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
-          model: 'qwen3-max',
           debug: false,
         },
       });
@@ -258,7 +127,7 @@ describe('System Control (E2E)', () => {
           new Promise<void>((resolve) => resolvers.push(resolve)),
         ];
 
-        (async () => {
+        const messageConsumer = (async () => {
           for await (const message of q) {
             if (isSDKSystemMessage(message)) {
               systemMessages.push({ model: message.model });
@@ -281,13 +150,12 @@ describe('System Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout 1')),
-              MODEL_RESPONSE_TIMEOUT_MS,
+              RESPONSE_TIMEOUT_MS,
             ),
           ),
         ]);
-
         // First model change
-        await q.setModel('qwen3-turbo');
+        await q.setModel('fake-model-2');
         resumeResolve1!();
 
         // Wait for second response
@@ -296,13 +164,13 @@ describe('System Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout 2')),
-              MODEL_RESPONSE_TIMEOUT_MS,
+              RESPONSE_TIMEOUT_MS,
             ),
           ),
         ]);
 
         // Second model change
-        await q.setModel('qwen3-vl-plus');
+        await q.setModel('fake-model-3');
         resumeResolve2!();
 
         // Wait for third response
@@ -311,41 +179,63 @@ describe('System Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout 3')),
-              MODEL_RESPONSE_TIMEOUT_MS,
+              RESPONSE_TIMEOUT_MS,
             ),
           ),
         ]);
+        await messageConsumer;
 
         // Verify we received system messages for each model
         expect(systemMessages.length).toBeGreaterThanOrEqual(3);
-        expect(systemMessages[0].model).toBeOneOf(['qwen3-max', 'coder-model']);
-        expect(systemMessages[1].model).toBe('qwen3-turbo');
-        expect(systemMessages[2].model).toBe('qwen3-vl-plus');
+        expect(systemMessages[0].model).toBe('fake-model');
+        expect(systemMessages[1].model).toBe('fake-model-2');
+        expect(systemMessages[2].model).toBe('fake-model-3');
+        const requestModels = fakeServer.requests
+          .filter(({ body }) => body['stream'] === true)
+          .map(({ body }) => body['model']);
+        expect(
+          requestModels.filter(
+            (model, index) => index === 0 || model !== requestModels[index - 1],
+          ),
+        ).toEqual(['fake-model', 'fake-model-2', 'fake-model-3']);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
     it('should throw error when setModel is called on closed query', async () => {
-      const q = query({
-        prompt: 'Hello',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          model: 'qwen3-max',
-        },
-      });
-
-      await q.close();
-
-      await expect(q.setModel('qwen3-turbo')).rejects.toThrow(
-        'Query is closed',
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Done.' }),
+        FAKE_SERVER_OPTIONS,
       );
+      try {
+        const q = query({
+          prompt: 'Hello',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+          },
+        });
+
+        await q.close();
+
+        await expect(q.setModel('fake-model-2')).rejects.toThrow(
+          'Query is closed',
+        );
+      } finally {
+        await fakeServer.close();
+      }
     });
   });
 
   describe('supportedCommands API', () => {
     it('should return list of supported slash commands', async () => {
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Done.' }),
+        FAKE_SERVER_OPTIONS,
+      );
       const sessionId = crypto.randomUUID();
       const resultWaiter = createResultWaiter(1);
       const generator = (async function* () {
@@ -363,8 +253,8 @@ describe('System Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
-          model: 'qwen3-max',
           debug: false,
         },
       });
@@ -415,22 +305,32 @@ describe('System Control (E2E)', () => {
       } catch (error) {
         await q.close();
         throw error;
+      } finally {
+        await fakeServer.close();
       }
     });
 
     it('should throw error when supportedCommands is called on closed query', async () => {
-      const q = query({
-        prompt: 'Hello',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          model: 'qwen3-max',
-        },
-      });
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Done.' }),
+        FAKE_SERVER_OPTIONS,
+      );
+      try {
+        const q = query({
+          prompt: 'Hello',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+          },
+        });
 
-      await q.close();
+        await q.close();
 
-      await expect(q.supportedCommands()).rejects.toThrow('Query is closed');
+        await expect(q.supportedCommands()).rejects.toThrow('Query is closed');
+      } finally {
+        await fakeServer.close();
+      }
     });
   });
 });

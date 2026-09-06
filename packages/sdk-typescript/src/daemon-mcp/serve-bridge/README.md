@@ -129,14 +129,14 @@ await server.instance.connect(transport);
 
 ### Session Lifecycle（6）
 
-| 工具名                    | 说明                              |
-| ------------------------- | --------------------------------- |
-| `session_create`          | 创建/附加会话（自动设为默认会话） |
-| `session_load`            | 恢复会话（含历史回放）            |
-| `session_resume`          | 恢复会话（无历史）                |
-| `session_close`           | 关闭会话                          |
-| `session_update_metadata` | 更新会话元数据                    |
-| `session_list`            | 列出工作区会话                    |
+| 工具名                    | 说明                                                                  |
+| ------------------------- | --------------------------------------------------------------------- |
+| `session_create`          | 创建/附加会话；可用 `session_id` 指定新 thread ID（自动设为默认会话） |
+| `session_load`            | 恢复会话（含历史回放）                                                |
+| `session_resume`          | 恢复会话（无历史）                                                    |
+| `session_close`           | 关闭会话                                                              |
+| `session_update_metadata` | 更新会话元数据                                                        |
+| `session_list`            | 列出工作区会话                                                        |
 
 ### Agent Interaction（4）
 
@@ -184,6 +184,8 @@ MCP 协议是无状态的，但大部分工具需要 `session_id`。本 MCP Serv
 2. 后续工具调用若省略 `session_id`，自动使用默认会话
 3. 也可显式传入 `session_id` 操作多个会话
 4. `session_close` 关闭默认会话时自动清除缓存
+
+`session_create.session_id` 仅接受 UUID v1-v5。提供该字段时，bridge 会在发出 mutation 前检查 daemon 的 `session_id_override` capability，并要求返回同一个小写 ID。它表示创建新 thread，不是幂等 attach；结果不确定时应使用已知 ID 调用 load/resume。
 
 ## 验证
 

@@ -5,11 +5,22 @@
  */
 
 import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
+import { escapeJsonTagCharacters } from '@qwen-code/qwen-code-core';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
 export class TemplateRenderer {
   // Render the complete HTML file
   async renderInsightHTML(insights: InsightData): Promise<string> {
+    // Escape tag-boundary characters so report data — chat summaries,
+    // file/tool names, LLM output — cannot terminate the inline <script> that
+    // carries it. Also escape U+2028/U+2029, which JSON.stringify emits raw but
+    // which are line terminators to pre-ES2019 engines (embedded WebViews,
+    // older Electron) and would throw SyntaxError. These are all valid JSON
+    // escapes and parse back to the original characters, so the data reaching
+    // the page is unchanged.
+    const insightJson = escapeJsonTagCharacters(JSON.stringify(insights))
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
     const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -37,7 +48,7 @@ export class TemplateRenderer {
 
     <!-- Application Data -->
     <script>
-      window.INSIGHT_DATA = ${JSON.stringify(insights)};
+      window.INSIGHT_DATA = ${insightJson};
     </script>
 
     <!-- App Script -->

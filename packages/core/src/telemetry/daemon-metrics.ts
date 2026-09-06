@@ -41,6 +41,8 @@ const KNOWN_ERROR_TYPES = new Set([
   'SubscriberLimitExceededError',
   'BridgeChannelClosedError',
   'BridgeTimeoutError',
+  'SessionRestoreTimeoutError',
+  'BridgeChannelQuarantinedError',
   'PermissionForbiddenError',
 ]);
 
@@ -204,11 +206,15 @@ export function recordDaemonHttpRequest(
   durationMs: number,
   route: string,
   statusCode: number,
+  deferredRuntimePath?: 'started_on_request' | 'joined',
 ): void {
   if (!initialized) return;
   const statusClass = `${Math.floor(statusCode / 100)}xx`;
   httpRequestCounter?.add(1, { route, status_class: statusClass });
-  httpRequestDurationHistogram?.record(durationMs, { route });
+  httpRequestDurationHistogram?.record(durationMs, {
+    route,
+    runtime_path: deferredRuntimePath ?? 'none',
+  });
 }
 
 export function recordDaemonSessionLifecycle(

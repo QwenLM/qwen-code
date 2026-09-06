@@ -1,46 +1,315 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactElement,
   type ReactNode,
 } from 'react';
 import {
   useActions,
+  useChannels,
   useConnection,
-  useSessions,
+  useWorkspace,
   useWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonSessionGroup,
   DaemonSessionGroupColor,
+  DaemonSessionGroupHexColor,
+  DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
+  DaemonWorkspaceCapability,
+  SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
+import {
+  FolderKanbanIcon,
+  ActivityIcon,
+  BlocksIcon,
+  CalendarClockIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  Columns2Icon,
+  LayoutGridIcon,
+  ListTodoIcon,
+  MessageCircleIcon,
+  EllipsisVerticalIcon,
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  DownloadIcon,
+  FolderClosedIcon,
+  FolderInputIcon,
+  GitBranchIcon,
+  GitForkIcon,
+  PencilIcon,
+  PinIcon,
+  Trash2Icon,
+  MoonIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
+  PlusIcon,
+  RadioTowerIcon,
+  SearchIcon,
+  SettingsIcon,
+  SquarePenIcon,
+  SunIcon,
+  TargetIcon,
+  WorkflowIcon,
+} from 'lucide-react';
+import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { Input } from '../ui/input';
+import { Button } from '../ui/button';
+import { Tabs, TabsList, TabsTrigger } from '../ui/tabs';
+import { Field, FieldGroup, FieldLabel } from '../ui/field';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { formatDateTime } from '../../utils/formatDateTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
+import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
+import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
+import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
+import {
+  DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  summarizeSessions,
+  type WorkspaceManagementTarget,
+  type WorkspaceOverviewItem,
+} from './workspaceOverviewModel';
+import { writeClipboardText } from '../../utils/clipboard';
+import { isLocalDaemon } from '../../config/daemon';
+import {
+  mergeSessionContentHits,
+  sessionMatchesGitQuery,
+  sessionMatchesSource as matchesSessionSource,
+} from './sessionSearch';
+import { useSessionContentSearch } from './useSessionContentSearch';
+import { SessionPrBadge } from '../SessionPrBadge';
+import {
+  hasWorkspaceExpansionPreference,
+  migrateWorkspaceExpansionPreference,
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
+import { SessionGroupSection } from './SessionGroupSection';
+import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { groupSessionsByChannelType } from './channelSessionGroups';
+import {
+  isPrimaryCollapsedSectionId,
+  readCollapsedSessionSectionIds,
+  replaceOwnedCollapsedSessionSectionIds,
+} from './collapsedSessionSections';
+import { measureSessionTitleScroll } from './sessionTitleScroll';
+import {
+  collectScheduledTaskSession,
+  getScheduledTaskSessionGroup,
+  type ScheduledTaskSessionSection,
+} from './scheduled-task-session-groups';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import {
+  useSessionCatalogController,
+  useSessionCatalogPolling,
+  useSessionCatalogQueries,
+  useWebShellSessions,
+} from '../../session-catalog/session-catalog-hooks';
+import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
+import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
+import { StandaloneRecents } from './StandaloneRecents';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_MAX_WIDTH_WINDOW_RATIO = 0.5;
+const SIDEBAR_FOOTER_COMPACT_WIDTH = 344;
+const SIDEBAR_FOOTER_TIGHT_WIDTH = 250;
+const SIDEBAR_DRAG_VISUAL_MIN_WIDTH = 200;
+const SIDEBAR_COLLAPSE_DRAG_THRESHOLD = 56;
+const SIDEBAR_COLLAPSE_DRAG_WIDTH =
+  SIDEBAR_DRAG_VISUAL_MIN_WIDTH - SIDEBAR_COLLAPSE_DRAG_THRESHOLD;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
+const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
+  zIndex: 'calc(var(--web-shell-popover-z-index, 1000) + 1)',
+};
 const GROUP_MENU_MARGIN = 8;
+const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
+const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
+type SidebarSessionSource = 'default' | 'channel';
+
+function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
+  return (
+    session.sourceType === 'scheduled_task' ||
+    getScheduledTaskSessionGroup(session) !== undefined
+  );
+}
+
+function getSessionIdentity(
+  sessionId: string,
+  workspaceCwd: string | undefined,
+): string {
+  return `${workspaceCwd ?? ''}\0${sessionId}`;
+}
+
+/** A catalog page the pin overlay drop check reads; undefined while the
+ * query is disabled or unloaded. */
+type PinCatalogPage = DaemonSessionSummary[] | undefined;
+
+/** A pin toggle applied optimistically before the daemon RPC settles. */
+interface OptimisticPinEntry {
+  /** Session snapshot captured at toggle time, for rendering the row. */
+  session: DaemonSessionSummary;
+  pinned: boolean;
+  /** Pin timestamp assigned optimistically (present when pinning). */
+  pinnedAt?: string;
+  rpcSettled: boolean;
+}
+
+function getPinnedSectionOrderTime(session: DaemonSessionSummary): number {
+  const pinnedAt = Date.parse(session.pinnedAt ?? '');
+  return Number.isFinite(pinnedAt) ? pinnedAt : 0;
+}
+
+// Pin order is stable: sessions sort by when they were pinned (new pins
+// append at the bottom), never by last activity.
+function comparePinnedSectionSessions(
+  a: DaemonSessionSummary,
+  b: DaemonSessionSummary,
+): number {
+  const byPinTime = getPinnedSectionOrderTime(a) - getPinnedSectionOrderTime(b);
+  if (byPinTime !== 0) return byPinTime;
+  return a.sessionId.localeCompare(b.sessionId);
+}
+
+export type WebShellSidebarFooterItem =
+  | 'settings'
+  | 'version'
+  | 'theme'
+  | 'sessionsOverview'
+  | 'workspacesOverview'
+  | 'splitView'
+  | 'daemonStatus'
+  | 'collapse';
+
+export interface WebShellSidebarBranding {
+  /** Replace the complete top branding row. */
+  render?: () => ReactNode;
+  /** Hide the branding row in the compact drawer. Defaults to true. */
+  hideWhenCompact?: boolean;
+}
+
+export interface WebShellSidebarLockedWorkspace {
+  /** Replace the locked workspace row content while preserving its built-in behavior. */
+  render?: (
+    workspace: DaemonWorkspaceCapability,
+    state: { expanded: boolean },
+  ) => ReactNode;
+}
+
+export type WebShellSidebarPrimaryNavItem =
+  | 'newTask'
+  | 'plugins'
+  | 'channels'
+  | 'scheduledTasks'
+  | 'workflows'
+  | 'goals';
+
+export interface WebShellSidebarPrimaryNavOptions {
+  /** Built-in primary nav entries to show. Defaults to all. */
+  items?: readonly WebShellSidebarPrimaryNavItem[];
+  /** Additional custom content rendered after the built-in nav buttons. */
+  render?: () => ReactNode;
+}
+
+export interface WebShellSidebarFooterOptions {
+  /** Built-in footer entries to expose. Entries use the canonical footer order. */
+  items?: readonly WebShellSidebarFooterItem[];
+  /** Additional custom content rendered before the built-in footer items (left side). */
+  render?: () => ReactNode;
+}
+
+const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
+  'settings',
+  'version',
+  'theme',
+  'sessionsOverview',
+  'splitView',
+  'daemonStatus',
+  'collapse',
+];
+
+const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
+  'newTask',
+  'plugins',
+  'channels',
+  'scheduledTasks',
+  'workflows',
+  'goals',
+];
+
+export type WebShellSidebarSessionActionItem =
+  | 'details'
+  | 'rename'
+  | 'group'
+  | 'export'
+  | 'delete'
+  | 'pin'
+  | 'archive';
+
+/** Subset of action items that have working inline (hover-button) handlers. */
+export type WebShellSidebarSessionInlineActionItem =
+  | 'pin'
+  | 'rename'
+  | 'export'
+  | 'delete';
+
+export interface WebShellSidebarSessionActionsOptions {
+  /** Session action items to show. Defaults to all. */
+  items?: readonly WebShellSidebarSessionActionItem[];
+  /**
+   * Which items appear as inline buttons (on hover). Defaults to ['pin'];
+   * archive stays in the dropdown so a stray click on the hover slot cannot
+   * archive a session.
+   * Only items that also pass their built-in visibility condition are rendered.
+   * Only items with working inline handlers are accepted
+   * (details/group/archive are dropdown-only).
+   */
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
+}
+
+const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
+  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
+
+const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
+  ['pin'];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -48,7 +317,7 @@ const GROUP_MENU_MARGIN = 8;
  * from core. Used both to order the color sections and as a fallback when the
  * daemon's color catalog has not loaded yet.
  */
-const SESSION_GROUP_COLORS: DaemonSessionGroupColor[] = [
+const SESSION_GROUP_COLORS: DaemonSessionGroupPresetColor[] = [
   'red',
   'orange',
   'yellow',
@@ -59,7 +328,7 @@ const SESSION_GROUP_COLORS: DaemonSessionGroupColor[] = [
 
 type GroupEditorMode = 'create' | 'edit';
 
-type SessionSectionKind = 'color' | 'group' | 'recent';
+type SessionSectionKind = 'color' | 'group' | 'scheduled-task' | 'recent';
 
 interface SessionSection {
   id: string;
@@ -75,6 +344,7 @@ interface GroupEditorState {
   mode: GroupEditorMode;
   group?: DaemonSessionGroup;
   targetSession?: DaemonSessionSummary;
+  workspaceCwd?: string;
 }
 
 interface GroupMenuState {
@@ -83,27 +353,112 @@ interface GroupMenuState {
   left: number;
 }
 
+type SessionWorkspaceScope =
+  | { kind: 'primary'; cwd: string }
+  | { kind: 'locked'; cwd: string; workspace: DaemonWorkspaceCapability }
+  | { kind: 'restricted'; cwd: string; workspace: DaemonWorkspaceCapability }
+  | { kind: 'untrusted'; cwd: string; workspace: DaemonWorkspaceCapability }
+  | { kind: 'unknown'; cwd: string };
+
+export interface WebShellSidebarWorkspaceOverviewOptions {
+  /**
+   * Facet chips under an expanded workspace row. Defaults to every facet
+   * except hooks.
+   */
+  items?: readonly WorkspaceOverviewItem[];
+}
+
+export type { WorkspaceManagementTarget, WorkspaceOverviewItem };
+
 interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenPlugins: () => void;
+  onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenWorkflows: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
-   * Whether to offer the Session Overview entry point. Gated to large screens
-   * by the app: below that there is no room to make managing several sessions
-   * side by side worthwhile.
+   * Whether to offer the Session Overview entry point. The table handles
+   * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
+  /** Opens the Workspaces overview panel (table of registered workspaces). */
+  onOpenWorkspacesOverview?: () => void;
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
-  onNewSession: () => Promise<boolean> | boolean;
-  onLoadSession: (sessionId: string) => Promise<void> | void;
+  onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  onLoadSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => Promise<void> | void;
+  onSelectCurrentSession?: () => void;
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string | undefined,
+    sessionId: string,
+    displayName: string,
+  ) => void;
+  onSessionsDeleted?: (sessionIds: string[]) => void;
   onError: (error: unknown, fallback: string) => void;
+  theme: WebShellTheme;
+  onThemeChange: (theme: WebShellTheme) => void;
   mobileOpen?: boolean;
-  sessionListReloadToken?: number;
+  onMobileClose?: () => void;
+  /**
+   * Phase 4: workspace cwd picked for the next new session (undefined =
+   * primary). Only meaningful on multi-workspace daemons.
+   */
+  selectedWorkspaceCwd?: string;
+  onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's folder header, where a live git chip fires it on click.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  onOpenCommit?: (workspaceCwd: string) => void;
+  /**
+   * Opens the shared App-owned Add Workspace dialog. Omit this callback when
+   * registration is unavailable; locked workspaces hide the action separately.
+   */
+  onOpenAddWorkspace?: () => void;
+  workspaces?: DaemonWorkspaceCapability[];
+  lockedWorkspaceCwd?: string;
+  lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  branding?: false | WebShellSidebarBranding;
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
+  showSessionSourceSwitch?: boolean;
+  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  hideProjectHeader?: boolean;
+  /** Customize which action buttons appear on session rows. */
+  sessionActions?: WebShellSidebarSessionActionsOptions;
+  footer?: false | WebShellSidebarFooterOptions;
+  /**
+   * Session counts, full path and facet chips on workspace rows. Pass `false`
+   * to keep the plain folder headers.
+   */
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
+  /**
+   * Open a management page (MCP, skills, …) for a workspace. Offered on the
+   * daemon's primary workspace only: the management pages read the
+   * connection's bound workspace, so another workspace's row cannot open its
+   * own view yet (#10399, layer B1).
+   */
+  onOpenWorkspaceManagement?: (
+    target: WorkspaceManagementTarget,
+    workspaceCwd: string,
+  ) => void;
+  /** Start a new session that works in an isolated git worktree. */
+  onNewWorktreeSession?: (
+    workspaceCwd?: string,
+  ) => Promise<boolean> | boolean | void;
+  projectFeaturesEnabled?: boolean;
+  onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
+  onStandaloneNotice?: (message: string) => void;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -142,12 +497,36 @@ function getSessionCreatedTime(session: DaemonSessionSummary): number {
 }
 
 function getDefaultGroupColor(
-  colorOptions: DaemonSessionGroupColor[],
-): DaemonSessionGroupColor {
+  colorOptions: DaemonSessionGroupPresetColor[],
+): DaemonSessionGroupPresetColor {
   return colorOptions[0] ?? 'blue';
 }
 
-function getGroupColorClass(color: DaemonSessionGroupColor): string {
+function normalizeHexColorInput(
+  value: string,
+): DaemonSessionGroupHexColor | undefined {
+  const normalized = value.trim();
+  if (/^#[0-9a-f]{6}$/i.test(normalized)) {
+    return normalized.toLowerCase() as DaemonSessionGroupHexColor;
+  }
+  return undefined;
+}
+
+function normalizeGroupColorInput(
+  value: string,
+  presets: readonly DaemonSessionGroupPresetColor[],
+): DaemonSessionGroupColor | undefined {
+  const normalized = value.trim();
+  if (presets.includes(normalized as DaemonSessionGroupPresetColor)) {
+    return normalized as DaemonSessionGroupPresetColor;
+  }
+  return normalizeHexColorInput(normalized);
+}
+
+function getGroupColorClass(
+  color: DaemonSessionGroupColor,
+): string | undefined {
+  if (color.startsWith('#')) return styles.groupColorCustom;
   switch (color) {
     case 'red':
       return styles.groupColorRed;
@@ -162,12 +541,36 @@ function getGroupColorClass(color: DaemonSessionGroupColor): string {
     case 'purple':
       return styles.groupColorPurple;
   }
-  const exhaustive: never = color;
-  return exhaustive;
+  return undefined;
+}
+
+function getGroupColorStyle(
+  color: DaemonSessionGroupColor,
+): CSSProperties | undefined {
+  return color.startsWith('#') ? { backgroundColor: color } : undefined;
+}
+
+// The cap scales with the window so wide displays can reveal full session
+// names, but never exceeds half the window so the sidebar cannot crush the
+// main content area. SIDEBAR_MAX_WIDTH is the floor, preserving the old
+// fixed cap on small windows.
+function getSidebarMaxWidth(): number {
+  if (typeof window === 'undefined') return SIDEBAR_MAX_WIDTH;
+  return Math.max(
+    SIDEBAR_MAX_WIDTH,
+    Math.floor(window.innerWidth * SIDEBAR_MAX_WIDTH_WINDOW_RATIO),
+  );
 }
 
 function clampSidebarWidth(width: number): number {
-  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
+  return Math.min(getSidebarMaxWidth(), Math.max(SIDEBAR_MIN_WIDTH, width));
+}
+
+function clampSidebarVisualWidth(width: number): number {
+  return Math.min(
+    getSidebarMaxWidth(),
+    Math.max(SIDEBAR_DRAG_VISUAL_MIN_WIDTH, width),
+  );
 }
 
 function readSidebarWidth(): number {
@@ -221,162 +624,6 @@ function IconQwenLogo() {
   );
 }
 
-function IconFolder({ expanded }: { expanded: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      {expanded ? (
-        <>
-          <path d="M3.25 8.6V7.4A2.4 2.4 0 0 1 5.65 5h4.1l2.1 2.1h6.5a2.4 2.4 0 0 1 2.4 2.4v1.1" />
-          <path d="M4.3 10.6h14.9a1.75 1.75 0 0 1 1.68 2.24l-1.32 4.5A2.4 2.4 0 0 1 17.25 19H5.05a2.4 2.4 0 0 1-2.34-2.94l.86-3.75A2.2 2.2 0 0 1 5.72 10.6" />
-        </>
-      ) : (
-        <>
-          <path d="M3.25 8.2V7.4A2.4 2.4 0 0 1 5.65 5h4.1l2.1 2.1h6.5a2.4 2.4 0 0 1 2.4 2.4v.7" />
-          <path d="M3.25 8.2h17.5v7.9a2.4 2.4 0 0 1-2.4 2.4H5.65a2.4 2.4 0 0 1-2.4-2.4V8.2Z" />
-        </>
-      )}
-    </svg>
-  );
-}
-
-function IconSearch() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="11" cy="11" r="7" />
-      <path d="m16.5 16.5 4 4" />
-    </svg>
-  );
-}
-
-function IconSettings() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 .9-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5.9h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
-    </svg>
-  );
-}
-
-function IconPulse() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M3 12h4l3-8 4 16 3-8h4" />
-    </svg>
-  );
-}
-
-function IconSchedule() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 2" />
-    </svg>
-  );
-}
-
-function IconGrid() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="3" width="7" height="7" rx="1" />
-      <rect x="14" y="3" width="7" height="7" rx="1" />
-      <rect x="3" y="14" width="7" height="7" rx="1" />
-      <rect x="14" y="14" width="7" height="7" rx="1" />
-    </svg>
-  );
-}
-
-function IconColumns() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="4" width="8" height="16" rx="1" />
-      <rect x="13" y="4" width="8" height="16" rx="1" />
-    </svg>
-  );
-}
-
-function IconRename() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 20h5l10-10a3 3 0 0 0-5-5L4 15v5Z" />
-      <path d="M13.5 5.5 18.5 10.5" />
-    </svg>
-  );
-}
-
-function IconDownload() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 3v12" />
-      <path d="m7 10 5 5 5-5" />
-      <path d="M5 21h14" />
-    </svg>
-  );
-}
-
-function IconTrash() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
-    </svg>
-  );
-}
-
-function IconPin() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="m14 4 6 6-4 1.5-3.5 3.5.5 4-8-8 4 .5 3.5-3.5L14 4Z" />
-      <path d="m5 19 4.5-4.5" />
-    </svg>
-  );
-}
-
-function IconArchive() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="4" rx="1" />
-      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
-      <path d="M10 12h4" />
-    </svg>
-  );
-}
-
-function IconGroup() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 10.5 12 5l8 5.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19v-8.5Z" />
-      <path d="M9 20.5v-6h6v6" />
-    </svg>
-  );
-}
-
-function IconUnarchive() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="4" rx="1" />
-      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
-      <path d="M12 18v-6M9 15l3-3 3 3" />
-    </svg>
-  );
-}
-
-function IconMore() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
-function IconCollapse({ collapsed }: { collapsed: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      {collapsed ? <path d="M9 6l6 6-6 6" /> : <path d="M15 6l-6 6 6 6" />}
-    </svg>
-  );
-}
-
 function IconChevron({ expanded }: { expanded: boolean }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -385,95 +632,243 @@ function IconChevron({ expanded }: { expanded: boolean }) {
   );
 }
 
-interface SessionMenuItem {
-  key: string;
-  label: string;
-  icon: ReactNode;
-  onSelect: () => void;
-  danger?: boolean;
-  disabled?: boolean;
-  disabledTitle?: string;
+function SessionMenu({
+  onOpenChange,
+  children,
+}: {
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  const openRef = useRef(false);
+  useEffect(
+    () => () => {
+      // Radix emits no onOpenChange(false) when an open menu unmounts (its
+      // row removed by a poll or preview slice); without the close signal the
+      // collapsed surface's dismissal guards stay blocked forever.
+      if (openRef.current) onOpenChange(false);
+    },
+    [onOpenChange],
+  );
+  return (
+    <DropdownMenu
+      onOpenChange={(open) => {
+        openRef.current = open;
+        onOpenChange(open);
+      }}
+    >
+      {children}
+    </DropdownMenu>
+  );
 }
 
-/**
- * Overflow ("...") action menu for a session row. Rendered at the sidebar
- * root with `position: fixed` (like the row tooltip) so it escapes the
- * session list's `overflow: auto` clipping. Closes on outside pointer,
- * Escape, scroll, or resize. The anchor button is excluded from the
- * outside-pointer check so its own click can toggle the menu shut.
- */
-function SessionActionsMenu({
-  anchorEl,
-  items,
-  onClose,
+function SidebarSessionSurface({
+  collapsed,
+  label,
+  status,
+  statusLabel,
+  width,
+  open,
+  onOpenChange,
+  isCloseBlocked,
+  children,
 }: {
-  anchorEl: HTMLElement;
-  items: SessionMenuItem[];
-  onClose: () => void;
+  collapsed: boolean;
+  label: string;
+  status?: 'approval' | 'question' | 'completed';
+  statusLabel?: string;
+  width: number;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  isCloseBlocked: () => boolean;
+  children: ReactNode;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<number | undefined>(undefined);
+  const pointerOpenRef = useRef(false);
+  const interactionOpenRef = useRef(false);
+  const focusInsideSurfaceRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const changeOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen && isCloseBlocked()) return;
+      if (nextOpen && !open) focusInsideSurfaceRef.current = false;
+      onOpenChange(nextOpen);
+    },
+    [isCloseBlocked, onOpenChange, open],
+  );
+  const cancelClose = useCallback(
+    () => window.clearTimeout(closeTimerRef.current),
+    [],
+  );
+  const closeAfterDelay = useCallback(() => {
+    cancelClose();
+    if (!pointerOpenRef.current) return;
+    closeTimerRef.current = window.setTimeout(() => {
+      // A hover-out must not unmount the surface while it holds keyboard
+      // focus (search or rename inputs): the close would drop focus to body.
+      // document.activeElement retargets to the shadow host in shadow-DOM
+      // portal mode, so also probe the surface's own tree for :focus.
+      if (
+        contentRef.current?.contains(document.activeElement) ||
+        contentRef.current?.querySelector(':focus')
+      ) {
+        return;
+      }
+      changeOpen(false);
+    }, 150);
+  }, [cancelClose, changeOpen]);
+
+  useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
 
   useEffect(() => {
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (!target) return;
-      if (ref.current?.contains(target)) return;
-      if (anchorEl.contains(target)) return;
-      onClose();
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onClose();
+    if (!collapsed || !open) return;
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!pointerOpenRef.current) return;
+      // Shadow-DOM portal mode retargets event.target to the shadow host;
+      // composedPath keeps the real node (same approach as App.tsx).
+      const target =
+        (event.composedPath()[0] as Node | undefined) ?? event.target;
+      const insideSurface =
+        target instanceof Node &&
+        (triggerRef.current?.contains(target) ||
+          contentRef.current?.contains(target));
+      const insideNestedOverlay =
+        target instanceof Element &&
+        target.closest(
+          '[data-slot="dropdown-menu-content"], [data-slot="popover-content"]',
+        );
+      if (!insideSurface && !insideNestedOverlay) {
+        closeAfterDelay();
+      } else {
+        cancelClose();
       }
     };
-    document.addEventListener('pointerdown', handlePointerDown, true);
-    document.addEventListener('keydown', handleKeyDown, true);
-    window.addEventListener('scroll', onClose, true);
-    window.addEventListener('resize', onClose);
+    document.addEventListener('pointermove', handlePointerMove);
     return () => {
-      document.removeEventListener('pointerdown', handlePointerDown, true);
-      document.removeEventListener('keydown', handleKeyDown, true);
-      window.removeEventListener('scroll', onClose, true);
-      window.removeEventListener('resize', onClose);
+      document.removeEventListener('pointermove', handlePointerMove);
+      window.clearTimeout(closeTimerRef.current);
     };
-  }, [anchorEl, onClose]);
+  }, [cancelClose, closeAfterDelay, collapsed, open]);
 
-  const anchor = anchorEl.getBoundingClientRect();
-  const estimatedHeight = items.length * 34 + 8;
-  const openUp = anchor.bottom + estimatedHeight > window.innerHeight - 8;
-  const style: CSSProperties = {
-    right: Math.max(8, window.innerWidth - anchor.right),
-    ...(openUp
-      ? { bottom: window.innerHeight - anchor.top + 4 }
-      : { top: anchor.bottom + 4 }),
-  };
+  if (!collapsed) {
+    return <div className={styles.sessionList}>{children}</div>;
+  }
 
   return (
-    <div ref={ref} className={styles.actionMenu} role="menu" style={style}>
-      {items.map((item) => (
-        <button
-          key={item.key}
-          type="button"
-          role="menuitem"
-          className={cx(
-            styles.actionMenuItem,
-            item.danger && styles.actionMenuItemDanger,
-          )}
-          disabled={item.disabled}
-          title={item.disabled ? item.disabledTitle : undefined}
-          onClick={() => {
-            if (item.disabled) return;
-            onClose();
-            item.onSelect();
+    <div className={styles.sessionList}>
+      <Popover open={open} onOpenChange={changeOpen}>
+        <PopoverTrigger asChild>
+          <button
+            ref={triggerRef}
+            className={styles.pluginButton}
+            type="button"
+            aria-label={statusLabel ? `${label}: ${statusLabel}` : label}
+            data-web-shell-collapsed-session-trigger
+            onPointerEnter={() => {
+              // Only an open initiated by the pointer uses hover semantics;
+              // a graze over a keyboard-opened switcher must not suppress
+              // focus restoration when it later closes.
+              if (!open) pointerOpenRef.current = true;
+              cancelClose();
+              changeOpen(true);
+            }}
+            onPointerLeave={closeAfterDelay}
+            onPointerDown={() => {
+              if (!open) pointerOpenRef.current = true;
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              cancelClose();
+              changeOpen(true);
+            }}
+            onKeyDown={() => {
+              pointerOpenRef.current = false;
+            }}
+          >
+            <span className={styles.navIcon}>
+              <FolderClosedIcon size={16} strokeWidth={1.2} />
+              {status && (
+                <span
+                  className={cx(
+                    styles.collapsedSessionStatusDot,
+                    status === 'approval' &&
+                      styles.collapsedSessionStatusApproval,
+                    status === 'question' &&
+                      styles.collapsedSessionStatusQuestion,
+                  )}
+                  data-web-shell-collapsed-session-status={status}
+                  aria-hidden="true"
+                />
+              )}
+            </span>
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          ref={contentRef}
+          side="right"
+          align="start"
+          sideOffset={8}
+          collisionPadding={8}
+          onFocus={() => {
+            focusInsideSurfaceRef.current = true;
+          }}
+          className={styles.collapsedSessionPopover}
+          style={
+            {
+              '--collapsed-session-popover-width': `${width}px`,
+            } as CSSProperties
+          }
+          data-web-shell-collapsed-session-switcher
+          onOpenAutoFocus={(event) => {
+            if (pointerOpenRef.current) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            // Suppress Radix's focus restoration only while focus stayed
+            // outside a pointer-opened surface; once focus has moved into
+            // the content (search, rename), closing must return it to the
+            // trigger like a keyboard-opened surface. Radix fires this
+            // after the content unmounts, so the flag is tracked while the
+            // surface is open instead of probed from document.activeElement.
+            if (pointerOpenRef.current && !focusInsideSurfaceRef.current) {
+              event.preventDefault();
+            }
+            pointerOpenRef.current = false;
+            interactionOpenRef.current = false;
+            focusInsideSurfaceRef.current = false;
+          }}
+          onEscapeKeyDown={() => {
+            interactionOpenRef.current = false;
+          }}
+          onPointerEnter={cancelClose}
+          onPointerLeave={closeAfterDelay}
+          onPointerDownCapture={() => {
+            interactionOpenRef.current = true;
+            cancelClose();
+          }}
+          onInteractOutside={(event) => {
+            const originalEvent = event.detail.originalEvent;
+            const originalTarget = originalEvent.composedPath()[0];
+            const target = (originalTarget as Node | undefined) ?? event.target;
+            if (
+              target instanceof Element &&
+              target.closest(
+                '[data-slot="dropdown-menu-content"], [data-slot="popover-content"]',
+              )
+            ) {
+              event.preventDefault();
+            } else if (
+              interactionOpenRef.current &&
+              originalEvent.type === 'focusin'
+            ) {
+              event.preventDefault();
+            } else {
+              interactionOpenRef.current = false;
+            }
           }}
         >
-          <span className={styles.actionMenuIcon} aria-hidden="true">
-            {item.icon}
-          </span>
-          <span className={styles.actionMenuLabel}>{item.label}</span>
-        </button>
-      ))}
+          {children}
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -482,42 +877,326 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenPlugins,
+  onOpenChannels,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenWorkflows,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
+  onOpenWorkspacesOverview,
   onOpenSplitView,
   canOpenSplitView,
   onNewSession,
   onLoadSession,
+  onSelectCurrentSession,
+  onSessionRenameConfirmed,
+  onSessionsDeleted,
   onError,
+  theme,
+  onThemeChange,
   mobileOpen,
-  sessionListReloadToken,
+  onMobileClose,
+  selectedWorkspaceCwd,
+  onSelectWorkspace,
+  onOpenGitDiff,
+  onOpenCommit,
+  onOpenAddWorkspace,
+  workspaces: providedWorkspaces,
+  lockedWorkspaceCwd,
+  lockedWorkspace: lockedWorkspaceOptions,
+  branding,
+  primaryNav: primaryNavOptions,
+  showSessionSourceSwitch = true,
+  hideProjectHeader,
+  sessionActions: sessionActionsOptions,
+  footer,
+  workspaceOverview,
+  onOpenWorkspaceManagement,
+  onNewWorktreeSession,
+  projectFeaturesEnabled = true,
+  onLoadStandaloneSession,
+  onStandaloneNotice,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
+  const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
+  const footerItems = useMemo(
+    () =>
+      new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
+    [footer],
+  );
+  const primaryNavItems = useMemo(
+    () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
+    [primaryNavOptions?.items],
+  );
+  const hasScrollingPrimaryNav =
+    (projectFeaturesEnabled &&
+      (primaryNavItems.has('plugins') ||
+        primaryNavItems.has('channels') ||
+        primaryNavItems.has('scheduledTasks') ||
+        primaryNavItems.has('workflows') ||
+        primaryNavItems.has('goals'))) ||
+    Boolean(primaryNavOptions?.render);
+  const sessionActionItems = useMemo(
+    () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
+    [sessionActionsOptions?.items],
+  );
+  const inlineActionItems = useMemo(
+    () =>
+      new Set(
+        sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS,
+      ),
+    [sessionActionsOptions?.inlineItems],
+  );
+  const shouldRenderBrand =
+    branding !== false && !(mobileOpen && (branding?.hideWhenCompact ?? true));
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const sourceMetadataEnabled = Boolean(
+    connection.capabilities?.features?.includes('session_source_metadata'),
+  );
+  const [sessionSource, setSessionSource] =
+    useState<SidebarSessionSource>('default');
+  // Reset before commit so effects that key bookkeeping by the raw source
+  // cannot observe a hidden switch with channel state and default catalogs.
+  if (!showSessionSourceSwitch && sessionSource !== 'default') {
+    setSessionSource('default');
+  }
+  const selectedSessionSource = sourceMetadataEnabled
+    ? showSessionSourceSwitch
+      ? sessionSource
+      : 'default'
+    : undefined;
+  const channelManagementEnabled = Boolean(
+    workspace.capabilities?.features.includes('channel_management'),
+  );
+  const channelGroupingEnabled =
+    selectedSessionSource === 'channel' && channelManagementEnabled;
+  const {
+    data: channelCatalogData,
+    catalog: channelTypeCatalog,
+    channels: channelInstances,
+    reload: reloadChannelCatalog,
+    error: channelCatalogError,
+  } = useChannels({
+    autoLoad: channelGroupingEnabled,
+    enabled: channelGroupingEnabled,
+  });
+  const sessionArchiveEnabled = Boolean(
+    connection.capabilities?.features?.includes('session_archive'),
+  );
+  const workspaceQualifiedRestCoreEnabled = Boolean(
+    connection.capabilities?.features?.includes(
+      'workspace_qualified_rest_core',
+    ),
+  );
+  const workspaceSessionLiveStateSupported = Boolean(
+    connection.capabilities?.features?.includes(
+      'workspace_session_live_state',
+    ) && typeof workspace.client.getWorkspaceSessionLiveState === 'function',
+  );
+  const sessionCatalogRequestsEnabled = connection.capabilities !== undefined;
+  const workspaceSessionMetadataEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_session_metadata'),
+  );
+  // Phase 4: registered workspaces on a multi-workspace daemon (absent or a
+  // single entry otherwise). Drives the new-session workspace picker.
+  const workspaces = useMemo(
+    () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
+    [providedWorkspaces, workspace.capabilities?.workspaces],
+  );
+  const workspaceCatalogAdvertised =
+    workspaces.length > 0 ||
+    workspace.capabilities?.workspaces !== undefined ||
+    connection.capabilities?.workspaces !== undefined;
+  const primaryWorkspaceCwd =
+    workspaces.find((entry) => entry.primary)?.cwd ??
+    workspace.capabilities?.workspaceCwd ??
+    connection.workspaceCwd;
+  const primaryWorkspaceExpansionId = `primary:${
+    primaryWorkspaceCwd ?? 'default'
+  }`;
+  const workflowWorkspaceCwd = connection.sessionId
+    ? connection.workspaceCwd
+    : (lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd);
+  const workspaceWorkflowsEnabled =
+    workspaces.find((entry) => entry.cwd === workflowWorkspaceCwd)
+      ?.workflowsEnabled ?? false;
+  const workflowsEnabled = connection.sessionId
+    ? (connection.supportedCommands?.workflowsEnabled ??
+      workspaceWorkflowsEnabled)
+    : workspaceWorkflowsEnabled;
+  const lockedWorkspace = lockedWorkspaceCwd
+    ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+    : undefined;
+  const includePrimaryWorkspaceSessions =
+    !lockedWorkspaceCwd || lockedWorkspace?.primary === true;
+  const projectName =
+    getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
+  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+    const availableWorkspaces =
+      workspaces.length > 0
+        ? workspaces
+        : [
+            {
+              id: 'primary',
+              cwd: connection.workspaceCwd || projectName,
+              primary: true,
+              trusted: true,
+            },
+          ];
+    return lockedWorkspaceCwd
+      ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+      : availableWorkspaces;
+  }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
+  const liveStateWorkspaceCwds = useMemo(
+    () =>
+      displayedWorkspaces
+        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+        .map((entry) => entry.cwd),
+    [displayedWorkspaces],
+  );
+  const liveStateWorkspaceCwdSet = useMemo(
+    () => new Set(liveStateWorkspaceCwds),
+    [liveStateWorkspaceCwds],
+  );
+  const liveStateGroupWorkspaceCwds = useMemo(
+    () =>
+      organizationEnabled && !channelGroupingEnabled
+        ? displayedWorkspaces
+            .filter(
+              (entry) =>
+                entry.kind !== 'live' &&
+                entry.trusted &&
+                isAbsolutePath(entry.cwd),
+            )
+            .map((entry) => entry.cwd)
+        : [],
+    [channelGroupingEnabled, displayedWorkspaces, organizationEnabled],
+  );
+  const workspaceSessionLiveStateEnabled =
+    workspaceSessionLiveStateSupported && liveStateWorkspaceCwds.length > 0;
+  const primaryWorkspaceSessionLiveStateEnabled = Boolean(
+    workspaceSessionLiveStateEnabled &&
+      primaryWorkspaceCwd &&
+      liveStateWorkspaceCwdSet.has(primaryWorkspaceCwd),
+  );
+  const primaryWorkspaceLiveStateGroupsEnabled = Boolean(
+    primaryWorkspaceSessionLiveStateEnabled &&
+      primaryWorkspaceCwd &&
+      liveStateGroupWorkspaceCwds.includes(primaryWorkspaceCwd),
+  );
+  const secondaryWorkspaceCwds = useMemo(
+    () =>
+      displayedWorkspaces
+        .filter((entry) => !entry.primary && entry.trusted)
+        .map((entry) => entry.cwd),
+    [displayedWorkspaces],
+  );
+  const secondaryWorkspaceSessionLiveStateEnabled =
+    workspaceSessionLiveStateEnabled &&
+    secondaryWorkspaceCwds.length > 0 &&
+    secondaryWorkspaceCwds.every((cwd) => liveStateWorkspaceCwdSet.has(cwd));
   const {
     sessions,
     loading,
     error,
+    data: sessionsPage,
+    nextCursor: sessionsNextCursor,
+    truncated: sessionsTruncated,
     reload,
     deleteSession,
     exportSession,
     archiveSession,
-  } = useSessions({
-    autoLoad: true,
+    catalogQuery,
+  } = useWebShellSessions({
+    autoLoad:
+      sessionCatalogRequestsEnabled && !primaryWorkspaceSessionLiveStateEnabled,
+    enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // Header counts for the primary workspace, whose sessions this component
+  // lists itself (the section only renders the folder header for it).
+  const primarySessionStats = useMemo(
+    () =>
+      includePrimaryWorkspaceSessions && sessionsPage !== undefined
+        ? summarizeSessions(
+            sessions,
+            // Either more pages follow, or the daemon capped its scan and
+            // marked the page a lower bound.
+            Boolean(sessionsNextCursor) || sessionsTruncated === true,
+          )
+        : undefined,
+    [
+      includePrimaryWorkspaceSessions,
+      sessions,
+      sessionsNextCursor,
+      sessionsPage,
+      sessionsTruncated,
+    ],
+  );
+  // The catalog starts with loading=false before its subscription requests
+  // data, so !loading is not “settled”. Treat the first data as the ready signal (empty
+  // lists are still defined data) so the initial-catalog latch waits. Errors
+  // must NOT settle it: a latch consumed against a failed request would treat
+  // every section from the eventual successful reload as brand-new,
+  // auto-collapsing and persisting over the user's restored expansions.
+  const sessionsCatalogReady =
+    !organizationEnabled ||
+    !includePrimaryWorkspaceSessions ||
+    sessionsPage !== undefined;
+  // Which source the settled sessions page belongs to. Switching the source
+  // changes the catalog query key, whose entry starts without a page
+  // (undefined), so reconciliation must not run until a page fetched for the
+  // new source settles — otherwise the other source's sections would be
+  // consumed as the new source's initial catalog.
+  const lastSettledSessionsPageRef = useRef(sessionsPage);
+  const settledSessionsSourceRef = useRef<SidebarSessionSource>(sessionSource);
+  useEffect(() => {
+    // An undefined page is the empty pre-settle snapshot, not a settled fetch.
+    if (sessionsPage === undefined) return;
+    if (lastSettledSessionsPageRef.current !== sessionsPage) {
+      lastSettledSessionsPageRef.current = sessionsPage;
+      settledSessionsSourceRef.current = sessionSource;
+    }
+  }, [sessionsPage, sessionSource]);
+  const loadPinnedSessions =
+    organizationEnabled && selectedSessionSource !== 'channel';
+  const { sessions: primaryPinnedSessions, data: primaryPinnedSessionsPage } =
+    useWebShellSessions({
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        loadPinnedSessions &&
+        !primaryWorkspaceSessionLiveStateEnabled,
+      enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
+      pageSize: SESSION_LIST_PAGE_SIZE,
+      archiveState: 'active',
+      ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+      view: 'organized',
+      group: 'pinned',
+    });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
+  const [pinnedExpanded, setPinnedExpanded] = useState(true);
+  // Pin toggles applied optimistically while the daemon organization RPC is
+  // in flight. The catalog store mirrors each toggle into its loaded pages
+  // (applySessionPinToggle); these entries only render rows no loaded page
+  // carries yet, and are dropped once one does or rolled back on RPC failure.
+  const [optimisticPins, setOptimisticPins] = useState<
+    ReadonlyMap<string, OptimisticPinEntry>
+  >(() => new Map());
   const {
     sessions: archivedSessions,
     loading: archivedLoading,
@@ -525,27 +1204,36 @@ export function WebShellSidebar({
     reload: reloadArchived,
     deleteSession: deleteArchivedSession,
     unarchiveSession,
-  } = useSessions({
-    autoLoad: true,
-    enabled: archivedExpanded,
+    catalogQuery: archivedCatalogQuery,
+  } = useWebShellSessions({
+    autoLoad:
+      sessionCatalogRequestsEnabled && !primaryWorkspaceSessionLiveStateEnabled,
+    enabled:
+      sessionArchiveEnabled &&
+      archivedExpanded &&
+      includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
-  const [menuState, setMenuState] = useState<{
-    session: DaemonSessionSummary;
-    isArchived: boolean;
-    anchorEl: HTMLElement;
-  } | null>(null);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
-  const [colorOptions, setColorOptions] = useState<DaemonSessionGroupColor[]>(
-    [],
-  );
+  const [menuGroups, setMenuGroups] = useState<DaemonSessionGroup[]>([]);
+  const [colorOptions, setColorOptions] = useState<
+    DaemonSessionGroupPresetColor[]
+  >([]);
   const [groupBusy, setGroupBusy] = useState(false);
-  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingSessionIdentity, setEditingSessionIdentity] = useState<
+    string | null
+  >(null);
+  const [editingSession, setEditingSession] =
+    useState<DaemonSessionSummary | null>(null);
   const [editingName, setEditingName] = useState('');
+  // Mirrors editingSessionIdentity for promise callbacks that outlive the
+  // render where the rename started.
+  const editingSessionIdentityRef = useRef<string | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -556,42 +1244,764 @@ export function WebShellSidebar({
   const exportingSessionIdsRef = useRef<Set<string>>(new Set());
   const [creatingSession, setCreatingSession] = useState(false);
   const creatingSessionRef = useRef(false);
+  // The workspace whose header menu is open: its action wrapper must stay
+  // visible while the (portalled) menu holds hover and focus, or Escape
+  // would return focus to a hidden trigger and strand it on the body.
+  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(
+    null,
+  );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
+  const groupMenuOpenRef = useRef(groupMenu !== null);
+  useEffect(() => {
+    groupMenuOpenRef.current = groupMenu !== null;
+  }, [groupMenu]);
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [groupName, setGroupName] = useState('');
   const [groupColor, setGroupColor] = useState<DaemonSessionGroupColor>('blue');
-  const [deleteGroupCandidate, setDeleteGroupCandidate] =
-    useState<DaemonSessionGroup | null>(null);
+  const [lastValidCustomGroupColor, setLastValidCustomGroupColor] =
+    useState<DaemonSessionGroupHexColor>(DEFAULT_CUSTOM_GROUP_COLOR);
+  const [deleteGroupCandidate, setDeleteGroupCandidate] = useState<{
+    group: DaemonSessionGroup;
+    workspaceCwd?: string;
+  } | null>(null);
   const [collapsedSessionSectionIds, setCollapsedSessionSectionIds] = useState<
     Set<string>
-  >(() => new Set());
+  >(
+    () =>
+      new Set(
+        Array.from(readCollapsedSessionSectionIds()).filter(
+          isPrimaryCollapsedSectionId,
+        ),
+      ),
+  );
+  const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
+  // Dedicated first-sync latch, keyed by session source: each source's first
+  // settled catalog only registers section ids. Without per-source latches the
+  // Tasks settle consumes the shared latch and the first Channels visit treats
+  // every platform section as brand-new, auto-collapsing and persisting them.
+  // Do not infer this from knownSessionSectionIdsRef.size — seeding that set
+  // early would make the first real sync look mid-session and auto-collapse
+  // restored expansions.
+  const awaitingInitialSessionCatalogBySourceRef = useRef<
+    Record<SidebarSessionSource, boolean>
+  >({ default: true, channel: true });
+  const [groupsCatalogReady, setGroupsCatalogReady] =
+    useState(!organizationEnabled);
+  // organizationEnabled can flip true mid-session (capabilities can land after
+  // the flat sessions request settles). Close the gate during that same render:
+  // deferring to the reload effect would let the auto-collapse effect consume
+  // the first-sync latch against the stale pre-organized catalog first.
+  const [prevOrganizationEnabled, setPrevOrganizationEnabled] =
+    useState(organizationEnabled);
+  if (prevOrganizationEnabled !== organizationEnabled) {
+    setPrevOrganizationEnabled(organizationEnabled);
+    setGroupsCatalogReady(!organizationEnabled);
+    if (organizationEnabled) {
+      // An org-disabled settle may already have consumed the Tasks latch
+      // against scheduled-task sections alone — possibly while the Channels
+      // tab was selected. Re-arm the source whose catalog gains manual
+      // groups so the first organized settle registers them as initial
+      // instead of collapsing them.
+      awaitingInitialSessionCatalogBySourceRef.current.default = true;
+    }
+  }
+  // The channel-grouping branch clears `groups` while the Channels tab is
+  // selected; when switching back to Tasks, close the gate during that same
+  // render so the settle cannot consume the first-sync latch against the
+  // empty catalog before the organized groups reload lands.
+  const [prevSessionSource, setPrevSessionSource] = useState(sessionSource);
+  if (prevSessionSource !== sessionSource) {
+    setPrevSessionSource(sessionSource);
+    if (
+      organizationEnabled &&
+      sessionSource === 'default' &&
+      channelManagementEnabled
+    ) {
+      setGroupsCatalogReady(false);
+    }
+  }
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
-  const [projectExpanded, setProjectExpanded] = useState(true);
+  const [projectExpanded, setProjectExpanded] = useState(() =>
+    readWorkspaceExpanded(primaryWorkspaceExpansionId),
+  );
+  const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
+  const [projectsExpanded, setProjectsExpanded] = useState(
+    () => hideProjectHeader || readWorkspaceExpanded('projects'),
+  );
+  const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isResizing, setIsResizing] = useState(false);
-  const [tooltip, setTooltip] = useState<{
-    content: ReactNode;
-    top: number;
-    left: number;
+  const [bodyScrolled, setBodyScrolled] = useState(false);
+  const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
+    useState<DaemonWorkspaceCapability | null>(null);
+  const [workspaceRenameSubmitting, setWorkspaceRenameSubmitting] =
+    useState(false);
+  const sidebarMountedRef = useRef(false);
+  const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
+    useState(0);
+  const [autoExpandWorkspace, setAutoExpandWorkspace] = useState<{
+    id: string;
+    key: string;
   } | null>(null);
+  // Keep the token for WorkspaceSection's group and Git consumers. Session
+  // catalogs are invalidated directly through their owning workspace.
+  const bumpWorkspaceReload = useCallback(() => {
+    setWorkspaceSessionsReloadToken((v) => v + 1);
+  }, []);
+
+  useEffect(() => {
+    // The five-row preview is scoped per source and per primary workspace;
+    // reset the one-shot show-all when either changes, not only on collapse.
+    setShowAllProjectSessions(false);
+  }, [projectExpanded, primaryWorkspaceExpansionId, selectedSessionSource]);
+
+  const previousPrimaryExpansionIdRef = useRef(primaryWorkspaceExpansionId);
+  useEffect(() => {
+    const previousId = previousPrimaryExpansionIdRef.current;
+    previousPrimaryExpansionIdRef.current = primaryWorkspaceExpansionId;
+    if (previousId !== primaryWorkspaceExpansionId) {
+      migrateWorkspaceExpansionPreference(
+        previousId,
+        primaryWorkspaceExpansionId,
+      );
+    }
+    setProjectExpanded(readWorkspaceExpanded(primaryWorkspaceExpansionId));
+  }, [primaryWorkspaceExpansionId]);
+
+  useEffect(() => {
+    sidebarMountedRef.current = true;
+    return () => {
+      sidebarMountedRef.current = false;
+    };
+  }, []);
+  const [searchQuery, setSearchQuery] = useState('');
+  // Order-insensitive membership key: poll-driven catalog updates change
+  // it only when the session-id set actually changes, so externally
+  // deleted/archived sessions invalidate content-search hits the same way
+  // local-handler token bumps do (without re-firing on every poll tick).
+  const sessionMembershipKey = useMemo(
+    () =>
+      sessions
+        .map((session) => session.sessionId)
+        .sort()
+        .join('|'),
+    [sessions],
+  );
+  const contentSearchHits = useSessionContentSearch(
+    workspace.client,
+    primaryWorkspaceCwd,
+    searchQuery,
+    `${workspaceSessionsReloadToken}:${sessionMembershipKey}`,
+  );
+  const [isResizing, setIsResizing] = useState(false);
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
-  const tooltipHideTimer = useRef<number | null>(null);
-  const previousRunningRef = useRef<Map<string, boolean> | null>(null);
-  const pollInFlightRef = useRef(false);
+  const sessionMenuPointerDismissRef = useRef(false);
+  const sessionMenuOpenRef = useRef(false);
+  const renameFocusSuppressRef = useRef(false);
+  const handleSessionMenuOpenChange = useCallback((open: boolean) => {
+    sessionMenuOpenRef.current = open;
+    if (open) renameFocusSuppressRef.current = false;
+  }, []);
+  const handleSessionMenuPointerDownOutside = useCallback(() => {
+    sessionMenuPointerDismissRef.current = true;
+  }, []);
+  const handleSessionMenuCloseAutoFocus = useCallback((event: Event) => {
+    if (renameFocusSuppressRef.current) {
+      renameFocusSuppressRef.current = false;
+      event.preventDefault();
+      return;
+    }
+    if (!sessionMenuPointerDismissRef.current) return;
+    sessionMenuPointerDismissRef.current = false;
+    event.preventDefault();
+  }, []);
+  const isCollapsedCloseBlocked = useCallback(
+    () =>
+      sessionMenuOpenRef.current ||
+      groupMenu !== null ||
+      deleteCandidate !== null,
+    [deleteCandidate, groupMenu],
+  );
+  const previousRunningBySourceRef = useRef<
+    Record<SidebarSessionSource, Map<string, boolean> | null>
+  >({ default: null, channel: null });
+  const previousSecondaryRunningBySourceRef = useRef<
+    Record<SidebarSessionSource, Map<string, boolean> | null>
+  >({ default: null, channel: null });
+  const lastTrackedSessionSourceRef = useRef(sessionSource);
+  const autoOpenedContextRef = useRef<string | null>(null);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
     null,
   );
   const currentSessionId = connection.sessionId;
+  const workspaceRemovalEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_runtime_removal'),
+  );
+  const workspaceRenameEnabled = Boolean(
+    connection.capabilities?.features?.includes(
+      'dynamic_workspace_registration',
+    ),
+  );
+  // Host-local affordance: the daemon opens the folder on ITS host, so the
+  // button is only honest when the browser sits on that same machine.
+  const localOpenEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_open'),
+    ) && isLocalDaemon();
+  const localTerminalEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_terminal'),
+    ) && isLocalDaemon();
+  const workspaceOverviewEnabled = workspaceOverview !== false;
+  const workspaceOverviewItems =
+    workspaceOverview === false
+      ? DEFAULT_WORKSPACE_OVERVIEW_ITEMS
+      : (workspaceOverview?.items ?? DEFAULT_WORKSPACE_OVERVIEW_ITEMS);
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
-  const projectName =
-    getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
+  const canExportWorkspaceSessions =
+    connection.capabilities?.features?.includes('workspace_session_export') ??
+    false;
+  const canExportArchivedSessions =
+    connection.capabilities?.features?.includes(
+      'workspace_archived_session_export',
+    ) ?? false;
+  const currentSessionIdentity = currentSessionId
+    ? getSessionIdentity(
+        currentSessionId,
+        connection.workspaceCwd || primaryWorkspaceCwd,
+      )
+    : null;
+  const liveStateGroupCatalogs = useWorkspaceSessionLiveState(
+    workspace.client,
+    {
+      enabled: workspaceSessionLiveStateEnabled,
+      workspaceCwds: liveStateWorkspaceCwds,
+      groupWorkspaceCwds: liveStateGroupWorkspaceCwds,
+    },
+  );
+  const primaryLiveStateGroupCatalog = primaryWorkspaceCwd
+    ? liveStateGroupCatalogs.get(primaryWorkspaceCwd)
+    : undefined;
+  const secondaryActiveQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'active',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          ...(organizationEnabled
+            ? { view: 'organized' as const, group: 'all' }
+            : {}),
+        },
+      })),
+    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryActiveSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryActiveQueries,
+    {
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        collapsed &&
+        !secondaryWorkspaceSessionLiveStateEnabled,
+      pollIntervalMs:
+        sessionCatalogRequestsEnabled &&
+        collapsed &&
+        !secondaryWorkspaceSessionLiveStateEnabled
+          ? ACTIVE_SESSION_POLL_INTERVAL_MS
+          : undefined,
+    },
+  );
+  const secondaryActiveSessions = useMemo(
+    () =>
+      secondaryActiveSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryActiveSnapshots],
+  );
+  const secondaryPinnedQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'active',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          view: 'organized',
+          group: 'pinned',
+        },
+      })),
+    [secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryPinnedSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryPinnedQueries,
+    {
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        !secondaryWorkspaceSessionLiveStateEnabled,
+      enabled: organizationEnabled && selectedSessionSource !== 'channel',
+    },
+  );
+  const secondaryPinnedSessions = useMemo(
+    () =>
+      secondaryPinnedSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryPinnedSnapshots],
+  );
+  // Every catalog page the sidebar renders pin state from. The pin overlay
+  // drop check only asks whether a loaded page carries the toggled row —
+  // never which page reference a refresh minted — so churn that recreates
+  // pages without touching pin state cannot be mistaken for a refresh.
+  const pinCatalogPages = useMemo<PinCatalogPage[]>(() => {
+    const pages: PinCatalogPage[] = [];
+    if (includePrimaryWorkspaceSessions) {
+      pages.push(primaryPinnedSessionsPage);
+    }
+    for (const snapshot of secondaryPinnedSnapshots) {
+      pages.push(snapshot.page?.sessions);
+    }
+    pages.push(sessionsPage);
+    for (const snapshot of secondaryActiveSnapshots) {
+      pages.push(snapshot.page?.sessions);
+    }
+    return pages;
+  }, [
+    includePrimaryWorkspaceSessions,
+    primaryPinnedSessionsPage,
+    secondaryActiveSnapshots,
+    secondaryPinnedSnapshots,
+    sessionsPage,
+  ]);
+  const secondaryArchivedEnabled =
+    archivedExpanded &&
+    sessionArchiveEnabled &&
+    workspaceQualifiedRestCoreEnabled;
+  const secondaryArchivedQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'archived',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          ...(organizationEnabled
+            ? { view: 'organized' as const, group: 'all' }
+            : {}),
+        },
+      })),
+    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryArchivedSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryArchivedQueries,
+    {
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        !secondaryWorkspaceSessionLiveStateEnabled,
+      enabled: secondaryArchivedEnabled,
+    },
+  );
+  const secondaryArchivedSessions = useMemo(
+    () =>
+      secondaryArchivedSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryArchivedSnapshots],
+  );
+  const secondaryArchivedLoading = secondaryArchivedSnapshots.some(
+    (snapshot) => snapshot.loading,
+  );
+  const secondaryArchivedError = secondaryArchivedSnapshots.some(
+    (snapshot) => snapshot.error !== undefined,
+  );
+  const toggleArchived = useCallback(() => {
+    if (!archivedExpanded) {
+      const queries = [
+        ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
+          ? [archivedCatalogQuery]
+          : []),
+        ...(workspaceQualifiedRestCoreEnabled ? secondaryArchivedQueries : []),
+      ];
+      if (queries.length > 0) {
+        sessionCatalogController.refreshQueries(queries);
+      }
+    }
+    setArchivedExpanded((expanded) => !expanded);
+  }, [
+    archivedCatalogQuery,
+    archivedExpanded,
+    includePrimaryWorkspaceSessions,
+    secondaryArchivedQueries,
+    sessionCatalogController,
+    workspaceQualifiedRestCoreEnabled,
+  ]);
+  const liveWorkspaces = useMemo(
+    () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
+    [displayedWorkspaces],
+  );
+  const projectWorkspaces = useMemo(
+    () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
+    [displayedWorkspaces],
+  );
+  const resolveSessionWorkspaceScope = useCallback(
+    (session: DaemonSessionSummary): SessionWorkspaceScope => {
+      const explicitCwd = session.workspaceCwd;
+      const cwd = explicitCwd || primaryWorkspaceCwd || '';
+      const workspaceEntry = workspaces.find((entry) => entry.cwd === cwd);
+
+      if (explicitCwd && !workspaceEntry) {
+        if (!workspaceCatalogAdvertised && cwd === primaryWorkspaceCwd) {
+          return { kind: 'primary', cwd };
+        }
+        return { kind: 'unknown', cwd };
+      }
+      if (workspaceEntry && !workspaceEntry.trusted) {
+        return { kind: 'untrusted', cwd, workspace: workspaceEntry };
+      }
+      if (
+        workspaceEntry?.primary ||
+        (!explicitCwd && cwd === primaryWorkspaceCwd)
+      ) {
+        return { kind: 'primary', cwd };
+      }
+      if (!workspaceEntry) return { kind: 'unknown', cwd };
+      if (lockedWorkspaceCwd === cwd) {
+        return { kind: 'locked', cwd, workspace: workspaceEntry };
+      }
+      return { kind: 'restricted', cwd, workspace: workspaceEntry };
+    },
+    [
+      lockedWorkspaceCwd,
+      primaryWorkspaceCwd,
+      workspaceCatalogAdvertised,
+      workspaces,
+    ],
+  );
+  const getSessionWorkspaceCwd = useCallback(
+    (session: DaemonSessionSummary) =>
+      resolveSessionWorkspaceScope(session).cwd,
+    [resolveSessionWorkspaceScope],
+  );
+  const isMutableSessionScope = useCallback(
+    (scope: SessionWorkspaceScope) =>
+      scope.kind === 'primary' || scope.kind === 'locked',
+    [],
+  );
+  const canUseWorkspaceQualifiedActions = useCallback(
+    (scope: SessionWorkspaceScope) =>
+      scope.kind === 'primary' ||
+      ((scope.kind === 'locked' || scope.kind === 'restricted') &&
+        workspaceQualifiedRestCoreEnabled),
+    [workspaceQualifiedRestCoreEnabled],
+  );
+  // Organization (pin/group) is safe for any trusted workspace — not just
+  // locked ones — because it only mutates display metadata, never executes
+  // code or touches the filesystem.
+  const canUseOrganizationActions = useCallback(
+    (scope: SessionWorkspaceScope) => {
+      if (scope.kind === 'unknown' || scope.kind === 'untrusted') return false;
+      return scope.kind === 'primary' || workspaceQualifiedRestCoreEnabled;
+    },
+    [workspaceQualifiedRestCoreEnabled],
+  );
+  const getSessionWorkspaceActions = useCallback(
+    (session: DaemonSessionSummary) => {
+      const scope = resolveSessionWorkspaceScope(session);
+      if (scope.kind === 'primary') return workspaceActions;
+      if (scope.kind === 'locked' || scope.kind === 'restricted') {
+        return workspace.client.workspaceByCwd(scope.cwd);
+      }
+      return undefined;
+    },
+    [resolveSessionWorkspaceScope, workspace.client, workspaceActions],
+  );
+  const getIdentityForSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      getSessionIdentity(session.sessionId, getSessionWorkspaceCwd(session)),
+    [getSessionWorkspaceCwd],
+  );
+  const applyOptimisticPin = useCallback(
+    (session: DaemonSessionSummary): DaemonSessionSummary => {
+      if (optimisticPins.size === 0) return session;
+      const entry = optimisticPins.get(getIdentityForSession(session));
+      if (!entry || entry.pinned === (session.isPinned === true)) {
+        return session;
+      }
+      const next: DaemonSessionSummary = {
+        ...session,
+        isPinned: entry.pinned,
+      };
+      if (entry.pinned) {
+        if (entry.pinnedAt !== undefined) next.pinnedAt = entry.pinnedAt;
+      } else {
+        delete next.pinnedAt;
+      }
+      return next;
+    },
+    [optimisticPins, getIdentityForSession],
+  );
+  // Drop a settled overlay entry once any loaded page carries its row. The
+  // store owns the optimistic pin state in the pages themselves
+  // (applySessionPinToggle), so a carried row is correct whether the page
+  // holds the store-applied toggle or an authoritative refetch — either way
+  // the overlay has nothing left to contribute. Carriage is a pin-state
+  // question, and churn (patchSession, live-state ticks) recreates page
+  // references without touching pin state, so churn can neither drop an
+  // entry early nor strand one: the R5-1 entrances keyed on page-reference
+  // freshness no longer exist. An entry whose row no loaded page carries
+  // stays until it does (or the RPC fails), rendering the row from its
+  // snapshot in the pinned section meanwhile.
+  useEffect(() => {
+    if (optimisticPins.size === 0) return;
+    const staleIdentities: string[] = [];
+    for (const [identity, entry] of optimisticPins) {
+      if (!entry.rpcSettled) continue;
+      const carried = pinCatalogPages.some((page) =>
+        page?.some(
+          (candidate) => getIdentityForSession(candidate) === identity,
+        ),
+      );
+      if (carried) staleIdentities.push(identity);
+    }
+    if (staleIdentities.length === 0) return;
+    setOptimisticPins((previous) => {
+      const next = new Map(previous);
+      for (const identity of staleIdentities) next.delete(identity);
+      return next;
+    });
+  }, [getIdentityForSession, optimisticPins, pinCatalogPages]);
+  const pinnedSessions = useMemo(() => {
+    const byId = new Map<string, DaemonSessionSummary>();
+    const addCandidate = (
+      session: DaemonSessionSummary,
+      options: { requirePinned: boolean },
+    ): void => {
+      if (!matchesSessionSource(session, selectedSessionSource)) return;
+      // Rows fetched through the pinned filter stay unless an optimistic
+      // unpin flips them; rows merged from other pages must be pinned.
+      if (session.isPinned === false) return;
+      if (options.requirePinned && session.isPinned !== true) return;
+      byId.set(getIdentityForSession(session), session);
+    };
+    for (const rawSession of [
+      ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
+      ...secondaryPinnedSessions,
+    ]) {
+      addCandidate(applyOptimisticPin(rawSession), { requirePinned: false });
+    }
+    // The all-sessions page carries optimistic pins before the pinned page
+    // refetch lands.
+    for (const rawSession of sessions) {
+      addCandidate(applyOptimisticPin(rawSession), { requirePinned: true });
+    }
+    // A row pinned from a workspace section that no loaded page carries yet
+    // renders from its optimistic snapshot so the pin still feels instant.
+    for (const [identity, entry] of optimisticPins) {
+      if (!entry.pinned || byId.has(identity)) continue;
+      addCandidate(applyOptimisticPin(entry.session), { requirePinned: true });
+    }
+    return [...byId.values()].sort(comparePinnedSectionSessions);
+  }, [
+    applyOptimisticPin,
+    getIdentityForSession,
+    includePrimaryWorkspaceSessions,
+    optimisticPins,
+    primaryPinnedSessions,
+    selectedSessionSource,
+    secondaryPinnedSessions,
+    sessions,
+  ]);
+  // Identities the Pinned section renders. Pinned rows have exactly one
+  // owner: content-search exemptions keep a pinned ghost in the list only
+  // when the Pinned section does NOT carry it — otherwise the session
+  // renders twice (or, for rename, nowhere that hosts the form).
+  const pinnedSectionIdentities = useMemo(
+    () =>
+      new Set(pinnedSessions.map((session) => getIdentityForSession(session))),
+    [getIdentityForSession, pinnedSessions],
+  );
+  const isCurrentSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      currentSessionIdentity === getIdentityForSession(session),
+    [currentSessionIdentity, getIdentityForSession],
+  );
+  const canRenameSession = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (!sessionActionItems.has('rename')) return false;
+      const scope = resolveSessionWorkspaceScope(session);
+      if (isCurrentSession(session) && isMutableSessionScope(scope)) {
+        return true;
+      }
+      return (
+        workspaceSessionMetadataEnabled &&
+        canUseWorkspaceQualifiedActions(scope)
+      );
+    },
+    [
+      canUseWorkspaceQualifiedActions,
+      isCurrentSession,
+      isMutableSessionScope,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+      workspaceSessionMetadataEnabled,
+    ],
+  );
+  const canShowDeleteSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('delete') &&
+      canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
+    [
+      canUseWorkspaceQualifiedActions,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const canDeleteSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      !isCurrentSession(session) && canShowDeleteSession(session),
+    [canShowDeleteSession, isCurrentSession],
+  );
+  const canOrganizeSession = useCallback(
+    (session: DaemonSessionSummary, item: 'pin' | 'group') =>
+      organizationEnabled &&
+      sessionActionItems.has(item) &&
+      canUseOrganizationActions(resolveSessionWorkspaceScope(session)),
+    [
+      canUseOrganizationActions,
+      organizationEnabled,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const resolveWorkspaceScope = useCallback(
+    (workspaceCwd?: string) =>
+      resolveSessionWorkspaceScope({
+        sessionId: '',
+        workspaceCwd,
+      } as DaemonSessionSummary),
+    [resolveSessionWorkspaceScope],
+  );
+  const canOrganizeWorkspace = useCallback(
+    (workspaceCwd?: string) =>
+      organizationEnabled &&
+      sessionActionItems.has('group') &&
+      canUseOrganizationActions(resolveWorkspaceScope(workspaceCwd)),
+    [
+      canUseOrganizationActions,
+      organizationEnabled,
+      resolveWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const groupAssignmentPolicyRef = useRef<{
+    canOrganizeSession: typeof canOrganizeSession;
+    getSessionWorkspaceActions: typeof getSessionWorkspaceActions;
+    resolveWorkspaceScope: typeof resolveWorkspaceScope;
+  } | null>(null);
+  groupAssignmentPolicyRef.current = {
+    canOrganizeSession,
+    getSessionWorkspaceActions,
+    resolveWorkspaceScope,
+  };
+  const canMutateSessionArchive = useCallback(
+    (session: DaemonSessionSummary) => {
+      const scope = resolveSessionWorkspaceScope(session);
+      if (scope.kind === 'unknown' || scope.kind === 'untrusted') return false;
+      return (
+        sessionArchiveEnabled &&
+        (scope.kind === 'primary' || workspaceQualifiedRestCoreEnabled)
+      );
+    },
+    [
+      resolveSessionWorkspaceScope,
+      sessionArchiveEnabled,
+      workspaceQualifiedRestCoreEnabled,
+    ],
+  );
+  const getActiveExportScope = useCallback(
+    (session: DaemonSessionSummary) => {
+      const scope = resolveSessionWorkspaceScope(session);
+      if (scope.kind === 'primary' && canExportSessions) {
+        return scope;
+      }
+      if (scope.kind === 'locked' && canExportWorkspaceSessions) {
+        return scope;
+      }
+      return undefined;
+    },
+    [
+      canExportSessions,
+      canExportWorkspaceSessions,
+      resolveSessionWorkspaceScope,
+    ],
+  );
+  const getArchivedExportWorkspaceCwd = useCallback(
+    (session: DaemonSessionSummary) => {
+      const scope = resolveSessionWorkspaceScope(session);
+      return canExportArchivedSessions &&
+        scope.kind !== 'unknown' &&
+        scope.kind !== 'untrusted'
+        ? scope.cwd
+        : undefined;
+    },
+    [canExportArchivedSessions, resolveSessionWorkspaceScope],
+  );
+  const canArchiveSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('archive') &&
+      !isCurrentSession(session) &&
+      !session.hasActivePrompt &&
+      canMutateSessionArchive(session),
+    [canMutateSessionArchive, isCurrentSession, sessionActionItems],
+  );
+  const canUnarchiveSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('archive') && canMutateSessionArchive(session),
+    [canMutateSessionArchive, sessionActionItems],
+  );
+
+  const allArchivedSessions = useMemo(() => {
+    const byIdentity = new Map<string, DaemonSessionSummary>();
+    for (const session of [
+      ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
+      ...secondaryArchivedSessions,
+    ]) {
+      if (!matchesSessionSource(session, selectedSessionSource)) continue;
+      byIdentity.set(getIdentityForSession(session), session);
+    }
+    return [...byIdentity.values()];
+  }, [
+    archivedSessions,
+    getIdentityForSession,
+    includePrimaryWorkspaceSessions,
+    selectedSessionSource,
+    secondaryArchivedSessions,
+  ]);
+  const effectiveArchivedLoading =
+    (includePrimaryWorkspaceSessions && archivedLoading) ||
+    secondaryArchivedLoading;
+  const effectiveArchivedError =
+    (includePrimaryWorkspaceSessions && Boolean(archivedError)) ||
+    secondaryArchivedError;
+
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
   // Numeric releases render as "v1.2.3"; a non-semver fallback such as
   // "unknown" is shown as-is so we never produce a bogus "vunknown".
@@ -600,45 +2010,171 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
+  const footerCompact =
+    !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
+  const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
+    '--web-shell-sidebar-min-width': `${SIDEBAR_MIN_WIDTH}px`,
+    '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
   const newSessionDisabled = creatingSession;
 
-  const setSessionBusy = useCallback((sessionId: string, busy: boolean) => {
-    const next = new Set(busySessionIdsRef.current);
-    if (busy) {
-      next.add(sessionId);
-    } else {
-      next.delete(sessionId);
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const activeWorkspace =
+      displayedWorkspaces.find(
+        (entry) => entry.cwd === connection.workspaceCwd,
+      ) ??
+      (displayedWorkspaces.length === 1 && displayedWorkspaces[0]?.primary
+        ? displayedWorkspaces[0]
+        : undefined);
+    if (!activeWorkspace) return;
+    const contextKey = `session:${currentSessionId}:${activeWorkspace.id}`;
+    if (autoOpenedContextRef.current === contextKey) return;
+    autoOpenedContextRef.current = contextKey;
+    if (!hasWorkspaceExpansionPreference('projects')) {
+      setProjectsExpanded(true);
     }
-    busySessionIdsRef.current = next;
-    setBusySessionIds(next);
-  }, []);
+    if (activeWorkspace.primary) {
+      if (!hasWorkspaceExpansionPreference(primaryWorkspaceExpansionId)) {
+        setProjectExpanded(true);
+      }
+    } else if (!hasWorkspaceExpansionPreference(activeWorkspace.id)) {
+      setAutoExpandWorkspace({ id: activeWorkspace.id, key: contextKey });
+    }
+  }, [
+    connection.workspaceCwd,
+    currentSessionId,
+    displayedWorkspaces,
+    primaryWorkspaceExpansionId,
+  ]);
 
-  const reloadGroups = useCallback(async () => {
-    if (!organizationEnabled) {
-      setGroups([]);
-      setColorOptions([]);
+  useEffect(() => {
+    if (currentSessionId || selectedWorkspaceCwd !== undefined) {
       return;
     }
+    if (!workspace.capabilities) return;
+    const connectedWorkspace = workspaces.find(
+      (entry) => entry.cwd === connection.workspaceCwd,
+    );
+    const contextKey = `new:${connectedWorkspace?.id ?? 'primary'}`;
+    if (autoOpenedContextRef.current === contextKey) return;
+    autoOpenedContextRef.current = contextKey;
+    if (!hasWorkspaceExpansionPreference('projects')) {
+      setProjectsExpanded(true);
+    }
+    if (connectedWorkspace && !connectedWorkspace.primary) {
+      if (!hasWorkspaceExpansionPreference(connectedWorkspace.id)) {
+        setAutoExpandWorkspace({
+          id: connectedWorkspace.id,
+          key: contextKey,
+        });
+      }
+      onSelectWorkspace?.(connectedWorkspace.cwd);
+      return;
+    }
+    if (!hasWorkspaceExpansionPreference(primaryWorkspaceExpansionId)) {
+      setProjectExpanded(true);
+    }
+  }, [
+    connection.workspaceCwd,
+    currentSessionId,
+    onSelectWorkspace,
+    primaryWorkspaceExpansionId,
+    selectedWorkspaceCwd,
+    workspace.capabilities,
+    workspaces,
+  ]);
+
+  const setSessionBusy = useCallback(
+    (sessionId: string, busy: boolean, workspaceCwd?: string) => {
+      const identity = getSessionIdentity(
+        sessionId,
+        workspaceCwd || primaryWorkspaceCwd,
+      );
+      const next = new Set(busySessionIdsRef.current);
+      if (busy) {
+        next.add(identity);
+      } else {
+        next.delete(identity);
+      }
+      busySessionIdsRef.current = next;
+      setBusySessionIds(next);
+    },
+    [primaryWorkspaceCwd],
+  );
+
+  const reloadGroups = useCallback(async () => {
+    if (!organizationEnabled || channelGroupingEnabled) {
+      setGroups([]);
+      setMenuGroups([]);
+      setColorOptions([]);
+      setGroupsCatalogReady(true);
+      return;
+    }
+    if (primaryWorkspaceLiveStateGroupsEnabled) return;
     try {
       const catalog = await workspaceActions.listSessionGroups();
       setGroups(catalog.groups);
+      setMenuGroups(catalog.groups);
       setColorOptions(catalog.colorOptions);
+      // Empty catalogs still settle the latch — sessions/groups hydrate on
+      // independent requests, so readiness cannot wait for a non-empty list.
+      // Failures must not settle it (see sessionsCatalogReady above).
+      setGroupsCatalogReady(true);
     } catch (err) {
       onError(err, t('sidebar.groupsLoadFailed'));
     }
-  }, [onError, organizationEnabled, t, workspaceActions]);
+  }, [
+    channelGroupingEnabled,
+    onError,
+    organizationEnabled,
+    primaryWorkspaceLiveStateGroupsEnabled,
+    t,
+    workspaceActions,
+  ]);
 
   useEffect(() => {
-    if (!organizationEnabled) {
+    if (!organizationEnabled || channelGroupingEnabled) {
       setGroups([]);
+      setMenuGroups([]);
       setColorOptions([]);
+      setGroupsCatalogReady(true);
       return;
     }
+    if (!includePrimaryWorkspaceSessions) {
+      setGroups([]);
+      setMenuGroups([]);
+      setColorOptions([]);
+      setGroupsCatalogReady(true);
+      return;
+    }
+    if (primaryWorkspaceLiveStateGroupsEnabled) {
+      setGroupsCatalogReady(false);
+      if (!primaryLiveStateGroupCatalog) return;
+      setGroups(primaryLiveStateGroupCatalog.groups);
+      // The open group menu may be anchored to a session from a different
+      // workspace (openGroupMenuFromAnchor loads menuGroups from the
+      // session's own workspace) — don't clobber it with the primary
+      // workspace's catalog on every reconcile.
+      if (!groupMenuOpenRef.current) {
+        setMenuGroups(primaryLiveStateGroupCatalog.groups);
+        setColorOptions(primaryLiveStateGroupCatalog.colorOptions);
+      }
+      setGroupsCatalogReady(true);
+      return;
+    }
+    setGroupsCatalogReady(false);
     void reloadGroups();
-  }, [organizationEnabled, reloadGroups]);
+  }, [
+    includePrimaryWorkspaceSessions,
+    channelGroupingEnabled,
+    organizationEnabled,
+    primaryLiveStateGroupCatalog,
+    reloadGroups,
+    primaryWorkspaceLiveStateGroupsEnabled,
+  ]);
 
   useEffect(() => {
     if (!groupMenu) return;
@@ -708,293 +2244,680 @@ export function WebShellSidebar({
     [],
   );
 
-  const cancelHideTooltip = useCallback(() => {
-    if (tooltipHideTimer.current !== null) {
-      window.clearTimeout(tooltipHideTimer.current);
-      tooltipHideTimer.current = null;
-    }
-  }, []);
-
-  const hideTooltip = useCallback(() => {
-    cancelHideTooltip();
-    tooltipHideTimer.current = window.setTimeout(() => {
-      setTooltip(null);
-      tooltipHideTimer.current = null;
-    }, 240);
-  }, [cancelHideTooltip]);
-
   useEffect(
     () => () => {
-      cancelHideTooltip();
       resizeTeardownRef.current?.(false);
     },
-    [cancelHideTooltip],
+    [],
   );
 
+  // The max width derives from window size, so re-clamp when the window
+  // shrinks below a previously stored wider sidebar.
   useEffect(() => {
-    setProjectExpanded(!collapsed);
-    if (collapsed) {
-      setSearchOpen(false);
-      setSearchQuery('');
-      setTooltip(null);
+    function handleWindowResize() {
+      setSidebarWidth((current) => clampSidebarWidth(current));
     }
-  }, [collapsed]);
+    window.addEventListener('resize', handleWindowResize);
+    return () => window.removeEventListener('resize', handleWindowResize);
+  }, []);
 
   const hasRunningSession = useMemo(
     () => sessions.some((session) => session.hasActivePrompt),
     [sessions],
   );
-
+  const statusSessions = useMemo(() => {
+    const byIdentity = new Map<string, DaemonSessionSummary>();
+    for (const session of [...sessions, ...secondaryActiveSessions]) {
+      byIdentity.set(getIdentityForSession(session), session);
+    }
+    return [...byIdentity.values()];
+  }, [getIdentityForSession, secondaryActiveSessions, sessions]);
+  const collapsedSessionStatus = useMemo(() => {
+    if (statusSessions.some((session) => session.isWaitingForPermission)) {
+      return 'approval' as const;
+    }
+    if (statusSessions.some((session) => session.isWaitingForUserQuestion)) {
+      return 'question' as const;
+    }
+    if (
+      statusSessions.some((session) =>
+        completedUnreadIds.has(getIdentityForSession(session)),
+      )
+    ) {
+      return 'completed' as const;
+    }
+    return undefined;
+  }, [completedUnreadIds, getIdentityForSession, statusSessions]);
+  const collapsedSessionStatusLabel = collapsedSessionStatus
+    ? t(
+        collapsedSessionStatus === 'approval'
+          ? 'sidebar.waitingForApproval'
+          : collapsedSessionStatus === 'question'
+            ? 'sidebar.userInputNeeded'
+            : 'sidebar.completedUnread',
+      )
+    : undefined;
+  const sessionPollInterval =
+    projectExpanded || hasRunningSession || selectedSessionSource === 'channel'
+      ? (hasRunningSession || selectedSessionSource === 'channel') && !error
+        ? ACTIVE_SESSION_POLL_INTERVAL_MS
+        : IDLE_SESSION_POLL_INTERVAL_MS
+      : undefined;
+  useSessionCatalogPolling(
+    workspace.client,
+    includePrimaryWorkspaceSessions ? catalogQuery : undefined,
+    sessionCatalogRequestsEnabled && !primaryWorkspaceSessionLiveStateEnabled
+      ? sessionPollInterval
+      : undefined,
+  );
+  // Channel grouping rides the session poll cadence: instances added or
+  // removed while the channel source is active must reach the grouping logic
+  // without a source switch.
+  const channelCatalogPollInFlightRef = useRef(false);
   useEffect(() => {
-    if (!projectExpanded && !hasRunningSession) return;
+    if (!channelGroupingEnabled) return;
+    // Back off on the channels hook's OWN failures too — a persistently
+    // failing channels endpoint must not be re-requested every 2s.
     const pollInterval =
-      hasRunningSession && !error
+      !error && !channelCatalogError
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
         : IDLE_SESSION_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      if (document.hidden || pollInFlightRef.current) return;
-      pollInFlightRef.current = true;
-      void reload().finally(() => {
-        pollInFlightRef.current = false;
+      if (document.hidden || channelCatalogPollInFlightRef.current) return;
+      channelCatalogPollInFlightRef.current = true;
+      void reloadChannelCatalog().finally(() => {
+        channelCatalogPollInFlightRef.current = false;
       });
     }, pollInterval);
     return () => window.clearInterval(intervalId);
-  }, [error, hasRunningSession, projectExpanded, reload]);
+  }, [
+    channelCatalogError,
+    channelGroupingEnabled,
+    error,
+    reloadChannelCatalog,
+  ]);
 
-  const prevReloadTokenRef = useRef(sessionListReloadToken);
   useEffect(() => {
-    if (
-      sessionListReloadToken !== undefined &&
-      sessionListReloadToken !== prevReloadTokenRef.current &&
-      !document.hidden &&
-      !pollInFlightRef.current
-    ) {
-      prevReloadTokenRef.current = sessionListReloadToken;
-      pollInFlightRef.current = true;
-      void reload().finally(() => {
-        pollInFlightRef.current = false;
-      });
+    if (lastTrackedSessionSourceRef.current !== sessionSource) {
+      lastTrackedSessionSourceRef.current = sessionSource;
+      return;
     }
-  }, [sessionListReloadToken, reload]);
+    if (loading || error) return;
 
-  useEffect(() => {
     const runningBySessionId = new Map(
-      sessions.map((session) => [
-        session.sessionId,
-        Boolean(session.hasActivePrompt),
-      ]),
+      sessions
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        )
+        .map((session) => [
+          getIdentityForSession(session),
+          Boolean(session.hasActivePrompt),
+        ]),
     );
-    const previousRunningBySessionId = previousRunningRef.current;
-    previousRunningRef.current = runningBySessionId;
+    const previousRunningBySessionId =
+      previousRunningBySourceRef.current[sessionSource];
+    previousRunningBySourceRef.current[sessionSource] = runningBySessionId;
     if (previousRunningBySessionId === null) return;
 
     setCompletedUnreadIds((current) => {
       const next = new Set(current);
       let changed = false;
 
-      for (const [sessionId, wasRunning] of previousRunningBySessionId) {
-        const isRunning = runningBySessionId.get(sessionId);
+      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId) {
+        const isRunning = runningBySessionId.get(sessionIdentity);
         if (
           wasRunning &&
           isRunning === false &&
-          sessionId !== currentSessionId &&
-          !next.has(sessionId)
+          sessionIdentity !== currentSessionIdentity &&
+          !next.has(sessionIdentity)
         ) {
-          next.add(sessionId);
+          next.add(sessionIdentity);
           changed = true;
         }
       }
 
-      for (const sessionId of next) {
+      for (const sessionIdentity of next) {
         if (
-          sessionId === currentSessionId ||
-          !runningBySessionId.has(sessionId) ||
-          runningBySessionId.get(sessionId)
+          sessionIdentity === currentSessionIdentity ||
+          (previousRunningBySessionId.has(sessionIdentity) &&
+            (!runningBySessionId.has(sessionIdentity) ||
+              runningBySessionId.get(sessionIdentity)))
         ) {
-          next.delete(sessionId);
+          next.delete(sessionIdentity);
           changed = true;
         }
       }
 
       return changed ? next : current;
     });
-  }, [currentSessionId, sessions]);
+  }, [
+    currentSessionIdentity,
+    error,
+    getIdentityForSession,
+    loading,
+    selectedSessionSource,
+    sessionSource,
+    sessions,
+  ]);
 
-  const showTooltip = useCallback(
-    (
-      event: ReactMouseEvent<HTMLElement> | ReactFocusEvent<HTMLElement>,
-      content: ReactNode,
-    ) => {
-      cancelHideTooltip();
-      const rect = event.currentTarget.getBoundingClientRect();
-      setTooltip({
-        content,
-        top: rect.top + rect.height / 2,
-        left: rect.right + 8,
-      });
-    },
-    [cancelHideTooltip],
-  );
+  useEffect(() => {
+    if (
+      !collapsed ||
+      secondaryActiveSnapshots.length !== secondaryActiveQueries.length ||
+      secondaryActiveSnapshots.some(
+        (snapshot) => snapshot.loading || snapshot.error,
+      )
+    ) {
+      return;
+    }
+    const runningBySessionId = new Map(
+      secondaryActiveSessions
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        )
+        .map((session) => [
+          getIdentityForSession(session),
+          Boolean(session.hasActivePrompt),
+        ]),
+    );
+    const previousRunningBySessionId =
+      previousSecondaryRunningBySourceRef.current[sessionSource];
+    previousSecondaryRunningBySourceRef.current[sessionSource] =
+      runningBySessionId;
+    if (previousRunningBySessionId === null) return;
 
-  const renderSessionTooltip = useCallback(
-    (session: DaemonSessionSummary) => {
-      const label = getSessionLabel(session);
-      const completedUnread =
-        session.sessionId !== currentSessionId &&
-        completedUnreadIds.has(session.sessionId);
-      return (
-        <div className={styles.tooltipContent}>
-          <div className={styles.tooltipTitle}>{label}</div>
-          <div className={styles.tooltipTags}>
-            {session.hasActivePrompt && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagRunning)}>
-                {t('sidebar.running')}
-              </span>
-            )}
-            {completedUnread && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagNew)}>
-                {t('sidebar.completedUnread')}
-              </span>
-            )}
-            <span className={styles.tooltipTag}>
-              {t('sidebar.clients', { count: session.clientCount ?? 0 })}
-            </span>
-          </div>
-          <div className={styles.tooltipMeta}>{session.sessionId}</div>
-        </div>
-      );
-    },
-    [completedUnreadIds, currentSessionId, t],
-  );
+    setCompletedUnreadIds((current) => {
+      const next = new Set(current);
+      let changed = false;
+      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId) {
+        const isRunning = runningBySessionId.get(sessionIdentity);
+        if (
+          wasRunning &&
+          isRunning === false &&
+          sessionIdentity !== currentSessionIdentity &&
+          !next.has(sessionIdentity)
+        ) {
+          next.add(sessionIdentity);
+          changed = true;
+        } else if (
+          next.has(sessionIdentity) &&
+          (sessionIdentity === currentSessionIdentity ||
+            !runningBySessionId.has(sessionIdentity) ||
+            isRunning)
+        ) {
+          next.delete(sessionIdentity);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [
+    collapsed,
+    currentSessionIdentity,
+    getIdentityForSession,
+    secondaryActiveQueries.length,
+    secondaryActiveSessions,
+    secondaryActiveSnapshots,
+    selectedSessionSource,
+    sessionSource,
+  ]);
 
-  const handleNewSession = useCallback(() => {
-    if (creatingSessionRef.current) return;
-
-    creatingSessionRef.current = true;
-    setCreatingSession(true);
-    void (async () => {
+  const reconcileRemovedWorkspace = useCallback(
+    async (removed: DaemonWorkspaceCapability) => {
+      if (!sidebarMountedRef.current) return;
+      if (selectedWorkspaceCwd === removed.cwd) {
+        onSelectWorkspace?.(undefined);
+      }
+      sessionCatalogController.invalidateWorkspace(removed.cwd);
+      setWorkspaceSessionsReloadToken((token) => token + 1);
       try {
-        const created = await onNewSession();
-        if (created) {
-          void reload().catch(() => undefined);
-        }
-      } catch (err) {
-        if (!isAbortError(err)) {
-          onError(err, t('sidebar.newSessionFailed'));
-        }
-      } finally {
-        creatingSessionRef.current = false;
-        setCreatingSession(false);
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // The mutation already converged; a later refresh will reconcile.
       }
-    })();
-  }, [onError, onNewSession, reload, t]);
+      if (!sidebarMountedRef.current) return;
+      void reload().catch(() => undefined);
+      void reloadArchived().catch(() => undefined);
+    },
+    [
+      onSelectWorkspace,
+      reload,
+      reloadArchived,
+      selectedWorkspaceCwd,
+      sessionCatalogController,
+      workspace,
+    ],
+  );
 
-  const handleLoadSession = useCallback(
-    (sessionId: string) => {
-      if (
-        sessionId === currentSessionId ||
-        busySessionIdsRef.current.has(sessionId)
-      ) {
+  const workspaceRemoval = useWorkspaceRemoval({
+    removeWorkspace: (workspaceId, options) =>
+      workspaceActions.removeWorkspace(workspaceId, options),
+    onRemoved: reconcileRemovedWorkspace,
+    onError,
+    errorMessage: t('sidebar.removeWorkspaceError'),
+    // The forced retry cannot target the workspace the active session lives
+    // in; the dialog explains and disables it, the hook enforces it against
+    // a stale click.
+    blockForce: (candidate) =>
+      Boolean(connection.sessionId) &&
+      connection.workspaceCwd === candidate.cwd,
+  });
+
+  const requestWorkspaceRename = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      if (workspaceRenameSubmitting) return;
+      setWorkspaceRenameCandidate(candidate);
+    },
+    [workspaceRenameSubmitting],
+  );
+
+  const confirmWorkspaceRename = useCallback(
+    async (displayName: string | null) => {
+      const candidate = workspaceRenameCandidate;
+      if (!candidate || workspaceRenameSubmitting) return;
+      setWorkspaceRenameSubmitting(true);
+      try {
+        await workspaceActions.updateWorkspace(candidate.id, { displayName });
+        setWorkspaceRenameCandidate(null);
+      } catch (error) {
+        onError(error, t('sidebar.renameWorkspaceFailed'));
         return;
+      } finally {
+        setWorkspaceRenameSubmitting(false);
       }
-      setCompletedUnreadIds((current) => {
-        if (!current.has(sessionId)) return current;
-        const next = new Set(current);
-        next.delete(sessionId);
-        return next;
+      // The row label reads the capabilities list; refresh so the new name
+      // shows without waiting for the next connection tick. The rename has
+      // already converged, so a failed refresh is not a rename failure — a
+      // later poll tick reconciles the label.
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // Reconciled by the next capabilities refresh.
+      }
+    },
+    [
+      onError,
+      t,
+      workspace,
+      workspaceActions,
+      workspaceRenameCandidate,
+      workspaceRenameSubmitting,
+    ],
+  );
+
+  const copyWorkspacePath = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
+        onError(error, t('sidebar.copyWorkspacePathFailed'));
       });
-      setSessionBusy(sessionId, true);
+    },
+    [onError, t],
+  );
+
+  const openWorkspaceFolderLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceFolderFailed'));
+        // Rethrow so the hover popover keeps its idle icon on a failure the
+        // toast already reported.
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
+  );
+
+  const openWorkspaceTerminalLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openTerminalLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceTerminalFailed'));
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
+  );
+
+  const reloadWorkspaceRuntime = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      // Deferred so a client without the reload method (older SDK) reports
+      // through onError instead of throwing out of the menu handler.
+      void Promise.resolve()
+        .then(() => workspace.client.workspaceByCwd(candidate.cwd).reload())
+        .then(() => {
+          // A reload re-reads settings and may restart the child; refetch the
+          // per-workspace lists and chips instead of waiting a poll interval.
+          setWorkspaceSessionsReloadToken((token) => token + 1);
+        })
+        .catch((error: unknown) => {
+          onError(error, t('sidebar.reloadWorkspaceFailed'));
+        });
+    },
+    [onError, t, workspace.client],
+  );
+
+  const handleNewSession = useCallback(
+    (workspaceCwd?: string) => {
+      if (creatingSessionRef.current) return;
+
+      creatingSessionRef.current = true;
+      setCreatingSession(true);
       void (async () => {
         try {
-          await onLoadSession(sessionId);
+          const created = await onNewSession(workspaceCwd);
+          if (created) {
+            bumpWorkspaceReload();
+            const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
+            if (ownerCwd) {
+              sessionCatalogController.refreshWorkspace(ownerCwd);
+            }
+          }
+        } catch (err) {
+          if (!isAbortError(err)) {
+            onError(err, t('sidebar.newSessionFailed'));
+          }
+        } finally {
+          creatingSessionRef.current = false;
+          setCreatingSession(false);
+        }
+      })();
+    },
+    [
+      bumpWorkspaceReload,
+      onError,
+      onNewSession,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      t,
+    ],
+  );
+
+  // Same re-entrancy guard, busy state and catalog invalidation as a plain
+  // new task; only the creation callback differs.
+  const handleNewWorktreeSession = useCallback(
+    (workspaceCwd?: string) => {
+      if (!onNewWorktreeSession || creatingSessionRef.current) return;
+
+      creatingSessionRef.current = true;
+      setCreatingSession(true);
+      void (async () => {
+        try {
+          const created = await onNewWorktreeSession(workspaceCwd);
+          if (created) {
+            bumpWorkspaceReload();
+            const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
+            if (ownerCwd) {
+              sessionCatalogController.refreshWorkspace(ownerCwd);
+            }
+          }
+        } catch (err) {
+          if (!isAbortError(err)) {
+            onError(err, t('sidebar.newSessionFailed'));
+          }
+        } finally {
+          creatingSessionRef.current = false;
+          setCreatingSession(false);
+        }
+      })();
+    },
+    [
+      bumpWorkspaceReload,
+      onError,
+      onNewWorktreeSession,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      t,
+    ],
+  );
+
+  const handleLoadSession = useCallback(
+    (sessionId: string, workspaceCwd?: string) => {
+      const sessionIdentity = getSessionIdentity(
+        sessionId,
+        workspaceCwd || primaryWorkspaceCwd,
+      );
+      if (sessionIdentity === currentSessionIdentity) {
+        onSelectCurrentSession?.();
+        return;
+      }
+      if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      setCompletedUnreadIds((current) => {
+        if (!current.has(sessionIdentity)) return current;
+        const next = new Set(current);
+        next.delete(sessionIdentity);
+        return next;
+      });
+      setSessionBusy(sessionId, true, workspaceCwd);
+      void (async () => {
+        try {
+          await onLoadSession(sessionId, workspaceCwd);
         } catch (err) {
           if (!isAbortError(err)) {
             onError(err, t('sidebar.switchFailed'));
           }
         } finally {
-          setSessionBusy(sessionId, false);
+          setSessionBusy(sessionId, false, workspaceCwd);
         }
       })();
     },
-    [currentSessionId, onError, onLoadSession, setSessionBusy, t],
+    [
+      currentSessionIdentity,
+      onError,
+      onLoadSession,
+      onSelectCurrentSession,
+      primaryWorkspaceCwd,
+      setSessionBusy,
+      t,
+    ],
   );
 
-  const startRename = useCallback((session: DaemonSessionSummary) => {
-    setEditingSessionId(session.sessionId);
-    setEditingName(getSessionLabel(session));
-  }, []);
+  const startRename = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (!canRenameSession(session)) return;
+      const identity = getIdentityForSession(session);
+      if (busySessionIdsRef.current.has(identity)) return;
+      setEditingSession(session);
+      setEditingSessionIdentity(identity);
+      editingSessionIdentityRef.current = identity;
+      setEditingName(getSessionLabel(session));
+    },
+    [canRenameSession, getIdentityForSession],
+  );
 
   const cancelRename = useCallback(() => {
-    setEditingSessionId(null);
+    setEditingSession(null);
+    setEditingSessionIdentity(null);
+    editingSessionIdentityRef.current = null;
     setEditingName('');
   }, []);
+  useEffect(() => {
+    if (editingSession && !canRenameSession(editingSession)) {
+      cancelRename();
+    }
+  }, [canRenameSession, cancelRename, editingSession]);
+
+  useEffect(() => {
+    if (!collapsed) {
+      setCollapsedSessionsOpen(false);
+      setSearchOpen(false);
+      setSearchQuery('');
+      cancelRename();
+      setGroupMenu(null);
+    } else if (!collapsedSessionsOpen) {
+      // A stale open search or rename editor would otherwise mount its
+      // autofocused input inside the collapsed hover popover and steal
+      // focus from the composer on every hover-open, so reset it whenever
+      // the collapsed surface is not showing (sidebar collapse, hover-out,
+      // or dismissal). Radix's outside-interaction
+      // dismissal unmounts a focused input without firing blur. A stale
+      // group picker would likewise block dismissal of the next
+      // hover-opened switcher.
+      setSearchOpen(false);
+      setSearchQuery('');
+      cancelRename();
+      setGroupMenu(null);
+    }
+  }, [cancelRename, collapsed, collapsedSessionsOpen]);
+
+  useEffect(() => {
+    if (projectFeaturesEnabled) return;
+    setCollapsedSessionsOpen(false);
+    setSearchOpen(false);
+    setSearchQuery('');
+    cancelRename();
+    setGroupMenu(null);
+  }, [cancelRename, projectFeaturesEnabled]);
 
   const saveRename = useCallback(() => {
     const nextName = editingName.trim();
-    if (!nextName || editingSessionId !== currentSessionId) {
+    if (
+      !nextName ||
+      !editingSession ||
+      editingSessionIdentity !== getIdentityForSession(editingSession) ||
+      !canRenameSession(editingSession)
+    ) {
       cancelRename();
       return;
     }
-    const sessionId = editingSessionId;
-    if (busySessionIdsRef.current.has(sessionId)) return;
-    setSessionBusy(sessionId, true);
-    actions
-      .renameSession(nextName)
-      .then(() => {
-        cancelRename();
-        reload();
+    const sessionId = editingSession.sessionId;
+    const workspaceCwd = getSessionWorkspaceCwd(editingSession);
+    const sessionIdentity = getIdentityForSession(editingSession);
+    if (busySessionIdsRef.current.has(sessionIdentity)) {
+      return;
+    }
+    setSessionBusy(sessionId, true, workspaceCwd);
+    let renamed = false;
+    const rename = isCurrentSession(editingSession)
+      ? actions.renameSession(nextName)
+      : workspaceCwd
+        ? workspace.client
+            .workspaceByCwd(workspaceCwd)
+            .updateSessionMetadata(sessionId, { displayName: nextName })
+        : workspace.client.updateSessionMetadata(sessionId, {
+            displayName: nextName,
+          });
+    rename
+      .then((result: SessionMetadataResult | void) => {
+        renamed = true;
+        // The daemon clamps displayName to 256 chars and reports the stored
+        // value; propagate that instead of the locally typed string so the
+        // catalog cache never disagrees with the daemon.
+        const effectiveName =
+          typeof result?.displayName === 'string' && result.displayName
+            ? result.displayName
+            : nextName;
+        if (workspaceCwd) {
+          if (onSessionRenameConfirmed) {
+            onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
+          } else {
+            sessionCatalogController.renamed(
+              workspaceCwd,
+              sessionId,
+              effectiveName,
+            );
+          }
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
+        }
+        // A late settle must not close an editor the user moved to another
+        // session with while this request was in flight.
+        if (editingSessionIdentityRef.current === sessionIdentity) {
+          cancelRename();
+        }
+        bumpWorkspaceReload();
       })
       .catch((err: unknown) => {
         onError(err, t('sidebar.renameFailed'));
-        cancelRename();
+        if (editingSessionIdentityRef.current === sessionIdentity) {
+          cancelRename();
+        }
       })
       .finally(() => {
-        setSessionBusy(sessionId, false);
+        if (!renamed && workspaceCwd) {
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
+        }
+        setSessionBusy(sessionId, false, workspaceCwd);
       });
   }, [
     actions,
+    bumpWorkspaceReload,
+    canRenameSession,
     cancelRename,
-    currentSessionId,
     editingName,
-    editingSessionId,
+    editingSession,
+    editingSessionIdentity,
+    getIdentityForSession,
+    getSessionWorkspaceCwd,
+    isCurrentSession,
+    onSessionRenameConfirmed,
     onError,
-    reload,
+    sessionCatalogController,
     setSessionBusy,
     t,
+    workspace.client,
   ]);
 
   const handleDeleteSession = useCallback(
     (session: DaemonSessionSummary) => {
-      if (session.sessionId === currentSessionId) return;
+      if (!canDeleteSession(session)) return;
       setDeleteCandidate(session);
     },
-    [currentSessionId],
+    [canDeleteSession],
   );
 
   const setSessionExporting = useCallback(
-    (sessionId: string, exporting: boolean) => {
+    (sessionId: string, exporting: boolean, workspaceCwd?: string) => {
+      const identity = getSessionIdentity(
+        sessionId,
+        workspaceCwd || primaryWorkspaceCwd,
+      );
       const next = new Set(exportingSessionIdsRef.current);
       if (exporting) {
-        next.add(sessionId);
+        next.add(identity);
       } else {
-        next.delete(sessionId);
+        next.delete(identity);
       }
       exportingSessionIdsRef.current = next;
       setExportingSessionIds(next);
     },
-    [],
+    [primaryWorkspaceCwd],
   );
 
   const handleExportSession = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
-      if (!canExportSessions || exportingSessionIdsRef.current.has(sessionId)) {
+      const sessionIdentity = getIdentityForSession(session);
+      const archived = session.isArchived === true;
+      const activeExportScope = getActiveExportScope(session);
+      if (
+        !sessionActionItems.has('export') ||
+        (archived
+          ? !getArchivedExportWorkspaceCwd(session)
+          : !activeExportScope) ||
+        exportingSessionIdsRef.current.has(sessionIdentity)
+      ) {
         return;
       }
-      setSessionExporting(sessionId, true);
+      setSessionExporting(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const result = await exportSession(sessionId, 'html');
+          let result;
+          if (archived) {
+            const workspaceCwd = getArchivedExportWorkspaceCwd(session);
+            if (!workspaceCwd) return;
+            result = await workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .exportArchivedSession(sessionId, { format: 'html' });
+          } else if (activeExportScope?.kind === 'primary') {
+            result = await exportSession(sessionId, 'html');
+          } else if (activeExportScope?.kind === 'locked') {
+            result = await workspace.client
+              .workspaceByCwd(activeExportScope.cwd)
+              .exportSession(sessionId, { format: 'html' });
+          } else {
+            return;
+          }
           const blob = new Blob([result.content], {
             type: result.mimeType || 'text/html',
           });
@@ -1012,125 +2935,257 @@ export function WebShellSidebar({
         } catch (err) {
           onError(err, t('sidebar.exportFailed'));
         } finally {
-          setSessionExporting(sessionId, false);
+          setSessionExporting(sessionId, false, session.workspaceCwd);
         }
       })();
     },
-    [canExportSessions, exportSession, onError, setSessionExporting, t],
+    [
+      exportSession,
+      getActiveExportScope,
+      getArchivedExportWorkspaceCwd,
+      getIdentityForSession,
+      onError,
+      setSessionExporting,
+      sessionActionItems,
+      t,
+      workspace.client,
+    ],
   );
 
   const confirmDeleteSession = useCallback(() => {
     if (!deleteCandidate) return;
     const sessionId = deleteCandidate.sessionId;
-    if (sessionId === currentSessionId) {
+    const sessionIdentity = getIdentityForSession(deleteCandidate);
+    if (!canDeleteSession(deleteCandidate)) {
       setDeleteCandidate(null);
       return;
     }
+    const scope = resolveSessionWorkspaceScope(deleteCandidate);
     const isArchived = Boolean(deleteCandidate.isArchived);
+    const removeSession =
+      scope.kind === 'locked' || scope.kind === 'restricted'
+        ? async (id: string) => {
+            const result = await workspace.client
+              .workspaceByCwd(scope.cwd)
+              .deleteSessionsData([id]);
+            const itemError = result.errors.find(
+              (entry) => entry.sessionId === id,
+            );
+            if (itemError) throw new Error(itemError.error);
+          }
+        : scope.kind === 'primary'
+          ? isArchived
+            ? deleteArchivedSession
+            : deleteSession
+          : undefined;
     setDeleteCandidate(null);
-    if (busySessionIdsRef.current.has(sessionId)) return;
-    setSessionBusy(sessionId, true);
-    const removeSession = isArchived ? deleteArchivedSession : deleteSession;
+    if (!removeSession) return;
+    if (busySessionIdsRef.current.has(sessionIdentity)) return;
+    setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        // A hard delete unlinks the transcript from BOTH the active and
-        // archived directories, so resync both lists regardless of origin.
-        void reload();
-        void reloadArchived();
+        onSessionsDeleted?.([sessionId]);
+        bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
-        setSessionBusy(sessionId, false);
+        const workspaceCwd =
+          deleteCandidate.workspaceCwd ?? primaryWorkspaceCwd;
+        if (scope.kind !== 'primary' && workspaceCwd) {
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
+        }
+        setSessionBusy(sessionId, false, deleteCandidate.workspaceCwd);
       });
   }, [
-    currentSessionId,
+    bumpWorkspaceReload,
+    canDeleteSession,
     deleteArchivedSession,
     deleteCandidate,
     deleteSession,
+    getIdentityForSession,
     onError,
-    reload,
-    reloadArchived,
+    onSessionsDeleted,
+    primaryWorkspaceCwd,
+    resolveSessionWorkspaceScope,
+    sessionCatalogController,
     setSessionBusy,
     t,
+    workspace.client,
   ]);
 
   const handleRenameFromMenu = useCallback(
     (session: DaemonSessionSummary) => {
-      if (session.sessionId !== currentSessionId) return;
+      renameFocusSuppressRef.current = true;
       startRename(session);
     },
-    [currentSessionId, startRename],
+    [startRename],
   );
 
   const handleCreateGroup = useCallback(() => {
+    if (!canOrganizeWorkspace()) return;
     setGroupMenu(null);
     setGroupName('');
     setGroupColor(getDefaultGroupColor(colorOptions));
+    setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
     setGroupEditor({ mode: 'create' });
-  }, [colorOptions]);
+  }, [canOrganizeWorkspace, colorOptions]);
+
+  const handleCreateWorkspaceGroup = useCallback(
+    (workspaceCwd: string) => {
+      if (!canOrganizeWorkspace(workspaceCwd)) return;
+      void (async () => {
+        try {
+          const catalog = await workspace.client
+            .workspaceByCwd(workspaceCwd)
+            .listSessionGroups();
+          setGroupMenu(null);
+          setGroupName('');
+          setGroupColor(getDefaultGroupColor(catalog.colorOptions));
+          setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
+          setGroupEditor({ mode: 'create', workspaceCwd });
+        } catch (err) {
+          onError(err, t('sidebar.groupsLoadFailed'));
+        }
+      })();
+    },
+    [canOrganizeWorkspace, onError, t, workspace.client],
+  );
 
   const handleCreateGroupForSession = useCallback(
     (session: DaemonSessionSummary) => {
+      if (!canOrganizeSession(session, 'group')) return;
       setGroupMenu(null);
       setGroupName('');
       setGroupColor(getDefaultGroupColor(colorOptions));
-      setGroupEditor({ mode: 'create', targetSession: session });
+      setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
+      setGroupEditor({
+        mode: 'create',
+        targetSession: session,
+        workspaceCwd: session.workspaceCwd,
+      });
     },
-    [colorOptions],
+    [canOrganizeSession, colorOptions],
   );
 
-  const handleRenameGroup = useCallback((group: DaemonSessionGroup) => {
-    setGroupName(group.name);
-    setGroupColor(group.color);
-    setGroupEditor({ mode: 'edit', group });
-  }, []);
+  const handleRenameGroup = useCallback(
+    (group: DaemonSessionGroup, workspaceCwd?: string) => {
+      if (!canOrganizeWorkspace(workspaceCwd)) return;
+      setGroupName(group.name);
+      setGroupColor(group.color);
+      setLastValidCustomGroupColor(
+        normalizeHexColorInput(group.color) ?? DEFAULT_CUSTOM_GROUP_COLOR,
+      );
+      setGroupEditor({ mode: 'edit', group, workspaceCwd });
+    },
+    [canOrganizeWorkspace],
+  );
 
   const closeGroupEditor = useCallback(() => {
     if (groupBusy) return;
     setGroupEditor(null);
     setGroupName('');
     setGroupColor(getDefaultGroupColor(colorOptions));
+    setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
   }, [colorOptions, groupBusy]);
 
   const saveGroupEditor = useCallback(() => {
     if (!groupEditor) return;
+    if (
+      !canOrganizeWorkspace(groupEditor.workspaceCwd) ||
+      (groupEditor.targetSession &&
+        !canOrganizeSession(groupEditor.targetSession, 'group'))
+    ) {
+      closeGroupEditor();
+      return;
+    }
     const name = groupName.trim();
-    if (!name) return;
+    const color = normalizeGroupColorInput(
+      groupColor,
+      colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS,
+    );
+    if (!name || !color) return;
     void (async () => {
       setGroupBusy(true);
+      const reportCreatedGroupAssignmentFailure = (error: unknown) => {
+        setGroupEditor(null);
+        setGroupName('');
+        if (groupEditor.workspaceCwd) {
+          bumpWorkspaceReload();
+        } else {
+          void reloadGroups().catch(() => undefined);
+        }
+        onError(error, t('sidebar.groupAssignFailedAfterCreate'));
+      };
       try {
+        const scope = resolveWorkspaceScope(groupEditor.workspaceCwd);
+        const groupActions =
+          scope.kind === 'primary'
+            ? workspaceActions
+            : scope.kind === 'locked' || scope.kind === 'restricted'
+              ? workspace.client.workspaceByCwd(scope.cwd)
+              : undefined;
+        if (!groupActions) return;
         const group =
           groupEditor.mode === 'create'
-            ? await workspaceActions.createSessionGroup({
+            ? await groupActions.createSessionGroup({
                 name,
-                color: groupColor,
+                color,
               })
-            : await workspaceActions.updateSessionGroup(groupEditor.group!.id, {
+            : await groupActions.updateSessionGroup(groupEditor.group!.id, {
                 name,
-                color: groupColor,
+                color,
               });
         if (groupEditor.mode === 'create') {
           if (groupEditor.targetSession) {
             try {
-              await workspaceActions.updateSessionOrganization(
+              const livePolicy = groupAssignmentPolicyRef.current;
+              const targetScope = livePolicy?.resolveWorkspaceScope(
+                groupEditor.targetSession.workspaceCwd,
+              );
+              if (
+                !livePolicy ||
+                !targetScope ||
+                !livePolicy.canOrganizeSession(
+                  groupEditor.targetSession,
+                  'group',
+                ) ||
+                targetScope.kind !== scope.kind ||
+                targetScope.cwd !== scope.cwd
+              ) {
+                reportCreatedGroupAssignmentFailure(
+                  new Error(t('sidebar.groupAssignFailedAfterCreate')),
+                );
+                return;
+              }
+              const targetActions = livePolicy.getSessionWorkspaceActions(
+                groupEditor.targetSession,
+              );
+              if (!targetActions) {
+                reportCreatedGroupAssignmentFailure(
+                  new Error(t('sidebar.groupAssignFailedAfterCreate')),
+                );
+                return;
+              }
+              await targetActions.updateSessionOrganization(
                 groupEditor.targetSession.sessionId,
                 // Assigning a named group clears any color tag (single choice
                 // in the UI), matching assignSessionGroup.
                 { groupId: group.id, color: null },
               );
-              void reload().catch(() => undefined);
+              bumpWorkspaceReload();
             } catch (err) {
-              setGroupEditor(null);
-              setGroupName('');
-              void reloadGroups().catch(() => undefined);
-              onError(err, t('sidebar.groupAssignFailedAfterCreate'));
+              reportCreatedGroupAssignmentFailure(err);
               return;
             }
           }
         }
         setGroupEditor(null);
         setGroupName('');
-        void reloadGroups().catch(() => undefined);
+        if (groupEditor.workspaceCwd) {
+          bumpWorkspaceReload();
+        } else {
+          void reloadGroups().catch(() => undefined);
+        }
       } catch (err) {
         onError(
           err,
@@ -1139,115 +3194,347 @@ export function WebShellSidebar({
             : t('sidebar.groupUpdateFailed'),
         );
       } finally {
+        const workspaceCwd = groupEditor.workspaceCwd ?? primaryWorkspaceCwd;
+        if (workspaceCwd) {
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
+        }
         setGroupBusy(false);
       }
     })();
   }, [
+    bumpWorkspaceReload,
+    colorOptions,
     groupColor,
     groupEditor,
     groupName,
+    canOrganizeSession,
+    canOrganizeWorkspace,
+    closeGroupEditor,
     onError,
-    reload,
+    primaryWorkspaceCwd,
     reloadGroups,
+    resolveWorkspaceScope,
+    sessionCatalogController,
     t,
     workspaceActions,
+    workspace.client,
   ]);
 
-  const handleDeleteGroup = useCallback((group: DaemonSessionGroup) => {
-    setDeleteGroupCandidate(group);
-  }, []);
+  const handleDeleteGroup = useCallback(
+    (group: DaemonSessionGroup, workspaceCwd?: string) => {
+      if (!canOrganizeWorkspace(workspaceCwd)) return;
+      setDeleteGroupCandidate({ group, workspaceCwd });
+    },
+    [canOrganizeWorkspace],
+  );
 
   const confirmDeleteGroup = useCallback(() => {
     if (!deleteGroupCandidate) return;
+    if (!canOrganizeWorkspace(deleteGroupCandidate.workspaceCwd)) {
+      setDeleteGroupCandidate(null);
+      return;
+    }
     setGroupBusy(true);
-    workspaceActions
-      .deleteSessionGroup(deleteGroupCandidate.id)
+    const scope = resolveWorkspaceScope(deleteGroupCandidate.workspaceCwd);
+    const groupActions =
+      scope.kind === 'primary'
+        ? workspaceActions
+        : scope.kind === 'locked' || scope.kind === 'restricted'
+          ? workspace.client.workspaceByCwd(scope.cwd)
+          : undefined;
+    if (!groupActions) {
+      setGroupBusy(false);
+      return;
+    }
+    groupActions
+      .deleteSessionGroup(deleteGroupCandidate.group.id)
       .then(() => {
         setDeleteGroupCandidate(null);
-        void reload().catch(() => undefined);
+        if (deleteGroupCandidate.workspaceCwd) {
+          bumpWorkspaceReload();
+        }
       })
       .catch((err: unknown) => onError(err, t('sidebar.groupDeleteFailed')))
-      .then(() => reloadGroups().catch(() => undefined))
-      .finally(() => setGroupBusy(false));
+      .then(() =>
+        deleteGroupCandidate.workspaceCwd
+          ? undefined
+          : reloadGroups().catch(() => undefined),
+      )
+      .finally(() => {
+        const workspaceCwd =
+          deleteGroupCandidate.workspaceCwd ?? primaryWorkspaceCwd;
+        if (workspaceCwd) {
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
+        }
+        setGroupBusy(false);
+      });
   }, [
     deleteGroupCandidate,
+    canOrganizeWorkspace,
     onError,
-    reload,
+    primaryWorkspaceCwd,
     reloadGroups,
     t,
+    bumpWorkspaceReload,
+    resolveWorkspaceScope,
+    sessionCatalogController,
+    workspace.client,
     workspaceActions,
   ]);
+
+  useEffect(() => {
+    if (deleteCandidate && !canDeleteSession(deleteCandidate)) {
+      setDeleteCandidate(null);
+    }
+  }, [canDeleteSession, deleteCandidate]);
+
+  useEffect(() => {
+    if (groupMenu && !canOrganizeSession(groupMenu.session, 'group')) {
+      setGroupMenu(null);
+    }
+  }, [canOrganizeSession, groupMenu]);
+
+  useEffect(() => {
+    if (
+      groupEditor &&
+      (!canOrganizeWorkspace(groupEditor.workspaceCwd) ||
+        (groupEditor.targetSession &&
+          !canOrganizeSession(groupEditor.targetSession, 'group')))
+    ) {
+      setGroupEditor(null);
+      setGroupName('');
+    }
+  }, [canOrganizeSession, canOrganizeWorkspace, groupEditor]);
+
+  useEffect(() => {
+    if (
+      deleteGroupCandidate &&
+      !canOrganizeWorkspace(deleteGroupCandidate.workspaceCwd)
+    ) {
+      setDeleteGroupCandidate(null);
+    }
+  }, [canOrganizeWorkspace, deleteGroupCandidate]);
 
   const handleTogglePin = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
-      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+      const sessionIdentity = getIdentityForSession(session);
+      if (
+        !canOrganizeSession(session, 'pin') ||
+        busySessionIdsRef.current.has(sessionIdentity)
+      ) {
         return;
       }
-      setSessionBusy(sessionId, true);
-      workspaceActions
+      const targetPinned = !session.isPinned;
+      const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+      const optimisticPinnedAt = new Date().toISOString();
+      const storeToggle = (pinned: boolean, pinnedAt?: string): void => {
+        if (!workspaceCwd) return;
+        sessionCatalogController.toggleSessionPinned(workspaceCwd, session, {
+          pinned,
+          ...(pinned && pinnedAt !== undefined ? { pinnedAt } : {}),
+        });
+      };
+      let rpcSucceeded = false;
+      const markRpcSettled = (): void => {
+        setOptimisticPins((previous) => {
+          const entry = previous.get(sessionIdentity);
+          if (!entry) return previous;
+          const next = new Map(previous);
+          next.set(sessionIdentity, { ...entry, rpcSettled: true });
+          return next;
+        });
+      };
+      const applyOptimistic = (): void => {
+        setOptimisticPins((previous) => {
+          const next = new Map(previous);
+          next.set(sessionIdentity, {
+            session,
+            pinned: targetPinned,
+            rpcSettled: false,
+            ...(targetPinned ? { pinnedAt: optimisticPinnedAt } : {}),
+          });
+          return next;
+        });
+      };
+      const rollbackOptimistic = (): void => {
+        setOptimisticPins((previous) => {
+          if (!previous.has(sessionIdentity)) return previous;
+          const next = new Map(previous);
+          next.delete(sessionIdentity);
+          return next;
+        });
+      };
+      // Reflect the toggle immediately. The catalog store applies it to
+      // every loaded page so churn cannot drop it, and the refresh below
+      // replaces those pages with authoritative state when it lands.
+      applyOptimistic();
+      storeToggle(targetPinned, optimisticPinnedAt);
+      setSessionBusy(sessionId, true, session.workspaceCwd);
+      const sessionActions = getSessionWorkspaceActions(session);
+      if (!sessionActions) {
+        rollbackOptimistic();
+        storeToggle(!targetPinned, session.pinnedAt);
+        setSessionBusy(sessionId, false, session.workspaceCwd);
+        return;
+      }
+      sessionActions
         .updateSessionOrganization(sessionId, {
-          isPinned: !session.isPinned,
+          isPinned: targetPinned,
         })
         .then(() => {
-          void reload().catch(() => undefined);
+          rpcSucceeded = true;
+          bumpWorkspaceReload();
         })
-        .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
+        .catch((err: unknown) => {
+          rollbackOptimistic();
+          storeToggle(!targetPinned, session.pinnedAt);
+          onError(err, t('sidebar.organizationFailed'));
+        })
         .finally(() => {
-          setSessionBusy(sessionId, false);
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          if (rpcSucceeded) markRpcSettled();
+          setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      getIdentityForSession,
+      getSessionWorkspaceActions,
+      onError,
+      primaryWorkspaceCwd,
+      canOrganizeSession,
+      sessionCatalogController,
+      setSessionBusy,
+      t,
+    ],
   );
 
   const handleArchive = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
+      const sessionIdentity = getIdentityForSession(session);
       // The daemon force-ends a live turn on archive; keep the current
       // session off-limits, mirroring the delete guard.
-      if (sessionId === currentSessionId) return;
-      if (busySessionIdsRef.current.has(sessionId)) return;
-      setSessionBusy(sessionId, true);
-      archiveSession(sessionId)
-        .then(() => {
-          void reloadArchived();
-        })
-        .catch((err: unknown) => onError(err, t('sidebar.archiveFailed')))
-        .finally(() => {
-          setSessionBusy(sessionId, false);
-        });
+      if (!canArchiveSession(session)) return;
+      if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      const scope = resolveSessionWorkspaceScope(session);
+      setSessionBusy(sessionId, true, session.workspaceCwd);
+      void (async () => {
+        try {
+          if (scope.kind === 'locked' || scope.kind === 'restricted') {
+            const result = await workspace.client
+              .workspaceByCwd(scope.cwd)
+              .archiveSessionsData([sessionId]);
+            const itemError = result.errors.find(
+              (entry) => entry.sessionId === sessionId,
+            );
+            if (itemError) {
+              onError(new Error(itemError.error), t('sidebar.archiveFailed'));
+            }
+          } else if (scope.kind === 'primary') {
+            await archiveSession(sessionId);
+          } else {
+            return;
+          }
+        } catch (err) {
+          onError(err, t('sidebar.archiveFailed'));
+        } finally {
+          bumpWorkspaceReload();
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (scope.kind !== 'primary' && workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          setSessionBusy(sessionId, false, session.workspaceCwd);
+        }
+      })();
     },
     [
       archiveSession,
-      currentSessionId,
+      bumpWorkspaceReload,
+      canArchiveSession,
+      getIdentityForSession,
       onError,
-      reloadArchived,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
       setSessionBusy,
       t,
+      resolveSessionWorkspaceScope,
+      workspace.client,
     ],
   );
 
   const handleUnarchive = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
-      if (busySessionIdsRef.current.has(sessionId)) return;
-      setSessionBusy(sessionId, true);
-      unarchiveSession(sessionId)
-        .then(() => {
-          void reload();
-        })
-        .catch((err: unknown) => onError(err, t('sidebar.unarchiveFailed')))
-        .finally(() => {
-          setSessionBusy(sessionId, false);
-        });
+      const sessionIdentity = getIdentityForSession(session);
+      if (!canUnarchiveSession(session)) return;
+      if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      const scope = resolveSessionWorkspaceScope(session);
+      setSessionBusy(sessionId, true, session.workspaceCwd);
+      void (async () => {
+        try {
+          if (scope.kind === 'locked' || scope.kind === 'restricted') {
+            const result = await workspace.client
+              .workspaceByCwd(scope.cwd)
+              .unarchiveSessionsData([sessionId]);
+            const itemError = result.errors.find(
+              (entry) => entry.sessionId === sessionId,
+            );
+            if (itemError) {
+              onError(new Error(itemError.error), t('sidebar.unarchiveFailed'));
+            }
+          } else if (scope.kind === 'primary') {
+            await unarchiveSession(sessionId);
+          } else {
+            return;
+          }
+        } catch (err) {
+          onError(err, t('sidebar.unarchiveFailed'));
+        } finally {
+          bumpWorkspaceReload();
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (scope.kind !== 'primary' && workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          setSessionBusy(sessionId, false, session.workspaceCwd);
+        }
+      })();
     },
-    [onError, reload, setSessionBusy, t, unarchiveSession],
+    [
+      bumpWorkspaceReload,
+      canUnarchiveSession,
+      getIdentityForSession,
+      onError,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      setSessionBusy,
+      t,
+      unarchiveSession,
+      resolveSessionWorkspaceScope,
+      workspace.client,
+    ],
   );
 
-  const closeMenu = useCallback(() => setMenuState(null), []);
-
   const openGroupMenuFromAnchor = useCallback(
-    (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
+    async (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
+      if (!canOrganizeSession(session, 'group')) return;
+      let groupCount = 0;
+      try {
+        const sessionActions = getSessionWorkspaceActions(session);
+        if (!sessionActions) return;
+        const catalog = await sessionActions.listSessionGroups();
+        if (!canOrganizeSession(session, 'group')) return;
+        setMenuGroups(catalog.groups);
+        setColorOptions(catalog.colorOptions);
+        groupCount = catalog.groups.length;
+      } catch (err) {
+        onError(err, t('sidebar.groupsLoadFailed'));
+        return;
+      }
+      if (!anchorEl.isConnected) return;
       const rect = anchorEl.getBoundingClientRect();
       const viewportWidth =
         typeof window === 'undefined'
@@ -1257,7 +3544,7 @@ export function WebShellSidebar({
         typeof window === 'undefined' ? rect.top + 320 : window.innerHeight;
       const estimatedHeight = Math.min(
         320,
-        34 * (groups.length + SESSION_GROUP_COLORS.length + 2) + 25,
+        34 * (groupCount + SESSION_GROUP_COLORS.length + 2) + 25,
       );
       const left =
         rect.right + GROUP_MENU_MARGIN + GROUP_MENU_WIDTH <= viewportWidth
@@ -1273,102 +3560,178 @@ export function WebShellSidebar({
           viewportHeight - estimatedHeight - GROUP_MENU_MARGIN,
         ),
       );
-      setTooltip(null);
       setGroupMenu({
         session,
         top,
         left,
       });
     },
-    [groups.length],
-  );
-
-  const openGroupMenu = useCallback(
-    (
-      event: ReactMouseEvent<HTMLButtonElement>,
-      session: DaemonSessionSummary,
-    ) => {
-      event.stopPropagation();
-      openGroupMenuFromAnchor(event.currentTarget, session);
-    },
-    [openGroupMenuFromAnchor],
-  );
-
-  const openMenu = useCallback(
-    (
-      event: ReactMouseEvent<HTMLButtonElement>,
-      session: DaemonSessionSummary,
-      isArchived: boolean,
-    ) => {
-      event.stopPropagation();
-      const anchorEl = event.currentTarget;
-      setMenuState((prev) =>
-        prev &&
-        prev.session.sessionId === session.sessionId &&
-        prev.isArchived === isArchived
-          ? null
-          : { session, isArchived, anchorEl },
-      );
-    },
-    [],
+    [canOrganizeSession, getSessionWorkspaceActions, onError, t],
   );
 
   const assignSessionGroup = useCallback(
     (session: DaemonSessionSummary, groupId: string | null) => {
       const sessionId = session.sessionId;
-      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+      const sessionIdentity = getIdentityForSession(session);
+      if (
+        !canOrganizeSession(session, 'group') ||
+        busySessionIdsRef.current.has(sessionIdentity)
+      ) {
         return;
       }
       setGroupMenu(null);
-      setSessionBusy(sessionId, true);
-      workspaceActions
+      setSessionBusy(sessionId, true, session.workspaceCwd);
+      const sessionActions = getSessionWorkspaceActions(session);
+      if (!sessionActions) {
+        setSessionBusy(sessionId, false, session.workspaceCwd);
+        return;
+      }
+      sessionActions
         // Group and color are a single choice in the UI: assigning a named
         // group (or "Ungrouped", groupId=null) clears any color tag.
         .updateSessionOrganization(sessionId, { groupId, color: null })
         .then(() => {
-          void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
-          setSessionBusy(sessionId, false);
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      getIdentityForSession,
+      getSessionWorkspaceActions,
+      onError,
+      primaryWorkspaceCwd,
+      canOrganizeSession,
+      sessionCatalogController,
+      setSessionBusy,
+      t,
+    ],
   );
 
   const assignSessionColor = useCallback(
-    (session: DaemonSessionSummary, color: DaemonSessionGroupColor | null) => {
+    (
+      session: DaemonSessionSummary,
+      color: DaemonSessionGroupPresetColor | null,
+    ) => {
       const sessionId = session.sessionId;
-      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+      const sessionIdentity = getIdentityForSession(session);
+      if (
+        !canOrganizeSession(session, 'group') ||
+        busySessionIdsRef.current.has(sessionIdentity)
+      ) {
         return;
       }
       setGroupMenu(null);
-      setSessionBusy(sessionId, true);
-      workspaceActions
+      setSessionBusy(sessionId, true, session.workspaceCwd);
+      const sessionActions = getSessionWorkspaceActions(session);
+      if (!sessionActions) {
+        setSessionBusy(sessionId, false, session.workspaceCwd);
+        return;
+      }
+      sessionActions
         // Picking a color clears any named-group assignment (single choice).
         .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
-          void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
-          setSessionBusy(sessionId, false);
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      getIdentityForSession,
+      getSessionWorkspaceActions,
+      onError,
+      primaryWorkspaceCwd,
+      canOrganizeSession,
+      sessionCatalogController,
+      setSessionBusy,
+      t,
+    ],
   );
 
-  const filteredSessions = useMemo(() => {
+  const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const nextSessions = query
-      ? sessions.filter((session) => {
-          const label = getSessionLabel(session).toLowerCase();
-          return (
-            label.includes(query) ||
-            session.sessionId.toLowerCase().includes(query)
+    const sourceScopedSessions = sessions
+      .map(applyOptimisticPin)
+      .filter((session) =>
+        matchesSessionSource(session, selectedSessionSource),
+      );
+    if (!query) return sourceScopedSessions;
+    const localMatches = sourceScopedSessions.filter((session) => {
+      const label = getSessionLabel(session).toLowerCase();
+      return (
+        label.includes(query) ||
+        session.sessionId.toLowerCase().includes(query) ||
+        sessionMatchesGitQuery(session, query)
+      );
+    });
+    // Merge daemon transcript-content hits into the local fast-path
+    // matches (shared with WorkspaceSection's copy — see sessionSearch).
+    return mergeSessionContentHits(
+      sourceScopedSessions,
+      localMatches,
+      contentSearchHits,
+      selectedSessionSource,
+      applyOptimisticPin,
+    );
+  }, [
+    applyOptimisticPin,
+    contentSearchHits,
+    searchQuery,
+    selectedSessionSource,
+    sessions,
+  ]);
+  // Content-search hits the loaded catalog doesn't carry ("ghosts"). A
+  // pinned ghost must still render somewhere while its hit is active:
+  // the filters below drop pinned rows because loaded pinned sessions
+  // render in the Pinned section — but when the Pinned section DOES
+  // carry the session (pinned page settled, or an optimistic pin), the
+  // ghost must not be retained too: pinned rows have exactly one owner.
+  const searchGhostIds = useMemo(() => {
+    const catalogIds = new Set(sessions.map((session) => session.sessionId));
+    const ghosts = new Set<string>();
+    for (const hit of contentSearchHits.values()) {
+      if (catalogIds.has(hit.session.sessionId)) continue;
+      if (pinnedSectionIdentities.has(getIdentityForSession(hit.session))) {
+        continue;
+      }
+      ghosts.add(hit.session.sessionId);
+    }
+    return ghosts;
+  }, [
+    contentSearchHits,
+    getIdentityForSession,
+    pinnedSectionIdentities,
+    sessions,
+  ]);
+  const isPinnedSectionMember = useCallback(
+    (session: DaemonSessionSummary) =>
+      pinnedSectionIdentities.has(getIdentityForSession(session)),
+    [getIdentityForSession, pinnedSectionIdentities],
+  );
+  const filteredSessions = useMemo(() => {
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? searchedSessions
+        : searchedSessions.filter(
+            (session) =>
+              !session.isPinned || searchGhostIds.has(session.sessionId),
           );
-        })
-      : sessions.slice();
+    const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
     }
@@ -1383,25 +3746,66 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [organizationEnabled, searchQuery, sessions]);
+  }, [
+    organizationEnabled,
+    searchGhostIds,
+    searchedSessions,
+    selectedSessionSource,
+  ]);
+
+  const channelCatalogLoaded = channelCatalogData !== undefined;
+  const channelSessionSections = useMemo(
+    () =>
+      selectedSessionSource === 'channel' && channelCatalogLoaded
+        ? groupSessionsByChannelType(
+            filteredSessions,
+            channelTypeCatalog,
+            channelInstances,
+            t('sidebar.channelType.other'),
+          )
+        : null,
+    [
+      channelCatalogLoaded,
+      channelInstances,
+      channelTypeCatalog,
+      filteredSessions,
+      selectedSessionSource,
+      t,
+    ],
+  );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
-    if (!organizationEnabled) return [];
     const searching = searchQuery.trim().length > 0;
     const validGroupIds = new Set(groups.map((group) => group.id));
     const sessionsByColor = new Map<
-      DaemonSessionGroupColor,
+      DaemonSessionGroupPresetColor,
       DaemonSessionSummary[]
     >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
+    const scheduledTaskSections = new Map<
+      string,
+      ScheduledTaskSessionSection
+    >();
     for (const group of groups) {
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    for (const session of filteredSessions) {
+    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // they are lifted into the Pinned section, but their group/color section
+    // must keep them, otherwise a section whose members are all pinned
+    // rendered `· 0`, indistinguishable from lost memberships (#10391).
+    // One pass (instead of bucketing the unpinned rows first and appending
+    // the pinned ones) preserves the daemon catalog order — pinned rows sort
+    // first there — so a pinned member is never pushed behind its section's
+    // preview limit by rows it sorts ahead of.
+    for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
-      if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
+      if (
+        organizationEnabled &&
+        session.color &&
+        SESSION_GROUP_COLORS.includes(session.color)
+      ) {
         const bucket = sessionsByColor.get(session.color) ?? [];
         bucket.push(session);
         sessionsByColor.set(session.color, bucket);
@@ -1413,9 +3817,25 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
-      } else {
-        recentSessions.push(session);
+        continue;
       }
+      if (collectScheduledTaskSession(scheduledTaskSections, session)) {
+        continue;
+      }
+      // On sources with a Pinned section, a pinned session without a
+      // (renderable) group stays Pinned-section-only; it never spills into
+      // Ungrouped. The channel source has no Pinned section, so its pinned
+      // rows keep the normal Ungrouped bucket. Pinned content-search ghosts
+      // are exempt: the Pinned section never sees them, so dropping them
+      // here would render the matching session nowhere.
+      if (
+        session.isPinned &&
+        selectedSessionSource !== 'channel' &&
+        !searchGhostIds.has(session.sessionId)
+      ) {
+        continue;
+      }
+      recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
     // Color buckets first, in palette order; only render non-empty ones so the
@@ -1446,16 +3866,83 @@ export function WebShellSidebar({
         sessions: groupSessions,
       });
     }
-    if (recentSessions.length > 0) {
+    for (const section of scheduledTaskSections.values()) {
+      sections.push({ ...section, kind: 'scheduled-task' });
+    }
+    if (recentSessions.length > 0 && sections.length > 0) {
       sections.push({
         id: RECENT_SESSION_SECTION_ID,
         kind: 'recent',
-        label: t('sidebar.groupRecent'),
+        label: t('sidebar.groupUngrouped'),
+        countLabel: String(recentSessions.length),
         sessions: recentSessions,
       });
     }
     return sections;
-  }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
+  }, [
+    groups,
+    organizationEnabled,
+    searchGhostIds,
+    searchedSessions,
+    searchQuery,
+    selectedSessionSource,
+    t,
+  ]);
+
+  useEffect(() => {
+    const activeSections = channelSessionSections ?? sessionSections;
+    if (selectedSessionSource === 'channel') {
+      if (!channelCatalogLoaded) return;
+      // The refetch for the new source retains the previous source's page
+      // until it settles; wait for a page fetched for the channel source.
+      if (settledSessionsSourceRef.current !== 'channel') return;
+    } else {
+      if (!sessionsCatalogReady) return;
+      if (organizationEnabled && !groupsCatalogReady) return;
+    }
+    const unseenIds = activeSections
+      .map((section) => section.id)
+      .filter((id) => !knownSessionSectionIdsRef.current.has(id));
+    const isInitialCatalog =
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource];
+    if (isInitialCatalog) {
+      // First-sync registration must reflect the full unfiltered catalog:
+      // sections hidden by an active search would never register and would
+      // later auto-collapse as mid-session additions. An empty first catalog
+      // keeps the latch so the first real sections still register as initial
+      // — channel sessions are externally driven and can arrive while the
+      // tab is open on an empty settle.
+      if (searchQuery.trim() || activeSections.length === 0) return;
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = false;
+      for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
+      return;
+    }
+    if (unseenIds.length === 0) return;
+    for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
+    // Brand-new sections that appear mid-session still start collapsed.
+    setCollapsedSessionSectionIds((current) => {
+      const next = new Set(current);
+      for (const id of unseenIds) next.add(id);
+      return next;
+    });
+  }, [
+    groupsCatalogReady,
+    channelCatalogLoaded,
+    channelSessionSections,
+    organizationEnabled,
+    searchQuery,
+    selectedSessionSource,
+    sessionSections,
+    sessionSource,
+    sessionsCatalogReady,
+  ]);
+
+  useEffect(() => {
+    replaceOwnedCollapsedSessionSectionIds(
+      collapsedSessionSectionIds,
+      isPrimaryCollapsedSectionId,
+    );
+  }, [collapsedSessionSectionIds]);
 
   const toggleSessionSection = useCallback((sectionId: string) => {
     setCollapsedSessionSectionIds((current) => {
@@ -1471,7 +3958,7 @@ export function WebShellSidebar({
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (collapsed) return;
+      if (collapsed || mobileOpen) return;
       event.preventDefault();
       resizeTeardownRef.current?.(true);
       setIsResizing(true);
@@ -1479,6 +3966,8 @@ export function WebShellSidebar({
       const startWidth = sidebarWidth;
       const previousCursor = document.body.style.cursor;
       const previousUserSelect = document.body.style.userSelect;
+      let collapsedByDrag = false;
+      let teardown: (updateState: boolean) => void = () => undefined;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
       try {
@@ -1486,13 +3975,30 @@ export function WebShellSidebar({
       } catch {
         // Pointer capture is best-effort; window listeners still handle drag.
       }
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + moveEvent.clientX - startX,
-        );
-        setSidebarWidth(nextWidth);
-      };
-      const teardown = (updateState: boolean) => {
+      function getRawWidth(clientX: number) {
+        return startWidth + clientX - startX;
+      }
+      function restoreExpandedWidth() {
+        const restoredWidth = clampSidebarWidth(startWidth);
+        setSidebarWidth(restoredWidth);
+        writeSidebarWidth(restoredWidth);
+      }
+      function collapseFromDrag() {
+        if (collapsedByDrag) return;
+        collapsedByDrag = true;
+        restoreExpandedWidth();
+        teardown(true);
+        onCollapsedChange(true);
+      }
+      function handlePointerMove(moveEvent: PointerEvent) {
+        const rawWidth = getRawWidth(moveEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        setSidebarWidth(clampSidebarVisualWidth(rawWidth));
+      }
+      teardown = function resizeTeardown(updateState: boolean) {
         document.body.style.cursor = previousCursor;
         document.body.style.userSelect = previousUserSelect;
         window.removeEventListener('pointermove', handlePointerMove);
@@ -1503,17 +4009,20 @@ export function WebShellSidebar({
           setIsResizing(false);
         }
       };
-      const handlePointerUp = (upEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + upEvent.clientX - startX,
-        );
+      function handlePointerUp(upEvent: PointerEvent) {
+        const rawWidth = getRawWidth(upEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        const nextWidth = clampSidebarWidth(rawWidth);
         setSidebarWidth(nextWidth);
         writeSidebarWidth(nextWidth);
         teardown(true);
-      };
-      const handlePointerCancel = () => {
+      }
+      function handlePointerCancel() {
         teardown(true);
-      };
+      }
       resizeTeardownRef.current = teardown;
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp, { once: true });
@@ -1521,7 +4030,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, sidebarWidth],
+    [collapsed, mobileOpen, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -1535,458 +4044,820 @@ export function WebShellSidebar({
   const groupMenuSelectedGroupId =
     !groupMenuSelectedColor &&
     groupMenu?.session.groupId &&
-    groups.some((group) => group.id === groupMenu.session.groupId)
+    menuGroups.some((group) => group.id === groupMenu.session.groupId)
       ? groupMenu.session.groupId
       : null;
   const menuColorOptions =
     colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS;
   const groupMenuUngroupedSelected =
     groupMenuSelectedGroupId === null && groupMenuSelectedColor === null;
-  const deleteGroupCandidateLabel = deleteGroupCandidate?.name ?? '';
-  const canSaveGroup = groupName.trim().length > 0 && !groupBusy;
+  const deleteGroupCandidateLabel = deleteGroupCandidate?.group.name ?? '';
+  const groupColorChoices =
+    colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS;
+  const normalizedGroupColor = normalizeGroupColorInput(
+    groupColor,
+    groupColorChoices,
+  );
+  const customGroupColor = !groupColorChoices.includes(
+    groupColor as DaemonSessionGroupPresetColor,
+  );
+  const canSaveGroup =
+    groupName.trim().length > 0 &&
+    normalizedGroupColor !== undefined &&
+    !groupBusy;
   const groupEditorTitle =
     groupEditor?.mode === 'create'
       ? t('sidebar.groupCreate')
       : t('sidebar.groupRename');
-  const groupColorChoices =
-    colorOptions.length > 0
-      ? colorOptions
-      : (['blue'] as DaemonSessionGroupColor[]);
 
   const renderSessionRow = useCallback(
     (
       session: DaemonSessionSummary,
-      options: { isArchived?: boolean; grouped?: boolean } = {},
+      options: {
+        isArchived?: boolean;
+        renameFormDisabled?: boolean;
+        searchSnippet?: string | undefined;
+      } = {},
     ) => {
-      const { isArchived = false, grouped = false } = options;
+      const {
+        isArchived = false,
+        renameFormDisabled = false,
+        searchSnippet = searchQuery.trim()
+          ? contentSearchHits.get(session.sessionId)?.snippet
+          : undefined,
+      } = options;
+      const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
-      const time = stamp ? formatRelativeTime(stamp, t) : '';
-      const busy = busySessionIds.has(session.sessionId);
-      const isMenuOpen =
-        menuState?.session.sessionId === session.sessionId &&
-        menuState.isArchived === isArchived;
-
+      // Rows stay text-only; the precise date lives in the hover popover.
+      const time = stamp ? formatDateTime(stamp) : '';
+      const busy = busySessionIds.has(sessionIdentity);
+      const exporting = exportingSessionIds.has(sessionIdentity);
+      const completedUnread =
+        !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
+      // Pinned group members also render in the Pinned section; callers
+      // suppress the rename form on the duplicate row so only one input can
+      // mount — a rival input's autofocus would blur this one and its blur
+      // handler would cancel the rename.
+      const isEditing =
+        !renameFormDisabled && editingSessionIdentity === sessionIdentity;
+      const gitIcon = session.worktree ? (
+        <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
+      ) : session.branch ? (
+        <GitBranchIcon aria-label={session.branch.name} />
+      ) : null;
+      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
+        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      ) : null;
+      const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      const withDetails = (row: ReactElement) => (
+        <Fragment key={sessionIdentity}>
+          {sessionActionItems.has('details') ? (
+            <SessionDetailsTooltip
+              session={{
+                ...session,
+                workspaceCwd: getSessionWorkspaceCwd(session) ?? '',
+              }}
+              label={label}
+              time={time}
+              completedUnread={completedUnread}
+            >
+              {row}
+            </SessionDetailsTooltip>
+          ) : (
+            row
+          )}
+        </Fragment>
+      );
       if (isArchived) {
-        return (
+        const archivedExportWorkspaceCwd =
+          getArchivedExportWorkspaceCwd(session);
+        const showArchivedExport =
+          sessionActionItems.has('export') &&
+          Boolean(archivedExportWorkspaceCwd);
+        const showArchivedUnarchive = canUnarchiveSession(session);
+        const showArchivedDelete = canDeleteSession(session);
+        const showArchivedRename = canRenameSession(session);
+        const hasArchivedActions =
+          showArchivedExport ||
+          showArchivedUnarchive ||
+          showArchivedDelete ||
+          showArchivedRename;
+        return withDetails(
           <div
-            key={session.sessionId}
             className={cx(
               styles.sessionRow,
               styles.archivedRow,
               busy && styles.busySession,
-              isMenuOpen && styles.menuActive,
             )}
-            title={label}
+            onMouseEnter={(event) =>
+              measureSessionTitleScroll(event.currentTarget)
+            }
           >
-            <span className={styles.sessionText}>{label}</span>
-            <div className={styles.sessionMetaSlot}>
-              <span className={styles.sessionTime}>{time}</span>
-              <div
-                className={styles.sessionActions}
-                onClick={(event) => event.stopPropagation()}
+            {scheduledTaskIcon && (
+              <span className={styles.sessionStatusSlot}>
+                <span
+                  className={styles.sessionSourceIcon}
+                  data-web-shell-scheduled-task-session
+                  title={t('sidebar.scheduledTasks')}
+                >
+                  {scheduledTaskIcon}
+                </span>
+              </span>
+            )}
+            {isEditing ? (
+              <form
+                className={styles.renameForm}
                 onKeyDown={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  saveRename();
+                }}
               >
-                <button
-                  className={styles.sessionActionButton}
-                  type="button"
-                  title={t('sidebar.unarchive')}
-                  aria-label={t('sidebar.unarchive')}
-                  onClick={() => handleUnarchive(session)}
+                <input
+                  autoFocus
+                  aria-label={`${t('sidebar.rename')}: ${label}`}
+                  className={styles.renameInput}
+                  maxLength={256}
+                  value={editingName}
+                  onChange={(event) => setEditingName(event.target.value)}
+                  onBlur={cancelRename}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') cancelRename();
+                  }}
+                />
+              </form>
+            ) : (
+              <span className={styles.sessionText} data-web-shell-session-title>
+                <span className={styles.sessionTextInner}>{label}</span>
+              </span>
+            )}
+            {prBadge}
+            <div
+              className={styles.sessionMetaSlot}
+              style={
+                hasArchivedActions
+                  ? ({ '--session-actions-width': '26px' } as CSSProperties)
+                  : undefined
+              }
+            >
+              {gitIcon && (
+                <span className={styles.sessionGitIcon}>{gitIcon}</span>
+              )}
+              {hasArchivedActions && (
+                <div
+                  className={styles.sessionActions}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
                 >
-                  <IconUnarchive />
-                </button>
-                <button
-                  className={cx(
-                    styles.sessionActionButton,
-                    isMenuOpen && styles.sessionActionButtonActive,
-                  )}
-                  type="button"
-                  aria-label={t('sidebar.moreActions')}
-                  aria-haspopup="menu"
-                  aria-expanded={isMenuOpen}
-                  title={t('sidebar.moreActions')}
-                  onClick={(event) => openMenu(event, session, true)}
-                >
-                  <IconMore />
-                </button>
-              </div>
+                  <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className={styles.sessionActionButton}
+                        type="button"
+                        aria-label={t('sidebar.moreActions')}
+                        title={t('sidebar.moreActions')}
+                      >
+                        <EllipsisVerticalIcon />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="w-auto min-w-40"
+                      style={SESSION_MENU_PORTAL_STYLE}
+                      onPointerDownOutside={handleSessionMenuPointerDownOutside}
+                      onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                    >
+                      <DropdownMenuGroup>
+                        {showArchivedRename && (
+                          <DropdownMenuItem
+                            disabled={busy}
+                            onSelect={() => handleRenameFromMenu(session)}
+                          >
+                            <PencilIcon />
+                            {t('sidebar.rename')}
+                          </DropdownMenuItem>
+                        )}
+                        {showArchivedExport && (
+                          <DropdownMenuItem
+                            disabled={exporting}
+                            onSelect={() => handleExportSession(session)}
+                          >
+                            <DownloadIcon />
+                            {t('sidebar.export')}
+                          </DropdownMenuItem>
+                        )}
+                        {showArchivedUnarchive && (
+                          <DropdownMenuItem
+                            onSelect={() => handleUnarchive(session)}
+                          >
+                            <ArchiveRestoreIcon />
+                            {t('sidebar.unarchive')}
+                          </DropdownMenuItem>
+                        )}
+                        {showArchivedDelete && (
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => handleDeleteSession(session)}
+                          >
+                            <Trash2Icon />
+                            {t('sidebar.delete')}
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </SessionMenu>
+                </div>
+              )}
             </div>
-          </div>
+          </div>,
         );
       }
 
-      const isCurrent = session.sessionId === currentSessionId;
-      const isEditing = editingSessionId === session.sessionId;
-      const exporting = exportingSessionIds.has(session.sessionId);
-      const completedUnread =
-        !isCurrent && completedUnreadIds.has(session.sessionId);
-      const showInlinePin =
-        grouped && session.isPinned && !session.hasActivePrompt;
-
-      return (
+      const isCurrent = isCurrentSession(session);
+      // Archiving closes the live session daemon-side, which would end the
+      // running turn; keep the action visible but inert while it runs.
+      const running = Boolean(session.hasActivePrompt);
+      const needsUserInput =
+        !session.isWaitingForPermission && session.isWaitingForUserQuestion;
+      const attention = session.isWaitingForPermission
+        ? {
+            full: t('sidebar.waitingForApproval'),
+            short: t('sidebar.waitingForApprovalShort'),
+          }
+        : needsUserInput
+          ? {
+              full: t('sidebar.userInputNeeded'),
+              short: t('sidebar.userInputNeededShort'),
+            }
+          : null;
+      const showPin = canOrganizeSession(session, 'pin');
+      const showArchive =
+        sessionActionItems.has('archive') && canMutateSessionArchive(session);
+      const showRename = canRenameSession(session);
+      const activeExportScope = getActiveExportScope(session);
+      const showExport =
+        sessionActionItems.has('export') && Boolean(activeExportScope);
+      const showDelete = canShowDeleteSession(session);
+      const inlineActionCount =
+        Number(showPin && inlineActionItems.has('pin')) +
+        Number(showRename && inlineActionItems.has('rename')) +
+        Number(showExport && inlineActionItems.has('export')) +
+        Number(showDelete && inlineActionItems.has('delete'));
+      const showMoreActions =
+        (showPin && !inlineActionItems.has('pin')) ||
+        showArchive ||
+        (showRename && !inlineActionItems.has('rename')) ||
+        canOrganizeSession(session, 'group') ||
+        (showExport && !inlineActionItems.has('export')) ||
+        (showDelete && !inlineActionItems.has('delete'));
+      const sessionActionCount = inlineActionCount + Number(showMoreActions);
+      return withDetails(
         <div
-          key={session.sessionId}
           className={cx(
             styles.sessionRow,
-            grouped && styles.groupedSessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
             session.hasActivePrompt && styles.runningSession,
             busy && styles.busySession,
-            isMenuOpen && styles.menuActive,
           )}
+          onMouseEnter={(event) =>
+            measureSessionTitleScroll(event.currentTarget)
+          }
+          onFocus={(event) => measureSessionTitleScroll(event.currentTarget)}
           role="button"
           tabIndex={0}
           aria-current={isCurrent ? 'page' : undefined}
-          onMouseEnter={(event) =>
-            showTooltip(event, renderSessionTooltip(session))
+          onClick={() =>
+            handleLoadSession(session.sessionId, session.workspaceCwd)
           }
-          onMouseLeave={hideTooltip}
-          onFocus={(event) => showTooltip(event, renderSessionTooltip(session))}
-          onBlur={hideTooltip}
-          onClick={() => handleLoadSession(session.sessionId)}
           onDoubleClick={() => {
-            if (isCurrent && !collapsed) startRename(session);
+            if (canRenameSession(session)) startRename(session);
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') handleLoadSession(session.sessionId);
+            if (event.key === 'Enter') {
+              handleLoadSession(session.sessionId, session.workspaceCwd);
+            }
           }}
         >
-          {!collapsed && (
-            <>
-              <span className={styles.sessionStatusSlot} aria-hidden="true">
-                {completedUnread && (
-                  <span className={styles.sessionStatusDot} />
+          <span className={styles.sessionStatusSlot}>
+            {scheduledTaskIcon ? (
+              <span
+                className={styles.sessionSourceIcon}
+                data-web-shell-scheduled-task-session
+                title={t('sidebar.scheduledTasks')}
+              >
+                {scheduledTaskIcon}
+              </span>
+            ) : null}
+            {completedUnread ? (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
                 )}
-                {!completedUnread && session.isPinned && !grouped && (
-                  <span className={styles.sessionPinMarker}>
-                    <IconPin />
+                data-web-shell-session-completed-unread
+                aria-hidden="true"
+              />
+            ) : null}
+            {session.hasActivePrompt &&
+            !scheduledTaskIcon &&
+            !completedUnread ? (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
+                data-web-shell-session-running
+                aria-hidden="true"
+              />
+            ) : null}
+          </span>
+          {isEditing && canRenameSession(session) ? (
+            <form
+              className={styles.renameForm}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveRename();
+              }}
+            >
+              <input
+                autoFocus
+                aria-label={`${t('sidebar.rename')}: ${label}`}
+                className={styles.renameInput}
+                maxLength={256}
+                value={editingName}
+                onChange={(event) => setEditingName(event.target.value)}
+                onBlur={cancelRename}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    cancelRename();
+                  }
+                }}
+              />
+            </form>
+          ) : (
+            <>
+              <span className={styles.sessionText} data-web-shell-session-title>
+                <span className={styles.sessionTextInner}>{label}</span>
+                {searchSnippet && (
+                  <span className={styles.sessionSearchSnippet}>
+                    {searchSnippet}
                   </span>
                 )}
               </span>
-              {isEditing ? (
-                <form
-                  className={styles.renameForm}
-                  onClick={(event) => event.stopPropagation()}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    saveRename();
-                  }}
-                >
-                  <input
-                    autoFocus
-                    className={styles.renameInput}
-                    value={editingName}
-                    onChange={(event) => setEditingName(event.target.value)}
-                    onBlur={cancelRename}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        cancelRename();
-                      }
-                    }}
-                  />
-                </form>
-              ) : (
-                <>
-                  <span className={styles.sessionText}>{label}</span>
-                  <div className={styles.sessionMetaSlot}>
-                    {session.hasActivePrompt ? (
-                      <span
-                        className={styles.sessionLoading}
-                        aria-label={t('sidebar.running')}
-                      />
-                    ) : showInlinePin ? (
-                      <span
-                        className={styles.sessionPinnedIndicator}
-                        aria-label={t('sidebar.pin')}
-                      >
-                        <IconPin />
-                      </span>
-                    ) : (
-                      <span className={styles.sessionTime}>{time}</span>
+              {prBadge}
+              <div
+                className={styles.sessionMetaSlot}
+                style={
+                  sessionActionCount > 0
+                    ? ({
+                        '--session-actions-width': `${sessionActionCount * 26}px`,
+                      } as CSSProperties)
+                    : undefined
+                }
+              >
+                {attention && (
+                  <span
+                    className={cx(
+                      styles.sessionAttention,
+                      needsUserInput && styles.sessionAttentionUserInput,
                     )}
-                    <div
-                      className={styles.sessionActions}
-                      onClick={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => event.stopPropagation()}
-                      onMouseEnter={(event) => {
-                        event.stopPropagation();
-                        setTooltip(null);
-                      }}
-                    >
-                      {organizationEnabled && (
-                        <>
+                    aria-label={attention.full}
+                  >
+                    {attention.short}
+                  </span>
+                )}
+                {session.hasActivePrompt ? (
+                  <span
+                    className={styles.sessionLoading}
+                    aria-label={t('sidebar.running')}
+                  />
+                ) : !attention && gitIcon ? (
+                  <span className={styles.sessionGitIcon}>{gitIcon}</span>
+                ) : null}
+                {(showPin ||
+                  showArchive ||
+                  showRename ||
+                  showExport ||
+                  showDelete ||
+                  canOrganizeSession(session, 'group')) && (
+                  <div
+                    className={styles.sessionActions}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    {(() => {
+                      const inlineActions: Array<{
+                        key: WebShellSidebarSessionInlineActionItem;
+                        icon?: ReactNode;
+                        label: string;
+                        disabled?: boolean;
+                        title?: string;
+                        active?: boolean;
+                        destructive?: boolean;
+                        visible: boolean;
+                        onClick: () => void;
+                      }> = [
+                        {
+                          key: 'pin',
+                          icon: <PinIcon size={16} strokeWidth={1.2} />,
+                          label: session.isPinned
+                            ? t('sidebar.unpin')
+                            : t('sidebar.pin'),
+                          disabled: busy,
+                          active: session.isPinned,
+                          visible: showPin && inlineActionItems.has('pin'),
+                          onClick: () => handleTogglePin(session),
+                        },
+                        {
+                          key: 'rename',
+                          icon: <PencilIcon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.rename'),
+                          disabled: busy,
+                          visible:
+                            showRename && inlineActionItems.has('rename'),
+                          onClick: () => handleRenameFromMenu(session),
+                        },
+                        {
+                          key: 'export',
+                          icon: <DownloadIcon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.export'),
+                          disabled: exporting,
+                          visible:
+                            showExport && inlineActionItems.has('export'),
+                          onClick: () => handleExportSession(session),
+                        },
+                        {
+                          key: 'delete',
+                          icon: <Trash2Icon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.delete'),
+                          disabled: isCurrent,
+                          destructive: true,
+                          title: isCurrent
+                            ? t('sidebar.currentDeleteDisabled')
+                            : undefined,
+                          visible:
+                            showDelete && inlineActionItems.has('delete'),
+                          onClick: () => handleDeleteSession(session),
+                        },
+                      ];
+                      return inlineActions
+                        .filter((a) => a.visible)
+                        .map((action) => (
                           <button
+                            key={action.key}
                             className={cx(
                               styles.sessionActionButton,
-                              session.isPinned &&
-                                styles.activeSessionActionButton,
+                              action.active && styles.activeSessionActionButton,
                             )}
                             type="button"
-                            disabled={busy}
-                            title={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
+                            disabled={action.disabled}
+                            aria-label={action.label}
+                            title={action.title ?? action.label}
+                            onClick={action.onClick}
+                            style={
+                              action.destructive && !action.disabled
+                                ? {
+                                    color: 'var(--destructive, #dc2626)',
+                                  }
+                                : undefined
                             }
-                            aria-label={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            onClick={() => handleTogglePin(session)}
                           >
-                            <IconPin />
+                            {action.icon ?? (
+                              <span style={{ fontSize: 12 }}>
+                                {action.label}
+                              </span>
+                            )}
                           </button>
+                        ));
+                    })()}
+                    {showMoreActions ? (
+                      <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
+                        <DropdownMenuTrigger asChild>
                           <button
                             className={styles.sessionActionButton}
                             type="button"
-                            disabled={busy}
-                            title={t('sidebar.sessionGroup')}
-                            aria-label={t('sidebar.sessionGroup')}
-                            onClick={(event) => openGroupMenu(event, session)}
+                            aria-label={t('sidebar.moreActions')}
+                            title={t('sidebar.moreActions')}
                           >
-                            <IconGroup />
+                            <EllipsisVerticalIcon />
                           </button>
-                        </>
-                      )}
-                      <button
-                        className={styles.sessionActionButton}
-                        type="button"
-                        disabled={isCurrent}
-                        title={
-                          isCurrent
-                            ? t('sidebar.archiveCurrentDisabled')
-                            : t('sidebar.archive')
-                        }
-                        aria-label={t('sidebar.archive')}
-                        onClick={() => handleArchive(session)}
-                      >
-                        <IconArchive />
-                      </button>
-                      {canExportSessions && (
-                        <button
-                          className={styles.sessionActionButton}
-                          type="button"
-                          disabled={exporting}
-                          title={t('sidebar.export')}
-                          aria-label={t('sidebar.export')}
-                          onClick={() => handleExportSession(session)}
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="end"
+                          className="w-auto min-w-40"
+                          style={SESSION_MENU_PORTAL_STYLE}
+                          onPointerDownOutside={
+                            handleSessionMenuPointerDownOutside
+                          }
+                          onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
                         >
-                          <IconDownload />
-                        </button>
-                      )}
-                      <button
-                        className={cx(
-                          styles.sessionActionButton,
-                          isMenuOpen && styles.sessionActionButtonActive,
-                        )}
-                        type="button"
-                        aria-label={t('sidebar.moreActions')}
-                        aria-haspopup="menu"
-                        aria-expanded={isMenuOpen}
-                        title={t('sidebar.moreActions')}
-                        onClick={(event) => openMenu(event, session, false)}
-                      >
-                        <IconMore />
-                      </button>
-                    </div>
+                          <DropdownMenuGroup>
+                            {showPin && !inlineActionItems.has('pin') && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleTogglePin(session)}
+                              >
+                                <PinIcon />
+                                {session.isPinned
+                                  ? t('sidebar.unpin')
+                                  : t('sidebar.pin')}
+                              </DropdownMenuItem>
+                            )}
+                            {showArchive && (
+                              <DropdownMenuItem
+                                disabled={busy || isCurrent || running}
+                                title={
+                                  isCurrent
+                                    ? t('sidebar.archiveCurrentDisabled')
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : undefined
+                                }
+                                onSelect={() => handleArchive(session)}
+                              >
+                                <ArchiveIcon />
+                                {t('sidebar.archive')}
+                              </DropdownMenuItem>
+                            )}
+                            {showRename && !inlineActionItems.has('rename') && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleRenameFromMenu(session)}
+                              >
+                                <PencilIcon />
+                                {t('sidebar.rename')}
+                              </DropdownMenuItem>
+                            )}
+                            {canOrganizeSession(session, 'group') && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={(event) =>
+                                  openGroupMenuFromAnchor(
+                                    event.currentTarget as HTMLElement,
+                                    session,
+                                  )
+                                }
+                              >
+                                <FolderInputIcon />
+                                {t('sidebar.sessionGroup')}
+                              </DropdownMenuItem>
+                            )}
+                            {showExport && !inlineActionItems.has('export') && (
+                              <DropdownMenuItem
+                                disabled={exporting}
+                                onSelect={() => handleExportSession(session)}
+                              >
+                                <DownloadIcon />
+                                {t('sidebar.export')}
+                              </DropdownMenuItem>
+                            )}
+                            {showDelete && !inlineActionItems.has('delete') && (
+                              <DropdownMenuItem
+                                variant="destructive"
+                                disabled={isCurrent}
+                                title={
+                                  isCurrent
+                                    ? t('sidebar.currentDeleteDisabled')
+                                    : undefined
+                                }
+                                onSelect={() => handleDeleteSession(session)}
+                              >
+                                <Trash2Icon />
+                                {t('sidebar.delete')}
+                              </DropdownMenuItem>
+                            )}
+                          </DropdownMenuGroup>
+                        </DropdownMenuContent>
+                      </SessionMenu>
+                    ) : null}
                   </div>
-                </>
-              )}
+                )}
+              </div>
             </>
           )}
-        </div>
+        </div>,
       );
     },
     [
       busySessionIds,
-      canExportSessions,
+      canDeleteSession,
+      canShowDeleteSession,
+      canOrganizeSession,
+      canRenameSession,
+      canUnarchiveSession,
+      canMutateSessionArchive,
       cancelRename,
-      collapsed,
       completedUnreadIds,
-      currentSessionId,
+      contentSearchHits,
       editingName,
-      editingSessionId,
+      editingSessionIdentity,
       exportingSessionIds,
+      getArchivedExportWorkspaceCwd,
+      getActiveExportScope,
+      getIdentityForSession,
+      getSessionWorkspaceCwd,
       handleArchive,
+      handleDeleteSession,
       handleExportSession,
       handleLoadSession,
+      handleRenameFromMenu,
+      handleSessionMenuCloseAutoFocus,
+      handleSessionMenuOpenChange,
+      handleSessionMenuPointerDownOutside,
       handleTogglePin,
       handleUnarchive,
-      hideTooltip,
-      menuState,
-      openGroupMenu,
-      openMenu,
-      organizationEnabled,
-      renderSessionTooltip,
+      isCurrentSession,
+      openGroupMenuFromAnchor,
       saveRename,
-      showTooltip,
+      searchQuery,
+      sessionActionItems,
+      inlineActionItems,
       startRename,
       t,
     ],
   );
 
   const body = useMemo(() => {
-    if (!projectExpanded) return null;
-    if (loading && sessions.length === 0) {
+    const renderFlatSessions = () => {
+      const showAll =
+        editingSessionIdentity !== null ||
+        showAllProjectSessions ||
+        Boolean(searchQuery.trim());
+      const displayedSessions = showAll
+        ? filteredSessions
+        : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      return (
+        <>
+          {displayedSessions.map((session) => renderSessionRow(session))}
+          {!showAll &&
+            filteredSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+              <button
+                type="button"
+                className={styles.showAllSessions}
+                onClick={() => setShowAllProjectSessions(true)}
+              >
+                {t('sidebar.showAllSessions')}
+              </button>
+            )}
+        </>
+      );
+    };
+    // Gate notices on the resource, not the filtered view: background
+    // refreshes set loading/error while retaining the settled page, so a
+    // filter-empty or empty-but-settled view must not flash or swap to retry.
+    if (loading && sessionsPage === undefined) {
       return (
         <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
       );
     }
-    if (error && sessions.length === 0) {
+    if (error && sessionsPage === undefined) {
       return (
-        <button className={styles.retry} type="button" onClick={reload}>
+        <button
+          className={styles.retry}
+          type="button"
+          onClick={() => void reload({ interactive: true })}
+        >
           {t('sidebar.loadFailed')}
         </button>
       );
     }
     if (
       filteredSessions.length === 0 &&
-      (searchQuery.trim() ||
+      (selectedSessionSource === 'channel' ||
+        channelSessionSections !== null ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
-      return <div className={styles.notice}>{t('sidebar.searchEmpty')}</div>;
+      return <div className={styles.notice}>{t('sidebar.noSessions')}</div>;
     }
-    if (!organizationEnabled) {
-      return filteredSessions.map((session) => renderSessionRow(session));
+    if (channelSessionSections) {
+      return channelSessionSections.map((section) => (
+        <SessionGroupSection
+          key={section.id}
+          id={section.id}
+          label={section.label}
+          count={section.sessions.length}
+          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
+          expanded={!collapsedSessionSectionIds.has(section.id)}
+          onToggle={() => toggleSessionSection(section.id)}
+        >
+          {section.sessions.map((session) => renderSessionRow(session))}
+        </SessionGroupSection>
+      ));
+    }
+    if (selectedSessionSource === 'channel') {
+      return renderFlatSessions();
+    }
+    if (sessionSections.length === 0) {
+      return renderFlatSessions();
     }
 
     return sessionSections.map((section) => {
       const expanded = !collapsedSessionSectionIds.has(section.id);
       const group = section.group;
       return (
-        <section
+        <SessionGroupSection
           key={section.id}
-          className={styles.sessionGroupSection}
-          aria-label={section.label}
+          id={section.id}
+          label={section.label}
+          count={section.sessions.length}
+          color={section.color}
+          icon={
+            section.kind === 'scheduled-task' ? (
+              <CalendarClockIcon data-web-shell-scheduled-task-group />
+            ) : undefined
+          }
+          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
+          expanded={expanded}
+          onToggle={() => toggleSessionSection(section.id)}
+          onRename={
+            section.kind === 'group' && group && canOrganizeWorkspace()
+              ? () => handleRenameGroup(group)
+              : undefined
+          }
+          onDelete={
+            section.kind === 'group' && group && canOrganizeWorkspace()
+              ? () => handleDeleteGroup(group)
+              : undefined
+          }
+          renameLabel={t('sidebar.groupRename')}
+          deleteLabel={t('sidebar.groupDelete')}
+          actionsDisabled={groupBusy}
         >
-          <div className={styles.sessionGroupHeaderRow}>
-            <button
-              type="button"
-              className={styles.sessionGroupHeader}
-              aria-expanded={expanded}
-              onClick={() => toggleSessionSection(section.id)}
-            >
-              {section.color ? (
-                <span
-                  className={cx(
-                    styles.sessionGroupDot,
-                    getGroupColorClass(section.color),
-                  )}
-                  aria-hidden="true"
-                />
-              ) : null}
-              <span className={styles.sessionGroupTitle}>{section.label}</span>
-              {section.countLabel ? (
-                <span className={styles.sessionGroupCount}>
-                  · {section.countLabel}
-                </span>
-              ) : null}
-              <span className={styles.sessionGroupChevron} aria-hidden="true">
-                <IconChevron expanded={expanded} />
-              </span>
-            </button>
-            <div className={styles.sessionGroupHeaderActions}>
-              {section.kind === 'group' && group ? (
-                <>
-                  <button
-                    className={styles.sessionGroupActionButton}
-                    type="button"
-                    title={t('sidebar.groupCreate')}
-                    aria-label={t('sidebar.groupCreate')}
-                    disabled={groupBusy}
-                    onClick={handleCreateGroup}
-                  >
-                    <IconNewChat />
-                  </button>
-                  <button
-                    className={styles.sessionGroupActionButton}
-                    type="button"
-                    title={t('sidebar.groupRename')}
-                    aria-label={t('sidebar.groupRename')}
-                    disabled={groupBusy}
-                    onClick={() => handleRenameGroup(group)}
-                  >
-                    <IconRename />
-                  </button>
-                  <button
-                    className={styles.sessionGroupActionButton}
-                    type="button"
-                    title={t('sidebar.groupDelete')}
-                    aria-label={t('sidebar.groupDelete')}
-                    disabled={groupBusy}
-                    onClick={() => handleDeleteGroup(group)}
-                  >
-                    <IconTrash />
-                  </button>
-                </>
-              ) : section.kind === 'recent' ? (
-                <button
-                  className={styles.sessionGroupActionButton}
-                  type="button"
-                  title={t('sidebar.groupCreate')}
-                  aria-label={t('sidebar.groupCreate')}
-                  disabled={groupBusy}
-                  onClick={handleCreateGroup}
-                >
-                  <IconNewChat />
-                </button>
-              ) : null}
-            </div>
-          </div>
-          {expanded && (
-            <div className={styles.sessionGroupList}>
-              {section.sessions.map((session) =>
-                renderSessionRow(session, { grouped: true }),
-              )}
-            </div>
+          {section.sessions.map((session) =>
+            renderSessionRow(session, {
+              // Pinned members also render in the Pinned section; while that
+              // section is expanded its row hosts the rename form, so this
+              // duplicate row must not mount a second autofocused input.
+              // Gate on the Pinned section actually carrying the row —
+              // content-search ghosts never appear there, so without the
+              // membership check no row would host the form at all and
+              // rename would be silently inoperable for them.
+              renameFormDisabled:
+                Boolean(session.isPinned) &&
+                pinnedExpanded &&
+                pinnedSessions.some(
+                  (candidate) =>
+                    getIdentityForSession(candidate) ===
+                    getIdentityForSession(session),
+                ),
+            }),
           )}
-        </section>
+        </SessionGroupSection>
       );
     });
   }, [
     collapsedSessionSectionIds,
+    canOrganizeWorkspace,
+    channelSessionSections,
+    editingSessionIdentity,
     error,
     filteredSessions,
+    getIdentityForSession,
     groupBusy,
-    handleCreateGroup,
     handleDeleteGroup,
     handleRenameGroup,
     loading,
     organizationEnabled,
-    projectExpanded,
+    pinnedExpanded,
+    pinnedSessions,
     reload,
     renderSessionRow,
     searchQuery,
+    selectedSessionSource,
     sessionSections,
-    sessions.length,
+    sessionsPage,
+    showAllProjectSessions,
     t,
     toggleSessionSection,
   ]);
 
   const archivedSection = useMemo(() => {
-    if (collapsed || !projectExpanded || searchQuery.trim()) return null;
+    if (!sessionArchiveEnabled || searchQuery.trim()) return null;
 
     const header = (
       <button
         type="button"
         className={styles.archivedHeader}
         aria-expanded={archivedExpanded}
-        onClick={() => setArchivedExpanded((expanded) => !expanded)}
+        onClick={toggleArchived}
       >
-        <span className={styles.archivedChevron} aria-hidden="true">
-          <IconChevron expanded={archivedExpanded} />
-        </span>
-        <span className={styles.archivedTitle}>
+        <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
           {t('sidebar.archivedTitle')}
         </span>
-        {archivedExpanded && archivedSessions.length > 0 && (
+        <span className={styles.archivedChevron} aria-hidden="true">
+          {archivedExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
+        </span>
+        {archivedExpanded && allArchivedSessions.length > 0 && (
           <span className={styles.archivedCount}>
-            {archivedSessions.length}
+            {allArchivedSessions.length}
           </span>
         )}
       </button>
@@ -1996,28 +4867,39 @@ export function WebShellSidebar({
       return <div className={styles.archivedSection}>{header}</div>;
     }
 
+    const retry = (
+      <button
+        className={styles.retry}
+        type="button"
+        onClick={() => {
+          void reloadArchived({ interactive: true }).catch(() => undefined);
+          for (const workspaceCwd of secondaryWorkspaceCwds) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+        }}
+      >
+        {t('sidebar.loadFailed')}
+      </button>
+    );
     let content: ReactNode;
-    if (archivedLoading && archivedSessions.length === 0) {
+    if (effectiveArchivedLoading && allArchivedSessions.length === 0) {
       content = (
         <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
       );
-    } else if (archivedError && archivedSessions.length === 0) {
-      content = (
-        <button
-          className={styles.retry}
-          type="button"
-          onClick={() => reloadArchived()}
-        >
-          {t('sidebar.loadFailed')}
-        </button>
-      );
-    } else if (archivedSessions.length === 0) {
+    } else if (effectiveArchivedError && allArchivedSessions.length === 0) {
+      content = retry;
+    } else if (allArchivedSessions.length === 0) {
       content = (
         <div className={styles.notice}>{t('sidebar.archivedEmpty')}</div>
       );
     } else {
-      content = archivedSessions.map((session) =>
-        renderSessionRow(session, { isArchived: true }),
+      content = (
+        <>
+          {allArchivedSessions.map((session) =>
+            renderSessionRow(session, { isArchived: true }),
+          )}
+          {effectiveArchivedError && retry}
+        </>
       );
     }
 
@@ -2028,560 +4910,1235 @@ export function WebShellSidebar({
       </div>
     );
   }, [
-    archivedError,
     archivedExpanded,
-    archivedLoading,
-    archivedSessions,
-    collapsed,
-    projectExpanded,
+    allArchivedSessions,
+    effectiveArchivedError,
+    effectiveArchivedLoading,
     reloadArchived,
     renderSessionRow,
     searchQuery,
+    secondaryWorkspaceCwds,
+    sessionCatalogController,
+    sessionArchiveEnabled,
     t,
+    toggleArchived,
   ]);
-
-  const menuItems = useMemo<SessionMenuItem[]>(() => {
-    if (!menuState) return [];
-    const { session, isArchived } = menuState;
-    if (isArchived) {
-      return [
-        {
-          key: 'unarchive',
-          label: t('sidebar.unarchive'),
-          icon: <IconUnarchive />,
-          onSelect: () => handleUnarchive(session),
-        },
-        {
-          key: 'delete',
-          label: t('sidebar.delete'),
-          icon: <IconTrash />,
-          danger: true,
-          onSelect: () => handleDeleteSession(session),
-        },
-      ];
-    }
-    const isCurrent = session.sessionId === currentSessionId;
-    const sessionBusy = busySessionIds.has(session.sessionId);
-    const items: SessionMenuItem[] = [
-      {
-        key: 'rename',
-        label: t('sidebar.rename'),
-        icon: <IconRename />,
-        disabled: !isCurrent,
-        disabledTitle: t('sidebar.renameCurrentOnly'),
-        onSelect: () => handleRenameFromMenu(session),
-      },
-      ...(organizationEnabled
-        ? [
-            {
-              key: 'pin',
-              label: session.isPinned ? t('sidebar.unpin') : t('sidebar.pin'),
-              icon: <IconPin />,
-              disabled: sessionBusy,
-              onSelect: () => handleTogglePin(session),
-            },
-            {
-              key: 'group',
-              label: t('sidebar.sessionGroup'),
-              icon: <IconGroup />,
-              disabled: sessionBusy,
-              onSelect: () =>
-                openGroupMenuFromAnchor(menuState.anchorEl, session),
-            },
-          ]
-        : []),
-      {
-        key: 'archive',
-        label: t('sidebar.archive'),
-        icon: <IconArchive />,
-        disabled: isCurrent,
-        disabledTitle: t('sidebar.archiveCurrentDisabled'),
-        onSelect: () => handleArchive(session),
-      },
-      {
-        key: 'delete',
-        label: t('sidebar.delete'),
-        icon: <IconTrash />,
-        danger: true,
-        disabled: isCurrent,
-        disabledTitle: t('sidebar.currentDeleteDisabled'),
-        onSelect: () => handleDeleteSession(session),
-      },
-    ];
-    return items;
-  }, [
-    busySessionIds,
-    currentSessionId,
-    handleArchive,
-    handleDeleteSession,
-    handleRenameFromMenu,
-    handleTogglePin,
-    handleUnarchive,
-    menuState,
-    openGroupMenuFromAnchor,
-    organizationEnabled,
-    t,
-  ]);
-
   return (
-    <aside
-      className={cx(
-        styles.sidebar,
-        collapsed && styles.collapsed,
-        isResizing && styles.resizing,
-        mobileOpen && styles.mobileOpen,
-      )}
-      aria-label={t('sidebar.label')}
-      style={sidebarStyle}
-    >
-      {tooltip && (
-        <div
-          className={styles.floatingTooltip}
-          role="tooltip"
-          style={{
-            top: tooltip.top,
-            left: tooltip.left,
-          }}
-          onMouseEnter={cancelHideTooltip}
-          onMouseLeave={hideTooltip}
-        >
-          {tooltip.content}
-        </div>
-      )}
-      {groupMenu && (
-        <div
-          ref={groupMenuRef}
-          className={styles.groupMenu}
-          role="menu"
-          aria-label={t('sidebar.sessionGroup')}
-          style={{ top: groupMenu.top, left: groupMenu.left }}
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={handleGroupMenuKeyDown}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <button
-            className={cx(
-              styles.groupMenuItem,
-              groupMenuUngroupedSelected && styles.groupMenuItemActive,
-            )}
-            type="button"
-            role="menuitemradio"
-            aria-checked={groupMenuUngroupedSelected}
-            onClick={() => assignSessionGroup(groupMenu.session, null)}
+    <>
+      <aside
+        ref={sidebarRef}
+        className={cx(
+          styles.sidebar,
+          collapsed && styles.collapsed,
+          isResizing && styles.resizing,
+          mobileOpen && styles.mobileOpen,
+        )}
+        aria-label={t('sidebar.label')}
+        style={sidebarStyle}
+      >
+        {groupMenu && (
+          <div
+            ref={groupMenuRef}
+            className={styles.groupMenu}
+            role="menu"
+            aria-label={t('sidebar.sessionGroup')}
+            style={{ top: groupMenu.top, left: groupMenu.left }}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={handleGroupMenuKeyDown}
+            onMouseDown={(event) => event.stopPropagation()}
           >
-            <span className={styles.groupMenuEmptyDot} />
-            <span className={styles.groupMenuName}>
-              {t('sidebar.groupUngrouped')}
-            </span>
-            {groupMenuUngroupedSelected && (
-              <span className={styles.groupMenuCheck}>✓</span>
-            )}
-          </button>
-          {menuColorOptions.map((color) => {
-            const selected = groupMenuSelectedColor === color;
-            return (
-              <button
-                key={`color:${color}`}
-                className={cx(
-                  styles.groupMenuItem,
-                  selected && styles.groupMenuItemActive,
-                )}
-                type="button"
-                role="menuitemradio"
-                aria-checked={selected}
-                onClick={() => assignSessionColor(groupMenu.session, color)}
-              >
-                <span
-                  className={cx(styles.groupMenuDot, getGroupColorClass(color))}
-                />
-                <span className={styles.groupMenuName}>
-                  {t(`sidebar.groupColor.${color}`)}
-                </span>
-                {selected && <span className={styles.groupMenuCheck}>✓</span>}
-              </button>
-            );
-          })}
-          {groups.map((group) => {
-            const selected = groupMenuSelectedGroupId === group.id;
-            return (
-              <button
-                key={group.id}
-                className={cx(
-                  styles.groupMenuItem,
-                  selected && styles.groupMenuItemActive,
-                )}
-                type="button"
-                role="menuitemradio"
-                aria-checked={selected}
-                onClick={() => assignSessionGroup(groupMenu.session, group.id)}
-              >
-                <span
+            <button
+              className={cx(
+                styles.groupMenuItem,
+                groupMenuUngroupedSelected && styles.groupMenuItemActive,
+              )}
+              type="button"
+              role="menuitemradio"
+              aria-checked={groupMenuUngroupedSelected}
+              onClick={() => assignSessionGroup(groupMenu.session, null)}
+            >
+              <span className={styles.groupMenuEmptyDot} />
+              <span className={styles.groupMenuName}>
+                {t('sidebar.groupUngrouped')}
+              </span>
+              {groupMenuUngroupedSelected && (
+                <span className={styles.groupMenuCheck}>✓</span>
+              )}
+            </button>
+            {menuColorOptions.map((color) => {
+              const selected = groupMenuSelectedColor === color;
+              return (
+                <button
+                  key={`color:${color}`}
                   className={cx(
-                    styles.groupMenuDot,
-                    getGroupColorClass(group.color),
+                    styles.groupMenuItem,
+                    selected && styles.groupMenuItemActive,
                   )}
-                />
-                <span className={styles.groupMenuName}>{group.name}</span>
-                {selected && <span className={styles.groupMenuCheck}>✓</span>}
-              </button>
-            );
-          })}
-          <div className={styles.groupMenuSeparator} />
-          <button
-            className={styles.groupMenuItem}
-            type="button"
-            role="menuitem"
-            onClick={() => handleCreateGroupForSession(groupMenu.session)}
-          >
-            <span className={styles.groupMenuIcon}>
-              <IconNewChat />
-            </span>
-            <span className={styles.groupMenuName}>
-              {t('sidebar.groupCreate')}
-            </span>
-          </button>
-        </div>
-      )}
-      {menuState && (
-        <SessionActionsMenu
-          anchorEl={menuState.anchorEl}
-          items={menuItems}
-          onClose={closeMenu}
-        />
-      )}
-      {deleteCandidate && (
-        <DialogShell
-          title={t('delete.title')}
-          size="sm"
-          onClose={() => setDeleteCandidate(null)}
-        >
-          <div className={styles.confirmContent}>
-            <p className={styles.confirmDescription}>
-              {t('sidebar.deleteConfirmDescription', {
-                name: deleteCandidateLabel,
-              })}
-            </p>
-            <div className={styles.confirmActions}>
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                onClick={() => setDeleteCandidate(null)}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                className={styles.dangerButton}
-                type="button"
-                onClick={confirmDeleteSession}
-              >
-                {t('sidebar.delete')}
-              </button>
-            </div>
-          </div>
-        </DialogShell>
-      )}
-      {groupEditor && (
-        <DialogShell
-          title={groupEditorTitle}
-          size="sm"
-          onClose={closeGroupEditor}
-        >
-          <form
-            className={styles.groupForm}
-            onSubmit={(event) => {
-              event.preventDefault();
-              saveGroupEditor();
-            }}
-          >
-            <label className={styles.fieldStack}>
-              <span>{t('sidebar.groupNamePrompt')}</span>
-              <input
-                className={styles.dialogInput}
-                value={groupName}
-                autoFocus
-                maxLength={64}
-                onChange={(event) => setGroupName(event.target.value)}
-              />
-            </label>
-            <label className={styles.fieldStack}>
-              <span>{t('sidebar.groupColor')}</span>
-              <select
-                className={styles.dialogSelect}
-                value={groupColor}
-                onChange={(event) =>
-                  setGroupColor(event.target.value as DaemonSessionGroupColor)
-                }
-              >
-                {groupColorChoices.map((color) => (
-                  <option key={color} value={color}>
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  onClick={() => assignSessionColor(groupMenu.session, color)}
+                >
+                  <span
+                    className={cx(
+                      styles.groupMenuDot,
+                      getGroupColorClass(color),
+                    )}
+                  />
+                  <span className={styles.groupMenuName}>
                     {t(`sidebar.groupColor.${color}`)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className={styles.confirmActions}>
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                disabled={groupBusy}
-                onClick={closeGroupEditor}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                className={styles.secondaryButton}
-                type="submit"
-                disabled={!canSaveGroup}
-              >
-                {t('common.save')}
-              </button>
-            </div>
-          </form>
-        </DialogShell>
-      )}
-      {deleteGroupCandidate && (
-        <DialogShell
-          title={t('sidebar.groupDelete')}
-          size="sm"
-          onClose={() => {
-            if (!groupBusy) setDeleteGroupCandidate(null);
-          }}
-        >
-          <div className={styles.confirmContent}>
-            <p className={styles.confirmDescription}>
-              {t('sidebar.groupDeleteConfirm', {
-                name: deleteGroupCandidateLabel,
-              })}
-            </p>
-            <div className={styles.confirmActions}>
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                disabled={groupBusy}
-                onClick={() => setDeleteGroupCandidate(null)}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                className={styles.dangerButton}
-                type="button"
-                disabled={groupBusy}
-                onClick={confirmDeleteGroup}
-              >
-                {t('sidebar.groupDelete')}
-              </button>
-            </div>
+                  </span>
+                  {selected && <span className={styles.groupMenuCheck}>✓</span>}
+                </button>
+              );
+            })}
+            {menuGroups.map((group) => {
+              const selected = groupMenuSelectedGroupId === group.id;
+              return (
+                <button
+                  key={group.id}
+                  className={cx(
+                    styles.groupMenuItem,
+                    selected && styles.groupMenuItemActive,
+                  )}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  onClick={() =>
+                    assignSessionGroup(groupMenu.session, group.id)
+                  }
+                >
+                  <span
+                    className={cx(
+                      styles.groupMenuDot,
+                      getGroupColorClass(group.color),
+                    )}
+                    style={getGroupColorStyle(group.color)}
+                  />
+                  <span className={styles.groupMenuName}>{group.name}</span>
+                  {selected && <span className={styles.groupMenuCheck}>✓</span>}
+                </button>
+              );
+            })}
+            <div className={styles.groupMenuSeparator} />
+            <button
+              className={styles.groupMenuItem}
+              type="button"
+              role="menuitem"
+              onClick={() => handleCreateGroupForSession(groupMenu.session)}
+            >
+              <span className={styles.groupMenuIcon}>
+                <IconNewChat />
+              </span>
+              <span className={styles.groupMenuName}>
+                {t('sidebar.groupCreate')}
+              </span>
+            </button>
           </div>
-        </DialogShell>
-      )}
-      <div className={styles.topRow}>
-        {!collapsed && (
-          <span className={styles.brandLogo} aria-hidden="true">
-            <IconQwenLogo />
-          </span>
         )}
-        <button
-          className={styles.newChatButton}
-          type="button"
-          title={t('sidebar.newChat')}
-          aria-label={t('sidebar.newChat')}
-          disabled={newSessionDisabled}
-          onClick={handleNewSession}
-        >
-          <span className={styles.navIcon}>
-            <IconNewChat />
-          </span>
-          {!collapsed && <span>{t('sidebar.newChat')}</span>}
-        </button>
-      </div>
-
-      <div className={styles.body}>
-        {!collapsed && (
-          <div className={styles.sectionTitle}>{t('sidebar.project')}</div>
+        {deleteCandidate && (
+          <DialogShell
+            title={t('delete.title')}
+            size="sm"
+            onClose={() => setDeleteCandidate(null)}
+          >
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {t('sidebar.deleteConfirmDescription', {
+                  name: deleteCandidateLabel,
+                })}
+              </p>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={() => setDeleteCandidate(null)}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.dangerButton}
+                  type="button"
+                  onClick={confirmDeleteSession}
+                >
+                  {t('sidebar.delete')}
+                </button>
+              </div>
+            </div>
+          </DialogShell>
         )}
-        <div
-          className={styles.projectRow}
-          role="button"
-          tabIndex={0}
-          aria-expanded={projectExpanded}
-          onClick={() => {
-            if (!collapsed) {
-              setProjectExpanded((expanded) => !expanded);
-            }
-          }}
-          onKeyDown={(event) => {
-            if (collapsed) return;
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              setProjectExpanded((expanded) => !expanded);
-            }
-          }}
-          onMouseEnter={(event) =>
-            showTooltip(
-              event,
-              <div className={styles.tooltipContent}>
-                <div className={styles.tooltipTitle}>{projectName}</div>
-                <div className={styles.tooltipMeta}>
-                  {connection.workspaceCwd || projectName}
-                </div>
-              </div>,
-            )
-          }
-          onMouseLeave={hideTooltip}
-          onFocus={(event) =>
-            showTooltip(
-              event,
-              <div className={styles.tooltipContent}>
-                <div className={styles.tooltipTitle}>{projectName}</div>
-                <div className={styles.tooltipMeta}>
-                  {connection.workspaceCwd || projectName}
-                </div>
-              </div>,
-            )
-          }
-          onBlur={hideTooltip}
-        >
-          <span className={`${styles.navIcon} ${styles.projectFolderIcon}`}>
-            <IconFolder expanded={projectExpanded} />
-          </span>
-          {!collapsed && (
-            <>
-              <span className={styles.projectName}>{projectName}</span>
-              <button
-                className={styles.projectIconButton}
-                type="button"
-                aria-label={t('sidebar.search')}
-                onKeyDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setSearchOpen((open) => {
-                    if (open) {
-                      setSearchQuery('');
-                    }
-                    return !open;
-                  });
-                  setProjectExpanded(true);
-                }}
-              >
-                <IconSearch />
-              </button>
-              <button
-                className={styles.projectIconButton}
-                type="button"
-                aria-label={
-                  projectExpanded
-                    ? t('sidebar.collapseProject')
-                    : t('sidebar.expandProject')
-                }
-                onKeyDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setProjectExpanded((expanded) => !expanded);
-                }}
-              >
-                <IconChevron expanded={projectExpanded} />
-              </button>
-            </>
-          )}
-        </div>
-        {searchOpen && !collapsed && projectExpanded && (
-          <input
-            className={styles.searchInput}
-            value={searchQuery}
-            placeholder={t('sidebar.searchPlaceholder')}
-            aria-label={t('sidebar.search')}
-            autoFocus
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                setSearchQuery('');
-                setSearchOpen(false);
-              }
+        {workspaceRenameCandidate && (
+          <WorkspaceRenameDialog
+            key={workspaceRenameCandidate.id}
+            workspace={workspaceRenameCandidate}
+            busy={workspaceRenameSubmitting}
+            onSubmit={(displayName) => void confirmWorkspaceRename(displayName)}
+            onClose={() => {
+              if (!workspaceRenameSubmitting) setWorkspaceRenameCandidate(null);
             }}
           />
         )}
-        <div className={styles.sessionList}>
-          {body}
-          {archivedSection}
+        <WorkspaceRemovalDialog
+          removal={workspaceRemoval}
+          currentSessionInCandidate={
+            Boolean(connection.sessionId) &&
+            connection.workspaceCwd === workspaceRemoval.candidate?.cwd
+          }
+        />
+        {groupEditor && (
+          <DialogShell
+            title={groupEditorTitle}
+            size="sm"
+            onClose={closeGroupEditor}
+          >
+            <form
+              className="flex flex-col gap-6"
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveGroupEditor();
+              }}
+            >
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="session-group-name">
+                    {t('sidebar.groupNamePrompt')}
+                  </FieldLabel>
+                  <Input
+                    id="session-group-name"
+                    value={groupName}
+                    autoFocus
+                    maxLength={64}
+                    onChange={(event) => setGroupName(event.target.value)}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="session-group-color">
+                    {t('sidebar.groupColor')}
+                  </FieldLabel>
+                  <Select
+                    value={
+                      customGroupColor ? CUSTOM_GROUP_COLOR_OPTION : groupColor
+                    }
+                    onValueChange={(value) => {
+                      setGroupColor(
+                        value === CUSTOM_GROUP_COLOR_OPTION
+                          ? lastValidCustomGroupColor
+                          : (value as DaemonSessionGroupPresetColor),
+                      );
+                    }}
+                  >
+                    <SelectTrigger id="session-group-color" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {groupColorChoices.map((color) => (
+                          <SelectItem key={color} value={color}>
+                            {t(`sidebar.groupColor.${color}`)}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value={CUSTOM_GROUP_COLOR_OPTION}>
+                          {t('sidebar.groupColor.custom')}
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                {customGroupColor && (
+                  <Field>
+                    <FieldLabel htmlFor="session-group-hex-color">
+                      {t('sidebar.groupColor.hex')}
+                    </FieldLabel>
+                    <div className={styles.groupCustomColorRow}>
+                      <Input
+                        className={styles.groupColorPicker}
+                        type="color"
+                        value={lastValidCustomGroupColor}
+                        aria-label={t('sidebar.groupColor.picker')}
+                        onChange={(event) => {
+                          const value =
+                            event.target.value.toLowerCase() as DaemonSessionGroupHexColor;
+                          setLastValidCustomGroupColor(value);
+                          setGroupColor(value);
+                        }}
+                      />
+                      <Input
+                        id="session-group-hex-color"
+                        value={groupColor}
+                        maxLength={7}
+                        spellCheck={false}
+                        aria-invalid={normalizedGroupColor === undefined}
+                        onChange={(event) => {
+                          const raw = event.target.value;
+                          const trimmed = raw.trim();
+                          const value = (
+                            trimmed && !trimmed.startsWith('#')
+                              ? `#${trimmed}`
+                              : raw
+                          ) as DaemonSessionGroupColor;
+                          setGroupColor(value);
+                          const normalized = normalizeHexColorInput(value);
+                          if (normalized) {
+                            setLastValidCustomGroupColor(normalized);
+                          }
+                        }}
+                      />
+                    </div>
+                    {normalizedGroupColor === undefined && (
+                      <span className={styles.groupColorError} role="alert">
+                        {t('sidebar.groupColor.invalid')}
+                      </span>
+                    )}
+                  </Field>
+                )}
+              </FieldGroup>
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={groupBusy}
+                  onClick={closeGroupEditor}
+                >
+                  {t('common.cancel')}
+                </Button>
+                <Button type="submit" disabled={!canSaveGroup}>
+                  {t('common.save')}
+                </Button>
+              </div>
+            </form>
+          </DialogShell>
+        )}
+        {deleteGroupCandidate && (
+          <DialogShell
+            title={t('sidebar.groupDelete')}
+            size="sm"
+            onClose={() => {
+              if (!groupBusy) setDeleteGroupCandidate(null);
+            }}
+          >
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {t('sidebar.groupDeleteConfirm', {
+                  name: deleteGroupCandidateLabel,
+                })}
+              </p>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={groupBusy}
+                  onClick={() => setDeleteGroupCandidate(null)}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.dangerButton}
+                  type="button"
+                  disabled={groupBusy}
+                  onClick={confirmDeleteGroup}
+                >
+                  {t('sidebar.groupDelete')}
+                </button>
+              </div>
+            </div>
+          </DialogShell>
+        )}
+        {shouldRenderBrand && (
+          <div className={styles.topRow}>
+            {branding?.render ? (
+              branding.render()
+            ) : (
+              <>
+                <span className={styles.brandLogo} aria-hidden="true">
+                  <IconQwenLogo />
+                </span>
+                {!collapsed && (
+                  <span className={styles.brandName}>Qwen Code</span>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        {primaryNavItems.has('newTask') && (
+          <div
+            className={cx(
+              styles.newTaskNav,
+              bodyScrolled && styles.newTaskNavScrolled,
+            )}
+          >
+            <button
+              className={styles.newChatButton}
+              type="button"
+              title={t('sidebar.newTask')}
+              aria-label={t('sidebar.newTask')}
+              disabled={newSessionDisabled}
+              onClick={() => handleNewSession()}
+            >
+              <span className={styles.navIcon}>
+                <SquarePenIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.newTask')}</span>}
+            </button>
+          </div>
+        )}
+        <div
+          className={styles.body}
+          onScroll={(event) =>
+            setBodyScrolled(event.currentTarget.scrollTop > 0)
+          }
+        >
+          {hasScrollingPrimaryNav && (
+            <div className={styles.primaryNav}>
+              {projectFeaturesEnabled && primaryNavItems.has('plugins') && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('sidebar.plugins')}
+                  aria-label={t('sidebar.plugins')}
+                  onClick={onOpenPlugins}
+                >
+                  <span className={styles.navIcon}>
+                    <BlocksIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('sidebar.plugins')}</span>}
+                </button>
+              )}
+              {projectFeaturesEnabled && primaryNavItems.has('channels') && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('sidebar.channels')}
+                  aria-label={t('sidebar.channels')}
+                  onClick={onOpenChannels}
+                >
+                  <span className={styles.navIcon}>
+                    <RadioTowerIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('sidebar.channels')}</span>}
+                </button>
+              )}
+              {projectFeaturesEnabled &&
+                primaryNavItems.has('scheduledTasks') && (
+                  <button
+                    className={styles.pluginButton}
+                    type="button"
+                    title={t('sidebar.scheduledTasks')}
+                    aria-label={t('sidebar.scheduledTasks')}
+                    onClick={onOpenScheduledTasks}
+                  >
+                    <span className={styles.navIcon}>
+                      <CalendarClockIcon size={16} strokeWidth={1.2} />
+                    </span>
+                    {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
+                  </button>
+                )}
+              {projectFeaturesEnabled &&
+                primaryNavItems.has('workflows') &&
+                workflowsEnabled && (
+                  <button
+                    className={styles.pluginButton}
+                    type="button"
+                    title={t('sidebar.workflows')}
+                    aria-label={t('sidebar.workflows')}
+                    onClick={onOpenWorkflows}
+                  >
+                    <span className={styles.navIcon}>
+                      <WorkflowIcon size={16} strokeWidth={1.2} />
+                    </span>
+                    {!collapsed && <span>{t('sidebar.workflows')}</span>}
+                  </button>
+                )}
+              {projectFeaturesEnabled && primaryNavItems.has('goals') && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('sidebar.goals')}
+                  aria-label={t('sidebar.goals')}
+                  onClick={onOpenGoals}
+                >
+                  <span className={styles.navIcon}>
+                    <TargetIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('sidebar.goals')}</span>}
+                </button>
+              )}
+              {primaryNavOptions?.render?.()}
+            </div>
+          )}
+          {onLoadStandaloneSession && onStandaloneNotice && (
+            <StandaloneRecents
+              collapsed={collapsed}
+              onExpand={() => onCollapsedChange(false)}
+              currentSessionId={connection.sessionId}
+              onLoadSession={onLoadStandaloneSession}
+              onRenameSession={(sessionId, displayName) =>
+                onSessionRenameConfirmed?.(undefined, sessionId, displayName)
+              }
+              onError={onError}
+              onNotice={onStandaloneNotice}
+            />
+          )}
+          {/* Workspace navigation is daemon-scoped rather than a control on
+              the active session, so it stays available in a projectless chat
+              instead of stranding the user with no way back to a workspace.
+              The affordances inside it that open a project panel or dialog
+              stay gated on projectFeaturesEnabled below. */}
+          <SidebarSessionSurface
+            collapsed={collapsed}
+            label={t('sidebar.project')}
+            status={collapsedSessionStatus}
+            statusLabel={collapsedSessionStatusLabel}
+            width={sidebarWidth}
+            open={collapsedSessionsOpen}
+            onOpenChange={setCollapsedSessionsOpen}
+            isCloseBlocked={isCollapsedCloseBlocked}
+          >
+            {showSessionSourceSwitch && sourceMetadataEnabled && (
+              <Tabs
+                className="px-2 pb-2"
+                value={sessionSource}
+                onValueChange={(value) =>
+                  setSessionSource(value as SidebarSessionSource)
+                }
+              >
+                <TabsList
+                  className="w-full"
+                  aria-label={t('sidebar.sessionSource')}
+                >
+                  <TabsTrigger value="default">
+                    <ListTodoIcon />
+                    {t('sidebar.sessionSource.tasks')}
+                  </TabsTrigger>
+                  <TabsTrigger value="channel">
+                    <MessageCircleIcon />
+                    {t('sidebar.sessionSource.channels')}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            )}
+            {selectedSessionSource !== 'channel' &&
+              pinnedSessions.length > 0 && (
+                <>
+                  <div className={styles.projectsHeader}>
+                    <button
+                      className={styles.projectsHeaderToggle}
+                      type="button"
+                      aria-expanded={pinnedExpanded}
+                      onClick={() => setPinnedExpanded((expanded) => !expanded)}
+                    >
+                      <span>{t('sidebar.pinnedSessions')}</span>
+                      <IconChevron expanded={pinnedExpanded} />
+                    </button>
+                  </div>
+                  {pinnedExpanded && (
+                    <div className={styles.pinnedSessionList}>
+                      {pinnedSessions.map((session) =>
+                        renderSessionRow(session),
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            {liveWorkspaces.map((ws) => (
+              <WorkspaceSection
+                key={ws.id}
+                workspace={ws}
+                renderHeader={(expanded) => (
+                  <>
+                    <RadioTowerIcon
+                      size={16}
+                      strokeWidth={1.2}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.liveWorkspaceLabel}>
+                      {t('sidebar.live')}
+                    </span>
+                    {expanded ? (
+                      <ChevronDownIcon
+                        size={15}
+                        strokeWidth={1.8}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <ChevronRightIcon
+                        size={15}
+                        strokeWidth={1.8}
+                        aria-hidden="true"
+                      />
+                    )}
+                  </>
+                )}
+                client={workspace.client}
+                reloadToken={workspaceSessionsReloadToken}
+                untrustedLabel={t('sidebar.workspaceUntrusted')}
+                readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                noSessionsLabel={t('sidebar.noSessions')}
+                loadErrorLabel={t('sidebar.loadFailed')}
+                organizationEnabled={false}
+                sessionCatalogRequestsEnabled={sessionCatalogRequestsEnabled}
+                sessionLiveStateEnabled={
+                  workspaceSessionLiveStateEnabled &&
+                  liveStateWorkspaceCwdSet.has(ws.cwd)
+                }
+                sourceType={sourceMetadataEnabled ? 'default' : undefined}
+                channelGroupingEnabled={false}
+                ungroupedLabel={t('sidebar.groupUngrouped')}
+                excludePinned={selectedSessionSource !== 'channel'}
+                mapSession={applyOptimisticPin}
+                limitSessions={editingSessionIdentity === null}
+                isPinnedSectionMember={isPinnedSectionMember}
+                autoExpandKey={
+                  autoExpandWorkspace?.id === ws.id
+                    ? autoExpandWorkspace.key
+                    : undefined
+                }
+                renderSession={(session, options) =>
+                  renderSessionRow(
+                    { ...session, workspaceCwd: ws.cwd },
+                    options,
+                  )
+                }
+                showSessionDetails={sessionActionItems.has('details')}
+              />
+            ))}
+            {!hideProjectHeader && (
+              <div className={styles.projectsHeader}>
+                <button
+                  className={styles.projectsHeaderToggle}
+                  type="button"
+                  aria-expanded={projectsExpanded}
+                  onClick={() => {
+                    const nextExpanded = !projectsExpanded;
+                    writeWorkspaceExpanded('projects', nextExpanded);
+                    setProjectsExpanded(nextExpanded);
+                  }}
+                >
+                  <span>{t('sidebar.project')}</span>
+                  {workspaceOverviewEnabled && projectWorkspaces.length > 1 && (
+                    <span
+                      className={styles.projectsHeaderCount}
+                      aria-label={t('sidebar.workspaceCount', {
+                        count: projectWorkspaces.length,
+                      })}
+                      title={t('sidebar.workspaceCount', {
+                        count: projectWorkspaces.length,
+                      })}
+                    >
+                      {projectWorkspaces.length}
+                    </span>
+                  )}
+                  <IconChevron expanded={projectsExpanded} />
+                </button>
+                <div className={styles.projectsHeaderActions}>
+                  <button
+                    className={styles.projectsHeaderAction}
+                    type="button"
+                    title={t('sidebar.search')}
+                    aria-label={t('sidebar.search')}
+                    onClick={() => {
+                      setSearchOpen((open) => {
+                        if (open) setSearchQuery('');
+                        return !open;
+                      });
+                      setProjectsExpanded(true);
+                    }}
+                  >
+                    <SearchIcon />
+                  </button>
+                  {projectFeaturesEnabled &&
+                    !lockedWorkspaceCwd &&
+                    onOpenAddWorkspace && (
+                      <button
+                        className={styles.projectsHeaderAction}
+                        type="button"
+                        title={t('sidebar.addWorkspace')}
+                        aria-label={t('sidebar.addWorkspace')}
+                        onClick={onOpenAddWorkspace}
+                      >
+                        <PlusIcon />
+                      </button>
+                    )}
+                </div>
+              </div>
+            )}
+            {searchOpen && !hideProjectHeader && (
+              <div className={styles.projectSearch}>
+                <SearchIcon aria-hidden="true" />
+                <Input
+                  value={searchQuery}
+                  placeholder={t('sidebar.searchPlaceholder')}
+                  aria-label={t('sidebar.search')}
+                  autoFocus
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      setSearchQuery('');
+                      setSearchOpen(false);
+                    }
+                  }}
+                />
+              </div>
+            )}
+            {projectsExpanded && (
+              <>
+                <div className={styles.workspacePicker}>
+                  <div className={styles.workspaceList}>
+                    {projectWorkspaces.map((ws) => (
+                      <Fragment key={ws.id}>
+                        <WorkspaceSection
+                          workspace={ws}
+                          renderHeader={
+                            lockedWorkspaceCwd && lockedWorkspaceOptions?.render
+                              ? (expanded) =>
+                                  lockedWorkspaceOptions.render?.(ws, {
+                                    expanded,
+                                  })
+                              : undefined
+                          }
+                          client={workspace.client}
+                          reloadToken={workspaceSessionsReloadToken}
+                          untrustedLabel={t('sidebar.workspaceUntrusted')}
+                          readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                          trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                          noSessionsLabel={t('sidebar.noSessions')}
+                          loadErrorLabel={t('sidebar.loadFailed')}
+                          organizationEnabled={organizationEnabled}
+                          sessionCatalogRequestsEnabled={
+                            sessionCatalogRequestsEnabled
+                          }
+                          sessionGroupCatalog={
+                            workspaceSessionLiveStateEnabled &&
+                            liveStateWorkspaceCwdSet.has(ws.cwd)
+                              ? liveStateGroupCatalogs.get(ws.cwd)
+                              : undefined
+                          }
+                          sessionLiveStateEnabled={
+                            workspaceSessionLiveStateEnabled &&
+                            liveStateWorkspaceCwdSet.has(ws.cwd)
+                          }
+                          sourceType={selectedSessionSource}
+                          channelGroupingEnabled={channelGroupingEnabled}
+                          ungroupedLabel={t('sidebar.groupUngrouped')}
+                          onRenameGroup={
+                            canOrganizeWorkspace(ws.cwd)
+                              ? handleRenameGroup
+                              : undefined
+                          }
+                          onDeleteGroup={
+                            canOrganizeWorkspace(ws.cwd)
+                              ? handleDeleteGroup
+                              : undefined
+                          }
+                          renameGroupLabel={t('sidebar.groupRename')}
+                          deleteGroupLabel={t('sidebar.groupDelete')}
+                          groupActionsDisabled={groupBusy}
+                          excludePinned={selectedSessionSource !== 'channel'}
+                          mapSession={applyOptimisticPin}
+                          limitSessions={editingSessionIdentity === null}
+                          isPinnedSectionMember={isPinnedSectionMember}
+                          onOpenGitDiff={
+                            projectFeaturesEnabled ? onOpenGitDiff : undefined
+                          }
+                          onOpenCommit={
+                            projectFeaturesEnabled ? onOpenCommit : undefined
+                          }
+                          searchQuery={searchQuery}
+                          expanded={ws.primary ? projectExpanded : undefined}
+                          autoExpandKey={
+                            autoExpandWorkspace?.id === ws.id
+                              ? autoExpandWorkspace?.key
+                              : undefined
+                          }
+                          onExpandedChange={
+                            ws.primary
+                              ? (expanded) => {
+                                  writeWorkspaceExpanded(
+                                    primaryWorkspaceExpansionId,
+                                    expanded,
+                                  );
+                                  setProjectExpanded(expanded);
+                                }
+                              : undefined
+                          }
+                          renderSessions={!ws.primary}
+                          renderSession={(session, renderOptions) =>
+                            renderSessionRow(
+                              {
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              },
+                              {
+                                ...renderOptions,
+                                // Pinned members also render in the
+                                // sidebar-level Pinned section; while that
+                                // section is expanded its row hosts the
+                                // rename form, so this duplicate row must
+                                // not mount a second autofocused input.
+                                // Channel mode has no Pinned section, so
+                                // the workspace row is the only copy and
+                                // must stay editable. The suppression also
+                                // requires the Pinned section to actually
+                                // carry the member: `pinnedSessions` merges
+                                // only the pinned catalog pages and the
+                                // primary sessions page, never this
+                                // workspace's own page, so before the
+                                // pinned page settles (or while it errors)
+                                // this row is the only copy and must host
+                                // the form itself.
+                                renameFormDisabled:
+                                  selectedSessionSource !== 'channel' &&
+                                  Boolean(session.isPinned) &&
+                                  pinnedExpanded &&
+                                  pinnedSessions.some(
+                                    (candidate) =>
+                                      getIdentityForSession(candidate) ===
+                                      getIdentityForSession(session),
+                                  ),
+                              },
+                            )
+                          }
+                          showSessionDetails={sessionActionItems.has('details')}
+                          overviewEnabled={workspaceOverviewEnabled}
+                          overviewItems={workspaceOverviewItems}
+                          onOpenPathLocally={
+                            localOpenEnabled
+                              ? openWorkspaceFolderLocally
+                              : undefined
+                          }
+                          onOpenTerminalLocally={
+                            localTerminalEnabled
+                              ? openWorkspaceTerminalLocally
+                              : undefined
+                          }
+                          gitBranchWanted={
+                            Boolean(onNewWorktreeSession) && !lockedWorkspaceCwd
+                          }
+                          sessionStats={
+                            ws.primary
+                              ? (primarySessionStats ?? null)
+                              : undefined
+                          }
+                          // A locked sidebar with a custom header renders no
+                          // action area, so wire nothing: the section then
+                          // skips the git poll that only feeds these actions.
+                          headerActions={
+                            lockedWorkspaceCwd && lockedWorkspaceOptions?.render
+                              ? undefined
+                              : (visible, { overview, gitBranch }) => {
+                                  const canRemove =
+                                    !lockedWorkspaceCwd &&
+                                    workspaceRemovalEnabled &&
+                                    !ws.primary &&
+                                    ws.removable === true;
+                                  if (!ws.trusted && !canRemove) return null;
+                                  const wsCwd = ws.cwd;
+                                  const realPath = isAbsolutePath(ws.cwd);
+                                  // A display name persists only for registration-backed
+                                  // rows; the daemon's bound (primary) workspace has no
+                                  // registration id, so a rename there would live in
+                                  // memory until the next restart. Trust is not required:
+                                  // the name is registry metadata, not runtime access.
+                                  const canRename =
+                                    !lockedWorkspaceCwd &&
+                                    workspaceRenameEnabled &&
+                                    realPath &&
+                                    !ws.primary;
+                                  // Management pages read the connection's bound
+                                  // workspace, so only the primary row can open
+                                  // its own view today (#10399, layer B1).
+                                  const canManage =
+                                    projectFeaturesEnabled &&
+                                    ws.primary &&
+                                    ws.trusted &&
+                                    Boolean(onOpenWorkspaceManagement);
+                                  const menuActions: WorkspaceMenuActions = {
+                                    ...(canRename
+                                      ? {
+                                          rename: () =>
+                                            requestWorkspaceRename(ws),
+                                        }
+                                      : {}),
+                                    ...(realPath
+                                      ? {
+                                          copyPath: () => copyWorkspacePath(ws),
+                                        }
+                                      : {}),
+                                    ...(localOpenEnabled &&
+                                    ws.trusted &&
+                                    realPath
+                                      ? {
+                                          openFolder: () => {
+                                            void openWorkspaceFolderLocally(
+                                              ws.cwd,
+                                            ).catch(() => undefined);
+                                          },
+                                        }
+                                      : {}),
+                                    ...(localTerminalEnabled &&
+                                    ws.trusted &&
+                                    realPath
+                                      ? {
+                                          openTerminal: () => {
+                                            void openWorkspaceTerminalLocally(
+                                              ws.cwd,
+                                            ).catch(() => undefined);
+                                          },
+                                        }
+                                      : {}),
+                                    ...(ws.trusted
+                                      ? {
+                                          newSession: () =>
+                                            handleNewSession(wsCwd),
+                                        }
+                                      : {}),
+                                    // A worktree needs a git repository; without a
+                                    // branch the composer never shows the armed
+                                    // intent and the daemon rejects the session.
+                                    ...(ws.trusted &&
+                                    onNewWorktreeSession &&
+                                    gitBranch
+                                      ? {
+                                          newWorktreeSession: () =>
+                                            handleNewWorktreeSession(wsCwd),
+                                        }
+                                      : {}),
+                                    ...(canManage
+                                      ? {
+                                          openManagement: (
+                                            target: WorkspaceManagementTarget,
+                                          ) =>
+                                            onOpenWorkspaceManagement?.(
+                                              target,
+                                              ws.cwd,
+                                            ),
+                                        }
+                                      : {}),
+                                    ...(ws.trusted && realPath
+                                      ? {
+                                          reload: () =>
+                                            reloadWorkspaceRuntime(ws),
+                                        }
+                                      : {}),
+                                    ...(canRemove
+                                      ? {
+                                          remove: () =>
+                                            workspaceRemoval.request(ws),
+                                        }
+                                      : {}),
+                                  };
+                                  // The section caps the folder name so the
+                                  // git chip never slides under this overlay;
+                                  // the count drives the cap's width. The
+                                  // menu trigger is absent under a lock.
+                                  const headerActionCount =
+                                    (ws.trusted
+                                      ? 1 + Number(canOrganizeWorkspace(ws.cwd))
+                                      : 0) + (lockedWorkspaceCwd ? 0 : 1);
+                                  return (
+                                    <div
+                                      className={styles.workspaceHeaderActions}
+                                      data-workspace-action-count={
+                                        headerActionCount
+                                      }
+                                      style={{
+                                        visibility:
+                                          visible ||
+                                          openWorkspaceMenuId === ws.id
+                                            ? 'visible'
+                                            : 'hidden',
+                                      }}
+                                    >
+                                      {ws.trusted && (
+                                        <>
+                                          {canOrganizeWorkspace(ws.cwd) && (
+                                            <button
+                                              className={
+                                                styles.workspaceHeaderAction
+                                              }
+                                              type="button"
+                                              title={t('sidebar.groupCreate')}
+                                              aria-label={t(
+                                                'sidebar.groupCreate',
+                                              )}
+                                              onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                if (ws.primary) {
+                                                  handleCreateGroup();
+                                                } else {
+                                                  handleCreateWorkspaceGroup(
+                                                    ws.cwd,
+                                                  );
+                                                }
+                                              }}
+                                            >
+                                              <PlusIcon
+                                                size={16}
+                                                strokeWidth={1.2}
+                                              />
+                                            </button>
+                                          )}
+                                          <button
+                                            className={
+                                              styles.workspaceHeaderAction
+                                            }
+                                            type="button"
+                                            title={t('sidebar.newTask')}
+                                            aria-label={t('sidebar.newTask')}
+                                            onClick={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              handleNewSession(wsCwd);
+                                            }}
+                                          >
+                                            <SquarePenIcon
+                                              size={16}
+                                              strokeWidth={1.2}
+                                            />
+                                          </button>
+                                        </>
+                                      )}
+                                      {/* A locked (embedded) sidebar keeps its
+                                    action area to the session controls the
+                                    host already expects. */}
+                                      {!lockedWorkspaceCwd && (
+                                        <WorkspaceMenu
+                                          workspace={ws}
+                                          actions={menuActions}
+                                          overview={overview}
+                                          disabled={
+                                            (workspaceRemoval.submitting &&
+                                              workspaceRemoval.candidate?.id ===
+                                                ws.id) ||
+                                            (workspaceRenameSubmitting &&
+                                              workspaceRenameCandidate?.id ===
+                                                ws.id)
+                                          }
+                                          triggerClassName={
+                                            styles.workspaceHeaderAction
+                                          }
+                                          contentStyle={
+                                            SESSION_MENU_PORTAL_STYLE
+                                          }
+                                          onOpenChange={(open) => {
+                                            handleSessionMenuOpenChange(open);
+                                            setOpenWorkspaceMenuId((current) =>
+                                              open
+                                                ? ws.id
+                                                : current === ws.id
+                                                  ? null
+                                                  : current,
+                                            );
+                                          }}
+                                          onPointerDownOutside={
+                                            handleSessionMenuPointerDownOutside
+                                          }
+                                          onCloseAutoFocus={(event) => {
+                                            // Radix restores focus to the
+                                            // trigger, which lives inside the
+                                            // details popover's focus-open
+                                            // anchor — without suppression the
+                                            // popover reopens 300 ms after
+                                            // every menu close and never
+                                            // closes.
+                                            event.preventDefault();
+                                          }}
+                                        />
+                                      )}
+                                    </div>
+                                  );
+                                }
+                          }
+                        />
+                        {ws.primary &&
+                        (projectExpanded || searchQuery.trim()) ? (
+                          <div className={styles.workspaceSessionBody}>
+                            {body}
+                          </div>
+                        ) : null}
+                      </Fragment>
+                    ))}
+                    {projectFeaturesEnabled &&
+                      onOpenWorkspacesOverview &&
+                      !lockedWorkspaceCwd && (
+                        <button
+                          className={styles.manageWorkspacesRow}
+                          type="button"
+                          data-testid="manage-workspaces"
+                          onClick={onOpenWorkspacesOverview}
+                        >
+                          <FolderKanbanIcon aria-hidden="true" />
+                          <span>{t('sidebar.manageWorkspaces')}</span>
+                        </button>
+                      )}
+                  </div>
+                </div>
+              </>
+            )}
+            {archivedSection}
+          </SidebarSessionSurface>
         </div>
-      </div>
 
-      <div className={styles.footer}>
-        <button
-          className={styles.footerButton}
-          type="button"
-          title={t('sidebar.settings')}
-          aria-label={t('sidebar.settings')}
-          onClick={onOpenSettings}
-        >
-          <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
-            <IconSettings />
-          </span>
-          {!collapsed && <span>{t('sidebar.settings')}</span>}
-        </button>
-        {!collapsed && versionLabel && (
-          <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
-            {versionLabel}
-          </span>
-        )}
-        <button
-          className={styles.collapseButton}
-          type="button"
-          title={t('sidebar.scheduledTasks')}
-          aria-label={t('sidebar.scheduledTasks')}
-          onClick={onOpenScheduledTasks}
-        >
-          <IconSchedule />
-        </button>
-        {canOpenSessionsOverview && (
-          <button
-            className={styles.collapseButton}
-            type="button"
-            title={t('sidebar.sessionsOverview')}
-            aria-label={t('sidebar.sessionsOverview')}
-            onClick={onOpenSessions}
+        {(footer !== false || mobileOpen) && (
+          <div
+            className={cx(
+              styles.footer,
+              footerCompact && styles.footerCompact,
+              footerTight && styles.footerTight,
+            )}
           >
-            <IconGrid />
-          </button>
+            <div className={styles.footerPrimary}>
+              {footer && typeof footer === 'object' && footer.render?.()}
+              {projectFeaturesEnabled && footerItems.has('settings') && (
+                <button
+                  className={styles.footerButton}
+                  type="button"
+                  title={t('sidebar.settings')}
+                  aria-label={t('sidebar.settings')}
+                  onClick={onOpenSettings}
+                >
+                  <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+                    <SettingsIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && !footerCompact && (
+                    <span className={styles.footerButtonLabel}>
+                      {t('sidebar.settings')}
+                    </span>
+                  )}
+                </button>
+              )}
+              {!collapsed &&
+                !footerTight &&
+                versionLabel &&
+                footerItems.has('version') && (
+                  <span
+                    className={styles.version}
+                    title={`Qwen Code ${versionLabel}`}
+                  >
+                    {versionLabel}
+                  </span>
+                )}
+            </div>
+            <div className={styles.footerActions}>
+              {footerItems.has('theme') && (
+                <button
+                  className={styles.collapseButton}
+                  type="button"
+                  title={
+                    theme === WebShellThemeId.Dark
+                      ? t('sidebar.themeLight')
+                      : t('sidebar.themeDark')
+                  }
+                  aria-label={
+                    theme === WebShellThemeId.Dark
+                      ? t('sidebar.themeLight')
+                      : t('sidebar.themeDark')
+                  }
+                  onClick={() =>
+                    onThemeChange(
+                      theme === WebShellThemeId.Dark
+                        ? WebShellThemeId.Light
+                        : WebShellThemeId.Dark,
+                    )
+                  }
+                >
+                  {theme === WebShellThemeId.Dark ? (
+                    <SunIcon size={16} strokeWidth={1.2} />
+                  ) : (
+                    <MoonIcon size={16} strokeWidth={1.2} />
+                  )}
+                </button>
+              )}
+              {projectFeaturesEnabled &&
+                canOpenSessionsOverview &&
+                footerItems.has('sessionsOverview') && (
+                  <button
+                    className={styles.collapseButton}
+                    type="button"
+                    title={t('sidebar.sessionsOverview')}
+                    aria-label={t('sidebar.sessionsOverview')}
+                    onClick={onOpenSessions}
+                  >
+                    <LayoutGridIcon size={16} strokeWidth={1.2} />
+                  </button>
+                )}
+              {projectFeaturesEnabled &&
+                onOpenWorkspacesOverview &&
+                !lockedWorkspaceCwd &&
+                footerItems.has('workspacesOverview') && (
+                  <button
+                    className={styles.collapseButton}
+                    type="button"
+                    data-testid="footer-workspaces-overview"
+                    title={t('sidebar.manageWorkspaces')}
+                    aria-label={t('sidebar.manageWorkspaces')}
+                    onClick={onOpenWorkspacesOverview}
+                  >
+                    <FolderKanbanIcon size={16} strokeWidth={1.2} />
+                  </button>
+                )}
+              {projectFeaturesEnabled &&
+                canOpenSplitView &&
+                footerItems.has('splitView') && (
+                  <button
+                    className={styles.collapseButton}
+                    type="button"
+                    title={t('sidebar.splitView')}
+                    aria-label={t('sidebar.splitView')}
+                    onClick={onOpenSplitView}
+                  >
+                    <Columns2Icon size={16} strokeWidth={1.2} />
+                  </button>
+                )}
+              {footerItems.has('daemonStatus') && (
+                <button
+                  className={styles.collapseButton}
+                  type="button"
+                  title={t('sidebar.daemonStatus')}
+                  aria-label={t('sidebar.daemonStatus')}
+                  onClick={onOpenDaemonStatus}
+                >
+                  <ActivityIcon size={16} strokeWidth={1.2} />
+                </button>
+              )}
+              {(mobileOpen || footerItems.has('collapse')) && (
+                <button
+                  className={styles.collapseButton}
+                  type="button"
+                  title={
+                    mobileOpen || !collapsed
+                      ? t('sidebar.collapse')
+                      : t('sidebar.expand')
+                  }
+                  aria-label={
+                    mobileOpen || !collapsed
+                      ? t('sidebar.collapse')
+                      : t('sidebar.expand')
+                  }
+                  onClick={() =>
+                    mobileOpen
+                      ? onMobileClose?.()
+                      : onCollapsedChange(!collapsed)
+                  }
+                >
+                  {collapsed && !mobileOpen ? (
+                    <PanelLeftOpenIcon size={16} strokeWidth={1.2} />
+                  ) : (
+                    <PanelLeftCloseIcon size={16} strokeWidth={1.2} />
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
         )}
-        {canOpenSplitView && (
-          <button
-            className={styles.collapseButton}
-            type="button"
-            title={t('sidebar.splitView')}
-            aria-label={t('sidebar.splitView')}
-            onClick={onOpenSplitView}
-          >
-            <IconColumns />
-          </button>
-        )}
-        <button
-          className={styles.collapseButton}
-          type="button"
-          title={t('sidebar.daemonStatus')}
-          aria-label={t('sidebar.daemonStatus')}
-          onClick={onOpenDaemonStatus}
-        >
-          <IconPulse />
-        </button>
-        {!mobileOpen && (
-          <button
-            className={styles.collapseButton}
-            type="button"
-            title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-            aria-label={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-            onClick={() => onCollapsedChange(!collapsed)}
-          >
-            <IconCollapse collapsed={collapsed} />
-          </button>
-        )}
-      </div>
-      <div
-        className={styles.resizeHandle}
-        role="separator"
-        aria-orientation="vertical"
-        onPointerDown={handleResizePointerDown}
-      />
-    </aside>
+        <div
+          className={styles.resizeHandle}
+          role="separator"
+          aria-orientation="vertical"
+          onPointerDown={handleResizePointerDown}
+        />
+      </aside>
+    </>
   );
 }

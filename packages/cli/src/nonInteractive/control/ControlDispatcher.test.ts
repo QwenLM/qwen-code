@@ -887,8 +887,9 @@ describe('ControlDispatcher', () => {
       vi.mocked(mockSystemController.cleanup).mockImplementation(() => {});
 
       dispatcher.shutdown();
+      dispatcher.shutdown();
 
-      expect(mockSystemController.cleanup).toHaveBeenCalled();
+      expect(mockSystemController.cleanup).toHaveBeenCalledTimes(1);
     });
 
     it('should shutdown in debug mode without throwing', () => {

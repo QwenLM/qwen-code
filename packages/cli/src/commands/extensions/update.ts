@@ -30,6 +30,17 @@ const updateOutput = (info: ExtensionUpdateInfo) =>
     },
   );
 
+const updateWarningOutput = (info: ExtensionUpdateInfo) =>
+  (info.warnings ?? [])
+    .map((warning) =>
+      t('Extension "{{name}}" updated with warning {{code}}: {{error}}', {
+        name: info.name,
+        code: warning.code,
+        error: warning.error,
+      }),
+    )
+    .join('\n');
+
 export async function handleUpdate(args: UpdateArgs) {
   const extensionManager = await getExtensionManager();
   const extensions = extensionManager.getLoadedExtensions();
@@ -89,6 +100,8 @@ export async function handleUpdate(args: UpdateArgs) {
           t('Extension "{{name}}" is already up to date.', { name: args.name }),
         );
       }
+      const warnings = updateWarningOutput(updatedExtensionInfo);
+      if (warnings) writeStderrLine(warnings);
     } catch (error) {
       writeStderrLine(getErrorMessage(error));
     }
@@ -116,6 +129,11 @@ export async function handleUpdate(args: UpdateArgs) {
         return;
       }
       writeStdoutLine(updateInfos.map((info) => updateOutput(info)).join('\n'));
+      const warnings = updateInfos
+        .map((info) => updateWarningOutput(info))
+        .filter(Boolean)
+        .join('\n');
+      if (warnings) writeStderrLine(warnings);
     } catch (error) {
       writeStderrLine(getErrorMessage(error));
     }

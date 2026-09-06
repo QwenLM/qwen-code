@@ -4,26 +4,51 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Static, type DOMElement } from 'ink';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import {
+  isHistoryItemVisibleAfterRestore,
+  StreamingState,
+  ToolCallStatus,
+} from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
+import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
-import { buildThinkingFullTextMap } from '../utils/historyUtils.js';
-import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
+import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
+import {
+  ScrollableList,
+  SCROLL_TO_ITEM_END,
+  type ScrollableListRef,
+} from './shared/ScrollableList.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from '../selection/use-text-selection.js';
+import { ContentMouseController } from '../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
+import { measureElementPosition } from '../utils/measure-element-position.js';
 
-// Limit Gemini messages to a very high number of lines to mitigate performance
-// issues in the worst case if we somehow get an enormous response from Gemini.
+// Limit LLM messages to a very high number of lines to mitigate performance
+// issues in the worst case if we somehow get an enormous model response.
 // This threshold is arbitrary but should be high enough to never impact normal
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
@@ -82,16 +107,37 @@ function initialReplayCount(length: number): number {
 // stable completed items when unrelated UIState fields change during streaming.
 const VirtualHistoryItem = memo(HistoryItemDisplay);
 
+// Banner sentinel injected as the first virtual-scroll item so it scrolls with
+// content instead of being pinned at the top (saves vertical space on small
+// terminals).
+type VpBannerItem = { type: 'vp-banner'; id: number };
+type VpItem = HistoryItem | VpBannerItem;
+const VP_BANNER_ID = Number.MIN_SAFE_INTEGER;
+const VP_BANNER_ITEM: VpBannerItem = { type: 'vp-banner', id: VP_BANNER_ID };
+
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
-const virtualEstimatedItemHeight = () => 3;
-const virtualKeyExtractor = (item: HistoryItem) =>
-  item.id >= 0 ? `h-${item.id}` : `p-${-item.id - 1}`;
-const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
+// index 0 is always the banner sentinel (VP_BANNER_ITEM is prepended first).
+const virtualEstimatedItemHeight = (index: number) => (index === 0 ? 10 : 3);
+const virtualKeyExtractor = (item: VpItem) =>
+  item.type === 'vp-banner'
+    ? 'vp-banner'
+    : item.id >= 0
+      ? `h-${item.id}`
+      : `p-${-item.id - 1}`;
+const virtualIsStaticItem = (item: VpItem) =>
+  item.type === 'vp-banner' || item.id > 0;
 
-export const MainContent = () => {
+interface MainContentProps {
+  footerRef?: RefObject<DOMElement | null>;
+}
+
+export const MainContent = ({ footerRef }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const { allExpanded: fullDetail } = useThoughtExpanded();
+  const streamingState = uiState.streamingState;
+  const showScrollbar = uiState.showScrollbar ?? true;
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -103,7 +149,7 @@ export const MainContent = () => {
 
   // Filter out items whose display is suppressed (e.g. /history collapse).
   const visibleHistory = useMemo(
-    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
+    () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
     [uiState.history],
   );
 
@@ -114,6 +160,9 @@ export const MainContent = () => {
   // state still computes because it lives at the top of the component, but
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
+  const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
+  const selectionQueryRef = useRef<SelectionQuery | null>(null);
+  const { menu: contextMenuOpen } = useContextMenu();
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -133,7 +182,9 @@ export const MainContent = () => {
           return { item, sourceCopyIndexOffsets: offsets };
         }
 
-        if (item.type === 'user') {
+        // Steer items (sentToModel === false) are mid-turn injections, not turn
+        // boundaries; don't reset code-block copy numbering on them.
+        if (item.type === 'user' && item.sentToModel !== false) {
           runningOffsets = createEmptySourceCopyOffsets();
         }
 
@@ -163,7 +214,9 @@ export const MainContent = () => {
         return { item, sourceCopyIndexOffsets: offsets };
       }
 
-      if (item.type === 'user') {
+      // Steer items (sentToModel === false) are mid-turn injections, not turn
+      // boundaries; don't reset code-block copy numbering on them.
+      if (item.type === 'user' && item.sentToModel !== false) {
         runningOffsets = createEmptySourceCopyOffsets();
       }
 
@@ -241,14 +294,57 @@ export const MainContent = () => {
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   // Combine completed history + live pending items for the virtualized list.
+  // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
-  const allVirtualItems = useMemo(
-    (): HistoryItem[] => [
+  const allVirtualItems = useMemo((): VpItem[] => {
+    const combined: VpItem[] = [
+      VP_BANNER_ITEM,
       ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
-    ],
-    [visibleHistory, pendingHistoryItems],
-  );
+    ];
+    // Collapse duplicate tool_group rows (#9420): the same in-flight batch
+    // renders from both committed history and the live pending list between
+    // the onComplete commit and the scheduler clearing its display state.
+    // Continuation thought/content items can land between the copies, so
+    // match across the whole list — never by adjacency — on the scheduler-
+    // minted batchId stamped on both copies of one batch, and only when a
+    // live pending counterpart exists (it keeps updating, so it wins).
+    // callIds are NOT an identity (ids are re-minted after core-history
+    // compaction and providers can reuse wire ids), so unrelated batches
+    // whose callIds collide keep rendering. Groups without a batchId
+    // (adapters) are never collapsed; restored-history ids are unique per
+    // mount, so they can never match a live pending batch either.
+    const livePendingBatchIds = new Set<string>();
+    for (const item of pendingHistoryItems) {
+      if (item.type === 'tool_group' && item.batchId !== undefined) {
+        livePendingBatchIds.add(item.batchId);
+      }
+    }
+    if (livePendingBatchIds.size === 0) return combined;
+    const dropped = new Set<VpItem>();
+    const committedByBatchId = new Map<string, VpItem>();
+    // Same batch twice within the pending list: keep the latest copy only.
+    const keptPendingByBatchId = new Map<string, VpItem>();
+    for (const item of combined) {
+      if (
+        item.type !== 'tool_group' ||
+        item.batchId === undefined ||
+        !livePendingBatchIds.has(item.batchId)
+      ) {
+        continue;
+      }
+      if (item.id > 0) {
+        committedByBatchId.set(item.batchId, item);
+      } else {
+        const kept = keptPendingByBatchId.get(item.batchId);
+        if (kept) dropped.add(kept);
+        keptPendingByBatchId.set(item.batchId, item);
+      }
+    }
+    for (const item of committedByBatchId.values()) dropped.add(item);
+    if (dropped.size === 0) return combined;
+    return combined.filter((item) => !dropped.has(item));
+  }, [visibleHistory, pendingHistoryItems]);
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
@@ -276,12 +372,12 @@ export const MainContent = () => {
     return map;
   }, [historyItemsWithSourceCopyOffsets]);
 
-  const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(visibleHistory),
+  const thoughtHeadIdByItem = useMemo(
+    () => buildThoughtHeadIdMap(visibleHistory),
     [visibleHistory],
   );
-  const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
-  thinkingFullTextByItemRef.current = thinkingFullTextByItem;
+  const thoughtHeadIdByItemRef = useRef(thoughtHeadIdByItem);
+  thoughtHeadIdByItemRef.current = thoughtHeadIdByItem;
 
   const pendingSourceCopyOffsetsByIndex = useMemo(
     () =>
@@ -306,16 +402,26 @@ export const MainContent = () => {
     activePtyId: uiState.activePtyId,
     embeddedShellFocused: uiState.embeddedShellFocused,
     isEditorDialogOpen: uiState.isEditorDialogOpen,
-    constrainHeight: uiState.constrainHeight,
-    availableTerminalHeight,
   });
   pendingStateRef.current = {
     activePtyId: uiState.activePtyId,
     embeddedShellFocused: uiState.embeddedShellFocused,
     isEditorDialogOpen: uiState.isEditorDialogOpen,
-    constrainHeight: uiState.constrainHeight,
-    availableTerminalHeight,
   };
+  const pendingAvailableTerminalHeight =
+    pendingHistoryItems.length > 0 && uiState.constrainHeight
+      ? availableTerminalHeight
+      : undefined;
+  const hasPendingPlainTextConfirmation = pendingHistoryItems.some(
+    (item) =>
+      item.type === 'tool_group' &&
+      item.tools.some(
+        (tool) =>
+          tool.status === ToolCallStatus.Confirming &&
+          tool.confirmationDetails?.type === 'info' &&
+          tool.confirmationDetails.renderPromptAsPlainText === true,
+      ),
+  );
   const pendingSourceCopyOffsetsRef = useRef(pendingSourceCopyOffsetsByIndex);
   pendingSourceCopyOffsetsRef.current = pendingSourceCopyOffsetsByIndex;
 
@@ -325,7 +431,16 @@ export const MainContent = () => {
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
-    ({ item }: { item: HistoryItem }) => {
+    ({ item }: { item: VpItem }) => {
+      if (item.type === 'vp-banner') {
+        return (
+          <Box flexDirection="column">
+            <AppHeader version={version} />
+            <DebugModeNotification />
+            <Notifications />
+          </Box>
+        );
+      }
       const isPending = item.id < 0;
       const sourceCopyIndexOffsets = isPending
         ? pendingSourceCopyOffsetsRef.current[-item.id - 1]
@@ -336,9 +451,7 @@ export const MainContent = () => {
           <VirtualHistoryItem
             terminalWidth={terminalWidth}
             mainAreaWidth={mainAreaWidth}
-            availableTerminalHeight={
-              ps.constrainHeight ? ps.availableTerminalHeight : undefined
-            }
+            availableTerminalHeight={pendingAvailableTerminalHeight}
             item={{ ...item, id: 0 }}
             isPending={true}
             isFocused={!ps.isEditorDialogOpen}
@@ -346,6 +459,7 @@ export const MainContent = () => {
             embeddedShellFocused={ps.embeddedShellFocused}
             commands={uiState.slashCommands}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+            fullDetail={fullDetail}
           />
         );
       }
@@ -353,55 +467,95 @@ export const MainContent = () => {
         <VirtualHistoryItem
           terminalWidth={terminalWidth}
           mainAreaWidth={mainAreaWidth}
-          availableTerminalHeight={staticAreaMaxItemHeight}
-          availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+          availableTerminalHeight={
+            uiState.constrainHeight ? staticAreaMaxItemHeight : undefined
+          }
+          availableTerminalHeightLlm={
+            uiState.constrainHeight ? MAX_GEMINI_MESSAGE_LINES : undefined
+          }
           item={item}
           isPending={false}
           commands={uiState.slashCommands}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-          thinkingFullText={thinkingFullTextByItemRef.current.get(item)}
+          thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
+          fullDetail={fullDetail}
         />
       );
     },
     [
+      version,
       terminalWidth,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       uiState.slashCommands,
       sourceCopyOffsetsByHistoryItem,
+      fullDetail,
+      pendingAvailableTerminalHeight,
+      uiState.constrainHeight,
     ],
   );
-
-  const vpHeaderRef = useRef<DOMElement>(null);
-  const { height: vpHeaderHeight } = useBoxMetrics(vpHeaderRef);
 
   if (useVirtualScroll) {
     const scrollContainerHeight = Math.max(
       0,
-      (uiState.availableTerminalHeight ?? 0) - vpHeaderHeight,
+      uiState.availableTerminalHeight ?? 0,
     );
+    // While the context menu is open it owns the pointer and keyboard: the
+    // scroll list goes quiet so clicks/keys don't leak into the content under
+    // the menu. The selection controller only PAUSES (it must keep the current
+    // selection — the menu's Copy Selection offers it — and clearing it the
+    // instant the menu opens would hide what is about to be copied).
+    const viewportInteractive =
+      !uiState.dialogsVisible && contextMenuOpen === null;
 
     return (
-      <>
-        <Box ref={vpHeaderRef} flexDirection="column" flexShrink={0}>
-          <AppHeader version={version} />
-          <DebugModeNotification />
-          <Notifications />
-        </Box>
-        <OverflowProvider>
-          <ScrollableList
-            hasFocus={!uiState.dialogsVisible}
-            data={allVirtualItems}
-            renderItem={renderVirtualItem}
-            estimatedItemHeight={virtualEstimatedItemHeight}
-            keyExtractor={virtualKeyExtractor}
-            initialScrollIndex={SCROLL_TO_ITEM_END}
-            isStaticItem={virtualIsStaticItem}
-            containerHeight={scrollContainerHeight}
-          />
-          <ShowMoreLines constrainHeight={uiState.constrainHeight} />
-        </OverflowProvider>
-      </>
+      <OverflowProvider>
+        <ScrollableList
+          ref={scrollRef}
+          hasFocus={viewportInteractive}
+          data={allVirtualItems}
+          renderItem={renderVirtualItem}
+          estimatedItemHeight={virtualEstimatedItemHeight}
+          keyExtractor={virtualKeyExtractor}
+          initialScrollIndex={
+            allVirtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END
+          }
+          isStaticItem={virtualIsStaticItem}
+          containerHeight={scrollContainerHeight}
+          measureAtFullHeight={hasPendingPlainTextConfirmation}
+          showScrollbar={showScrollbar}
+        />
+        <TextSelectionController
+          isActive={!uiState.dialogsVisible}
+          eventsPaused={contextMenuOpen !== null}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getAdditionalSelectableRects={() =>
+            footerRef?.current
+              ? [measureElementPosition(footerRef.current)]
+              : []
+          }
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
+        />
+        <ContentMouseController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
+        />
+        <ShowMoreLines constrainHeight={uiState.constrainHeight} />
+      </OverflowProvider>
     );
   }
 
@@ -424,13 +578,14 @@ export const MainContent = () => {
                 terminalWidth={terminalWidth}
                 mainAreaWidth={mainAreaWidth}
                 availableTerminalHeight={staticAreaMaxItemHeight}
-                availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+                availableTerminalHeightLlm={MAX_GEMINI_MESSAGE_LINES}
                 key={h.id}
                 item={h}
                 isPending={false}
                 commands={uiState.slashCommands}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-                thinkingFullText={thinkingFullTextByItem.get(h)}
+                thoughtHeadId={thoughtHeadIdByItem.get(h)}
+                fullDetail={fullDetail}
               />
             ),
           ),
@@ -440,24 +595,65 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItemsWithSourceCopyOffsets.map(
-            ({ item, sourceCopyIndexOffsets }, i) => (
-              <HistoryItemDisplay
-                key={i}
-                availableTerminalHeight={
-                  uiState.constrainHeight ? availableTerminalHeight : undefined
-                }
-                terminalWidth={terminalWidth}
-                mainAreaWidth={mainAreaWidth}
-                item={{ ...item, id: 0 }}
-                isPending={true}
-                isFocused={!uiState.isEditorDialogOpen}
-                activeShellPtyId={uiState.activePtyId}
-                embeddedShellFocused={uiState.embeddedShellFocused}
-                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-              />
-            ),
-          )}
+          {/*
+            Hard Ink backstop on the live (non-<Static>) pending region. The
+            estimator's source-line slice (MarkdownDisplay's fitPendingSlice) is
+            the primary bound, but it is disabled whenever availableTerminalHeight
+            is undefined — which is exactly what happens when constrainHeight is
+            off (ctrl-s "show more lines"). A tall pending item (e.g. a long
+            vertical-fallback table) then renders past the viewport, Ink cannot
+            update incrementally and clears the terminal, redrawing from the top
+            on every repaint — the "scroll-to-top lock". Capping this region at
+            availableTerminalHeight (which already excludes the footer/controls)
+            keeps its measured height within the viewport so Ink never trips that
+            path. While constrained the estimator keeps content well under this,
+            so the clamp is a no-op there and only engages on residual overflow.
+            ShowMoreLines stays OUTSIDE the clamp; it only renders while
+            constrained (so the clamp is inert) and must not be clipped.
+
+            The clamp engages while constrained OR while the model is actively
+            streaming (Responding) — i.e. the case that trips the scroll-to-top
+            lock. It is deliberately dropped in "show more lines" mode
+            (constrainHeight off) once streaming has settled to a static
+            confirmation (WaitingForConfirmation): a tall edit/write_file diff
+            preview must render every row so the user can scroll the terminal
+            scrollback and review the full change before approving (#6809). A
+            static confirmation is a single render, so it does not trip Ink's
+            from-top full-redraw path the way a streaming table does.
+          */}
+          <Box
+            flexDirection="column"
+            flexShrink={0}
+            maxHeight={
+              uiState.constrainHeight ||
+              streamingState === StreamingState.Responding
+                ? availableTerminalHeight || undefined
+                : undefined
+            }
+            overflow="hidden"
+          >
+            {pendingHistoryItemsWithSourceCopyOffsets.map(
+              ({ item, sourceCopyIndexOffsets }, i) => (
+                <HistoryItemDisplay
+                  key={i}
+                  availableTerminalHeight={
+                    uiState.constrainHeight
+                      ? availableTerminalHeight
+                      : undefined
+                  }
+                  terminalWidth={terminalWidth}
+                  mainAreaWidth={mainAreaWidth}
+                  item={{ ...item, id: 0 }}
+                  isPending={true}
+                  isFocused={!uiState.isEditorDialogOpen}
+                  activeShellPtyId={uiState.activePtyId}
+                  embeddedShellFocused={uiState.embeddedShellFocused}
+                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                  fullDetail={fullDetail}
+                />
+              ),
+            )}
+          </Box>
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>

@@ -340,7 +340,7 @@ inputs. Document this as a deliberate guardrail in a one-line comment.
 | `packages/core/src/index.ts:360`                     | re-exports `*` from yaml-parser                                      | yes — same names                                                         |
 | `packages/core/src/subagents/subagent-manager.ts:15` | `parse`, `stringify`                                                 | yes                                                                      |
 | `packages/core/src/extension/claude-converter.ts:26` | `parse`, `stringify`                                                 | yes — round-trip is now safe for `mcpServers` + `hooks` (see Phase 3)    |
-| `packages/core/src/utils/rulesDiscovery.ts:20`       | `parse as parseYaml`                                                 | yes                                                                      |
+| `packages/core/src/config/rulesDiscovery.ts:20`      | `parse as parseYaml`                                                 | yes                                                                      |
 | `packages/core/src/skills/skill-manager.ts:13`       | `parse as parseYaml` (and `import * as yaml from 'yaml'` separately) | yes — and the duplicate `import * as yaml` can be removed in a follow-up |
 | `packages/core/src/skills/skill-load.ts:11`          | `parse as parseYaml`                                                 | yes                                                                      |
 

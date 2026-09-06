@@ -175,8 +175,8 @@ This is useful for production or high-security environments where you
 want defense-in-depth: even seemingly harmless commands are reviewed by
 the classifier before execution. The trade-off is added latency (~300ms
 per read-only shell call) and reliance on classifier availability — if
-the classifier API is unreachable, read-only shell commands will also be
-blocked (fail-closed).
+the classifier API is unreachable, read-only shell commands will also require
+manual approval.
 
 > [!note]
 >
@@ -187,18 +187,13 @@ blocked (fail-closed).
 
 ## Reading the decision
 
-When the classifier blocks an action, the tool call fails with one of
-the following error texts:
+When the classifier blocks an action, the tool call fails with:
 
 - **`Blocked by auto mode policy: <reason>`** —
   the classifier judged the action unsafe. The reason comes from Stage
   2 of the classifier.
-- **`Auto mode classifier unavailable; action blocked for safety`** —
-  the classifier API was unreachable, timed out, or returned an
-  un-parseable response. This is fail-closed behavior: when in doubt,
-  block.
 
-Both messages are followed by a trailing guidance line telling the agent
+This message is followed by a trailing guidance line telling the agent
 that the **denied action specifically** must not be completed through
 another tool, shell indirection, generated script, alias, symlink,
 config change, hook, command file, MCP configuration, encoded payload,
@@ -219,16 +214,24 @@ want non-English reasons, add a hint like
 
 Auto Mode protects you from getting stuck:
 
+- If the classifier API is unreachable, times out, exceeds its context window,
+  or returns an invalid response, the current action immediately falls back to
+  manual approval. The confirmation recommends Default Mode and offers
+  **Switch to Default Mode and allow once** alongside Allow once and Reject.
+  Switching affects only the current runtime session; it does not change your
+  saved settings.
+
 - After **3 consecutive policy blocks** the next tool call falls back to
   the standard manual-approval prompt. This catches the case where the
   agent keeps trying minor variants of a forbidden command.
-- After **2 consecutive unavailable** results (classifier API failures)
-  the next tool call also falls back. This avoids waiting on a broken
-  classifier.
+- After **2 consecutive unavailable** results (classifier API failures),
+  later calls skip the known-broken classifier and go directly to manual
+  approval. The first unavailable result already asks; the threshold avoids
+  repeatedly waiting for classifier retries.
 
-The session itself stays in Auto Mode — only the single fallback call
-goes through manual approval. The counters reset when you approve the
-fallback call or switch modes.
+The session stays in Auto Mode unless you explicitly select the switch option.
+Only the fallback call goes through manual approval. The counters reset when
+you approve the fallback call or switch modes.
 
 If you find yourself constantly hitting fallback, the most likely causes
 are an outage on the classifier API or hints that need tuning. Switch to
@@ -284,15 +287,21 @@ tightened over time.
 - **Not a substitute for `deny` rules.** The classifier is best-effort.
   For commands you're sure should never run, put them in
   `permissions.deny`.
-- **MCP tools default to conservative blocking.** Third-party MCP tools
-  (`mcp__*`) opt-in to argument forwarding via the
-  `toAutoClassifierInput` override. Tools that have not opted in expose
-  only their name to the classifier — most such calls are
-  conservatively blocked unless you've written an explicit `allow`
-  rule. This is fail-closed by design (credentials and voluminous
-  content do not leak into the classifier LLM). If you trust a
-  specific MCP tool, add `permissions.allow: ["mcp__server__tool"]` so
-  it bypasses the classifier entirely.
+- **MCP tools are judged on their arguments, not verified behaviour.**
+  Third-party MCP tools (`mcp__*`) are never on the fast-path allowlist;
+  every call from a server that is not marked `trust: true` goes to the
+  classifier with the server name, the tool name, the server's
+  self-reported annotations (`readOnlyHint` / `destructiveHint` /
+  `idempotentHint` / `openWorldHint`) and a bounded copy of the
+  arguments. The classifier is told the annotations are unverified. It
+  cannot see what the server actually does with the call, so a
+  misleading tool name plus benign arguments can still pass. If you
+  trust a specific MCP tool, add
+  `permissions.allow: ["mcp__server__tool"]` so it bypasses the
+  classifier entirely; if you want the classifier to see only the tool
+  name (for example when it runs against a different provider than the
+  main model), set `permissions.autoMode.mcp.forwardArguments: false`
+  — most MCP calls are then conservatively blocked.
 
 ## FAQ
 
@@ -309,7 +318,7 @@ projection exposes:
 
 - `read_file` and other read-only tools: not invoked (they're on the
   fast-path allowlist).
-- `edit` / `write_file`: file_path plus the first 80 characters of
+- `edit` / `write_file`: file_path plus a 300-character preview of
   old/new content. Full content is not forwarded.
 - `run_shell_command`: the full command (it has to — that's what the
   classifier judges).
@@ -323,13 +332,24 @@ projection exposes:
 Tool results (the actual content returned by tools) are stripped from
 the classifier transcript entirely.
 
-MCP tools (`mcp__*`) follow a stricter default: their parameters are
-not forwarded unless the MCP tool author explicitly opted in via the
-`toAutoClassifierInput` override. The classifier sees the tool name
-but no arguments, so most MCP calls will be conservatively blocked
-unless the user has written an explicit allow rule. This is fail-
-closed by design — third-party tools should not leak credentials or
-voluminous file content into the classifier LLM without intent.
+MCP tools (`mcp__*`): the server name, the tool name, the server's
+annotations and the call arguments are forwarded. Each string (value
+or key) is cut at 2,000 characters, names at 200, the whole payload
+shares a 16,000 character budget measured on the pretty-printed form
+the classifier receives, and nesting / entry counts are capped; every
+cut is marked in place (`…[truncated N chars]` or `[omitted: …]`) and
+flagged with `arguments_truncated: true` / `name_truncated: true` so
+the classifier never mistakes an omission for an absence. Historical
+actions in the transcript are capped at 4,000 characters each and
+40,000 in total (newest kept first; older ones keep only their tool
+name). The arguments are what the agent is about to
+send to that server — the classifier's data-exfiltration and
+external-write rules can only be applied to them, and they were
+already produced by the main model, so forwarding them to a classifier
+on the same model configuration discloses nothing new. If your
+classifier runs against a different provider, set
+`permissions.autoMode.mcp.forwardArguments: false` to restore the
+name-only projection (expect most MCP calls to be blocked).
 
 **Can I disable the first-time information message?**
 

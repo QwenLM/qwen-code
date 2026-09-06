@@ -10,6 +10,7 @@ import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
   MissingCliEntryError,
+  SessionRestoreTimeoutError,
   SERVE_ERROR_KINDS,
   mapDomainErrorToErrorKind,
 } from './status.js';
@@ -28,6 +29,7 @@ describe('SERVE_ERROR_KINDS', () => {
       'blocked_egress',
       'auth_env_error',
       'init_timeout',
+      'restore_timeout',
       'protocol_error',
       'missing_file',
       'parse_error',
@@ -95,6 +97,14 @@ describe('mapDomainErrorToErrorKind', () => {
     expect(mapDomainErrorToErrorKind(new BridgeTimeoutError('init', 100))).toBe(
       'init_timeout',
     );
+  });
+
+  it('classifies restore timeout before its BridgeTimeoutError parent', () => {
+    expect(
+      mapDomainErrorToErrorKind(
+        new SessionRestoreTimeoutError('session-1', 'load', 60_000),
+      ),
+    ).toBe('restore_timeout');
   });
 
   it('classifies SkillError(PARSE_ERROR / INVALID_CONFIG / INVALID_NAME) as parse_error', () => {

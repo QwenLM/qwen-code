@@ -24,6 +24,7 @@ export const terminalSetupCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
 
   action: async (): Promise<MessageActionReturn> => {
     try {

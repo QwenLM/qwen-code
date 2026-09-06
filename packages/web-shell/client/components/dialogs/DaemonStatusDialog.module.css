@@ -141,6 +141,93 @@
   color: var(--muted-foreground);
 }
 
+/* Chart cards render the title and its ⓘ help as siblings in a flex row (the
+   hint must stay out of the <h3> for a clean heading accessible name). The row
+   owns the bottom gap so the heading's own margin doesn't double it. */
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.cardHeader .cardTitle {
+  margin: 0;
+}
+
+/* Per-chart help affordance: an ⓘ button whose hover/focus reveals a plain
+   explanation. The card has no `overflow: hidden` and the ⓘ sits at the card's
+   top-left after the title, so the bubble opens downward into the card's own
+   area — never clipped, never pushing horizontal scroll. */
+.infoHint {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.infoHintButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  /* Reset the uppercase heading context so the glyph renders cleanly. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 13px;
+  line-height: 1;
+  cursor: help;
+}
+
+/* Focus/hover: a filled background (not a color shift alone) so keyboard focus
+   is unmistakable — WCAG 2.4.7. Mirrors the dialog's own header buttons
+   (DialogShell `.close` / `.iconButton`), which use --muted rather than an
+   outline; --muted is in scope under the DialogShell portal. */
+.infoHintButton:hover,
+.infoHintButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.infoHintTip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  /* Match the SvgLineChart data tooltip's surface; --popover/--card are absent
+     under the DialogShell body portal, so fall back to --background. */
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--popover, var(--card, var(--background)));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  /* Reset the heading's uppercase/tracking so the sentence reads normally. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--foreground);
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.infoHint:hover .infoHintTip,
+.infoHint:focus-within .infoHintTip {
+  opacity: 1;
+  visibility: visible;
+}
+
 .row {
   display: flex;
   align-items: baseline;

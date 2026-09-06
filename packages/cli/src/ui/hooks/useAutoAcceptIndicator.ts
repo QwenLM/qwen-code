@@ -14,11 +14,20 @@ import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 
-const AUTO_MODE_FIRST_TIME_MESSAGE =
+const AUTO_MODE_FIRST_TIME_MESSAGE_KEY = 'auto_mode.entry_notice';
+const AUTO_MODE_FIRST_TIME_MESSAGE_FALLBACK =
   'Auto mode enabled.\n' +
   '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
   '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
+
+const getAutoModeFirstTimeMessage = () => {
+  const message = t(AUTO_MODE_FIRST_TIME_MESSAGE_KEY);
+  return message === AUTO_MODE_FIRST_TIME_MESSAGE_KEY
+    ? AUTO_MODE_FIRST_TIME_MESSAGE_FALLBACK
+    : message;
+};
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;
@@ -72,7 +81,7 @@ export function useAutoAcceptIndicator({
       // Handle Shift+Tab to cycle through all modes
       // On Windows, Shift+Tab is indistinguishable from Tab (\t) in some terminals,
       // so we allow Tab to switch modes as well to support the shortcut.
-      const isShiftTab = key.shift && key.name === 'tab';
+      const isShiftTab = key.shift && key.name === 'tab' && !key.ctrl;
       const isWindowsTab =
         process.platform === 'win32' &&
         key.name === 'tab' &&
@@ -145,7 +154,7 @@ export function emitAutoModeEntryNotices(opts: {
   const acknowledged = settings?.merged.ui?.autoModeAcknowledged === true;
   if (!acknowledged) {
     addItem(
-      { type: MessageType.INFO, text: AUTO_MODE_FIRST_TIME_MESSAGE },
+      { type: MessageType.INFO, text: getAutoModeFirstTimeMessage() },
       now,
     );
     if (settings) {
@@ -165,6 +174,8 @@ export function emitAutoModeEntryNotices(opts: {
     stripped &&
     (stripped.persistent.length > 0 || stripped.session.length > 0)
   ) {
+    // Intentionally untranslated operational notice: rule text is copied from
+    // user/session allow-rule configuration and may contain command syntax.
     const lines = [
       'ℹ Auto mode temporarily disabled these allow rules',
       '   (they would bypass the classifier):',

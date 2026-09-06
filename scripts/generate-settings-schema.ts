@@ -128,6 +128,9 @@ function convertSettingToJsonSchema(
     case 'number':
       schema.type = 'number';
       break;
+    case 'integer':
+      schema.type = 'integer';
+      break;
     case 'array':
       schema.type = 'array';
       if (setting.items) {
@@ -186,10 +189,16 @@ function convertSettingToJsonSchema(
     }
   }
 
-  if (setting.type === 'number' && setting.minimum !== undefined) {
+  if (
+    (setting.type === 'number' || setting.type === 'integer') &&
+    setting.minimum !== undefined
+  ) {
     schema.minimum = setting.minimum;
   }
-  if (setting.type === 'number' && setting.maximum !== undefined) {
+  if (
+    (setting.type === 'number' || setting.type === 'integer') &&
+    setting.maximum !== undefined
+  ) {
     schema.maximum = setting.maximum;
   }
 

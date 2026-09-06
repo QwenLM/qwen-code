@@ -8,8 +8,11 @@ import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
   FileDiff,
+  FindingsResultDisplay,
+  McpAppResultDisplay,
   McpToolProgressData,
   PlanResultDisplay,
+  ReportedFinding,
   TaskListResultDisplay,
   TeamResultDisplay,
   TodoResultDisplay,
@@ -84,6 +87,18 @@ function compactString(
   }
 
   const marker = buildStringCompactionMarker(value, purpose);
+
+  // The marker is 60-80 characters and was appended whatever the limit was,
+  // so a caller-supplied limit below that got back more than it asked for --
+  // and for a limit under the input length, more characters than it passed
+  // in. `compactStringForRecording('x'.repeat(70), 60)` returned 79. When the
+  // marker cannot fit alongside any content there is nothing to announce, so
+  // hard-truncate instead of explaining the truncation at greater length than
+  // the truncated text.
+  if (marker.length >= limit) {
+    return copyString(value.slice(0, safeHeadEnd(value, Math.max(0, limit))));
+  }
+
   const contentBudget = Math.max(0, limit - marker.length);
   const headLength = Math.ceil(contentBudget * 0.6);
   const tailLength = contentBudget - headLength;
@@ -369,6 +384,95 @@ function compactTodoResultDisplay(
   };
 }
 
+function isFindingsResultDisplay(
+  resultDisplay: unknown,
+): resultDisplay is FindingsResultDisplay {
+  return (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'findings_list'
+  );
+}
+
+// Deterministic size estimate of one finding as retained: every string field
+// at its post-compaction length. The enum and boolean fields are bounded
+// constants, so a fixed per-entry allowance covers them and the JSON shape.
+function findingRetainedSize(finding: ReportedFinding): number {
+  return (
+    (finding.id?.length ?? 0) +
+    finding.severity.length +
+    (finding.confidence?.length ?? 0) +
+    (finding.source?.length ?? 0) +
+    finding.file.length +
+    String(finding.line ?? '').length +
+    finding.summary.length +
+    finding.shortSummary.length +
+    finding.failureScenario.length +
+    (finding.category?.length ?? 0) +
+    (finding.direction?.length ?? 0) +
+    (finding.baseline?.length ?? 0) +
+    (finding.outcome?.length ?? 0) +
+    (finding.outcomeNote?.length ?? 0) +
+    20
+  );
+}
+
+function compactFindingsResultDisplay(
+  display: FindingsResultDisplay,
+  purpose: CompactionPurpose,
+): FindingsResultDisplay {
+  const compacted: FindingsResultDisplay = {
+    ...display,
+    findings: display.findings.map((finding) => ({
+      ...finding,
+      summary: compactString(
+        finding.summary,
+        purpose,
+        MAX_RETAINED_AGENT_FIELD_CHARS,
+      ),
+      failureScenario: compactString(
+        finding.failureScenario,
+        purpose,
+        MAX_RETAINED_AGENT_FIELD_CHARS,
+      ),
+      ...(finding.outcomeNote !== undefined && {
+        outcomeNote: compactString(
+          finding.outcomeNote,
+          purpose,
+          MAX_RETAINED_AGENT_FIELD_CHARS,
+        ),
+      }),
+    })),
+  };
+
+  // Per-field caps alone leave a schema-maximal list (50 findings x the
+  // field maxima) at several hundred retained KB, bypassing the budget every
+  // other display type obeys. The list arrives sorted most-severe-first and
+  // compaction never reorders, so a prefix keeps the most severe entries;
+  // the evicted tail is counted, never dropped silently. (A single finding
+  // cannot outgrow the budget: the schema's field maxima bound one to a
+  // third of it.)
+  let total = 0;
+  let kept = 0;
+  for (const finding of compacted.findings) {
+    const size = findingRetainedSize(finding);
+    if (total + size > MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS) {
+      break;
+    }
+    total += size;
+    kept += 1;
+  }
+  if (kept === compacted.findings.length) {
+    return compacted;
+  }
+  return {
+    ...compacted,
+    findings: compacted.findings.slice(0, kept),
+    omittedFindings: compacted.findings.length - kept,
+  };
+}
+
 function isPlanResultDisplay(
   resultDisplay: unknown,
 ): resultDisplay is PlanResultDisplay {
@@ -462,6 +566,33 @@ function isTaskListResultDisplay(
   );
 }
 
+function isMcpAppResultDisplay(
+  resultDisplay: unknown,
+): resultDisplay is McpAppResultDisplay {
+  return (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'mcp_app'
+  );
+}
+
+function compactMcpAppResultDisplay(
+  display: McpAppResultDisplay,
+  purpose: CompactionPurpose,
+): McpAppResultDisplay {
+  return {
+    ...display,
+    html: '',
+    toolResult: {},
+    fallbackText: compactString(
+      display.fallbackText,
+      purpose,
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    ),
+  };
+}
+
 function compactTaskListResultDisplay(
   display: TaskListResultDisplay,
   purpose: CompactionPurpose,
@@ -514,6 +645,10 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
     return compactTodoResultDisplay(resultDisplay, purpose) as T;
   }
 
+  if (isFindingsResultDisplay(resultDisplay)) {
+    return compactFindingsResultDisplay(resultDisplay, purpose) as T;
+  }
+
   if (isPlanResultDisplay(resultDisplay)) {
     return compactPlanResultDisplay(resultDisplay, purpose) as T;
   }
@@ -528,6 +663,10 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
 
   if (isTaskListResultDisplay(resultDisplay)) {
     return compactTaskListResultDisplay(resultDisplay, purpose) as T;
+  }
+
+  if (isMcpAppResultDisplay(resultDisplay)) {
+    return compactMcpAppResultDisplay(resultDisplay, purpose) as T;
   }
 
   return resultDisplay;

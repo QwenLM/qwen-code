@@ -58,6 +58,11 @@ Managed Auto-Memory 是一套在 AI 会话过程中**自动**积累、整合和�
 >
 > - `QWEN_CODE_MEMORY_BASE_DIR`：替换全局基础目录
 > - `QWEN_CODE_MEMORY_LOCAL=1`：改用项目内路径 `.qwen/memory/`
+> - `QWEN_CODE_MEMORY_PROJECT_SCOPE=workspace`：按精确 workspace 目录分区项目记忆。`qwen serve` 未显式设置或值为空白时会注入 `workspace`；standalone CLI 仍默认按 Git 根目录共享。非空取值会做 trim / 小写归一，无法识别的值会告警一次并回退到 `git-root`。
+>   - 团队记忆（`getTeamAutoMemoryRoot`）仍按 Git 根目录分区：同一 checkout 内的嵌套 workspace 仍共享团队记忆——团队记忆本就应跨 workspace 共享，不随本开关改变。
+>   - 切换 scope 不做迁移：切到 `workspace` 后，此前写在 git-root key 下的项目记忆会“失联”（切回去则看不到 workspace key 下新写的内容）。
+>   - 目录 key 由 `sanitizeCwd` 生成（非字母数字字符替换为 `-`），仅在标点上不同的兄弟目录（如 `feature_1` 与 `feature-1`）会映射到同一记忆目录；`workspace` 分区下这类命名会共享记忆，命名时需避开。
+>   - 待处理任务上限（`MAX_PENDING = 16`）是**每个 lane** 的，N 个 workspace 即允许 16·N 个并发记忆任务，目前没有守护进程级总量上限。
 
 ### 关键文件说明
 
@@ -345,35 +350,58 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[resolveRelevantAutoMemoryPromptForQuery] --> B[scanAutoMemoryTopicDocuments\n扫描所有主题文件]
-    B --> C[filterExcludedAutoMemoryDocuments\n过滤本轮已写入的文件]
+    A[resolveRelevantAutoMemoryPromptForQuery] --> B[scanAllAutoMemoryTopicDocuments +\nscanAllUserAutoMemoryTopicDocuments\n扫描项目级与用户级全部主题文件]
+    B --> C[filterExcludedAutoMemoryDocuments\n合并作用域并过滤排除列表中的文件]
     C --> D{query 为空\n或 docs 为空\n或 limit <= 0?}
     D -- 是 --> E[返回空 prompt\nstrategy: none]
     D -- 否 --> F{是否配置了 Config?}
-    F -- 是 --> G[selectRelevantAutoMemoryDocumentsByModel\n发起 side query 请求模型选择]
-    G --> H{模型返回结果?}
-    H -- 有文档 --> I[strategy: model]
-    H -- 无文档 --> J[strategy: none\n仍然返回空]
-    G -- "失败/异常" --> K[回退到启发式选择]
-    F -- 否 --> K
-    K --> L[tokenize query\n提取 ≥3 字符的 token]
-    L --> M[scoreDocument 打分\n关键词匹配 +2 / 类型关键词 +1 / 有内容 +1]
-    M --> N[过滤 score=0 的文档\n按分数降序排列，取 Top 5]
-    N --> O{有得分文档?}
-    O -- 是 --> P[strategy: heuristic]
-    O -- 否 --> J
-    I --> Q[buildRelevantAutoMemoryPrompt\n构建 Relevant Memory 区块]
-    P --> Q
-    Q --> R[返回注入主系统提示的 prompt 片段]
+    F -- 是 --> G[selectModelCandidateDocuments\n词法候选 + recent reserve\n最多 200 篇且交错排列]
+    G --> H[selectRelevantAutoMemoryDocumentsByModel\n构建最多 25 KB manifest\n发起 side query 请求模型选择]
+    H --> I{模型返回结果?}
+    I -- 有文档 --> J[strategy: model]
+    I -- 无文档 --> K[strategy: none\n仍然返回空]
+    H -- "失败/异常" --> L[复用已计算的启发式排序]
+    F -- 否 --> M[tokenize query\nNFKC + 非 CJK 字母整串 + CJK bigram\n最多 64 个 token]
+    M --> N[scoreDocument 打分\ntitle +4 / description +3 / body +1\n词法命中后类型加成最多 +2]
+    N --> O[过滤 score=0 的文档\n按分数降序、mtime 降序、输入顺序排列\n取 Top 5]
+    L --> O
+    O --> P{有得分文档?}
+    P -- 是 --> Q[strategy: heuristic]
+    P -- 否 --> K
+    J --> R[buildRelevantAutoMemoryPrompt\n构建 Relevant Memory 区块]
+    Q --> R
+    R --> S[返回注入主系统提示的 prompt 片段]
 ```
+
+> **关于 200 上限：这是换了截断依据，不是抬高了天花板。** 旧路径按 scope 各自
+> 保留最近 200 篇，截断发生在看 query 之前；新路径先扫全量，再按词法相关性 +
+> recency reserve 选出最多 200 篇候选。因此效果分三档：总量 ≤200 时两者都不按
+> 数量丢弃（但新增了 25 KB manifest 上限，长 description 场景可能被截）；总量
+> 在 200–400 且单个 scope 不超 200 时，旧路径会把全部（最多 400 篇）送给
+> Selector，新路径最多 200 篇，且实测中 25 KB 的 manifest 预算会先于数量上限
+> 生效——150+150 篇的实测里旧路径送 300 行、新路径只送 94 行，**候选变少的幅度
+> 比数量上限暗示的更大**；只有单个 scope 超过 200 时，
+> 才是这次真正要解决的场景——旧的 recency 上限会让老而相关的文档永久不可见。
+> 详见 `docs/design/2026-08-09-bounded-memory-recall-candidates.md`。
 
 **评分规则（启发式）**：
 
-| 条件                             | 加分             |
-| -------------------------------- | ---------------- |
-| query token 出现在文档内容中     | +2（每个 token） |
-| query token 是该类型的特征关键词 | +1（每个 token） |
-| 文档 body 非空                   | +1               |
+| 条件                                       | 加分                |
+| ------------------------------------------ | ------------------- |
+| query token 出现在 title                   | +4（每个 token）    |
+| query token 出现在 description             | +3（每个 token）    |
+| query token 出现在 body 前 1200 字符       | +1（每个 token）    |
+| 至少一次词法命中后，token 是类型特征关键词 | +1，整篇文档最多 +2 |
+
+> **Tokenize 规则**：NFKC 归一化并转小写后，Han/Hiragana/Katakana/Hangul 连续片段
+> 按 code point bigram 切分（单字不产生 token）；其余至少 3 个字母、组合符或数字的
+> 连续片段整串保留。后者基于 `\p{L}` 而非 `[a-z0-9]`，因此西里尔、希腊、阿拉伯和
+> 带重音拉丁文都能产生 token。CJK 是**逐字符**排除的，不能只依赖正则分支顺序——
+> `\p{L}` 也匹配 Han，否则 `abc漢字` 会被并成一个 token。Thai/Khmer/Lao 这类
+> 无分词符又不在 CJK 集合内的文字，会整段变成一个 token：比之前完全没有 token 强，
+> 但不是分词。
+>
+> **同分排序**：按 mtime 降序，再按输入顺序（稳定排序），**不按 type**。
 
 **每种类型的特征关键词**：
 
@@ -384,10 +412,76 @@ flowchart TD
 
 **Prompt 构建规则**：
 
-- 最多注入 5 篇文档（`MAX_RELEVANT_DOCS`）
+- 单次注入最多 5 篇文档（`MAX_RELEVANT_DOCS`）
 - 每篇文档 body 截断至 1200 字符（`MAX_DOC_BODY_CHARS`）
 - 超出截断时追加提示："NOTE: Relevant memory truncated for prompt budget."
 - 包含文档的新鲜度信息（基于文件 mtime）
+
+> **`MAX_RELEVANT_DOCS` 限制的是单次注入，不是单轮总量。** Fast 阶段投递 2 篇、
+> ToolResult 阶段又投递 5 篇全新文档时，本轮进入模型的是 **7 篇**——去重只消除
+> 重复，不压缩总和。这是放弃跨阶段预算核算的有意结果（见
+> `2026-08-08-native-memory-recall-reliability.md`）：两次 Prompt 各自有界，
+> 每篇 body 仍截断到 1200 字符，Fast 上限为 2，因此最坏情况有界且不大，只是不等于 5。
+
+### 投递时机（Delivery）
+
+"选中了 Memory" 不等于 "主模型看到了 Memory"。Recall 在 UserQuery 到达时异步启动，
+投递发生在两个时机：
+
+```mermaid
+flowchart TD
+    A[UserQuery 到达\n启动 Recall Prefetch] --> B{等待结束\n以先到者为准:\nRecall 完成 / Fast 就绪 /\n取消 / 100 ms 上限}
+    B --> B1{Recall 是否完成?}
+    B1 -- 是 --> C{选中结果非空?}
+    C -- 是 --> C1[注入首轮 Prompt\nphase: refined]
+    C -- 否 --> C0[丢弃\nno_relevant_results]
+    B1 -- 否 --> D{是否有确定性\nFast 结果?}
+    D -- 是 --> E[注入首轮 Prompt\nphase: fast\n最多 2 篇 MAX_FAST_RECALL_DOCS]
+    D -- 否 --> F[首轮不注入]
+    E --> G[Recall 继续运行]
+    F --> G
+    G --> H{本轮是否有\nToolResult?}
+    H -- 是 --> I{Recall 是否已完成?}
+    I -- 是 --> J[排除 Fast 已投递文档\n按剩余文档重建 Prompt]
+    I -- 否 --> M
+    J --> J1{还有剩余文档?}
+    J1 -- 是 --> K[注入 ToolResult\nphase: refined]
+    J1 -- 否 --> L{Recall 选中了文档?}
+    L -- 是 --> L1[丢弃\nalready_delivered]
+    L -- 否 --> L2[丢弃\nno_relevant_results]
+    H -- 否 --> M{选中文档是否\n全部已被 Fast 投递?}
+    M -- 是 --> L1
+    M -- 否 --> M1[丢弃\nno_safe_delivery_point]
+```
+
+**为什么需要 Fast 阶段**：当存在 Config 时 Recall 会等待 Model Selector，
+而它是一次网络 Side Query（中止上限 30 秒），因此 100 ms 预算通常会超时。
+若没有 Fast 阶段，**没有工具调用的轮次将完全拿不到 Memory**——而这正是
+用户级 Memory 最重要的场景。Fast 结果复用 `selectModelCandidateDocuments`
+为 Model Manifest 已经算好的候选，不产生额外扫描或 I/O。
+
+**100 ms 是上限而不是固定开销**：Fast 结果在 Recall 扫完 Memory 树之后才发布，
+所以真正决定它能否赶上的是**扫描耗时**，不是打分耗时（后者是微秒级）。
+`recall-scan-latency.test.ts` 在真实临时 Memory 树上实测：200 篇约 29 ms、
+500 篇约 70 ms、1000 篇约 130 ms。对能在预算内扫完的树（普通用户的常见情况），
+Fast 就绪后继续等待只是在等一个本设计已经假定赶不上的 Model Selector，
+因此等待会在 Fast 就绪时立即结束。超过约 1000 篇时扫描本身就超预算，
+该轮会付满 100 ms 且什么都投不到——提前结束等待只能把这种情况**限制住**，
+消除不了它。
+
+**Fast 阶段的边界**：Fast 结果就是确定性结果，因此它只能解决**时机**问题，
+解决不了**匹配**问题。与文档没有任何词面重叠的 Query 产生不了 Fast 结果，
+这类 Query 在无工具回合仍然拿不到 Memory——只有 Model Selector 能覆盖它们，
+而无工具回合等不到 Selector。语料中的 `semantic-no-lexical` 分片专门测量这一点。
+
+**去重**：两个阶段来自同一次扫描，Model Selector 并未把 Fast 文档视为已排除，
+因此 ToolResult 投递前必须过滤掉 Fast 已投递的 `filePath` 并重建 Prompt。
+
+**丢弃口径**：同一条规则也适用于取消路径。若最终选中的文档已被 Fast 阶段
+全部投递，无论本轮是因为无工具调用、New Query、Reset、Abort 还是 Shutdown
+结束，都记为 `already_delivered` 而不是对应的取消原因——否则「Memory 从未
+到达模型」这一桶会被实际已送达的回合灌水。只有部分重叠时仍记取消原因，
+因为不在 Fast 集合里的那些文档确实没有投递点。
 
 ---
 
@@ -483,6 +577,25 @@ flowchart TD
 | `docs_selected` | number                                 | 最终注入的文档数 |
 | `strategy`      | `'none'` \| `'heuristic'` \| `'model'` | 选择策略         |
 | `duration_ms`   | number                                 | 总耗时（毫秒）   |
+
+### Recall Delivery 遥测
+
+记录选中的 Memory 是否真的送达主模型（Selection 事件无法回答这个问题）。
+
+| 字段             | 类型                                                                                                                                      | 说明                                                       |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `phase`          | `'fast'` \| `'refined'`                                                                                                                   | **投递阶段**                                               |
+| `delivery_point` | `'initial'` \| `'tool_result'` \| `'discarded'`                                                                                           | 投递位置                                                   |
+| `discard_reason` | `'no_safe_delivery_point'` \| `'new_query'` \| `'reset'` \| `'abort'` \| `'shutdown'` \| `'no_relevant_results'` \| `'already_delivered'` | 丢弃原因                                                   |
+| `strategy`       | `'none'` \| `'heuristic'` \| `'model'`                                                                                                    | **选择方式**                                               |
+| `docs_selected`  | number                                                                                                                                    | 结果文档数（投递事件为实际投递数；discarded 事件为选中数） |
+| `latency_ms`     | number                                                                                                                                    | 自发起的耗时                                               |
+
+> **`phase` 与 `strategy` 正交，互不替代。** `phase` 描述**何时**送达：`fast` 是预算
+> 超时后注入的确定性结果，`refined` 是 Model Selector 选出的结果。`strategy` 描述
+> **如何**选出。`fast` 投递必然是 `heuristic`；`refined` 投递常规为 `model`，
+> 在 Selector 失败走 Fallback 时为 `heuristic`。仅凭 `strategy` 判断阶段，
+> 会把"确定性结果先到"与"Selector 故障"混为一谈。
 
 ---
 

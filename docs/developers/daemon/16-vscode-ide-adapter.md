@@ -85,7 +85,7 @@ exception paths call `onEndTurn('error')`.
 
 ### Webview bridging
 
-The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview itself uses the shared `packages/webui/` component library to render — see Adapter Matrix in [`01-architecture.md`](./01-architecture.md).
+The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview embeds Web Shell for rendering.
 
 ### Connect serialization
 
@@ -174,18 +174,18 @@ sequenceDiagram
 
 - `packages/sdk-typescript/src/daemon/` — `DaemonClient`, `DaemonSessionClient` (the actual transport).
 - VS Code extension API (`vscode.*`) — host APIs, quick-pick, webview.
-- `packages/webui/src/adapters/ACPAdapter.ts` — webview rendering of ACP-shaped messages relayed via `postMessage`.
+- `packages/web-shell/client/` — embedded webview rendering for daemon session events.
 
 ## Configuration
 
-| Knob                                                 | Where                             | Effect                                                            |
-| ---------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------- |
-| `baseUrl`                                            | `connect(options)`                | Daemon URL; must be loopback.                                     |
-| `token`                                              | `connect(options)`                | Bearer token (stamped via SDK).                                   |
-| `workspaceCwd`                                       | `connect(options)`                | Used on `POST /session`; must match the daemon's bound workspace. |
-| `modelServiceId`                                     | `connect(options)` / `setModel()` | Initial model.                                                    |
-| `lastEventId`                                        | `connect(options)`                | Resume cursor (typically restored from host state).               |
-| VS Code setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings                | Operator-configured daemon URL.                                   |
+| Knob                                                 | Where                             | Effect                                                                                                              |
+| ---------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`                                            | `connect(options)`                | Daemon URL; must be loopback.                                                                                       |
+| `token`                                              | `connect(options)`                | Bearer token (stamped via SDK).                                                                                     |
+| `workspaceCwd`                                       | `connect(options)`                | Used on `POST /session`; must match the daemon's primary workspace or a registered multi-workspace session runtime. |
+| `modelServiceId`                                     | `connect(options)` / `setModel()` | Initial model.                                                                                                      |
+| `lastEventId`                                        | `connect(options)`                | Resume cursor (typically restored from host state).                                                                 |
+| VS Code setting `qwen.ide.daemonUrl` (or equivalent) | Workspace settings                | Operator-configured daemon URL.                                                                                     |
 
 ## Caveats & Known Limits
 
@@ -193,7 +193,7 @@ sequenceDiagram
 - **The legacy `AcpConnectionState` path is still primary** in the IDE companion (stdio child). This adapter is the sibling-transport for Mode-B migration; see [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md) for the migration blockers and the planned `BridgeFileSystem` parity work.
 - **No reverse RPC or editor-affordance surface yet over HTTP.** Features that require the agent to call back into the IDE (e.g. read-only buffer access, diff preview integration) currently live only on the stdio path.
 - **Webview ↔ connection coupling is host-owned**, not in this adapter. Do not push webview-specific logic into `DaemonIdeConnection`.
-- **`workspaceCwd` mismatch** with the daemon's bound workspace returns `400 workspace_mismatch` — surface this as a clear setup error rather than retrying.
+- **`workspaceCwd` mismatch** with the daemon's registered workspaces returns `400 workspace_mismatch` — surface this as a clear setup error rather than retrying.
 
 ## References
 
@@ -201,6 +201,6 @@ sequenceDiagram
 - `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts` (`createSdkDaemonSessionFactory`)
 - `packages/vscode-ide-companion/src/types/connectionTypes.ts` (legacy `AcpConnectionState`)
 - `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (webview bridge)
-- `packages/webui/src/adapters/ACPAdapter.ts` (webview ACP-message adapter)
+- `packages/web-shell/client/` (embedded Web Shell renderer)
 - Draft design: [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md)
 - SDK reference: [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)

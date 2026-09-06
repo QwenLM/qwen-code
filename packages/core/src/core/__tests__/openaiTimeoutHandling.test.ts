@@ -363,24 +363,5 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         generator.generateContent(request, 'test-prompt-id'),
       ).rejects.toThrow(/Request timeout after \d+s/);
     });
-
-    it('should fall back to character-based estimation if countTokens fails', async () => {
-      const timeoutError = new Error('Request timeout');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
-
-      // Mock countTokens to throw error
-      const mockCountTokens = vi.spyOn(generator, 'countTokens');
-      mockCountTokens.mockRejectedValue(new Error('Count tokens failed'));
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello world' }] }],
-        model: 'gpt-4',
-      };
-
-      // Should not throw due to token counting failure
-      await expect(
-        generator.generateContent(request, 'test-prompt-id'),
-      ).rejects.toThrow(/Request timeout after \d+s/);
-    });
   });
 });

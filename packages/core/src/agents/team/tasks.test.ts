@@ -24,7 +24,9 @@ import {
   notifyTasksUpdated,
   TaskOwnershipError,
   RECIPROCAL_CALLER,
+  normalizeTaskId,
 } from './tasks.js';
+import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -51,6 +53,23 @@ function setMockDir(dir: string): void {
     }
   ).__setMockGlobalDir(dir);
 }
+
+describe('normalizeTaskId', () => {
+  it('trims whitespace and strips one leading #', () => {
+    expect(normalizeTaskId(' 1 ')).toBe('1');
+    expect(normalizeTaskId('#1')).toBe('1');
+    expect(normalizeTaskId(' #42 ')).toBe('42');
+    // Only one leading # is stripped.
+    expect(normalizeTaskId('##1')).toBe('#1');
+  });
+
+  it('returns undefined when nothing remains', () => {
+    expect(normalizeTaskId('')).toBeUndefined();
+    expect(normalizeTaskId('   ')).toBeUndefined();
+    expect(normalizeTaskId('#')).toBeUndefined();
+    expect(normalizeTaskId(' # ')).toBeUndefined();
+  });
+});
 
 describe('tasks', () => {
   let tmpDir: string;
@@ -151,6 +170,27 @@ describe('tasks', () => {
       });
       expect(updated!.status).toBe('in_progress');
       expect(updated!.owner).toBe('worker@team');
+    });
+
+    it('still updates the task when the lock is compromised', async () => {
+      const task = await createTask('team', {
+        subject: 'Test',
+        description: 'Desc',
+      });
+      const { lockSpy, getOnCompromised } = mockCompromisedLock();
+
+      try {
+        await expect(
+          updateTask('team', task.id, { status: 'in_progress' }),
+        ).resolves.toMatchObject({ id: task.id, status: 'in_progress' });
+        expect(getOnCompromised()).toBeTypeOf('function');
+      } finally {
+        lockSpy.mockRestore();
+      }
+
+      expect(await getTask('team', task.id)).toMatchObject({
+        status: 'in_progress',
+      });
     });
 
     it('clears owner with null', async () => {

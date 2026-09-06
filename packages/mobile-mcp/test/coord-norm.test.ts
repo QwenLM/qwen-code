@@ -66,11 +66,14 @@ test('normToPx rounds to nearest', async () => {
   }
 });
 
-test('pxToNorm is inverse at midpoint', async () => {
+test('hasCoordFields returns true for click tools', async () => {
   const { mod, restore } = await loadCoordNorm();
   try {
-    expect(mod.pxToNorm(400, 800, 1000)).toBe(500);
-    expect(mod.pxToNorm(800, 800, 1000)).toBe(1000);
+    expect(mod.hasCoordFields('mobile_click_on_screen_at_coordinates')).toBe(
+      true,
+    );
+    expect(mod.hasCoordFields('mobile_swipe_on_screen')).toBe(true);
+    expect(mod.hasCoordFields('mobile_take_screenshot')).toBe(false);
   } finally {
     restore();
   }
@@ -87,10 +90,10 @@ test('normToPx respects custom scale (999)', async () => {
   }
 });
 
-test('pxToNorm handles zero dim', async () => {
+test('pxToNorm (removed) is no longer exported', async () => {
   const { mod, restore } = await loadCoordNorm();
   try {
-    expect(mod.pxToNorm(400, 0, 1000)).toBe(0);
+    expect(mod.pxToNorm).toBeUndefined();
   } finally {
     restore();
   }
@@ -172,57 +175,13 @@ test('denormalizeArgs ignores missing coord fields', async () => {
   }
 });
 
-// ── Output normalization tests ──
+// ── Removed output normalization (now no-op) ──
 
-test('normalizeElementResult rewrites element coordinates', async () => {
+test('normalizeElementResult and normalizeScreenSizeResult are no longer exported', async () => {
   const { mod, restore } = await loadCoordNorm();
   try {
-    const elements = [
-      {
-        type: 'button',
-        coordinates: { x: 400, y: 300, width: 80, height: 60 },
-      },
-    ];
-    const input = 'Found these elements on screen: ' + JSON.stringify(elements);
-    const result = mod.normalizeElementResult(
-      'mobile_list_elements_on_screen',
-      input,
-      800,
-      600,
-    );
-    const parsed = JSON.parse(
-      result.replace('Found these elements on screen: ', ''),
-    );
-    expect(parsed[0].coordinates.x).toBe(500); // 400/800*1000
-    expect(parsed[0].coordinates.y).toBe(500); // 300/600*1000
-    expect(parsed[0].coordinates.width).toBe(100); // 80/800*1000
-    expect(parsed[0].coordinates.height).toBe(100); // 60/600*1000
-  } finally {
-    restore();
-  }
-});
-
-test('normalizeScreenSizeResult rewrites to scale', async () => {
-  const { mod, restore } = await loadCoordNorm();
-  try {
-    const result = mod.normalizeScreenSizeResult(
-      'mobile_get_screen_size',
-      'Screen size is 1080x2400 pixels',
-    );
-    expect(result).toContain('1000x1000');
-  } finally {
-    restore();
-  }
-});
-
-test('normalizeScreenSizeResult leaves non-screen-size tools alone', async () => {
-  const { mod, restore } = await loadCoordNorm();
-  try {
-    const result = mod.normalizeScreenSizeResult(
-      'mobile_tap',
-      'Tapped at 100, 200',
-    );
-    expect(result).toBe('Tapped at 100, 200');
+    expect(mod.normalizeElementResult).toBeUndefined();
+    expect(mod.normalizeScreenSizeResult).toBeUndefined();
   } finally {
     restore();
   }

@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isBlockedAddress, ssrfGuardedLookup } from './ssrfGuard.js';
+import {
+  isBlockedAddress,
+  isMetadataAddress,
+  ssrfGuardedLookup,
+} from './ssrfGuard.js';
 
 function lookupAsync(
   hostname: string,
@@ -106,6 +110,46 @@ describe('ssrfGuard', () => {
     it('should return false for non-IP hostnames', () => {
       expect(isBlockedAddress('api.example.com')).toBe(false);
       expect(isBlockedAddress('localhost')).toBe(false);
+    });
+  });
+
+  describe('isMetadataAddress', () => {
+    it('should match the AWS/GCP/Azure metadata IP', () => {
+      expect(isMetadataAddress('169.254.169.254')).toBe(true);
+    });
+
+    it('should match the Alibaba Cloud metadata IP', () => {
+      expect(isMetadataAddress('100.100.100.200')).toBe(true);
+    });
+
+    it('should match IPv4-mapped IPv6 forms of metadata IPs', () => {
+      // ::ffff:a9fe:a9fe = 169.254.169.254
+      expect(isMetadataAddress('::ffff:a9fe:a9fe')).toBe(true);
+      expect(isMetadataAddress('::ffff:169.254.169.254')).toBe(true);
+      expect(isMetadataAddress('0:0:0:0:0:ffff:a9fe:a9fe')).toBe(true);
+      // ::ffff:6464:64c8 = 100.100.100.200
+      expect(isMetadataAddress('::ffff:6464:64c8')).toBe(true);
+      expect(isMetadataAddress('::ffff:100.100.100.200')).toBe(true);
+    });
+
+    it('should not match other private/link-local addresses', () => {
+      expect(isMetadataAddress('169.254.169.253')).toBe(false);
+      expect(isMetadataAddress('100.100.100.201')).toBe(false);
+      expect(isMetadataAddress('10.0.0.1')).toBe(false);
+      expect(isMetadataAddress('172.16.0.1')).toBe(false);
+      expect(isMetadataAddress('192.168.1.1')).toBe(false);
+      expect(isMetadataAddress('::ffff:c0a8:101')).toBe(false);
+    });
+
+    it('should not match loopback or public addresses', () => {
+      expect(isMetadataAddress('127.0.0.1')).toBe(false);
+      expect(isMetadataAddress('::1')).toBe(false);
+      expect(isMetadataAddress('8.8.8.8')).toBe(false);
+    });
+
+    it('should return false for non-IP hostnames', () => {
+      expect(isMetadataAddress('metadata.google.internal')).toBe(false);
+      expect(isMetadataAddress('api.example.com')).toBe(false);
     });
   });
 

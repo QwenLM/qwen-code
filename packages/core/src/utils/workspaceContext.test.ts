@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { WorkspaceContext } from './workspaceContext.js';
+import { resolveWorkspacePath, WorkspaceContext } from './workspaceContext.js';
 
 describe('WorkspaceContext with real filesystem', () => {
   let tempDir: string;
@@ -153,6 +153,16 @@ describe('WorkspaceContext with real filesystem', () => {
     it('should handle non-existent paths correctly', () => {
       const workspaceContext = new WorkspaceContext(cwd, [otherDir]);
       const nonExistentPath = path.join(cwd, 'does-not-exist.txt');
+      expect(workspaceContext.isPathWithinWorkspace(nonExistentPath)).toBe(
+        true,
+      );
+    });
+
+    it('should preserve paths with missing intermediate components', () => {
+      const workspaceContext = new WorkspaceContext(cwd);
+      const nonExistentPath = path.join(cwd, 'missing', 'nested.txt');
+
+      expect(resolveWorkspacePath(nonExistentPath)).toBe(nonExistentPath);
       expect(workspaceContext.isPathWithinWorkspace(nonExistentPath)).toBe(
         true,
       );

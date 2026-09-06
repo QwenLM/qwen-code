@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { defaultModalities } from './modalityDefaults.js';
+import {
+  defaultModalities,
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from './modalityDefaults.js';
 
 describe('defaultModalities', () => {
   describe('Google Gemini', () => {
@@ -151,6 +155,32 @@ describe('defaultModalities', () => {
       expect(defaultModalities('qwen3.7-max')).toEqual({});
     });
 
+    it('returns image for qwen3.8-max', () => {
+      const m = defaultModalities('qwen3.8-max');
+      expect(m.image).toBe(true);
+      expect(m.video).toBeUndefined();
+    });
+
+    it('returns image for qwen3.8-max-preview (provider-prefixed)', () => {
+      const m = defaultModalities('bailian-token-plan/qwen3.8-max-preview');
+      expect(m.image).toBe(true);
+    });
+
+    // [Regression] issue-10194 — qwen3.8-flash/plus were classified as text-only
+    it('returns image + video for qwen3.8-flash', () => {
+      expect(defaultModalities('qwen3.8-flash')).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
+    it('returns image + video for qwen3.8-plus', () => {
+      expect(defaultModalities('qwen3.8-plus')).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
     it('returns image + video for qwen3.6-35b variants', () => {
       const m = defaultModalities('qwen3.6-35b-a3b-nvfp4');
       expect(m.image).toBe(true);
@@ -172,11 +202,41 @@ describe('defaultModalities', () => {
     it('returns text-only for deepseek-reasoner', () => {
       expect(defaultModalities('deepseek-reasoner')).toEqual({});
     });
+
+    // (QwenLM/qwen-code#10270)
+    it('returns text-only for non-vision deepseek-v4-flash', () => {
+      expect(defaultModalities('deepseek-v4-flash')).toEqual({});
+    });
+
+    it('returns image for deepseek-v4-flash-vision-exp', () => {
+      const m = defaultModalities('deepseek-v4-flash-vision-exp');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
   });
 
   describe('Zhipu GLM', () => {
     it('returns image for glm-4.5v', () => {
       const m = defaultModalities('glm-4.5v');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
+
+    // (QwenLM/qwen-code#10270)
+    it('returns image for glm-4.6v', () => {
+      const m = defaultModalities('glm-4.6v');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
+
+    it('returns image for glm-5v-turbo', () => {
+      const m = defaultModalities('glm-5v-turbo');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+    });
+
+    it('returns image for glm-5.3-flash', () => {
+      const m = defaultModalities('glm-5.3-flash');
       expect(m.image).toBe(true);
       expect(m.pdf).toBeUndefined();
     });
@@ -187,6 +247,10 @@ describe('defaultModalities', () => {
 
     it('returns text-only for glm-4.7', () => {
       expect(defaultModalities('glm-4.7')).toEqual({});
+    });
+
+    it('returns text-only for glm-4.6 (no v suffix)', () => {
+      expect(defaultModalities('glm-4.6')).toEqual({});
     });
   });
 
@@ -205,6 +269,14 @@ describe('defaultModalities', () => {
   });
 
   describe('Kimi', () => {
+    it('returns image + video for kimi-k3', () => {
+      const m = defaultModalities('kimi-k3');
+      expect(m.image).toBe(true);
+      expect(m.video).toBe(true);
+      expect(m.pdf).toBeUndefined();
+      expect(m.audio).toBeUndefined();
+    });
+
     it('returns image + video for kimi-k2.5', () => {
       const m = defaultModalities('kimi-k2.5');
       expect(m.image).toBe(true);
@@ -274,5 +346,41 @@ describe('defaultModalities', () => {
       expect(a).toEqual(b);
       expect(a).not.toBe(b);
     });
+  });
+});
+
+describe('isQwenFamilyWireModel', () => {
+  it('matches qwen* ids case-insensitively', () => {
+    expect(isQwenFamilyWireModel('qwen3.8-max')).toBe(true);
+    expect(isQwenFamilyWireModel('Qwen3.7-Max')).toBe(true);
+    expect(isQwenFamilyWireModel('qwen-vl-max')).toBe(true);
+  });
+
+  it('matches the coder-model QWEN_OAUTH default', () => {
+    expect(isQwenFamilyWireModel('coder-model')).toBe(true);
+  });
+
+  it('rejects non-qwen ids and empty input', () => {
+    expect(isQwenFamilyWireModel('glm-5.2')).toBe(false);
+    expect(isQwenFamilyWireModel('kimi-k2.6')).toBe(false);
+    expect(isQwenFamilyWireModel('')).toBe(false);
+    expect(isQwenFamilyWireModel(undefined)).toBe(false);
+  });
+});
+
+describe('isTieredEffortWireModel', () => {
+  it('matches the qwen3.8-max family including snapshots and aliases', () => {
+    expect(isTieredEffortWireModel('qwen3.8-max')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-max-preview')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-max-2026-01-15')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-max-latest')).toBe(true);
+    expect(isTieredEffortWireModel('Qwen3.8-Max')).toBe(true);
+  });
+
+  it('rejects other qwen models and non-qwen ids', () => {
+    expect(isTieredEffortWireModel('qwen3.7-max')).toBe(false);
+    expect(isTieredEffortWireModel('coder-model')).toBe(false);
+    expect(isTieredEffortWireModel('glm-5.2')).toBe(false);
+    expect(isTieredEffortWireModel(undefined)).toBe(false);
   });
 });

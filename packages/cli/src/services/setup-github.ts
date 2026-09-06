@@ -6,7 +6,6 @@
 
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
-import { ProxyAgent } from 'undici';
 
 import {
   getGitHubRepoInfoAsync,
@@ -15,6 +14,7 @@ import {
   isGitHubRepositoryAsync,
 } from '../utils/gitUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { loadUndici } from '../utils/load-undici.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('SETUP_GITHUB');
@@ -111,6 +111,15 @@ export class SetupGithubError extends Error {
     this.partial = partialResult !== undefined;
     this.partialResult = partialResult;
   }
+}
+
+function isWorkspaceGenerationClosed(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'workspace_generation_closed',
+  );
 }
 
 const nodeFileOps: SetupGithubFileOps = {
@@ -256,6 +265,7 @@ export async function setupGithub(
           sizeBytes: write.sizeBytes,
         });
       } catch (error) {
+        if (isWorkspaceGenerationClosed(error)) throw error;
         result.partial = true;
         result.workflows.push({
           sourcePath: workflow.sourcePath,
@@ -272,6 +282,7 @@ export async function setupGithub(
       }
     }
   } catch (error) {
+    if (isWorkspaceGenerationClosed(error)) throw error;
     if (error instanceof SetupGithubError) throw error;
     throw new SetupGithubError(
       'github_workflow_write_failed',
@@ -322,6 +333,7 @@ export async function updateGitignore(
       added: missingEntries,
     };
   } catch (error) {
+    if (isWorkspaceGenerationClosed(error)) throw error;
     debugLogger.debug('Failed to update .gitignore:', error);
     return {
       path: '.gitignore',
@@ -339,8 +351,10 @@ async function downloadWorkflows(options: {
 }): Promise<Array<{ sourcePath: string; content: string }>> {
   const internalAbort = new AbortController();
   try {
+    // Lazy-load undici so it stays out of the eager startup closure
+    // (issue #7264).
     const dispatcher = options.proxy
-      ? new ProxyAgent(options.proxy)
+      ? new (await loadUndici()).ProxyAgent(options.proxy)
       : undefined;
     return await Promise.all(
       GITHUB_WORKFLOW_PATHS.map(async (workflow) => {

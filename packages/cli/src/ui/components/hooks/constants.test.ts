@@ -93,6 +93,14 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(2);
     });
 
+    it('should return fire-and-forget exit codes for SessionDelete event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.SessionDelete);
+      expect(exitCodes).toHaveLength(2);
+      for (const row of exitCodes) {
+        expect(row.description).toContain('fire-and-forget');
+      }
+    });
+
     it('should return exit codes for PreCompact event', () => {
       const exitCodes = getHookExitCodes(HookEventName.PreCompact);
       expect(exitCodes).toHaveLength(3);
@@ -153,6 +161,12 @@ describe('hooks constants', () => {
       expect(desc).toBe('When a new session is started');
     });
 
+    it('should return description for SessionDelete', () => {
+      expect(getHookShortDescription(HookEventName.SessionDelete)).toBe(
+        'After an explicitly selected session is deleted',
+      );
+    });
+
     it('should return description for InstructionsLoaded', () => {
       const desc = getHookShortDescription(HookEventName.InstructionsLoaded);
       expect(desc).toBe('When instruction files are loaded');
@@ -163,6 +177,12 @@ describe('hooks constants', () => {
       expect(desc).toBe('After conversation compaction');
     });
 
+    it('should describe the deleted session id for SessionDelete', () => {
+      expect(getHookDescription(HookEventName.SessionDelete)).toContain(
+        'deleted_session_id',
+      );
+    });
+
     it('should return description for StopFailure', () => {
       const desc = getHookShortDescription(HookEventName.StopFailure);
       expect(desc).toContain('API error');
@@ -171,9 +191,7 @@ describe('hooks constants', () => {
 
     it('should return description for PermissionDenied', () => {
       const desc = getHookShortDescription(HookEventName.PermissionDenied);
-      expect(desc).toBe(
-        'When a tool call is denied before a permission dialog is displayed',
-      );
+      expect(desc).toBe('When AUTO-mode classification denies a tool call');
     });
 
     it('should return empty string for unknown event', () => {
@@ -210,6 +228,14 @@ describe('hooks constants', () => {
       expect(desc).toContain('file_path');
       expect(desc).toContain('memory_type');
       expect(desc).toContain('load_reason');
+    });
+
+    it('should distinguish model-bound and submitted prompts', () => {
+      const desc = getHookDescription(HookEventName.UserPromptSubmit);
+      expect(desc).toContain('"prompt"');
+      expect(desc).toContain('model-bound');
+      expect(desc).toContain('"submitted_prompt"');
+      expect(desc).toContain('interactive TUI');
     });
 
     it('should return description for PostCompact', () => {
@@ -264,6 +290,7 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptExpansion);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionEnd);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionDelete);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStop);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
@@ -305,6 +332,7 @@ describe('hooks constants', () => {
       expect(supportsMatchers(HookEventName.UserPromptSubmit)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCreated)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCompleted)).toBe(false);
+      expect(supportsMatchers(HookEventName.SessionDelete)).toBe(false);
     });
 
     it('returns false for unknown events', () => {
@@ -358,7 +386,7 @@ describe('hooks constants', () => {
 
       expect(info.event).toBe(HookEventName.PermissionDenied);
       expect(info.shortDescription).toBe(
-        'When a tool call is denied before a permission dialog is displayed',
+        'When AUTO-mode classification denies a tool call',
       );
       expect(info.description).toContain('tool_use_id');
       expect(info.exitCodes).toHaveLength(2);

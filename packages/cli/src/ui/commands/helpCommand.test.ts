@@ -55,5 +55,6 @@ describe('helpCommand', () => {
     expect(helpCommand.kind).toBe(CommandKind.BUILT_IN);
     expect(helpCommand.argumentHint).toBeUndefined();
     expect(helpCommand.description).toBe('for help on Qwen Code');
+    expect(helpCommand.canRunDuringStreaming).toBe(true);
   });
 });

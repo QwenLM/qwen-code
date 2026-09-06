@@ -8,6 +8,14 @@
   overflow-wrap: break-word;
 }
 
+.streamingPlainText {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .content > :first-child {
   margin-top: 0;
 }
@@ -19,7 +27,7 @@
 .content strong,
 .content b {
   color: var(--foreground);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .content h1,
@@ -228,6 +236,11 @@
   color: var(--foreground);
 }
 
+.codeBlockCopy:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .codeBlockContent {
   max-width: 100%;
   max-height: none;
@@ -285,7 +298,7 @@
 }
 
 .mermaidBlock :global(svg) {
-  max-width: 100%;
+  max-width: none;
   height: auto;
 }
 
@@ -307,6 +320,18 @@
 .mermaidActions {
   display: flex;
   gap: 4px;
+}
+
+.mermaidZoomWrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.mermaidDragging {
+  cursor: grabbing;
 }
 
 .content :global(.katex-display) {

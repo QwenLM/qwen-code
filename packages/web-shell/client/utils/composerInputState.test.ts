@@ -1,61 +1,39 @@
 import { describe, expect, it } from 'vitest';
 import {
   getComposerPlaceholderKey,
+  getComposerPlaceholderState,
   shouldBlockComposerSubmit,
   shouldDisableComposerInput,
 } from './composerInputState';
 
 describe('composer input state', () => {
-  it('keeps the composer editable while the SSE connection is disconnected', () => {
+  it('keeps the composer editable while idle', () => {
+    // Catch-up no longer participates in the composer input state: the
+    // function only takes approval/preparation flags, so this unit covers
+    // the idle case (catch-up behaviour is guarded by App integration tests).
     expect(
       shouldDisableComposerInput({
-        catchingUp: false,
         pendingApproval: false,
         isPreparingPrompt: false,
       }),
     ).toBe(false);
     expect(
       getComposerPlaceholderKey({
-        catchingUp: false,
-        isPreparingPrompt: false,
-        isStreaming: false,
-      }),
-    ).toBe('editor.placeholder');
-    expect(
-      getComposerPlaceholderKey({
-        catchingUp: false,
         isPreparingPrompt: false,
         isStreaming: false,
       }),
     ).toBe('editor.placeholder');
   });
 
-  it('keeps loading state only for catch-up or prompt preparation', () => {
+  it('keeps disabling the composer for prompt preparation', () => {
     expect(
       shouldDisableComposerInput({
-        catchingUp: true,
-        pendingApproval: false,
-        isPreparingPrompt: false,
-      }),
-    ).toBe(true);
-    expect(
-      getComposerPlaceholderKey({
-        catchingUp: true,
-        isPreparingPrompt: false,
-        isStreaming: false,
-      }),
-    ).toBe('common.loading');
-
-    expect(
-      shouldDisableComposerInput({
-        catchingUp: false,
         pendingApproval: false,
         isPreparingPrompt: true,
       }),
     ).toBe(true);
     expect(
       getComposerPlaceholderKey({
-        catchingUp: false,
         isPreparingPrompt: true,
         isStreaming: false,
       }),
@@ -65,42 +43,76 @@ describe('composer input state', () => {
   it('shows processing placeholder while streaming', () => {
     expect(
       getComposerPlaceholderKey({
-        catchingUp: false,
         isPreparingPrompt: false,
         isStreaming: true,
       }),
     ).toBe('editor.processing');
   });
 
+  it('exposes the semantic placeholder state independently of i18n keys', () => {
+    expect(
+      getComposerPlaceholderState({
+        isPreparingPrompt: false,
+        isStreaming: false,
+      }),
+    ).toBe('idle');
+    expect(
+      getComposerPlaceholderState({
+        isPreparingPrompt: true,
+        isStreaming: true,
+      }),
+    ).toBe('processing');
+    expect(
+      getComposerPlaceholderState({
+        isPreparingPrompt: false,
+        isStreaming: true,
+      }),
+    ).toBe('processing');
+  });
+
   it('still disables editing for pending approvals', () => {
     expect(
       shouldDisableComposerInput({
-        catchingUp: false,
         pendingApproval: true,
         isPreparingPrompt: false,
       }),
     ).toBe(true);
   });
 
-  it('blocks submit only after the connection reaches a failed state', () => {
+  it('blocks submit only on error or a disconnected session without a session', () => {
     expect(
       shouldBlockComposerSubmit({
-        connectionStatus: 'disconnected',
+        connectionStatus: 'error',
+        hasSession: true,
       }),
     ).toBe(true);
     expect(
       shouldBlockComposerSubmit({
-        connectionStatus: 'error',
+        connectionStatus: 'disconnected',
+        hasSession: false,
       }),
     ).toBe(true);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'connecting',
+        hasSession: false,
       }),
     ).toBe(false);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'connected',
+        hasSession: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('allows a disconnected session with an existing session to submit', () => {
+    // The prompt is submitted over HTTP and the SSE stream is rebuilt on
+    // admission, so a down stream does not block sending.
+    expect(
+      shouldBlockComposerSubmit({
+        connectionStatus: 'disconnected',
+        hasSession: true,
       }),
     ).toBe(false);
   });

@@ -14,8 +14,10 @@ import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
+import { FindingsDisplay } from '../FindingsDisplay.js';
 import type {
   TodoResultDisplay,
+  FindingsResultDisplay,
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
@@ -23,12 +25,19 @@ import type {
   Config,
   McpToolProgressData,
   FileDiff,
+  TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
-import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isTerminalImageDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  ToolNamesMigration,
+} from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME, ICON } from '../../constants.js';
 import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -38,15 +47,21 @@ import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
   escapeAnsiCtrlCodes,
+  sanitizeTerminalText,
   getCachedStringWidth,
+  sanitizeMultilineForDisplay,
   toCodePoints,
 } from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
+import { toggleKeyHint } from './ConversationMessages.js';
 
 import {
   ToolStatusIndicator,
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { TerminalImage } from '../TerminalImage.js';
+import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -59,6 +74,11 @@ const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
     .map(([legacy]) => legacy),
 ]);
 
+// How many of the subagent's prior tool calls to list above an approval
+// prompt — enough to show what led up to the request without pushing the
+// confirmation itself off-screen.
+const APPROVAL_CONTEXT_CALLS = 3;
+
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
@@ -67,6 +87,7 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
+
 export type TextEmphasis = 'high' | 'medium' | 'low';
 type DiffResultDisplay = Pick<
   FileDiff,
@@ -81,7 +102,11 @@ function sliceTextForMaxHeight(
   text: string,
   maxHeight: number | undefined,
   maxWidth: number,
-): { text: string; hiddenLinesCount: number } {
+): {
+  text: string;
+  hiddenLinesCount: number;
+  sourceBoundaries?: Array<{ kind: 'soft' | 'hard'; joiner: string }>;
+} {
   if (maxHeight === undefined) {
     return { text, hiddenLinesCount: 0 };
   }
@@ -89,41 +114,49 @@ function sliceTextForMaxHeight(
   const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
   const visibleContentHeight = targetMaxHeight - 1;
   const visualWidth = Math.max(1, Math.floor(maxWidth));
-  const visibleLines: string[] = [];
+  const visibleLines: Array<{
+    text: string;
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null;
+  }> = [];
   let visualLineCount = 0;
   let currentLine = '';
   let currentLineWidth = 0;
 
-  const appendVisibleLine = (line: string) => {
+  const appendVisibleLine = (
+    line: string,
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
     visualLineCount += 1;
-    visibleLines.push(line);
+    visibleLines.push({ text: line, breakAfter });
     if (visibleLines.length > visibleContentHeight) {
       visibleLines.shift();
     }
   };
 
-  const flushCurrentLine = () => {
-    appendVisibleLine(currentLine);
+  const flushCurrentLine = (
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
+    appendVisibleLine(currentLine, breakAfter);
     currentLine = '';
     currentLineWidth = 0;
   };
 
   for (const char of toCodePoints(text)) {
     if (char === '\n') {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'hard', joiner: '\n' });
       continue;
     }
 
     const charWidth = Math.max(getCachedStringWidth(char), 1);
     if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'soft', joiner: '' });
     }
 
     currentLine += char;
     currentLineWidth += charWidth;
   }
 
-  flushCurrentLine();
+  flushCurrentLine(null);
 
   if (visualLineCount <= targetMaxHeight) {
     return { text, hiddenLinesCount: 0 };
@@ -131,18 +164,23 @@ function sliceTextForMaxHeight(
 
   const hiddenLinesCount = visualLineCount - visibleContentHeight;
   return {
-    text: visibleLines.join('\n'),
+    text: visibleLines.map((line) => line.text).join('\n'),
     hiddenLinesCount,
+    sourceBoundaries: visibleLines
+      .slice(0, -1)
+      .map((line) => line.breakAfter ?? { kind: 'hard', joiner: '\n' }),
   };
 }
 
 type DisplayRendererResult =
   | { type: 'none' }
   | { type: 'todo'; data: TodoResultDisplay }
+  | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
+  | { type: 'image'; data: TerminalImageDisplay }
   | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
@@ -156,6 +194,10 @@ const useResultDisplayRenderer = (
       return { type: 'none' };
     }
 
+    if (isTerminalImageDisplay(resultDisplay)) {
+      return { type: 'image', data: resultDisplay };
+    }
+
     // Check for TodoResultDisplay
     if (
       typeof resultDisplay === 'object' &&
@@ -166,6 +208,19 @@ const useResultDisplayRenderer = (
       return {
         type: 'todo',
         data: resultDisplay as TodoResultDisplay,
+      };
+    }
+
+    // Check for FindingsResultDisplay
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'findings_list'
+    ) {
+      return {
+        type: 'findings',
+        data: resultDisplay as FindingsResultDisplay,
       };
     }
 
@@ -251,6 +306,20 @@ const useResultDisplayRenderer = (
       return { type: 'none' };
     }
 
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'mcp_app' &&
+      'fallbackText' in resultDisplay &&
+      typeof resultDisplay.fallbackText === 'string'
+    ) {
+      return {
+        type: 'string',
+        data: resultDisplay.fallbackText,
+      };
+    }
+
     // Default to string — safeguard against non-string objects
     return {
       type: 'string',
@@ -266,7 +335,12 @@ const useResultDisplayRenderer = (
  */
 const TodoResultRenderer: React.FC<{ data: TodoResultDisplay }> = ({
   data,
-}) => <TodoDisplay todos={data.todos} />;
+}) => {
+  if (data.unchanged) {
+    return null;
+  }
+  return <TodoDisplay todos={data.todos} />;
+};
 
 const PlanResultRenderer: React.FC<{
   data: PlanResultDisplay;
@@ -279,6 +353,61 @@ const PlanResultRenderer: React.FC<{
     childWidth={childWidth}
   />
 );
+
+/**
+ * The subagent's most recent tool calls that lead up to a parked
+ * permission request (excluding the call awaiting approval itself,
+ * newest last, capped at `APPROVAL_CONTEXT_CALLS`). Each renders as one
+ * line above the confirmation prompt, so the caller also uses the count
+ * to reserve height for the confirmation.
+ */
+const priorApprovalCalls = (
+  data: AgentResultDisplay,
+): NonNullable<AgentResultDisplay['toolCalls']> =>
+  (data.toolCalls ?? [])
+    .filter((call) => call.status !== 'awaiting_approval')
+    .slice(-APPROVAL_CONTEXT_CALLS);
+
+/**
+ * The last few tool calls the subagent made before parking a permission
+ * request — rendered between the "Approval requested by" header and the
+ * confirmation prompt so the user can judge WHY the agent wants to run
+ * this call instead of approving an isolated command blind (the
+ * permission-context ask of issue #6569).
+ */
+const SubagentApprovalContext: React.FC<{
+  data: AgentResultDisplay;
+}> = ({ data }) => {
+  const priorCalls = priorApprovalCalls(data);
+  if (priorCalls.length === 0) return null;
+  return (
+    <Box flexDirection="column">
+      {priorCalls.map((call) => {
+        const glyph =
+          call.status === 'failed'
+            ? '✖'
+            : call.status === 'success'
+              ? '✔'
+              : ICON.CIRCLE_EMPTY;
+        const displayName = localizeToolDisplayName(
+          TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
+        );
+        const desc = (call.description ?? '').replace(/\s*\n\s*/g, ' ').trim();
+        const label = desc ? `${displayName} ${desc}` : displayName;
+        return (
+          <Box key={call.callId}>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {/* sanitizeMultilineForDisplay: bare C0 controls (\r, BS,
+                  BEL) pass through the ANSI-sequence escape and this
+                  line informs an allow/deny decision. */}
+              {`  ${glyph} ${sanitizeMultilineForDisplay(label)}`}
+            </Text>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
 
 /**
  * Component to render subagent execution results.
@@ -325,6 +454,21 @@ const SubagentExecutionRenderer: React.FC<{
     // ANSI control sequences; escape before rendering into Ink Text
     // (matches LiveAgentPanel + SubagentScrollbackSummary).
     const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
+    // Reserve height for everything this component renders above the
+    // confirmation prompt — the "Approval requested by" header (1 line)
+    // plus one sibling line per prior call — out of the confirmation's
+    // budget, so the question and its options never get clipped off-screen
+    // in a short terminal. Approving blind is the exact failure this context
+    // is meant to prevent, so the confirmation prompt must always win.
+    const HEADER_LINES = 1;
+    const contextLines = priorApprovalCalls(data).length;
+    const confirmationHeight =
+      availableHeight !== undefined
+        ? Math.max(
+            MINIMUM_MAX_HEIGHT,
+            availableHeight - contextLines - HEADER_LINES,
+          )
+        : availableHeight;
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Box>
@@ -334,10 +478,11 @@ const SubagentExecutionRenderer: React.FC<{
           </Text>
           <Text color={theme.text.secondary}>:</Text>
         </Box>
+        <SubagentApprovalContext data={data} />
         <ToolConfirmationMessage
           confirmationDetails={data.pendingConfirmation}
           isFocused={isFocused}
-          availableTerminalHeight={availableHeight}
+          availableTerminalHeight={confirmationHeight}
           contentWidth={childWidth - 2}
           compactMode={true}
           config={config}
@@ -463,7 +608,14 @@ const StringResultRenderer: React.FC<{
   renderAsMarkdown: boolean;
   availableHeight?: number;
   childWidth: number;
-}> = ({ data, renderAsMarkdown, availableHeight, childWidth }) => {
+  registerOverflow?: boolean;
+}> = ({
+  data,
+  renderAsMarkdown,
+  availableHeight,
+  childWidth,
+  registerOverflow,
+}) => {
   let displayData = data;
 
   // Truncate if too long
@@ -495,6 +647,8 @@ const StringResultRenderer: React.FC<{
       maxHeight={availableHeight}
       maxWidth={childWidth}
       additionalHiddenLinesCount={sliced.hiddenLinesCount}
+      sourceBoundaries={sliced.sourceBoundaries}
+      registerOverflow={registerOverflow}
     >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
@@ -552,6 +706,23 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   config?: Config;
   forceShowResult?: boolean;
   /**
+   * Transcript (Ctrl+O) full-detail mode. When true AND this is a collapsible
+   * tool (read/search/list) that carries a `detailedDisplay`, the renderer
+   * switches its DATA SOURCE from the summary `resultDisplay` to the full
+   * `detailedDisplay` (§4.9). Kept separate from `forceShowResult`, which only
+   * controls unfold/height — so main-view force scenarios (user-initiated,
+   * error, confirming) still render the summary, never the full output.
+   */
+  fullDetail?: boolean;
+  /**
+   * `ui.showToolCallArgs`. When true, an extra row under the tool header
+   * prints the raw `args` JSON, recovering parameters that
+   * `invocation.getDescription()` summarizes away (Edit shows only the
+   * filename, Read only the path). Independent of `fullDetail`, which owns
+   * result-output expansion; this one only ever adds the args row.
+   */
+  showToolCallArgs?: boolean;
+  /**
    * Whether this subagent owns keyboard input for the inline approval
    * surface — when true the focus-holder banner renders and the
    * underlying ToolConfirmationMessage receives keystrokes; when false
@@ -576,6 +747,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  confirmationDetails,
+  images,
+  omittedImageCount,
+  visionBridgeNotice,
+  detailedDisplay,
   status,
   availableTerminalHeight,
   contentWidth,
@@ -586,6 +762,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   ptyId,
   config,
   forceShowResult,
+  fullDetail,
+  showToolCallArgs,
+  args,
   isFocused,
   isPending,
   executionStartTime,
@@ -654,6 +833,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  const inlineImageHeight =
+    availableHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableHeight / (images.length + 1)))
+      : availableHeight;
   // Cap inline shell output. Applies to both the streaming ANSI display and
   // the completed string display (shell.ts emits the final result as a plain
   // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
@@ -681,16 +864,79 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight !== undefined
       ? shellCapHeight + 1
       : availableHeight;
+  // Ctrl+s ("show more lines") lifts height clamps but not the
+  // ui.shellOutputMaxLines cap (#10640): when the shell cap is what hides
+  // lines, keep them out of the overflow state so the ctrl+s hint does not
+  // advertise lines that pressing ctrl+s cannot reveal.
+  const shellCapIgnoresShowMore =
+    isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
   // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox
-  if (availableHeight) {
+  // to render as plain text, which is contained within the terminal using MaxSizedBox.
+  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
+  // (#10640): constrainHeight=false drops the height budget (availableHeight
+  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
+  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
+  // (default true), so without this the capped shell output would escape
+  // through the markdown branch, which MaxSizedBox does not contain.
+  if (availableHeight || isCappingShell) {
     renderOutputAsMarkdown = false;
   }
 
-  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
+  // §4.9: in full-detail mode, collapsible tools (read/search/list)
+  // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
+  // from the persisted functionResponse. Only a non-empty string detail
+  // qualifies; everything else (and all main-view rendering) keeps the summary.
+  const usingDetailedDisplay =
+    fullDetail &&
+    isCollapsibleTool(name) &&
+    typeof detailedDisplay === 'string' &&
+    detailedDisplay.length > 0;
+  // `detailedDisplay` is RAW, un-sanitized tool output (file contents, grep
+  // hits, directory listings). A malicious repo could embed terminal control
+  // codes that execute when the transcript renders the full content unfiltered.
+  // Run it through the shared `sanitizeTerminalText` pipeline (ANSI escape + C0
+  // strip + bidi strip), memoized since the content can be ~25K chars and this
+  // runs on every render.
+  const sanitizedDetailedDisplay = React.useMemo(
+    () =>
+      usingDetailedDisplay && typeof detailedDisplay === 'string'
+        ? sanitizeTerminalText(detailedDisplay)
+        : detailedDisplay,
+    [detailedDisplay, usingDetailedDisplay],
+  );
+  const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
+    ? resultDisplay
+    : undefined;
+  const visionBridgeNoticeText = [
+    visionBridgeNoticeDisplay
+      ? formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay)
+      : undefined,
+    visionBridgeNotice,
+  ]
+    .filter((notice): notice is string => notice !== undefined)
+    .map((notice) => sanitizeTerminalText(notice))
+    .join('\n');
+  const effectiveResultDisplay = usingDetailedDisplay
+    ? sanitizedDetailedDisplay
+    : visionBridgeNoticeDisplay
+      ? undefined
+      : resultDisplay;
+
+  // detailedDisplay is RAW tool output (file content, grep hits, directory
+  // listings). Render it as plain text — Markdown formatting would turn the
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
+  // markdown-suppression guard above doesn't catch this because fullDetail
+  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  if (usingDetailedDisplay) {
+    renderOutputAsMarkdown = false;
+  }
+
+  const effectiveDisplayRenderer = useResultDisplayRenderer(
+    effectiveResultDisplay,
+  );
 
   // Collapse text/ANSI output for completed collapsible tools (read/search/list)
   // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)
@@ -703,8 +949,24 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     (effectiveDisplayRenderer.type === 'string' ||
       effectiveDisplayRenderer.type === 'ansi');
 
+  const inlineToolArgs = React.useMemo(
+    () =>
+      showToolCallArgs
+        ? formatInlineToolArgs(
+            args,
+            description,
+            fullDetail === true,
+            // The row renders at `innerWidth` (the header's status-indicator
+            // gutter is padding, not content), so that is the width the
+            // line cap has to reason about.
+            innerWidth > 0 ? innerWidth : undefined,
+          )
+        : undefined,
+    [showToolCallArgs, args, description, fullDetail, innerWidth],
+  );
+
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
+    <Box paddingY={0} flexDirection="column">
       <Box minHeight={1}>
         <ToolStatusIndicator status={status} name={name} />
         <ToolInfo
@@ -712,6 +974,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           status={status}
           description={description}
           emphasis={emphasis}
+          hideDescription={
+            status === ToolCallStatus.Confirming &&
+            confirmationDetails?.type === 'info' &&
+            confirmationDetails.renderPromptAsPlainText === true &&
+            isDescriptionRepeatedInPrompt(
+              description,
+              confirmationDetails.prompt,
+            )
+          }
         />
         {shouldShowFocusHint && (
           <Box marginLeft={1} flexShrink={0}>
@@ -727,11 +998,30 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {inlineToolArgs !== undefined && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <Text color={theme.text.secondary} wrap="wrap">
+            {inlineToolArgs}
+          </Text>
+        </Box>
+      )}
+      {visionBridgeNoticeText && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <StringResultRenderer
+            data={visionBridgeNoticeText}
+            renderAsMarkdown={false}
+            childWidth={innerWidth}
+          />
+        </Box>
+      )}
       {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
               <TodoResultRenderer data={effectiveDisplayRenderer.data} />
+            )}
+            {effectiveDisplayRenderer.type === 'findings' && (
+              <FindingsDisplay data={effectiveDisplayRenderer.data} />
             )}
             {effectiveDisplayRenderer.type === 'plan' && (
               <PlanResultRenderer
@@ -773,15 +1063,44 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 )}
               </>
             )}
+            {effectiveDisplayRenderer.type === 'image' && config && (
+              <TerminalImage
+                data={effectiveDisplayRenderer.data}
+                config={config}
+                contentWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+              />
+            )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
+                registerOverflow={!shellCapIgnoresShowMore}
               />
             )}
           </Box>
+        </Box>
+      )}
+      {((images?.length ?? 0) > 0 ||
+        (omittedImageCount !== undefined && omittedImageCount > 0)) && (
+        <Box
+          paddingLeft={STATUS_INDICATOR_WIDTH}
+          width="100%"
+          flexDirection="column"
+        >
+          {images?.map((image, index) => (
+            <TerminalImage
+              key={index}
+              image={image}
+              contentWidth={innerWidth}
+              availableTerminalHeight={inlineImageHeight}
+            />
+          ))}
+          {omittedImageCount !== undefined && omittedImageCount > 0 && (
+            <Text dimColor>{formatInlineImageOverflow(omittedImageCount)}</Text>
+          )}
         </Box>
       )}
       {isThisShellFocused && config && (
@@ -796,17 +1115,196 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   );
 };
 
+/**
+ * Absolute column cap for the inline args row in the main view. Generous enough
+ * for a real MCP payload, small enough that a WriteFile `content` arg cannot
+ * bury the conversation. Applies when the row width is unknown; otherwise
+ * whichever of this and `TOOL_ARGS_INLINE_MAX_LINES` is tighter wins. Lifted in
+ * full-detail mode — `ui.showToolCallArgs` gives you the args, Ctrl+O gives you
+ * everything.
+ */
+const TOOL_ARGS_INLINE_MAX_CHARS = 1000;
+
+/**
+ * Wrapped-row cap for the inline args row.
+ *
+ * `ToolGroupMessage` budgets terminal height per tool from
+ * `availableTerminalHeight - staticHeight - countOneLineToolCalls`, and that
+ * budget only ever reaches the result-output renderers — a tool with no
+ * `resultDisplay` is counted as exactly one line. The args row sits outside
+ * both, so a character-only cap let a single pending batch draw far past the
+ * viewport (six calls at the 1000-char cap measured ~72 rows into a 20-row
+ * frame). Once the live, non-`<Static>` frame exceeds the terminal height,
+ * ink's `shouldClearTerminalForFrame` wipes scrollback on every repaint —
+ * exactly the #5798 condition the parallel-agent hand-off above exists to
+ * avoid. Bounding the row in *rows* keeps a group's live frame proportional to
+ * its tool count; Ctrl+O remains the release valve.
+ */
+export const TOOL_ARGS_INLINE_MAX_LINES = 2;
+
+/**
+ * One-line JSON for the `ui.showToolCallArgs` row, or undefined when there is
+ * nothing worth adding.
+ *
+ * Skipped when `description` already IS the args JSON: MCP invocations return
+ * `safeJsonStringify(params)` from `getDescription()`, so rendering both would
+ * print the same payload twice.
+ *
+ * The result is model- and MCP-controlled text, so it goes through the same
+ * `sanitizeTerminalText` pipeline as the other untrusted renders in this
+ * component (`detailedDisplay`, the vision-bridge notice). `JSON.stringify`
+ * escapes C0 controls and `escapeAnsiCtrlCodes` neutralizes ESC-prefixed
+ * sequences, but neither touches Unicode bidi overrides — which would let a
+ * malicious arg visually reorder the very payload this row exists to expose
+ * (Trojan Source, CVE-2021-42572).
+ *
+ * Sanitization runs last, on the returned string: the dedup comparison and the
+ * `+N chars` accounting below both read the raw `json`, so the hidden-character
+ * count stays honest about the actual arguments.
+ *
+ * `rowWidth` is the width in columns the row renders at (`innerWidth` in the
+ * component). When given, the row is bounded to `TOOL_ARGS_INLINE_MAX_LINES`
+ * wrapped rows rather than by character count alone — see that constant.
+ */
+export function formatInlineToolArgs(
+  args: Record<string, unknown> | undefined,
+  description: string,
+  uncapped: boolean,
+  rowWidth?: number,
+): string | undefined {
+  if (!args || Object.keys(args).length === 0) {
+    return undefined;
+  }
+
+  let json: string;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    // Circular or otherwise unserializable args — the header line is all we
+    // can honestly show.
+    return undefined;
+  }
+
+  const trimmedDescription = description.trim();
+  if (trimmedDescription.startsWith('{')) {
+    try {
+      if (
+        JSON.stringify(JSON.parse(trimmedDescription) as unknown) === json ||
+        trimmedDescription === json
+      ) {
+        return undefined;
+      }
+    } catch {
+      // Only looks like JSON — fall through and render the args row.
+    }
+  }
+
+  if (uncapped) {
+    return sanitizeTerminalText(json);
+  }
+
+  // Whichever bound is tighter. Without a known row width the column cap is all
+  // we have; with one, `TOOL_ARGS_INLINE_MAX_LINES` rows is the real ceiling.
+  const budget =
+    rowWidth !== undefined && rowWidth > 0
+      ? Math.min(
+          TOOL_ARGS_INLINE_MAX_CHARS,
+          Math.floor(rowWidth) * TOOL_ARGS_INLINE_MAX_LINES,
+        )
+      : TOOL_ARGS_INLINE_MAX_CHARS;
+
+  // Reserve the marker's own columns inside the budget — otherwise the
+  // `+N chars` tail is precisely what spills onto the row after the last one we
+  // are allowed to draw. `json.length` is an upper bound on the digit count.
+  const markerWidth = `… +${json.length} chars (${toggleKeyHint})`.length;
+  const headBudget = Math.max(1, budget - markerWidth);
+
+  // Walk code points, measuring columns. Two reasons not to `slice` code units:
+  // a raw cut can land between the halves of a surrogate pair (an emoji or a
+  // supplementary-plane CJK char in an argument) and leave an orphan the
+  // terminal draws as a replacement glyph; and columns, not code units, are
+  // what decide where ink wraps — a full-width CJK argument fills the row in
+  // half the characters.
+  let columns = 0;
+  let cut = -1;
+  for (let i = 0; i < json.length; ) {
+    const unit = json.charCodeAt(i);
+    const size =
+      unit >= 0xd800 && unit <= 0xdbff && i + 1 < json.length ? 2 : 1;
+    const width = Math.max(getCachedStringWidth(json.slice(i, i + size)), 1);
+    if (columns + width > headBudget) {
+      cut = i;
+      break;
+    }
+    columns += width;
+    i += size;
+  }
+
+  if (cut < 0) {
+    return sanitizeTerminalText(json);
+  }
+
+  // `+N chars` counts code points, matching the rest of this file's
+  // `toCodePoints` accounting: a code-unit count over-reports by one per astral
+  // character, so a payload of emoji would advertise twice what Ctrl+O reveals.
+  let hidden = 0;
+  for (let i = cut; i < json.length; ) {
+    const unit = json.charCodeAt(i);
+    i += unit >= 0xd800 && unit <= 0xdbff && i + 1 < json.length ? 2 : 1;
+    hidden++;
+  }
+  return sanitizeTerminalText(
+    `${json.slice(0, cut)}… +${hidden} chars (${toggleKeyHint})`,
+  );
+}
+
+function isDescriptionRepeatedInPrompt(
+  description: string,
+  prompt: string,
+): boolean {
+  try {
+    const parsed: unknown = JSON.parse(description);
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed)
+    ) {
+      return false;
+    }
+    const values = Object.values(parsed);
+    if (
+      values.length === 0 ||
+      !values.every((value): value is string => typeof value === 'string')
+    ) {
+      return false;
+    }
+    const promptValues = prompt.split('\n').flatMap((line) => {
+      try {
+        const value: unknown = JSON.parse(line);
+        return typeof value === 'string' ? [value] : [];
+      } catch {
+        return [];
+      }
+    });
+    return values.every((value) => promptValues.includes(value));
+  } catch {
+    return false;
+  }
+}
+
 type ToolInfo = {
   name: string;
   description: string;
   status: ToolCallStatus;
   emphasis: TextEmphasis;
+  hideDescription?: boolean;
 };
 const ToolInfo: React.FC<ToolInfo> = ({
   name,
   description,
   status,
   emphasis,
+  hideDescription,
 }) => {
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
@@ -827,8 +1325,13 @@ const ToolInfo: React.FC<ToolInfo> = ({
       <Text wrap="wrap" strikethrough={status === ToolCallStatus.Canceled}>
         <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
-        </Text>{' '}
-        <Text color={theme.text.secondary}>{description}</Text>
+        </Text>
+        {!hideDescription && (
+          <>
+            {' '}
+            <Text color={theme.text.secondary}>{description}</Text>
+          </>
+        )}
       </Text>
     </Box>
   );

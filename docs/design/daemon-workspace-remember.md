@@ -213,7 +213,8 @@ The initial response is `202 Accepted` with a `forget-...` task id. Poll
       "filePath": "/path/to/memory.md"
     }
   ],
-  "touchedTopics": ["project"]
+  "touchedTopics": ["project"],
+  "touchedScopes": ["project"]
 }
 ```
 
@@ -401,7 +402,7 @@ to the per-session event stream receive this notification.
 | `scope`         | `"managed"` | Discriminates from file-based `memory_changed` events                                     |
 | `source`        | `string`    | `"workspace_memory_remember"`, `"workspace_memory_forget"`, or `"workspace_memory_dream"` |
 | `taskId`        | `string`    | Correlates with the task returned by POST                                                 |
-| `touchedScopes` | `string[]`  | Which memory scopes were written: `"user"`, `"project"`                                   |
+| `touchedScopes` | `string[]`  | Which managed memory scopes changed: `"user"`, `"project"`                                |
 
 The `originatorClientId` (if provided at POST time) is attached to the event
 envelope so the event bus can route it to the originating client.

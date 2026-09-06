@@ -27,7 +27,7 @@ import { SettingInputPrompt } from '../SettingInputPrompt.js';
 import { PluginChoicePrompt } from '../PluginChoicePrompt.js';
 
 export interface StatusMessage {
-  type: 'info' | 'success' | 'error';
+  type: 'info' | 'success' | 'warning' | 'error';
   text: string;
 }
 
@@ -256,9 +256,11 @@ export function ExtensionsManagerDialog({
             color={
               status.type === 'error'
                 ? theme.status.error
-                : status.type === 'success'
-                  ? theme.status.success
-                  : theme.text.secondary
+                : status.type === 'warning'
+                  ? theme.status.warning
+                  : status.type === 'success'
+                    ? theme.status.success
+                    : theme.text.secondary
             }
           >
             {status.text}

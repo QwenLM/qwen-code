@@ -13,12 +13,13 @@ import { useCallback, useState } from 'react';
 import type {
   AnsiOutput,
   Config,
-  GeminiClient,
+  LlmClient,
   ShellExecutionResult,
 } from '@qwen-code/qwen-code-core';
 import {
   compactToolResultDisplayForHistory,
   createDebugLogger,
+  isSignalTermination,
   isBinary,
   ShellExecutionService,
 } from '@qwen-code/qwen-code-core';
@@ -40,8 +41,8 @@ function copyString(value: string): string {
   return value.split('').join('');
 }
 
-function addShellCommandToGeminiHistory(
-  geminiClient: GeminiClient,
+function addShellCommandToLlmHistory(
+  llmClient: LlmClient,
   rawQuery: string,
   resultText: string,
 ) {
@@ -51,7 +52,7 @@ function addShellCommandToGeminiHistory(
         '\n... (truncated)'
       : resultText;
 
-  geminiClient.addHistory({
+  llmClient.addHistory({
     role: 'user',
     parts: [
       {
@@ -81,7 +82,7 @@ export const useShellCommandProcessor = (
   onExec: (command: Promise<void>) => void,
   onDebugMessage: (message: string) => void,
   config: Config,
-  geminiClient: GeminiClient,
+  llmClient: LlmClient,
   setShellInputFocused: (value: boolean) => void,
   terminalWidth?: number,
   terminalHeight?: number,
@@ -150,6 +151,16 @@ export const useShellCommandProcessor = (
         abortSignal.addEventListener('abort', abortHandler, { once: true });
 
         onDebugMessage(`Executing in ${targetDir}: ${commandToExecute}`);
+
+        const cleanupShellCommand = () => {
+          abortSignal.removeEventListener('abort', abortHandler);
+          if (pwdFilePath && fs.existsSync(pwdFilePath)) {
+            fs.unlinkSync(pwdFilePath);
+          }
+          setActiveShellPtyId(null);
+          setShellInputFocused(false);
+          resolve();
+        };
 
         try {
           const activeTheme = themeManager.getActiveTheme();
@@ -288,7 +299,7 @@ export const useShellCommandProcessor = (
               } else if (result.aborted) {
                 finalStatus = ToolCallStatus.Canceled;
                 finalOutput = `Command was cancelled.\n${finalOutput}`;
-              } else if (result.signal) {
+              } else if (isSignalTermination(result.signal)) {
                 finalStatus = ToolCallStatus.Error;
                 finalOutput = `Command terminated by signal: ${result.signal}.\n${finalOutput}`;
               } else if (result.exitCode !== 0) {
@@ -321,11 +332,7 @@ export const useShellCommandProcessor = (
               );
 
               // Keep the existing LLM history behavior unchanged.
-              addShellCommandToGeminiHistory(
-                geminiClient,
-                rawQuery,
-                finalOutput,
-              );
+              addShellCommandToLlmHistory(llmClient, rawQuery, finalOutput);
             })
             .catch((err) => {
               setPendingHistoryItem(null);
@@ -340,13 +347,7 @@ export const useShellCommandProcessor = (
               );
             })
             .finally(() => {
-              abortSignal.removeEventListener('abort', abortHandler);
-              if (pwdFilePath && fs.existsSync(pwdFilePath)) {
-                fs.unlinkSync(pwdFilePath);
-              }
-              setActiveShellPtyId(null);
-              setShellInputFocused(false);
-              resolve();
+              cleanupShellCommand();
             });
         } catch (err) {
           // This block handles synchronous errors from `execute`
@@ -360,13 +361,7 @@ export const useShellCommandProcessor = (
             userMessageTimestamp,
           );
 
-          // Perform cleanup here as well
-          if (pwdFilePath && fs.existsSync(pwdFilePath)) {
-            fs.unlinkSync(pwdFilePath);
-          }
-          setActiveShellPtyId(null);
-          setShellInputFocused(false);
-          resolve(); // Resolve the promise to unblock `onExec`
+          cleanupShellCommand();
         }
       };
 
@@ -383,7 +378,7 @@ export const useShellCommandProcessor = (
       addItemToHistory,
       setPendingHistoryItem,
       onExec,
-      geminiClient,
+      llmClient,
       setShellInputFocused,
       terminalHeight,
       terminalWidth,

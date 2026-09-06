@@ -2,7 +2,7 @@
 
 ## Overview
 
-A `qwen serve` process is **one daemon = one workspace**. It hosts a single Express HTTP server, owns an `@qwen-code/acp-bridge` instance, and spawns one ACP child process (`qwen --acp`) that runs the actual agent runtime. Multiple clients (CLI TUI, IDE companion, IM channel bots, web BFFs, custom scripts) connect over HTTP + SSE and either share one ACP session (`sessionScope: 'single'`, default) or split sessions by conversation thread (`sessionScope: 'thread'`).
+A `qwen serve` process hosts one Express HTTP server and one primary workspace by default. With `multi_workspace_sessions` enabled it may also host additional workspace runtimes for the live session closed loop; each registered workspace owns its own `@qwen-code/acp-bridge` / `qwen --acp` child pair. Multiple clients (CLI TUI, IDE companion, IM channel bots, web BFFs, custom scripts) connect over HTTP + SSE and either share one ACP session (`sessionScope: 'single'`, default) or split sessions by conversation thread (`sessionScope: 'thread'`).
 
 Inside the ACP child, MCP servers are shared workspace-wide through `McpTransportPool` (F2): a single (server-name + config-fingerprint) tuple maps to one MCP transport, regardless of how many sessions discover it. The bridge's `MultiClientPermissionMediator` (F3) coordinates permission votes across all connected clients under one of four policies.
 
@@ -13,14 +13,14 @@ This doc gives the **system-level picture** that the rest of this documentation 
 ```mermaid
 flowchart LR
     subgraph clients["Clients"]
-        WUI["Web UI<br/>(packages/webui/src/daemon)"]
+        WUI["Web Shell<br/>(packages/web-shell/client/daemon)"]
         TUI["CLI TUI<br/>(packages/cli/src/ui/daemon)"]
         IDE["VS Code IDE<br/>(packages/vscode-ide-companion)"]
         CH["Channel bots<br/>(DingTalk / WeChat / Telegram / Feishu)"]
         SDK["Any SDK consumer<br/>(packages/sdk-typescript/src/daemon)"]
     end
 
-    subgraph daemon["qwen serve process (one workspace)"]
+    subgraph daemon["qwen serve process (primary workspace plus optional session runtimes)"]
         EXP["Express app<br/>(packages/cli/src/serve/server.ts)"]
         BR["AcpBridge<br/>(packages/acp-bridge/src/bridge.ts)"]
         MED["MultiClientPermissionMediator<br/>(F3)"]
@@ -98,7 +98,7 @@ flowchart TB
     end
 
     subgraph adapters["Adapters"]
-        WUIP["webui/src/daemon/<br/>DaemonSessionProvider.tsx"]
+        WUIP["web-shell/client/daemon/session/<br/>DaemonSessionProvider.tsx"]
         TUIA["cli/src/ui/daemon/<br/>daemon-tui-adapter.ts"]
         CHB["channels/base/<br/>DaemonChannelBridge.ts"]
         DT["channels/dingtalk"]
@@ -154,7 +154,7 @@ sequenceDiagram
     participant CH as ACP child
 
     C->>MW: POST /session/:id/prompt<br/>Authorization: Bearer …<br/>X-Qwen-Client-Id: …
-    MW->>MW: denyBrowserOriginCors
+    MW->>MW: allowOriginCors (mutable allowlist; unmatched Origin -> 403)
     MW->>MW: hostAllowlist (DNS rebinding guard)
     MW->>MW: access-log hook
     MW->>MW: bearerAuth (constant-time compare)
@@ -196,7 +196,7 @@ sequenceDiagram
     Note over EB,SR: If subscriber queue >= maxQueued,<br/>EventBus emits client_evicted terminal frame<br/>and closes subscriber.
 ```
 
-The ring buffer is bounded (`eventRingSize`, default 8000). A reconnecting client whose `Last-Event-ID` is older than the ring's head receives a synthetic catch-up signal and must call `loadSession` / `resumeSession` to rebuild deeper state. Slow clients trigger `slow_client_warning` at 75% queue fill and `client_evicted` at the cap.
+The ring buffer is bounded (`eventRingSize`, default 8000). A reconnecting client whose `Last-Event-ID` is older than the ring's head receives `state_resync_required` and must rebuild from `loadSession`'s bounded replay snapshot window or use `resumeSession` when it already has local history. Slow clients trigger `slow_client_warning` at 75% queue fill and `client_evicted` at the cap.
 
 ## Workflow 3: Multi-client permission mediation
 
@@ -327,7 +327,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 
 | Concern              | File                                                        |
 | -------------------- | ----------------------------------------------------------- |
-| Bootstrap            | `packages/cli/src/serve/run-qwen-serve.ts`                    |
+| Bootstrap            | `packages/cli/src/serve/run-qwen-serve.ts`                  |
 | Express app          | `packages/cli/src/serve/server.ts`                          |
 | Capability registry  | `packages/cli/src/serve/capabilities.ts`                    |
 | Auth middleware      | `packages/cli/src/serve/auth.ts`                            |

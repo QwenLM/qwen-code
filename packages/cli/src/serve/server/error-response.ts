@@ -6,14 +6,24 @@
 
 import {
   emitDaemonLog,
+  InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionIdCaseConflictError,
+  SessionTranscriptPageTooLargeError,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+  SessionWriterError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
+  BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -21,17 +31,21 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionRestoreTimeoutError,
+  SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
   SessionConflictError,
   SessionLimitExceededError,
+  SessionNotArchivedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -40,12 +54,32 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  WorkspaceDrainingError,
+  TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
+import { sendGenerationClosedError } from '../workspace-route-runtime.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
+import { DaemonDrainingError } from './session-archive.js';
+import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
   sessionId?: string;
+  /**
+   * The caller asserts that, on this request path, the channel-initialize
+   * handshake strictly precedes every durable mutation (git branch/worktree
+   * prep, committed forks, dispatched ACP requests). Only then may the
+   * `init_timeout` response promise `sideEffectPossible: false`. Routes
+   * that mutate before or around initialization must leave it unset so the
+   * response reports an unknown outcome instead.
+   */
+  initPrecedesMutations?: boolean;
   [key: string]: string | number | boolean | undefined;
 };
 
@@ -55,17 +89,98 @@ export type SendBridgeError = (
   ctx?: BridgeErrorContext,
 ) => void;
 
+function reportBridgeError(
+  err: unknown,
+  ctx: BridgeErrorContext | undefined,
+  daemonLog: DaemonLogger | undefined,
+): void {
+  recordDaemonBridgeError(err);
+  const extraContext = bridgeErrorExtraContext(ctx);
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge error.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    ...extraContext,
+    'error.type': err instanceof Error ? err.name : typeof err,
+    'error.message': (err instanceof Error ? err.message : String(err)).slice(
+      0,
+      1024,
+    ),
+  });
+  if (daemonLog) {
+    daemonLog.error(
+      err instanceof Error ? err.message : String(err),
+      err instanceof Error ? err : undefined,
+      {
+        ...(ctx?.route ? { route: ctx.route } : {}),
+        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        ...extraContext,
+      },
+    );
+    return;
+  }
+  const ctxParts = [
+    ctx?.route,
+    ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+    ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
+  ].filter(Boolean);
+  const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
+  writeStderrLine(
+    `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+  );
+}
+
+const SESSION_WRITER_ERROR_MESSAGES = {
+  session_writer_conflict:
+    'This session is already open in another Qwen process.',
+  session_writer_lost: 'Write ownership for this session was lost.',
+  session_transcript_changed:
+    'The session transcript changed outside its active writer.',
+  session_writer_unavailable: 'Session write ownership could not be verified.',
+} as const;
+
 function bridgeErrorExtraContext(
   ctx: BridgeErrorContext | undefined,
 ): Record<string, string | number | boolean> {
   const extra: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(ctx ?? {})) {
-    if (key === 'route' || key === 'sessionId' || value === undefined) {
+    if (
+      key === 'route' ||
+      key === 'sessionId' ||
+      key === 'initPrecedesMutations' ||
+      value === undefined
+    ) {
       continue;
     }
     extra[key] = value;
   }
   return extra;
+}
+
+function recordExpectedBridgeError(
+  err: Error,
+  ctx: BridgeErrorContext | undefined,
+  daemonLog: DaemonLogger | undefined,
+): void {
+  recordDaemonBridgeError(err);
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge request failed.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    'error.type': err.name,
+    'error.message': err.message.slice(0, 1024),
+  });
+  daemonLog?.warn(err.message, {
+    ...(ctx?.route ? { route: ctx.route } : {}),
+    ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    errorType: err.name,
+  });
 }
 
 export function sendPermissionVoteError(
@@ -146,6 +261,224 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    if (ctx?.initPrecedesMutations === true) {
+      res.set('Retry-After', '5');
+      // The caller asserted initialization strictly precedes every durable
+      // mutation on this path (plain session creation: the initialize
+      // handshake runs before the ACP newSession request is dispatched), so
+      // clients that understand the structured body can safely distinguish
+      // this timeout from an ambiguous mutation outcome.
+      res.status(504).json({
+        error: err.message,
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        retryable: true,
+        sideEffectPossible: false,
+        phase: 'channel.initialize',
+        timeoutMs: err.timeoutMs,
+      });
+      return;
+    }
+    // Mutations may precede or interleave with initialization on this path
+    // (branch/worktree preparation on POST /session, committed forks on the
+    // branch and side-task restore flows). Report the timeout WITHOUT the
+    // safe-retry contract: no Retry-After, no retryable, and no
+    // sideEffectPossible claim — the mutation outcome is unknown, and a
+    // contract-trusting client must not auto-retry.
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      phase: 'channel.initialize',
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
+  if (err instanceof SessionRestoreTimeoutError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    // The state this 504 leaves behind is the abandoned-restore fence, which
+    // outlives one full budget. A 5s hint here just buys one wasted round trip
+    // before the 409 tells the client the real backoff.
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'session_restore_timeout',
+      errorKind: 'restore_timeout',
+      retryable: true,
+      sessionId: err.sessionId,
+      action: err.action,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
+  if (err instanceof BridgeTimeoutError && err.label === 'newSession') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
+  if (err instanceof BridgeChannelQuarantinedError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    // Quarantine lasts until the channel drains, which is strictly longer than
+    // the fence — and a fresh-id request never reaches the 409 that carries the
+    // correct hint, so this header is the only backoff signal it gets.
+    res.set('Retry-After', String(err.retryAfterSeconds));
+    res.status(503).json({
+      error: err.message,
+      code: 'acp_channel_unavailable',
+      errorKind: 'acp_channel_unavailable',
+      retryable: true,
+      reason: err.reason,
+      retryAfterSeconds: err.retryAfterSeconds,
+    });
+    return;
+  }
+  if (err instanceof DaemonDrainingError) {
+    res.status(503).json({
+      error: err.message,
+      code: err.code,
+      errorKind: err.code,
+    });
+    return;
+  }
+  if (err instanceof ConversationRuntimeOwnershipError) {
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      retryable: err.retryable,
+    });
+    return;
+  }
+  if (err instanceof StandaloneSessionServiceError) {
+    const status =
+      err.code === 'invalid_request'
+        ? 400
+        : err.code === 'standalone_session_not_found'
+          ? 404
+          : err.code === 'standalone_creation_outcome_unknown' ||
+              err.code === 'standalone_creation_rolled_back' ||
+              err.code === 'standalone_session_operation_failed' ||
+              err.code === 'transcript_deletion_failed' ||
+              err.code === 'transcript_deletion_outcome_unknown' ||
+              err.code === 'working_directory_recovery_failed'
+            ? 500
+            : 409;
+    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+    if (err.retryable) res.set('Retry-After', '5');
+    res.status(status).json({
+      error: err.message,
+      code: err.code,
+      errorKind: err.code,
+      retryable: err.retryable,
+      ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
+    });
+    return;
+  }
+  if (sendGenerationClosedError(res, err)) return;
+  if (err instanceof WorkspaceRuntimeStillStartingError) {
+    reportBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_still_starting',
+    });
+    return;
+  }
+  if (err instanceof WorkspaceRuntimeInitializationError) {
+    reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_initialization_failed',
+    });
+    return;
+  }
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    (err.code === 'session_attachment_gone' ||
+      err.code === 'invalid_session_attachment_reference')
+  ) {
+    res
+      .status(err.code === 'session_attachment_gone' ? 410 : 400)
+      .json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SessionWriterError) {
+    res.status(err.httpStatus).json({
+      error: err.message,
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
+  const skillError = mapWorkspaceSkillToggleError(err);
+  if (skillError) {
+    res.status(404).json(skillError);
+    return;
+  }
+  if (err instanceof InvalidSessionTranscriptCursorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_transcript_cursor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionTranscriptTurnAnchorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_turn_anchor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptSnapshotUnavailableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'transcript_snapshot_unavailable',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptPageTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_page_too_large',
+      sessionId: err.sessionId,
+      pageBytes: err.pageBytes,
+      maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_too_large',
+      sessionId: err.sessionId,
+      snapshotSize: err.snapshotSize,
+      maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceDrainingError) {
+    if (err.cause !== undefined) reportBridgeError(err.cause, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'workspace_draining',
+      workspaceCwd: err.workspaceCwd,
+    });
+    return;
+  }
   if (err instanceof WorkspaceInitConflictError) {
     // The target file already exists with non-
     // whitespace content and the caller did not pass `force: true`.
@@ -191,6 +524,13 @@ export function sendBridgeError(
       code: 'workspace_init_race',
       target: err.target,
       kind: err.kind,
+    });
+    return;
+  }
+  if (err instanceof McpAuthenticationInProgressError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'mcp_authentication_in_progress',
     });
     return;
   }
@@ -241,7 +581,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionNotFoundError) {
-    res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    res
+      .status(404)
+      .json({ error: err.message, code: err.code, sessionId: err.sessionId });
     return;
   }
   if (err instanceof SessionArchivedError) {
@@ -252,7 +594,23 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionNotArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_not_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
   if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionIdCaseConflictError) {
     res.status(409).json({
       error: err.message,
       code: 'session_conflict',
@@ -278,6 +636,15 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_artifact_forbidden',
+      sessionId: err.sessionId,
+      artifactId: err.artifactId,
+    });
+    return;
+  }
   if (err instanceof SessionShellDisabledError) {
     res.status(403).json({
       error: err.message,
@@ -295,21 +662,21 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceMismatchError) {
-    // Single-workspace mode: the daemon binds to one workspace at
-    // boot; cross-workspace POSTs are rejected here.
-    // 400 (not 404 — the daemon is "fine", the client just picked
-    // the wrong daemon for their workspace). Body includes both
-    // paths so orchestrator-aware clients can route to the right
-    // daemon / spawn a new one.
+    // Each bridge binds to one workspace runtime; a cross-workspace POST that
+    // reaches the selected bridge is rejected here.
+    // 400 (not 404 — the daemon is "fine", but the client selected an
+    // unregistered runtime or reached a mismatched bridge). Body includes both
+    // paths so clients can refresh the registry, register the workspace, or
+    // select the right runtime.
     //
     // Operator log line: unlike SessionNotFoundError (per-session
     // 404 with rich URL context), workspace_mismatch indicates an
-    // orchestration / deployment drift (operator booted with the
-    // wrong workspace, or client is routing to the wrong daemon).
+    // orchestration / deployment drift (the workspace was not registered, or
+    // runtime selection and bridge dispatch disagree).
     // Without a breadcrumb the daemon's log looks healthy while
-    // every client request silently 400s. Limited to authenticated
-    // requests by the upstream bearer-token gate, so probing-DoS
-    // log noise stays bounded.
+    // every client request silently 400s. Limited to requests admitted by the
+    // upstream bearer/listener policy, so probing-DoS log noise stays bounded
+    // by the configured deployment boundary.
     // SECURITY: `err.requested` is derived from the request body
     // (`req.workspaceCwd` → `canonicalizeWorkspace` → here). `path.resolve`
     // + `realpathSync.native` both preserve control characters inside
@@ -325,7 +692,7 @@ export function sendBridgeError(
     // readability.
     writeStderrLine(
       `qwen serve: workspace_mismatch (POST /session): ` +
-        `daemon bound to ${JSON.stringify(err.bound)}, ` +
+        `runtime bound to ${JSON.stringify(err.bound)}, ` +
         `rejected ${JSON.stringify(err.requested)}`,
     );
     res.status(400).json({
@@ -368,6 +735,37 @@ export function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+      scope: 'workspace',
+    });
+    return;
+  }
+  if (err instanceof TotalSessionLimitExceededError) {
+    const totalSessionError = err as TotalSessionLimitExceededError & {
+      operation?: string;
+      workspaceCwd?: string;
+      sourceSessionId?: string;
+    };
+    daemonLog?.warn('total session admission rejected', {
+      ...(ctx?.route ? { route: ctx.route } : {}),
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      limit: totalSessionError.limit,
+      scope: totalSessionError.scope,
+      ...(totalSessionError.operation
+        ? { operation: totalSessionError.operation }
+        : {}),
+      ...(totalSessionError.workspaceCwd
+        ? { workspaceCwd: totalSessionError.workspaceCwd }
+        : {}),
+      ...(totalSessionError.sourceSessionId
+        ? { sourceSessionId: totalSessionError.sourceSessionId }
+        : {}),
+    });
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'session_limit_exceeded',
+      limit: err.limit,
+      scope: err.scope,
     });
     return;
   }
@@ -383,14 +781,17 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof RestoreInProgressError) {
-    // Match `SessionLimitExceededError`'s 5s hint (above) — the
-    // underlying restore can take up to `initTimeoutMs` (default
-    // 10s) on the agent side, so a 1s retry hint pushed clients
-    // into tight loops that kept hitting the same 409.
-    res.set('Retry-After', '5');
+    // An ordinary in-flight restore matches `SessionLimitExceededError`'s 5s
+    // hint (above). A fence left behind by a timed-out restore carries a much
+    // longer hint from the bridge, because the late ACP request has to settle
+    // before the id frees up — a 5s cadence there is a tight loop against a
+    // 409 the client cannot clear. `reason` lets clients tell the two apart.
+    res.set('Retry-After', String(err.retryAfterSeconds));
     res.status(409).json({
       error: err.message,
       code: 'restore_in_progress',
+      reason: err.reason,
+      retryable: true,
       sessionId: err.sessionId,
       activeAction: err.activeAction,
       requestedAction: err.requestedAction,
@@ -402,6 +803,8 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_busy',
+      errorKind: 'session_busy',
+      retryable: true,
       sessionId: err.sessionId,
     });
     return;
@@ -420,6 +823,83 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'session_busy') {
+        res.set('Retry-After', '5');
+        res.status(409).json({
+          error: 'The session is busy.',
+          code: kind,
+          errorKind: kind,
+          retryable: true,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
+      if (
+        kind === 'working_directory_missing' ||
+        kind === 'working_directory_compromised'
+      ) {
+        const retryable = kind === 'working_directory_missing';
+        if (retryable) res.set('Retry-After', '5');
+        res.status(409).json({
+          error:
+            kind === 'working_directory_missing'
+              ? 'The standalone working directory is missing.'
+              : 'The standalone working directory identity is compromised.',
+          code: kind,
+          errorKind: kind,
+          retryable,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
+      if (
+        kind === 'session_writer_conflict' ||
+        kind === 'session_writer_lost' ||
+        kind === 'session_transcript_changed'
+      ) {
+        res.status(409).json({
+          error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_writer_unavailable') {
+        res.status(503).json({
+          error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'untrusted_workspace') {
+        res.status(403).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
+      if (
+        kind === 'goal_conflict' ||
+        kind === 'goal_invalid_transition' ||
+        kind === 'goal_persist_failed'
+      ) {
+        const d = data as { current?: unknown };
+        res.status(kind === 'goal_persist_failed' ? 500 : 409).json({
+          error: errorMessage(err),
+          code: kind,
+          ...(d.current !== undefined ? { current: d.current } : {}),
+        });
+        return;
+      }
+      if (kind === 'branch_point_invalid') {
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'branch_point_invalid',
+          errorKind: kind,
+        });
+        return;
+      }
       if (kind === 'mcp_budget_would_exceed') {
         const d = data as { serverName?: string };
         res.status(409).json({
@@ -489,6 +969,70 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'invalid_transcript_cursor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      if (kind === 'invalid_transcript_limit') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'invalid_turn_anchor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_turn_anchor',
+        });
+        return;
+      }
+      if (kind === 'transcript_snapshot_unavailable') {
+        const d = data as { sessionId?: string };
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'transcript_snapshot_unavailable',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+        });
+        return;
+      }
+      if (kind === 'transcript_too_large') {
+        const d = data as {
+          sessionId?: string;
+          snapshotSize?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.snapshotSize === 'number'
+            ? { snapshotSize: d.snapshotSize }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+        });
+        return;
+      }
+      if (kind === 'transcript_page_too_large') {
+        const d = data as {
+          sessionId?: string;
+          pageBytes?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_page_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.pageBytes === 'number'
+            ? { pageBytes: d.pageBytes }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+        });
+        return;
+      }
     }
   }
   // 5xx is the kind of error operators need to see in their daemon log
@@ -498,43 +1042,7 @@ export function sendBridgeError(
   // structured daemon logger (which tees to stderr + log file). When
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
-  recordDaemonBridgeError(err);
-  const extraContext = bridgeErrorExtraContext(ctx);
-  recordDaemonError(undefined, err, {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-  });
-  emitDaemonLog('Daemon bridge error.', {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-    ...extraContext,
-    'error.type': err instanceof Error ? err.name : typeof err,
-    'error.message': (err instanceof Error ? err.message : String(err)).slice(
-      0,
-      1024,
-    ),
-  });
-  if (daemonLog) {
-    daemonLog.error(
-      err instanceof Error ? err.message : String(err),
-      err instanceof Error ? err : undefined,
-      {
-        ...(ctx?.route ? { route: ctx.route } : {}),
-        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
-        ...extraContext,
-      },
-    );
-  } else {
-    const ctxParts = [
-      ctx?.route,
-      ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
-      ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
-    ].filter(Boolean);
-    const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
-    writeStderrLine(
-      `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-    );
-  }
+  reportBridgeError(err, ctx, daemonLog);
   res.status(500).json(errorPayload(err));
 }
 

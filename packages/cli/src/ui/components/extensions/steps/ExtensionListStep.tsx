@@ -102,6 +102,7 @@ export const ExtensionListStep = ({
         return theme.text.secondary;
       case ExtensionUpdateState.UPDATE_AVAILABLE:
       case ExtensionUpdateState.UPDATED_NEEDS_RESTART:
+      case ExtensionUpdateState.UPDATED_WITH_WARNINGS:
         return theme.status.warning;
       case ExtensionUpdateState.ERROR:
         return theme.status.error;

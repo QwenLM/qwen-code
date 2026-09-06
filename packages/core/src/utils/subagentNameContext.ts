@@ -24,3 +24,21 @@ export const MAIN_SOURCE = 'main';
  * helpers.
  */
 export const subagentNameContext = new AsyncLocalStorage<string>();
+
+/** Stable per-invocation identity of the current subagent. */
+export interface SubagentIdentity {
+  /** Agent type name (e.g. "general-purpose"), from the agent config. */
+  type: string;
+  /** Unique id for this invocation, so repeated calls stay distinguishable. */
+  id: string;
+  /** Human-readable business/task name for this invocation. */
+  taskName?: string;
+}
+
+/**
+ * Carries the current subagent's local UI identity alongside
+ * `subagentNameContext`, which retains the stable agent type used by existing
+ * telemetry consumers.
+ */
+export const subagentIdentityContext =
+  new AsyncLocalStorage<SubagentIdentity>();

@@ -48,6 +48,7 @@ export class ChannelLoopScheduler {
   private runningTick: Promise<void> | undefined;
   private readonly inFlightJobs = new Map<string, symbol>();
   private generation = 0;
+  private recoveryEpoch = 0;
 
   constructor(options: ChannelLoopSchedulerOptions) {
     this.store = options.store;
@@ -87,6 +88,15 @@ export class ChannelLoopScheduler {
     this.runningTick = undefined;
     this.generation++;
     this.inFlightJobs.clear();
+  }
+
+  /**
+   * Mark that a bridge recovery started. Loop prompts already in flight that
+   * the bridge replacement aborts are cleared instead of counted as agent
+   * failures, so a crash-restart cannot auto-disable a loop.
+   */
+  markBridgeRecovery(): void {
+    this.recoveryEpoch++;
   }
 
   private async reconcileStartupState(): Promise<void> {
@@ -177,6 +187,7 @@ export class ChannelLoopScheduler {
     const latestJob = await this.findJob(job.id);
     if (!latestJob?.enabled) return;
     if (this.generation !== generation) return;
+    let recoveryEpoch = this.recoveryEpoch;
 
     const runningSince = now.toISOString();
     let resultPreview: string | undefined;
@@ -189,6 +200,7 @@ export class ChannelLoopScheduler {
         await this.clearRunningSince(latestJob.id, runningSince);
         return;
       }
+      recoveryEpoch = this.recoveryEpoch;
       resultPreview = await channel.runLoopPrompt(latestJob, {
         timeoutMs: this.loopTimeoutMs,
         shouldContinue: async () => {
@@ -216,6 +228,21 @@ export class ChannelLoopScheduler {
       }
       if (this.generation !== generation || !currentJob?.enabled) {
         await this.clearRunningSince(latestJob.id, runningSince);
+        return;
+      }
+      if (recoveryEpoch !== this.recoveryEpoch) {
+        try {
+          await this.store.update(latestJob.id, {
+            lastFinishedAt: this.now().toISOString(),
+            lastStatus: 'error',
+            lastError: truncateError(
+              err instanceof Error ? err.message : String(err),
+            ),
+            runningSince: undefined,
+          });
+        } catch {
+          await this.clearRunningSince(latestJob.id, runningSince);
+        }
         return;
       }
       await this.recordFailure(

@@ -137,6 +137,34 @@ describe('CronListTool', () => {
     );
   });
 
+  it('reports a legacy condition task as disabled while a normal task stays enabled', async () => {
+    // `condition` was removed from DurableCronTask, but a pre-removal version
+    // stamped it on isolated/precondition tasks. Such a task can never fire —
+    // the scheduler skips it — so cron_list must surface it as disabled
+    // (enabled === false) rather than as an active task that silently never
+    // runs. Attach the legacy field off the typed shape.
+    const legacy = {
+      ...makeDurableTask({ id: 'legacy01', prompt: 'guarded' }),
+      condition: 'files_changed',
+    } as DurableCronTask;
+    await writeCronTasks(tmpDir, [
+      legacy,
+      makeDurableTask({ id: 'normal01', prompt: 'runs fine' }),
+    ]);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    // The legacy condition task is forced disabled...
+    expect(result.llmContent).toContain(
+      'legacy01 — 0 */2 * * * (recurring) [durable, disabled]: guarded',
+    );
+    // ...while an ordinary durable task stays enabled (no disabled marker).
+    expect(result.llmContent).toContain(
+      'normal01 — 0 */2 * * * (recurring) [durable]: runs fine',
+    );
+  });
+
   it('merges file-backed durable jobs with session-only jobs', async () => {
     await writeCronTasks(tmpDir, [makeDurableTask()]);
     config._scheduler.create('*/10 * * * *', 'session task', true);

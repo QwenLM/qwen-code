@@ -96,6 +96,9 @@ export function extensionToOutputString(
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;
+    if (extension.installMetadata.originSource) {
+      output += `\n ${t('Origin:')} ${extension.installMetadata.originSource}`;
+    }
     if (extension.installMetadata.ref) {
       output += `\n ${t('Ref:')} ${extension.installMetadata.ref}`;
     }

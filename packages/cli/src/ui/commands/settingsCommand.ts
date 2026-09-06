@@ -15,6 +15,7 @@ export const settingsCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   action: (_context, _args): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'settings',

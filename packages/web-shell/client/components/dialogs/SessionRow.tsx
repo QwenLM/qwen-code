@@ -1,7 +1,8 @@
 import { type ReactNode } from 'react';
-import { type DaemonSessionSummary } from '@qwen-code/webui/daemon-react-sdk';
+import { type DaemonSessionSummary } from '@qwen-code/web-shell/daemon-react-sdk';
 import { dp } from './dialogStyles';
 import { useI18n } from '../../i18n';
+import { SessionPrBadge } from '../SessionPrBadge';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 
 interface SessionRowProps {
@@ -29,6 +30,8 @@ interface SessionRowProps {
   leading?: ReactNode;
   /** Trailing slot in the title row, e.g. a status badge. */
   trailing?: ReactNode;
+  /** Test-only selector for the resume dialog's session options. */
+  resumeSelector?: boolean;
   onClick: () => void;
   /**
    * Pointer moved over the row (real movement — see useListboxKeyboard). This
@@ -56,11 +59,13 @@ export function SessionRow({
   ariaSelected,
   leading,
   trailing,
+  resumeSelector,
   onClick,
   onActivate,
 }: SessionRowProps) {
   const { t } = useI18n();
   const timestamp = session.updatedAt || session.createdAt;
+  const prs = session.prs ?? [];
 
   return (
     <div
@@ -78,6 +83,8 @@ export function SessionRow({
         disabled ? 'disabled' : undefined,
       )}
       title={current ? currentLabel : undefined}
+      data-web-shell-resume-session={resumeSelector ? '' : undefined}
+      data-session-id={resumeSelector ? session.sessionId : undefined}
       onClick={onClick}
       onMouseMove={onActivate}
     >
@@ -86,6 +93,9 @@ export function SessionRow({
         <span className={dp('picker-item-title')}>
           {session.displayName || session.sessionId.slice(0, 8)}
         </span>
+        {/* role="option" rows own roving-tabindex keyboard navigation, so
+            the badge must not steal a tab stop. */}
+        <SessionPrBadge prs={prs} tabIndex={-1} />
         {trailing}
       </div>
       <div className={dp('picker-item-meta')}>

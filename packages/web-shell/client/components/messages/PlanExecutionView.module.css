@@ -1,0 +1,625 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Query container for the overview strip only. Keeping the containment off
+ * .section lets the DAG's intrinsic width still size an auto-width dialog. */
+.overviewContainer {
+  container-type: inline-size;
+}
+
+.heading,
+.unassignedTitle {
+  font-weight: 700;
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.locateButton {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--foreground);
+  background: var(--background);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.locateButton:hover {
+  background: var(--accent);
+}
+
+.overview {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(110px, 1fr));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+}
+
+.progressCard,
+.overviewStat {
+  display: flex;
+  min-width: 0;
+  padding: 12px;
+}
+
+.progressCard {
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.progressHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.progressHeading strong,
+.overviewStat strong {
+  color: var(--foreground);
+  font-size: 16px;
+}
+
+.progressTrack {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--secondary);
+}
+
+.progressTrack span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--status-done-fg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progressTrack span {
+    transition: width 160ms ease;
+  }
+}
+
+.overviewStat {
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  border-left: 1px solid var(--border);
+}
+
+.overviewStat span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.overviewStat[data-attention='true'] strong {
+  color: var(--status-attention-fg);
+}
+
+.count,
+.dependencies,
+.executionStatus {
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+/* Scrolls in both axes: a host that gives this region a fixed slab of height
+   (the workflow page does) clips its card, so a tall graph has to scroll inside
+   the viewport rather than overflow it. Flexible sizing is inert when the host
+   lets the section size to its content, as the inline and dialog uses do. */
+.dagViewport {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 2px 0 6px;
+}
+
+.flatList {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.dagCanvas {
+  --plan-edge-lanes: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 64px;
+  width: max-content;
+  min-width: 100%;
+  padding: 8px 10px calc(28px + var(--plan-edge-lanes) * 9px);
+}
+
+.dagEdges {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.dagEdge {
+  fill: none;
+  stroke: var(--muted-foreground);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+  opacity: 0.5;
+  transition: opacity 140ms ease;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Pointing at a node mutes every edge that does not touch it, so a dense graph
+   answers "what feeds this, and what waits on it?" in one look instead of
+   forcing the reader to trace lines by eye. */
+.dagEdges[data-focused='true'] .dagEdge {
+  opacity: 0.1;
+}
+
+.dagEdges[data-focused='true'] .dagEdge[data-active='true'] {
+  stroke: var(--agent-blue-500);
+  opacity: 0.95;
+}
+
+.edgeArrow {
+  fill: var(--agent-blue-500);
+  opacity: 0.75;
+}
+
+.edgeArrowDim {
+  fill: var(--muted-foreground);
+  opacity: 0.1;
+}
+
+/* With the caption gone the row exists only for the locate control. */
+.heading[data-title-hidden='true'] {
+  justify-content: flex-end;
+  margin-bottom: -4px;
+}
+
+.flatList,
+.flatCanvas,
+.layer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flatCanvas .layer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.flatCanvas {
+  width: 100%;
+}
+
+.layer {
+  min-width: 220px;
+}
+
+.dagCanvas .layer {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 240px;
+  min-width: 0;
+}
+
+/* Status drives one accent, and the accent drives every edge treatment on the
+   node: the border, and the selection ring. Before this, status set
+   `border-color` while selection stacked an always-blue ring on top, so a
+   completed (green) or blocked (amber) node picked up a second border in a
+   clashing hue the moment it was selected. */
+.node {
+  --node-accent: var(--border);
+  --node-ring: var(--agent-blue-500);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--node-accent);
+  border-radius: 8px;
+  background: var(--background);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.dagCanvas .node::before,
+.dagCanvas .node::after {
+  display: none;
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--agent-blue-500);
+  border-radius: 999px;
+  background: var(--background);
+  content: '';
+  transform: translateY(-50%);
+}
+
+.dagCanvas .node[data-plan-input='true']::before {
+  left: -4px;
+  display: block;
+}
+
+.dagCanvas .node[data-plan-output='true']::after {
+  right: -4px;
+  display: block;
+}
+
+/* Completed is the only green: green means "done", never "moving" — running
+   and completed previously shared it, and those are the two states a reader
+   most needs to tell apart. `blocked` is the resting state of most nodes in any
+   real plan, so it stays neutral; painting it amber made a perfectly healthy
+   graph read as a wall of warnings. */
+.node[data-status='completed'] {
+  --node-accent: color-mix(in srgb, var(--status-done-fg) 55%, var(--border));
+  --node-ring: var(--status-done-fg);
+}
+
+.node[data-status='running'],
+.node[data-status='in_progress'] {
+  --node-accent: color-mix(
+    in srgb,
+    var(--status-running-fg) 55%,
+    var(--border)
+  );
+  --node-ring: var(--status-running-fg);
+}
+
+.node[data-status='paused'] {
+  --node-accent: color-mix(
+    in srgb,
+    var(--status-attention-fg) 55%,
+    var(--border)
+  );
+  --node-ring: var(--status-attention-fg);
+}
+
+.node[data-status='blocked'],
+.node[data-status='ready'] {
+  --node-accent: var(--border);
+  --node-ring: var(--muted-foreground);
+}
+
+/* Selection reads as "the same edge, turned up": the border goes to full
+   strength and the ring echoes it, rather than introducing a second colour. */
+.node[data-selected='true'] {
+  border-color: var(--node-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-ring) 32%, transparent);
+}
+
+.nodeSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.node:has(.nodeSummary:focus-visible) {
+  outline: 2px solid var(--node-ring);
+  outline-offset: 2px;
+}
+
+.nodeSummary:focus-visible {
+  outline: none;
+}
+
+.nodeTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nodeId {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.nodeStatus,
+.attention {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--secondary);
+  font-size: 11px;
+}
+
+.completed {
+  color: var(--status-done-fg);
+}
+
+.running,
+.in_progress {
+  color: var(--status-running-fg);
+}
+
+.paused,
+.blocked,
+.attention {
+  color: var(--status-attention-fg);
+}
+
+.ready {
+  color: var(--muted-foreground);
+}
+
+.nodeContent {
+  color: var(--foreground);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dependencies {
+  font-size: 11px;
+}
+
+.executions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.executionGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.execution {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--foreground);
+  background: var(--secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.executionHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.executionExpanded {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+}
+
+.executionDescription,
+.executionActivity,
+.executionMetrics,
+.executionOpen,
+.emptyExecutions {
+  font-size: 11px;
+}
+
+.executionDescription {
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.executionActivity {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.executionActivity span {
+  margin-right: 4px;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.executionMetrics,
+.emptyExecutions {
+  color: var(--muted-foreground);
+}
+
+.executionOpen {
+  align-self: flex-end;
+  color: var(--agent-blue-500);
+}
+
+.execution:disabled {
+  cursor: default;
+}
+
+.execution:not(:disabled):hover,
+.execution:not(:disabled):focus-visible {
+  background: var(--muted);
+}
+
+.execution:not(:disabled):focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 1px;
+}
+
+.executionLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.executionStatus {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.nestedExecution {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  color: var(--muted-foreground);
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+
+button.nestedExecution:not(:disabled) {
+  cursor: pointer;
+}
+
+button.nestedExecution:not(:disabled):hover {
+  color: var(--foreground);
+}
+
+button.nestedExecution:not(:disabled):focus-visible {
+  color: var(--foreground);
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 1px;
+}
+
+.unassigned {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stepDetails {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.stepDetailsHeading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+
+.stepExecutions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+}
+
+.stepExecutionsTitle {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.emptyExecutions {
+  padding-top: 4px;
+}
+
+@container (max-width: 760px) {
+  .overview {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .progressCard {
+    grid-column: 1 / -1;
+  }
+
+  .overviewStat {
+    border-top: 1px solid var(--border);
+  }
+
+  .overviewStat:nth-child(2) {
+    border-left: 0;
+  }
+}
+
+/* The status glyph. Sized and aligned to the mono ID beside it so the two read
+   as one identifier block rather than an icon bolted onto a label. */
+.nodeGlyph {
+  flex: 0 0 auto;
+  width: 13px;
+  color: var(--node-ring);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1;
+  text-align: center;
+}
+
+/* Work in flight is the only thing on the page that moves, so the eye finds it
+   without a legend. */
+.node[data-status='running'] .nodeGlyph {
+  animation: planGlyphSpin 1.6s linear infinite;
+}
+
+@keyframes planGlyphSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.edgeNotice {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+}
+
+/* Every motion opt-out in this view, kept in one place so a new animation has
+   an obvious home. */
+@media (prefers-reduced-motion: reduce) {
+  .dagEdge,
+  .node {
+    transition: none;
+  }
+
+  .node[data-status='running'] .nodeGlyph {
+    animation: none;
+  }
+}

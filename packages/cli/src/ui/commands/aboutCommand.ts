@@ -7,7 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType, type HistoryItemAbout } from '../types.js';
-import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
+import { getExtendedSystemInfo } from '../systemInfo.js';
 import { t } from '../../i18n/index.js';
 import {
   collectSessionPathInfo,
@@ -22,6 +22,7 @@ export const aboutCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (context) => {
     const systemInfo = await getExtendedSystemInfo(context);
 
@@ -63,6 +64,7 @@ export const aboutCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      canRunDuringStreaming: true,
       action: async (context) => {
         const info = await collectSessionPathInfo(context);
         const content = formatSessionPathInfo(info);

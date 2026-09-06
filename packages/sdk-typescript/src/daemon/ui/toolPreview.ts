@@ -6,18 +6,26 @@
 
 import type {
   DaemonToolPreview,
+  DaemonToolResultPreview,
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,
+  DaemonTranscriptTodoItem,
 } from './types.js';
 import {
+  capDetails,
+  detachString,
   getFirstString,
   isRecord,
   isSensitiveKey,
+  redactSensitiveFields,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
 
 const MAX_TOOL_PREVIEW_DEPTH = 8;
+const MAX_TODO_PREVIEW_ENTRIES = 1_000;
+const MAX_TOOL_RESULT_PREVIEW_LENGTH = 100_000;
+const MAX_TODO_ID_LENGTH = 512;
 
 export function createDaemonToolPreview(
   input: unknown,
@@ -32,12 +40,15 @@ export function createDaemonToolPreview(
   if (isRecord(input)) {
     const nestedInput = input['rawInput'] ?? input['input'] ?? input['args'];
     if (nestedInput !== undefined && nestedInput !== input) {
+      const meta = isRecord(input['_meta']) ? input['_meta'] : undefined;
       const nested = createDaemonToolPreview(
         nestedInput,
         {
           title: opts.title ?? getFirstString(input, ['title']),
           toolName:
-            opts.toolName ?? getFirstString(input, ['toolName', 'name']),
+            opts.toolName ??
+            getFirstString(input, ['toolName', 'name']) ??
+            (meta ? getFirstString(meta, ['toolName']) : undefined),
           toolKind: opts.toolKind ?? getFirstString(input, ['kind']),
         },
         depth + 1,
@@ -50,6 +61,9 @@ export function createDaemonToolPreview(
   if (askUserQuestions.length > 0) {
     return { kind: 'ask_user_question', questions: askUserQuestions };
   }
+
+  const todoList = detectTodoList(input, opts, true);
+  if (todoList) return todoList;
 
   // PR-C / PR-F: try specific tool-shape detectors before falling back to
   // generic command / key_value detection. Detector order matters —
@@ -105,6 +119,226 @@ export function createDaemonToolPreview(
   return { kind: 'generic', ...(summary ? { summary } : {}) };
 }
 
+export function createDaemonToolResultPreview(
+  output: unknown,
+  content?: unknown,
+  opts: { toolName?: string; toolKind?: string } = {},
+): DaemonToolResultPreview | undefined {
+  const todoList = detectTodoList(output, opts, false);
+  if (todoList) return todoList;
+
+  return createDaemonToolResultTextPreview(
+    extractDisplayContentText(content) ?? '',
+  );
+}
+
+export function createDaemonToolResultTextPreview(
+  text: string,
+): Extract<DaemonToolResultPreview, { kind: 'text' }> | undefined {
+  return text.length > 0 && text.length <= MAX_TOOL_RESULT_PREVIEW_LENGTH
+    ? { kind: 'text', text }
+    : undefined;
+}
+
+function detectTodoList(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string },
+  includeLegacySummary: boolean,
+): Extract<DaemonToolPreview, { kind: 'todo_list' }> | undefined {
+  if (!isRecord(input)) return undefined;
+  const toolName = opts.toolName?.toLowerCase();
+  const entries = Array.isArray(input['entries'])
+    ? input['entries']
+    : Array.isArray(input['todos'])
+      ? input['todos']
+      : undefined;
+  if (!entries || (toolName !== 'todo_write' && toolName !== 'todowrite')) {
+    return undefined;
+  }
+
+  const retainedEntries = entries.slice(0, MAX_TODO_PREVIEW_ENTRIES);
+  const authoredIds = new Set<string>();
+  for (const entry of retainedEntries) {
+    if (!isRecord(entry)) continue;
+    const meta = isRecord(entry['_meta']) ? entry['_meta'] : undefined;
+    const qwenTodo =
+      meta && isRecord(meta['qwenTodo']) ? meta['qwenTodo'] : undefined;
+    const authoredId =
+      getFirstString(qwenTodo, ['id']) ?? getFirstString(entry, ['id']);
+    if (authoredId && authoredId.length <= MAX_TODO_ID_LENGTH) {
+      authoredIds.add(authoredId);
+    }
+  }
+
+  const normalized: DaemonTranscriptTodoItem[] = [];
+  const usedIds = new Set<string>();
+  let truncated = entries.length > MAX_TODO_PREVIEW_ENTRIES;
+  let remainingText = MAX_TOOL_RESULT_PREVIEW_LENGTH;
+  let remainingDependencyInputs = MAX_TODO_PREVIEW_ENTRIES;
+  retainedEntries.forEach((entry, index) => {
+    if (!isRecord(entry)) {
+      truncated = true;
+      return;
+    }
+    const rawContent = getFirstString(entry, ['content', 'text', 'title']);
+    if (!rawContent) {
+      truncated = true;
+      return;
+    }
+    if (remainingText === 0) {
+      truncated = true;
+      return;
+    }
+    const content = detachString(rawContent.slice(0, remainingText));
+    if (content.length < rawContent.length) truncated = true;
+    remainingText -= content.length;
+    const meta = isRecord(entry['_meta']) ? entry['_meta'] : undefined;
+    const qwenTodo =
+      meta && isRecord(meta['qwenTodo']) ? meta['qwenTodo'] : undefined;
+    const qwenTodoId = getFirstString(qwenTodo, ['id']);
+    const entryId = getFirstString(entry, ['id']);
+    const authoredId = qwenTodoId ?? entryId;
+    const rawId = authoredId ?? `plan-${index}`;
+    if (
+      (qwenTodo?.['id'] !== undefined) !== !!qwenTodoId ||
+      (entry['id'] !== undefined) !== !!entryId
+    ) {
+      truncated = true;
+    }
+    let id = rawId.length <= MAX_TODO_ID_LENGTH ? rawId : `plan-${index}`;
+    if (id !== rawId) truncated = true;
+    const idWasSynthesized = authoredId === undefined || id !== rawId;
+    if (usedIds.has(id) || (idWasSynthesized && authoredIds.has(id))) {
+      id = allocateUniqueTodoId(id, authoredIds, usedIds);
+    }
+    usedIds.add(id);
+    const rawStatus = getFirstString(entry, ['status']);
+    if (entry['status'] !== undefined && rawStatus === undefined) {
+      truncated = true;
+    }
+    const status =
+      rawStatus === 'completed' || rawStatus === 'in_progress'
+        ? rawStatus
+        : 'pending';
+    if (
+      rawStatus !== undefined &&
+      rawStatus !== 'pending' &&
+      rawStatus !== 'in_progress' &&
+      rawStatus !== 'completed'
+    ) {
+      truncated = true;
+    }
+    const rawPriority = getFirstString(entry, ['priority']);
+    const priority =
+      rawPriority === 'high' ||
+      rawPriority === 'medium' ||
+      rawPriority === 'low'
+        ? rawPriority
+        : undefined;
+    if ((entry['priority'] !== undefined) !== !!priority) {
+      truncated = true;
+    }
+    const blockedBySource = qwenTodo?.['blockedBy'] ?? entry['blockedBy'];
+    const rawBlockedBy = Array.isArray(blockedBySource) ? blockedBySource : [];
+    if (blockedBySource !== undefined && !Array.isArray(blockedBySource)) {
+      truncated = true;
+    }
+    const blockedBy: string[] = [];
+    for (const dependency of rawBlockedBy) {
+      if (remainingDependencyInputs === 0) {
+        truncated = true;
+        break;
+      }
+      remainingDependencyInputs -= 1;
+      if (
+        typeof dependency !== 'string' ||
+        dependency.length === 0 ||
+        dependency.length > MAX_TODO_ID_LENGTH
+      ) {
+        truncated = true;
+        continue;
+      }
+      blockedBy.push(dependency);
+    }
+    normalized.push({
+      id,
+      content,
+      status,
+      ...(priority ? { priority } : {}),
+      ...(blockedBy.length > 0 ? { blockedBy } : {}),
+    });
+  });
+  const meta = isRecord(input['_meta']) ? input['_meta'] : undefined;
+  const todoPlan =
+    meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
+  const plan = isRecord(input['plan']) ? input['plan'] : undefined;
+  const todoPlanId = getFirstString(todoPlan, ['id']);
+  const nestedPlanId = getFirstString(plan, ['id']);
+  const inputPlanId = getFirstString(input, ['planId']);
+  const rawPlanId = todoPlanId ?? nestedPlanId ?? inputPlanId;
+  if (
+    (todoPlan?.['id'] !== undefined) !== !!todoPlanId ||
+    (plan?.['id'] !== undefined) !== !!nestedPlanId ||
+    (input['planId'] !== undefined) !== !!inputPlanId
+  ) {
+    truncated = true;
+  }
+  const planId =
+    rawPlanId && rawPlanId.length <= MAX_TODO_ID_LENGTH ? rawPlanId : undefined;
+  if (rawPlanId && !planId) truncated = true;
+  const rawRevision =
+    todoPlan?.['revision'] ?? plan?.['revision'] ?? input['revision'];
+  const revision =
+    typeof rawRevision === 'number' &&
+    Number.isSafeInteger(rawRevision) &&
+    rawRevision >= 0
+      ? rawRevision
+      : undefined;
+  if (rawRevision !== undefined && revision === undefined) truncated = true;
+  const summary = opts.title ?? opts.toolName ?? opts.toolKind;
+  return {
+    kind: 'todo_list',
+    entries: normalized,
+    ...(includeLegacySummary && summary ? { summary } : {}),
+    ...(truncated ? { truncated: true } : {}),
+    ...(planId ? { planId } : {}),
+    ...(revision !== undefined ? { revision } : {}),
+  };
+}
+
+function allocateUniqueTodoId(
+  base: string,
+  authoredIds: ReadonlySet<string>,
+  usedIds: ReadonlySet<string>,
+): string {
+  for (let attempt = 1; ; attempt += 1) {
+    const suffix = attempt === 1 ? '-s' : `-s${attempt}`;
+    const candidate = `${base.slice(0, MAX_TODO_ID_LENGTH - suffix.length)}${suffix}`;
+    if (!authoredIds.has(candidate) && !usedIds.has(candidate)) {
+      return candidate;
+    }
+  }
+}
+
+function extractDisplayContentText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  let text = '';
+  for (const entry of content) {
+    if (!isRecord(entry) || entry['type'] !== 'content') continue;
+    const body = isRecord(entry['content']) ? entry['content'] : undefined;
+    const next = typeof body?.['text'] === 'string' ? body['text'] : undefined;
+    if (!next) continue;
+    if (
+      text.length + (text ? 1 : 0) + next.length >
+      MAX_TOOL_RESULT_PREVIEW_LENGTH
+    ) {
+      return undefined;
+    }
+    text += `${text ? '\n' : ''}${next}`;
+  }
+  return text || undefined;
+}
+
 /**
  * Detect file-edit tool calls by signature. Matches:
  *
@@ -127,7 +361,9 @@ function detectFileDiff(
   const oldText = getFirstString(input, [
     'oldText',
     'old_text',
+    'old_string',
     'old_str',
+    'old_string',
     'oldString',
   ]);
   // wenshao R4 (qwen3.7-max): `content` is too ambiguous as a newText
@@ -142,7 +378,9 @@ function detectFileDiff(
   const explicitNewText = getFirstString(input, [
     'newText',
     'new_text',
+    'new_string',
     'new_str',
+    'new_string',
     'newString',
   ]);
   const toolNameLower = (opts.toolName ?? '').toLowerCase();
@@ -270,7 +508,11 @@ function detectMcpInvocation(
         .filter(([key]) => key !== 'name' && key !== 'toolName')
         .slice(0, 1)
         .map(([key, value]) => {
-          const v = typeof value === 'string' ? value : JSON.stringify(value);
+          const v = isSensitiveKey(key)
+            ? '[redacted]'
+            : typeof value === 'string'
+              ? value
+              : stringifyCompactRedactedJson(value);
           const trimmed = v.length > 60 ? `${v.slice(0, 60)}…` : v;
           return `${key}=${trimmed}`;
         })[0];
@@ -283,6 +525,14 @@ function detectMcpInvocation(
     toolName: toolPart,
     ...(argsSummary ? { argsSummary } : {}),
   };
+}
+
+function stringifyCompactRedactedJson(value: unknown): string {
+  try {
+    return JSON.stringify(redactSensitiveFields(value)) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function extractAskUserQuestions(input: unknown): DaemonTranscriptQuestion[] {
@@ -338,7 +588,9 @@ function collectPreviewRows(
     if (isRecord(value)) continue;
     rows.push({
       label: key,
-      value: isSensitiveKey(key) ? '[redacted]' : stringifyRedactedJson(value),
+      value: isSensitiveKey(key)
+        ? '[redacted]'
+        : capDetails(stringifyRedactedJson(value)),
     });
   }
   return rows;

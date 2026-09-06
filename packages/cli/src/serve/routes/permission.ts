@@ -6,11 +6,16 @@
 
 import type { Application, RequestHandler, Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
+import type { DaemonLogger } from '../daemon-logger.js';
 import {
   detectFromLoopback,
   parseClientIdHeader,
   parsePermissionVoteBody,
 } from '../server/request-helpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
+import { requireSessionRuntime } from './session-runtime.js';
 
 type SendPermissionVoteError = (
   res: Response,
@@ -20,17 +25,26 @@ type SendPermissionVoteError = (
 
 interface RegisterPermissionRoutesDeps {
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
+  daemonLog?: DaemonLogger;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendPermissionVoteError: SendPermissionVoteError;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 export function registerPermissionRoutes(
   app: Application,
   deps: RegisterPermissionRoutesDeps,
 ): void {
-  const { bridge, mutate, sendPermissionVoteError } = deps;
+  const {
+    bridge,
+    workspaceRegistry,
+    daemonLog,
+    mutate,
+    sendPermissionVoteError,
+  } = deps;
 
-  app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
+  app.post('/session/:id/permission/:requestId', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const requestId = req.params['requestId'];
     const response = parsePermissionVoteBody(req, res);
@@ -46,12 +60,32 @@ export function registerPermissionRoutes(
     };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToSessionPermission(
+      const runtime = requireSessionRuntime({
         sessionId,
-        requestId,
-        response,
-        context,
-      );
+        route: 'POST /session/:id/permission/:requestId',
+        res,
+        workspaceRegistry,
+        daemonLog,
+        details: { requestId },
+      });
+      if (!runtime) return;
+      const respond = async () =>
+        runtime.bridge.respondToSessionPermission(
+          sessionId,
+          requestId,
+          response,
+          context,
+        );
+      if (isInternalWorkspaceRuntime(runtime)) {
+        if (!deps.conversationRuntimeActivity) {
+          throw new Error(
+            'Conversations runtime activity gate is unavailable.',
+          );
+        }
+        accepted = await deps.conversationRuntimeActivity.run(respond);
+      } else {
+        accepted = await respond();
+      }
     } catch (err) {
       sendPermissionVoteError(res, err, {
         route: 'POST /session/:id/permission/:requestId',

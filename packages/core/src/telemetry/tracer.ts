@@ -236,7 +236,7 @@ export function startSpanWithContext(
  * let the sampler decide. `always_on` is the exception — it ignores parent
  * flags, so SAMPLED is harmless and keeps the decision matrix explicit.
  */
-function shouldForceSampled(): boolean {
+export function shouldForceSampled(): boolean {
   const sampler =
     process.env['OTEL_TRACES_SAMPLER']?.trim().toLowerCase() ?? '';
   if (!sampler || sampler.startsWith('parentbased_')) {

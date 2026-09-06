@@ -176,17 +176,22 @@ describe('ChannelLoopStore', () => {
     expect(second.id).toBe('job-1-1');
   });
 
-  it('writes loop files with private permissions', async () => {
-    await store.create(input);
+  // Windows has no POSIX permission bits, so skip (reportedly) rather than
+  // passing a test that asserted nothing.
+  it.skipIf(process.platform === 'win32')(
+    'writes loop files with private permissions',
+    async () => {
+      await store.create(input);
 
-    const channelsDir = path.join(tmpDir, 'channels');
-    const filePath = path.join(channelsDir, 'loops.json');
-    const dirMode = (await fs.stat(channelsDir)).mode & 0o777;
-    const fileMode = (await fs.stat(filePath)).mode & 0o777;
+      const channelsDir = path.join(tmpDir, 'channels');
+      const filePath = path.join(channelsDir, 'loops.json');
+      const dirMode = (await fs.stat(channelsDir)).mode & 0o777;
+      const fileMode = (await fs.stat(filePath)).mode & 0o777;
 
-    expect(dirMode).toBe(0o700);
-    expect(fileMode).toBe(0o600);
-  });
+      expect(dirMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    },
+  );
 
   it('disables a job without deleting its last status', async () => {
     const created = await store.create(input);

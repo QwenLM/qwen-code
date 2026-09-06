@@ -199,6 +199,7 @@ export class AcpHttpTransport implements DaemonTransport {
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
+  readonly restFetch: typeof globalThis.fetch;
 
   constructor(
     baseUrl: string,
@@ -208,6 +209,7 @@ export class AcpHttpTransport implements DaemonTransport {
     this.baseUrl = baseUrl;
     this.token = token;
     this._fetch = fetchFn;
+    this.restFetch = fetchFn;
   }
 
   get connected(): boolean {
@@ -387,14 +389,25 @@ export class AcpHttpTransport implements DaemonTransport {
     headers['Acp-Session-Id'] = sessionId;
     if (opts.lastEventId !== undefined) {
       headers['Last-Event-ID'] = String(opts.lastEventId);
+      // Pair the resume cursor with the epoch of the bus that produced it
+      // so a restarted daemon (new epoch) forces a resync instead of
+      // resuming from a stale cursor (DAEMON-001). Meaningless without a
+      // cursor, hence nested.
+      if (opts.epoch !== undefined) {
+        headers['X-Qwen-Event-Epoch'] = opts.epoch;
+      }
     }
-    // NOTE: `opts.maxQueued` does NOT apply to this transport. The REST
+    // NOTE: `opts.maxQueued` and the SSE lifecycle fields (`clientId`,
+    // `sseConnectReason`, `previousSseStreamId`, `onSseStreamAccepted`) do NOT
+    // apply to this transport. The REST
     // `/session/:id/events` surface accepted it as a per-subscription queue
     // bound, but the `/acp` session stream is backed by the daemon's
     // server-controlled EventBus ring (a fixed `DEFAULT_RING_SIZE`), so there
     // is no client-tunable queue to forward it to. It's intentionally ignored
     // here rather than silently mis-applied; the field stays on the shared
-    // `DaemonTransportSubscribeOptions` for the REST transport.
+    // `DaemonTransportSubscribeOptions` for the REST transport. In particular,
+    // ACP's accepted `/acp` stream must not be reported as an accepted REST
+    // stream or joined into the REST predecessor lineage.
 
     // Connect-phase timeout.
     const connectCtrl = new AbortController();
@@ -469,6 +482,13 @@ export class AcpHttpTransport implements DaemonTransport {
 
     if (!res.body) {
       throw new Error('SSE response has no body');
+    }
+
+    // Learn the daemon's current bus epoch so the caller can pair it with
+    // its resume cursor on the next reconnect (DAEMON-001).
+    const responseEpoch = res.headers.get('x-qwen-event-epoch');
+    if (responseEpoch) {
+      opts.onEpoch?.(responseEpoch);
     }
 
     // The `/acp` session stream carries RAW JSON-RPC frames (not REST

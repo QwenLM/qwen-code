@@ -1,0 +1,37 @@
+/* Field styling (label + input + buttons) comes from the shared dialog
+   primitives (`.dialog-form`, `.dialog-inline-button`, `.dialog-primary-button`)
+   so the dialog tracks the active theme. Only the field grouping and the helper
+   text / error line are local. */
+
+/* Group the label, input, hint, and error tightly. They are siblings (not a
+   label wrapping the input) so the hint/error text stays out of the input's
+   accessible name — they're associated as descriptions via aria-describedby.
+   The shared `.dialog-form` gap is larger and meant for separating whole
+   fields. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Applied alongside the shared `dialog-footer-actions`. That primitive adds side
+   padding for standalone (picker) footers; here the footer lives inside
+   `.dialog-form`, which already pads its sides, so drop the horizontal padding to
+   line the buttons up with the input. The selector is doubled so it outranks the
+   primitive regardless of stylesheet order. */
+.footer.footer {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.error {
+  color: var(--error-color);
+  font-size: 12px;
+  line-height: 1.4;
+}

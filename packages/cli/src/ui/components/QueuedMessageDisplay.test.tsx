@@ -80,6 +80,7 @@ describe('QueuedMessageDisplay', () => {
     );
 
     const output = lastFrame();
+    expect(output).toContain('Ctrl+Q to queue');
     expect(output).toContain('to edit queued messages');
   });
 

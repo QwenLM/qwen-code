@@ -13,15 +13,14 @@
  *  - Keyboard events are scoped — no conflict with the main InputPrompt
  *
  * Wraps its content in a local StreamingContext.Provider so reusable
- * components like LoadingIndicator and GeminiRespondingSpinner read the
+ * components like LoadingIndicator and RespondingSpinner read the
  * agent's derived streaming state instead of the main agent's.
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
   AgentStatus,
-  isTerminalStatus,
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core';
@@ -55,13 +54,23 @@ interface AgentComposerProps {
 
 // ─── Component ──────────────────────────────────────────────
 
+// Shared empty queue identity so unregistered agents don't allocate on
+// every render.
+const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
+
 export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
-  const { agents, agentTabBarFocused, agentShellFocused, agentApprovalModes } =
-    useAgentViewState();
+  const {
+    agents,
+    agentTabBarFocused,
+    agentShellFocused,
+    agentApprovalModes,
+    agentMessageQueues,
+  } = useAgentViewState();
   const {
     setAgentInputBufferText,
     setAgentTabBarFocused,
     setAgentApprovalMode,
+    appendToAgentMessageQueue,
   } = useAgentViewActions();
   const agent = agents.get(agentId);
   const interactiveAgent = agent?.interactiveAgent;
@@ -104,7 +113,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   useKeypress(
     (key) => {
-      const isShiftTab = key.shift && key.name === 'tab';
+      const isShiftTab = key.shift && key.name === 'tab' && !key.ctrl;
       const isWindowsTab =
         process.platform === 'win32' &&
         key.name === 'tab' &&
@@ -187,23 +196,15 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     [buffer, agentTabBarFocused, setAgentTabBarFocused],
   );
 
-  // ── Message queue (accumulate while streaming, flush as one prompt on idle) ──
+  // ── Message queue display ──
+  //
+  // Queued follow-ups live in AgentViewContext (keyed by agentId) and are
+  // delivered by the provider's always-mounted per-agent flusher, not here:
+  // the layout keys this component by the active view, so a flush effect in
+  // this component would only run while the agent's tab is focused (#10069,
+  // #10148).
 
-  const [messageQueue, setMessageQueue] = useState<string[]>([]);
-
-  // When agent becomes idle (and not terminal), flush queued messages.
-  useEffect(() => {
-    if (
-      streamingState === StreamingState.Idle &&
-      messageQueue.length > 0 &&
-      status !== undefined &&
-      !isTerminalStatus(status)
-    ) {
-      const combined = messageQueue.join('\n');
-      setMessageQueue([]);
-      interactiveAgent?.enqueueMessage(combined);
-    }
-  }, [streamingState, messageQueue, interactiveAgent, status]);
+  const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
 
   const handleSubmit = useCallback(
     (text: string) => {
@@ -212,10 +213,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       if (streamingState === StreamingState.Idle) {
         interactiveAgent.enqueueMessage(trimmed);
       } else {
-        setMessageQueue((prev) => [...prev, trimmed]);
+        appendToAgentMessageQueue(agentId, trimmed);
       }
     },
-    [interactiveAgent, streamingState],
+    [interactiveAgent, streamingState, agentId, appendToAgentMessageQueue],
   );
 
   // ── Render ──
@@ -279,7 +280,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           </Box>
         )}
 
-        <QueuedMessageDisplay messageQueue={messageQueue} />
+        <QueuedMessageDisplay messageQueue={messageQueue} showHint={false} />
 
         {/* Input prompt — always visible, like the main Composer */}
         <BaseTextInput

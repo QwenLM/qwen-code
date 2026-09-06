@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Config, ApprovalMode } from '../../config/config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveWorktreeConfig,
+  installSessionWorkflowRevisionWriteThrough,
+  type SessionWorkflowPlanRevision,
+} from '../../config/config.js';
 import { isPlanModeBlocked } from '../../core/permissionFlow.js';
 import type { ToolCallConfirmationDetails } from '../tools.js';
 import {
@@ -43,6 +49,10 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     model: 'test-model',
     usageStatisticsEnabled: false,
     bareMode: true,
+    // Pin a DEFAULT baseline: these tests exercise override isolation and the
+    // DEFAULT→AUTO rule strip/restore transitions, so they must not depend on
+    // the constructor's default approval mode (which is now AUTO).
+    approvalMode: ApprovalMode.DEFAULT,
   };
 
   async function createParentWithRegistry(): Promise<Config> {
@@ -65,6 +75,28 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     };
     return { stripDangerousRulesForAutoMode, restoreDangerousRules };
   }
+
+  it('copies the current plan-exit event before isolating approval mode', async () => {
+    const parent = await createParentWithRegistry();
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
+    );
+
+    const childNotice = child.takePendingManualPlanExitNotice();
+    const parentNotice = parent.takePendingManualPlanExitNotice();
+    expect(childNotice?.version).toBe(parentNotice?.version);
+    expect(childNotice?.currentMode).toBe(ApprovalMode.AUTO_EDIT);
+    expect(parentNotice?.currentMode).toBe(ApprovalMode.DEFAULT);
+
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    parent.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+    expect(parent.takePendingManualPlanExitNotice()).toBeDefined();
+  });
 
   it('returns a Config whose registry is a distinct instance from the parent', async () => {
     const parent = new Config(baseParams);
@@ -192,6 +224,60 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
   });
 
+  it('lets an approval override above a worktree Config change mode', async () => {
+    const parent = await createParentWithRegistry();
+    const worktree = deriveWorktreeConfig(parent, '/tmp/worktree');
+    const { config: child } = await createApprovalModeOverride(
+      worktree,
+      ApprovalMode.PLAN,
+    );
+
+    expect(() => worktree.setApprovalMode(ApprovalMode.DEFAULT)).toThrow(
+      'Derived Configs cannot change approval mode',
+    );
+    expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+  });
+
+  // AgentTool's isolation path layers the approval override above a
+  // deriveWorktreeConfig wrapper; both layers sit between the subagent's
+  // tools and the root Config. Without the worktree layer forwarding
+  // revision mutations (as AgentTool installs it), the approval
+  // override's write-through would land as an OWN property on the
+  // worktree wrapper and shadow the session-global revision.
+  it('forwards Session Workflow revision mutations through a worktree wrapper beneath the approval override', async () => {
+    const parent = new Config({
+      ...baseParams,
+      sessionWorkflowEnabled: true,
+    });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+    const worktree = deriveWorktreeConfig(parent, '/tmp/worktree');
+    installSessionWorkflowRevisionWriteThrough(worktree, parent);
+    const { config: child } = await createApprovalModeOverride(
+      worktree,
+      ApprovalMode.DEFAULT,
+    );
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-isolated',
+      sourceCallId: 'call-isolated',
+      todoIds: ['t1'],
+    };
+    child.setSessionWorkflowPlanRevision(sentinel);
+    expect(parent.getSessionWorkflowPlanRevision()).toEqual(sentinel);
+    expect(Object.hasOwn(child, 'sessionWorkflowPlanRevision')).toBe(false);
+    expect(Object.hasOwn(worktree, 'sessionWorkflowPlanRevision')).toBe(false);
+
+    child.clearSessionWorkflowPlanRevision();
+    expect(parent.getSessionWorkflowPlanRevision()).toBeUndefined();
+    expect(Object.hasOwn(worktree, 'sessionWorkflowPlanRevision')).toBe(false);
+  });
+
   it('stops plan-mode blocking exec tools after a child override exits plan mode', async () => {
     const parent = await createParentWithRegistry();
 
@@ -213,15 +299,13 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
   });
 
-  it('isolates child plan state from a parent that is already in plan mode', async () => {
+  it('isolates child approval-mode revisions from a parent in plan mode', async () => {
     const parent = await createParentWithRegistry();
     vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
     parent.setApprovalMode(ApprovalMode.YOLO);
-    parent.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-
-    const parentGateState = parent.getPlanGateState();
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    const parentRevision = parent.getApprovalModeRevision();
     expect(parent.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-    expect(parentGateState?.enteredByModel).toBe(true);
 
     const { config: child } = await createApprovalModeOverride(
       parent,
@@ -229,21 +313,15 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
 
     expect(child.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-    const childGateState = child.getPlanGateState();
-    expect(childGateState).not.toBe(parentGateState);
-    expect(childGateState?.lastFindings).not.toBe(
-      parentGateState?.lastFindings,
-    );
+    expect(child.getApprovalModeRevision()).toBe(0);
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
     child.setApprovalMode(ApprovalMode.PLAN);
 
     expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
-    expect(child.getPlanGateState()?.entryId).toBe(
-      (parentGateState?.entryId ?? 0) + 1,
-    );
+    expect(child.getApprovalModeRevision()).toBe(2);
     expect(parent.getApprovalMode()).toBe(ApprovalMode.PLAN);
-    expect(parent.getPlanGateState()).toBe(parentGateState);
+    expect(parent.getApprovalModeRevision()).toBe(parentRevision);
   });
 
   it('starts child AUTO denial state independent from the parent', async () => {
@@ -291,6 +369,22 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
 
     cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores AUTO rules when registry setup fails', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'createToolRegistry').mockRejectedValue(
+      new Error('registry boom'),
+    );
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.AUTO),
+    ).rejects.toThrow('registry boom');
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
     expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
@@ -416,17 +510,29 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     await parentRegistry.warmAll();
 
     const childNames = child.getToolRegistry().getAllToolNames().sort();
+    const topLevelOnlyTools = new Set<string>([
+      ToolNames.GET_GOAL,
+      ToolNames.UPDATE_GOAL,
+    ]);
+    const expectedChildNames = parentRegistry
+      .getAllToolNames()
+      .filter((name) => !topLevelOnlyTools.has(name))
+      .sort();
 
-    // After warmAll the core tool sets must match — the child registry
-    // is built from the same Config (just the override), and we copied
-    // any discovered tools across. So the name set should equal parent's.
-    expect(childNames).toEqual(parentRegistry.getAllToolNames().sort());
+    // The child registry copies discovered tools and rebuilds the same core
+    // toolset, except for session-owned tools intentionally excluded from
+    // subagent contexts.
+    expect(childNames).toEqual(expectedChildNames);
     // And the parent's pre-warm names must be a subset of the post-warm
     // names — sanity check that warmAll didn't lose anything.
-    const beforeSet = new Set(beforeNames);
+    const beforeSet = new Set(
+      beforeNames.filter((name) => !topLevelOnlyTools.has(name)),
+    );
     for (const name of beforeSet) {
       expect(childNames).toContain(name);
     }
+    expect(childNames).not.toContain(ToolNames.GET_GOAL);
+    expect(childNames).not.toContain(ToolNames.UPDATE_GOAL);
 
     // Sanity: WriteFile is registered in non-bare mode only, so bare mode
     // should NOT have it.
@@ -492,6 +598,16 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(child.getToolRegistry().getAllToolNames()).not.toContain(
       ToolNames.WRITE_FILE,
     );
+  });
+
+  it('rejects fractional maxSessionTurns from persisted launch flags', async () => {
+    const parent = await createParentWithRegistry();
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.DEFAULT, {
+        persistedCliFlags: { maxSessionTurns: 0.5 },
+      }),
+    ).rejects.toThrow(/maxSessionTurns: must be an integer/);
   });
 
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {

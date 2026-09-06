@@ -57,6 +57,25 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ model: 'gpt-4' });
   });
 
+  it('POST /session maps sessionId into ACP metadata', () => {
+    const result = matchRoute('/session', 'POST')!;
+    const params = result.mapping.extractParams(
+      result.segments,
+      {
+        sessionId: '550E8400-E29B-41D4-A716-446655440000',
+        sessionScope: 'single',
+        _meta: { existing: true },
+      },
+      'POST',
+    );
+    expect(params).toEqual({
+      _meta: {
+        existing: true,
+        'qwen-code/sessionId': '550E8400-E29B-41D4-A716-446655440000',
+      },
+    });
+  });
+
   it('POST /session with non-record body returns empty params', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(
@@ -359,7 +378,26 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/remove');
     expect(
       result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+    });
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        {
+          clientId: 'client-a',
+          sessionId: 'body-session',
+          artifactId: 'body-artifact',
+          deleteContent: true,
+        },
+        'DELETE',
+      ),
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+      clientId: 'client-a',
+    });
   });
 
   it('POST /session/:id/recap maps to _qwen/session/recap', () => {
@@ -422,6 +460,77 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s17/tasks', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/tasks');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('includeWorkflows=true'),
+    );
+    expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
+  });
+
+  it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
+    const result = matchRoute('/session/s17/tasks/task%2F1/cancel', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/cancel');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { kind: 'workflow' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'task/1',
+      kind: 'workflow',
+    });
+  });
+
+  it('POST /session/:id/tasks/:taskId/workflow-action maps to _qwen/session/tasks/workflow_action', () => {
+    const result = matchRoute(
+      '/session/s17/tasks/workflow%201/workflow-action',
+      'POST',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/workflow_action');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { action: 'retry' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'workflow 1',
+      action: 'retry',
+    });
+  });
+
+  it('GET /session/:id/agents maps to _qwen/session/agents', () => {
+    const result = matchRoute('/session/s17/agents', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/agents');
+  });
+
+  it('GET /session/:id/agent-trace maps its optional root filter', () => {
+    const result = matchRoute('/session/s17/agent-trace', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/agent_trace');
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        undefined,
+        'GET',
+        new URLSearchParams('rootAgentId=root-1'),
+      ),
+    ).toEqual({ sessionId: 's17', rootAgentId: 'root-1' });
+  });
+
+  it('GET /session/:id/attachments maps to _qwen/session/attachments', () => {
+    const result = matchRoute('/session/s17/attachments', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/attachments');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
+    ).toEqual({ sessionId: 's17' });
   });
 
   it('GET /session/:id/lsp maps to _qwen/session/lsp', () => {
@@ -436,12 +545,33 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ sessionId: 's18' });
   });
 
+  it('GET /session/:id/saved-workflows/:name maps to _qwen/session/saved_workflow', () => {
+    const result = matchRoute(
+      '/session/s19/saved-workflows/deep%20review',
+      'GET',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/saved_workflow');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's19', name: 'deep review' });
+  });
+
   // ---- Granular workspace routes ----------------------------------------
 
   it('GET /workspace/mcp maps to _qwen/workspace/mcp', () => {
     const result = matchRoute('/workspace/mcp', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/workspace/mcp');
+  });
+
+  it('POST /workspace/mcp/reload maps to _qwen/workspace/mcp/reload', () => {
+    const result = matchRoute('/workspace/mcp/reload', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/reload');
   });
 
   it('GET /workspace/skills maps to _qwen/workspace/skills', () => {
@@ -881,6 +1011,11 @@ describe('acpRouteTable – matchRoute', () => {
     expect(matchRoute('/session/s12/approval-mode', 'POST')).toBeNull();
   });
 
+  it('keeps rewind routes off ACP so strict REST auth cannot be bypassed', () => {
+    expect(matchRoute('/session/s12/rewind/snapshots', 'GET')).toBeNull();
+    expect(matchRoute('/session/s12/rewind', 'POST')).toBeNull();
+  });
+
   // ---- Unknown/unmatched routes ---------------------------------------
 
   it('returns null for unknown path', () => {
@@ -927,9 +1062,9 @@ describe('acpRouteTable – query param coercion', () => {
     };
   }
 
-  it('GET /file forwards path (string) + maxBytes/line/limit as NUMBERS', () => {
+  it('GET /file forwards typed range and cursor params', () => {
     const { method, params } = extract(
-      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10',
+      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10&cursor=next%201',
       'GET',
     );
     expect(method).toBe('_qwen/file/read');
@@ -938,6 +1073,7 @@ describe('acpRouteTable – query param coercion', () => {
       maxBytes: 123,
       line: 4,
       limit: 10,
+      cursor: 'next 1',
     });
     // The daemon requires real numbers — a regression to strings would break it.
     expect(typeof params['maxBytes']).toBe('number');

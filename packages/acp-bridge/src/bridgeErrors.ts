@@ -28,6 +28,17 @@ import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
 
+export class StandaloneSessionSpawnError extends Error {
+  override readonly name = 'StandaloneSessionSpawnError';
+
+  constructor(
+    readonly dispatched: boolean,
+    cause: unknown,
+  ) {
+    super('Daemon-owned standalone session creation failed', { cause });
+  }
+}
+
 /**
  * ACP idle-cancel compatibility contract.
  *
@@ -57,10 +68,16 @@ function isNotCurrentlyGeneratingText(value: unknown): boolean {
 
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
-  constructor(sessionId: string, extra?: string) {
+  readonly code: 'session_not_found' | 'session_closing';
+  constructor(
+    sessionId: string,
+    extra?: string,
+    code: 'session_not_found' | 'session_closing' = 'session_not_found',
+  ) {
     super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
+    this.code = code;
   }
 }
 
@@ -70,6 +87,19 @@ export class SessionArchivedError extends Error {
   constructor(sessionId: string) {
     super(`Session "${sessionId}" is archived. Unarchive it before loading.`);
     this.name = 'SessionArchivedError';
+    this.sessionId = sessionId;
+  }
+}
+
+// Used by daemon archived-export routes; ACP itself does not throw this error.
+export class SessionNotArchivedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session "${sessionId}" is active. Archive it before exporting from archived storage.`,
+    );
+    this.name = 'SessionNotArchivedError';
     this.sessionId = sessionId;
   }
 }
@@ -104,23 +134,66 @@ export class SessionArchivingError extends Error {
   }
 }
 
+/**
+ * Why a restore of this id is fenced.
+ *
+ * `restore_in_progress` is the ordinary case: a restore is running and the
+ * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
+ * caller already received a timeout, but the non-cancellable ACP registration
+ * request (and its cleanup) has not settled yet — retrying at the ordinary
+ * cadence just re-hits the fence, so clients must back off much further.
+ */
+export type RestoreInProgressReason =
+  | 'restore_in_progress'
+  | 'awaiting_abandoned_cleanup';
+
+/** Fallback retry hint, in seconds, for an ordinary in-flight restore. */
+export const RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * A session-id registration operation. `requestedAction` is the caller's
+ * operation; `activeAction` is the operation that already owns the id.
+ * `spawn` means a fresh `POST /session` carrying a caller-supplied id.
+ */
+export type RestoreBlockedAction = 'load' | 'resume' | 'spawn';
+
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
-  readonly activeAction: 'load' | 'resume';
-  readonly requestedAction: 'load' | 'resume';
+  readonly activeAction: RestoreBlockedAction;
+  readonly requestedAction: RestoreBlockedAction;
+  readonly reason: RestoreInProgressReason;
+  readonly retryAfterSeconds: number;
 
   constructor(
     sessionId: string,
-    activeAction: 'load' | 'resume',
-    requestedAction: 'load' | 'resume',
+    activeAction: RestoreBlockedAction,
+    requestedAction: RestoreBlockedAction,
+    opts?: {
+      reason?: RestoreInProgressReason;
+      retryAfterSeconds?: number;
+    },
   ) {
+    const reason = opts?.reason ?? 'restore_in_progress';
+    const retryTarget =
+      requestedAction === 'spawn' ? 'the spawn' : `session/${requestedAction}`;
+    const activeTarget =
+      activeAction === 'spawn'
+        ? 'a caller-supplied-id spawn'
+        : `session/${activeAction}`;
     super(
-      `Session "${sessionId}" is already being restored via session/${activeAction}; retry session/${requestedAction} after it completes`,
+      reason === 'awaiting_abandoned_cleanup'
+        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned registration has not settled yet; retry ${retryTarget} once cleanup completes`
+        : activeAction === 'spawn'
+          ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
+          : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,
     );
     this.name = 'RestoreInProgressError';
     this.sessionId = sessionId;
     this.activeAction = activeAction;
     this.requestedAction = requestedAction;
+    this.reason = reason;
+    this.retryAfterSeconds =
+      opts?.retryAfterSeconds ?? RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS;
   }
 }
 
@@ -163,6 +236,16 @@ export class SessionLimitExceededError extends Error {
   }
 }
 
+export class TotalSessionLimitExceededError extends Error {
+  readonly limit: number;
+  readonly scope = 'total' as const;
+  constructor(limit: number) {
+    super(`Total session limit reached (${limit})`);
+    this.name = 'TotalSessionLimitExceededError';
+    this.limit = limit;
+  }
+}
+
 /**
  * Thrown by `sendPrompt` when a session already has too many accepted
  * prompts waiting or running. The REST route maps this to 503 with
@@ -188,13 +271,30 @@ export class PromptQueueFullError extends Error {
 }
 
 /**
+ * Rejected by `sendPrompt` when an accepted prompt exceeds its wallclock
+ * deadline (`BridgeClientRequestContext.deadlineMs`). The bridge publishes a
+ * `turn_error{code:'prompt_deadline_exceeded'}` terminal, releases the FIFO,
+ * and best-effort cancels the agent — the agent may still be executing.
+ * Exported so tests and routes can match on the class identity.
+ */
+export class PromptDeadlineExceededError extends Error {
+  readonly deadlineMs: number;
+  constructor(deadlineMs: number) {
+    super(`prompt exceeded the ${deadlineMs}ms deadline`);
+    this.name = 'PromptDeadlineExceededError';
+    this.deadlineMs = deadlineMs;
+  }
+}
+
+/**
  * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
- * canonicalize to the daemon's bound workspace. Every
- * bridge instance is bound to exactly one workspace; cross-workspace
- * requests are rejected at the daemon boundary. The server route
- * translates this to a 400 response with `code: 'workspace_mismatch'`
- * and both paths in the body so clients can fall through to spawning
- * their own daemon / routing to a different one via an orchestrator.
+ * canonicalize to the bridge's bound workspace. Every bridge instance is bound
+ * to exactly one runtime; a multi-workspace daemon selects a bridge before
+ * dispatch. Cross-workspace requests that reach this boundary are rejected.
+ * The server route translates this to a 400 response with
+ * `code: 'workspace_mismatch'`
+ * and both paths in the body so clients can refresh the workspace catalog,
+ * register the requested workspace, or route to the correct runtime.
  */
 export class WorkspaceMismatchError extends Error {
   readonly bound: string;
@@ -207,11 +307,10 @@ export class WorkspaceMismatchError extends Error {
         ? `${requested.slice(0, MAX_WORKSPACE_PATH_LENGTH)}…[truncated]`
         : requested;
     super(
-      `Workspace mismatch: daemon is bound to "${bound}" but ` +
-        `request asked for "${safeRequested}". Each \`qwen serve\` ` +
-        `daemon binds to exactly one workspace; start a separate ` +
-        `daemon for "${safeRequested}" (or route the request to one ` +
-        `via an orchestrator).`,
+      `Workspace mismatch: runtime is bound to "${bound}" but ` +
+        `request asked for "${safeRequested}". Select a registered ` +
+        `runtime for "${safeRequested}" or register it before retrying; ` +
+        `this bridge will not fall back to the primary workspace.`,
     );
     this.name = 'WorkspaceMismatchError';
     this.bound = bound;
@@ -249,7 +348,7 @@ export class SessionShellDisabledError extends Error {
 
 /**
  * Thrown when a direct daemon shell command has no client id bound to the
- * addressed session. The bearer token authenticates the caller to the daemon;
+ * addressed session. Deployment policy authorizes the caller to the daemon;
  * this error means the caller has not proven ownership of the session.
  */
 export class SessionShellClientRequiredError extends Error {
@@ -521,6 +620,59 @@ export class SessionBusyError extends Error {
   }
 }
 
+export class WorkspaceDrainingError extends Error {
+  readonly code = 'workspace_draining';
+  readonly workspaceCwd: string;
+  override readonly cause: unknown;
+  constructor(workspaceCwd: string, cause?: unknown) {
+    super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
+    this.name = 'WorkspaceDrainingError';
+    this.workspaceCwd = workspaceCwd;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Why a channel is closed to new session work. Cleanup failures mean the
+ * child's state is unknown; settlement-overdue states mean the child still
+ * holds work the bridge can neither cancel nor account for. Existing sessions
+ * remain usable. Cleanup-failed states last until channel recycle;
+ * settlement-overdue states may clear when the abandoned request settles.
+ */
+export type BridgeChannelUnavailableReason =
+  | 'restore_cleanup_failed'
+  | 'restore_settlement_overdue'
+  | 'new_session_cleanup_failed'
+  | 'new_session_settlement_overdue';
+
+export class BridgeChannelQuarantinedError extends Error {
+  readonly reason: BridgeChannelUnavailableReason;
+  /**
+   * How long the caller should wait before retrying fresh session work. The
+   * operation-budget-derived hint avoids polling these longer-lived states at
+   * the ordinary 5-second cadence.
+   */
+  readonly retryAfterSeconds: number;
+
+  constructor(
+    reason: BridgeChannelUnavailableReason = 'restore_cleanup_failed',
+    retryAfterSeconds: number = RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
+  ) {
+    super(
+      reason === 'restore_settlement_overdue'
+        ? 'The ACP channel is unavailable for new sessions while an abandoned session restore has not settled'
+        : reason === 'new_session_settlement_overdue'
+          ? 'The ACP channel is unavailable for new sessions while an abandoned session initialization has not settled'
+          : reason === 'new_session_cleanup_failed'
+            ? 'The ACP channel is unavailable for new sessions while timed-out session initialization cleanup is pending'
+            : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+    );
+    this.name = 'BridgeChannelQuarantinedError';
+    this.reason = reason;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 export class InvalidRewindTargetError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string, message?: string) {
@@ -550,5 +702,12 @@ export class CdWhilePromptActiveError extends Error {
     );
     this.name = 'CdWhilePromptActiveError';
     this.sessionId = sessionId;
+  }
+}
+
+export class McpAuthenticationInProgressError extends Error {
+  constructor() {
+    super('Another MCP authentication is already in progress');
+    this.name = 'McpAuthenticationInProgressError';
   }
 }

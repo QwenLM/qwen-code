@@ -273,25 +273,7 @@ export class WorkspaceContext {
     if (cached !== undefined) {
       return cached;
     }
-    let resolved: string;
-    try {
-      resolved = fs.realpathSync(pathToCheck);
-    } catch (e: unknown) {
-      if (
-        isNodeError(e) &&
-        e.code === 'ENOENT' &&
-        e.path &&
-        // realpathSync does not set e.path correctly for symlinks to
-        // non-existent files.
-        !this.isFileSymlink(e.path)
-      ) {
-        // If it doesn't exist, e.path contains the fully resolved path.
-        resolved = e.path;
-      } else {
-        // Don't cache exceptions — the path may exist on retry.
-        throw e;
-      }
-    }
+    const resolved = resolveWorkspacePath(pathToCheck);
     if (
       this.resolvedPathCache.size >= WorkspaceContext.RESOLVED_PATH_CACHE_MAX
     ) {
@@ -302,16 +284,67 @@ export class WorkspaceContext {
     this.resolvedPathCache.set(pathToCheck, resolved);
     return resolved;
   }
+}
 
-  /**
-   * Checks if a file path is a symbolic link that points to a file.
-   */
-  private isFileSymlink(filePath: string): boolean {
-    try {
-      return !fs.readlinkSync(filePath).endsWith('/');
-    } catch (_error) {
-      return false;
+/**
+ * Resolves a workspace path using the same missing-path and symlink semantics
+ * used by WorkspaceContext containment checks.
+ */
+export function resolveWorkspacePath(pathToCheck: string): string {
+  try {
+    const resolved = fs.realpathSync(pathToCheck);
+    return typeof resolved === 'string' ? resolved : pathToCheck;
+  } catch (error: unknown) {
+    if (isResolvableMissingPathError(error)) {
+      return resolveMissingPath(pathToCheck);
     }
+
+    throw error;
+  }
+}
+
+function resolveMissingPath(pathToCheck: string): string {
+  const missingTail: string[] = [];
+  let ancestor = pathToCheck;
+
+  while (true) {
+    try {
+      const resolvedAncestor = fs.realpathSync(ancestor);
+      return path.join(resolvedAncestor, ...missingTail);
+    } catch (error: unknown) {
+      if (!isResolvableMissingPathError(error)) {
+        throw error;
+      }
+
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) {
+        return pathToCheck;
+      }
+      missingTail.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function isResolvableMissingPathError(error: unknown): boolean {
+  return (
+    isNodeError(error) &&
+    error.code === 'ENOENT' &&
+    !!error.path &&
+    // realpathSync does not set error.path correctly for symlinks to
+    // non-existent files.
+    !isFileSymlink(error.path)
+  );
+}
+
+/**
+ * Checks if a file path is a symbolic link that points to a file.
+ */
+function isFileSymlink(filePath: string): boolean {
+  try {
+    return !fs.readlinkSync(filePath).endsWith('/');
+  } catch (_error) {
+    return false;
   }
 }
 

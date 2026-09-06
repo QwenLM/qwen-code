@@ -98,6 +98,45 @@ describe('copyFromLastAssistantMessage', () => {
     expect(result.message).toBe('Code block 2 copied to the clipboard');
   });
 
+  // The argument hint is `[code|<lang>|latex|inline-latex] [index]`, both
+  // groups optional, so a bare index is a documented form.
+  it('copies a numbered fenced code block with a bare index', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const content = [
+      '```ts',
+      'const first = 1;',
+      '```',
+      '```json',
+      '{"second": true}',
+      '```',
+    ].join('\n');
+
+    const result = await copyFromLastAssistantMessage(
+      [assistant(content)],
+      '2',
+      writeText,
+    );
+
+    expect(writeText).toHaveBeenCalledWith('{"second": true}');
+    expect(result.message).toBe('Code block 2 copied to the clipboard');
+  });
+
+  it('reports a missing block for a bare index that is out of range', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const content = ['```ts', 'const only = 1;', '```'].join('\n');
+
+    const result = await copyFromLastAssistantMessage(
+      [assistant(content)],
+      '9',
+      writeText,
+    );
+
+    expect(writeText).not.toHaveBeenCalled();
+    expect(result.message).toBe(
+      'No matching code block found in the last AI output.',
+    );
+  });
+
   it('copies the last matching language code block', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const content = [

@@ -6,10 +6,19 @@
 
 import { describe, it, expect, vi } from 'vitest';
 
+// Subcommand modules are stubbed so this file tests wiring only — loading
+// the real ones would pull the whole core barrel in behind them.
 vi.mock('./sessions/list.js', () => ({
   listCommand: {
     command: 'list',
     describe: 'List sessions',
+  },
+}));
+
+vi.mock('./sessions/ps.js', () => ({
+  psCommand: {
+    command: 'ps',
+    describe: 'List interactive Qwen Code sessions running right now',
   },
 }));
 
@@ -42,7 +51,7 @@ describe('sessions command', () => {
     expect(options.key).toHaveProperty('help');
   });
 
-  it('should register list subcommand', () => {
+  it('should register list and ps subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -55,12 +64,13 @@ describe('sessions command', () => {
     }
     builder(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(1);
+    expect(mockYargs.command).toHaveBeenCalledTimes(2);
 
     const commandCalls = mockYargs.command.mock.calls;
     const commandNames = commandCalls.map((call) => call[0].command);
 
     expect(commandNames).toContain('list');
+    expect(commandNames).toContain('ps');
 
     expect(mockYargs.demandCommand).toHaveBeenCalledWith(
       1,

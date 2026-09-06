@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Text } from 'ink';
 import type React from 'react';
 import { ToolGroupMessage } from './ToolGroupMessage.js';
+import { ToolMessage } from './ToolMessage.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type {
@@ -18,62 +19,74 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../../config/settings.js';
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 // Mock child components to isolate ToolGroupMessage behavior
-vi.mock('./ToolMessage.js', () => ({
-  ToolMessage: function MockToolMessage({
-    callId,
-    name,
-    description,
-    status,
-    emphasis,
-    resultDisplay,
-    isFocused,
-    forceShowResult,
-  }: {
-    callId: string;
-    name: string;
-    description: string;
-    status: ToolCallStatus;
-    emphasis: string;
-    resultDisplay?: unknown;
-    isFocused?: boolean;
-    forceShowResult?: boolean;
-  }) {
-    // Use the same constants as the real component
-    const statusSymbolMap: Record<ToolCallStatus, string> = {
-      [ToolCallStatus.Success]: TOOL_STATUS.SUCCESS,
-      [ToolCallStatus.Pending]: TOOL_STATUS.PENDING,
-      [ToolCallStatus.Executing]: TOOL_STATUS.EXECUTING,
-      [ToolCallStatus.Confirming]: TOOL_STATUS.CONFIRMING,
-      [ToolCallStatus.Canceled]: TOOL_STATUS.CANCELED,
-      [ToolCallStatus.Error]: TOOL_STATUS.ERROR,
-    };
-    const statusSymbol = statusSymbolMap[status] || '?';
-    if (
-      resultDisplay &&
-      typeof resultDisplay === 'object' &&
-      (resultDisplay as { type?: string }).type === 'task_execution'
-    ) {
-      // `forceShowResult` is the gate that lets `SubagentScrollbackSummary`
-      // render in compact mode — surfaced in the mock so tests can
-      // assert it was passed for terminal subagent tools.
+// Spread the real module so non-component exports (TOOL_ARGS_INLINE_MAX_LINES,
+// which ToolGroupMessage reserves height with) keep their real values — a
+// hand-written literal here would let the two drift apart silently.
+vi.mock('./ToolMessage.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ToolMessage.js')>()),
+  ToolMessage: vi.fn(
+    ({
+      callId,
+      name,
+      description,
+      status,
+      emphasis,
+      resultDisplay,
+      isFocused,
+      forceShowResult,
+      showToolCallArgs,
+    }: {
+      callId: string;
+      name: string;
+      description: string;
+      status: ToolCallStatus;
+      emphasis: string;
+      resultDisplay?: unknown;
+      isFocused?: boolean;
+      forceShowResult?: boolean;
+      showToolCallArgs?: boolean;
+    }) => {
+      // Use the same constants as the real component
+      const statusSymbolMap: Record<ToolCallStatus, string> = {
+        [ToolCallStatus.Success]: TOOL_STATUS.SUCCESS,
+        [ToolCallStatus.Pending]: TOOL_STATUS.PENDING,
+        [ToolCallStatus.Executing]: TOOL_STATUS.EXECUTING,
+        [ToolCallStatus.Confirming]: TOOL_STATUS.CONFIRMING,
+        [ToolCallStatus.Canceled]: TOOL_STATUS.CANCELED,
+        [ToolCallStatus.Error]: TOOL_STATUS.ERROR,
+      };
+      const statusSymbol = statusSymbolMap[status] || '?';
+      if (
+        resultDisplay &&
+        typeof resultDisplay === 'object' &&
+        (resultDisplay as { type?: string }).type === 'task_execution'
+      ) {
+        // `forceShowResult` is the gate that lets `SubagentScrollbackSummary`
+        // render in compact mode — surfaced in the mock so tests can
+        // assert it was passed for terminal subagent tools.
+        return (
+          <Text>
+            MockSubagent[{callId}]: focused={String(isFocused)} force=
+            {String(Boolean(forceShowResult))}
+          </Text>
+        );
+      }
+
       return (
         <Text>
-          MockSubagent[{callId}]: focused={String(isFocused)} force=
-          {String(Boolean(forceShowResult))}
+          MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
+          {forceShowResult ? ' [forceShow]' : ''}
+          {showToolCallArgs ? ' [args]' : ''}
         </Text>
       );
-    }
-
-    return (
-      <Text>
-        MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
-        {forceShowResult ? ' [forceShow]' : ''}
-      </Text>
-    );
-  },
+    },
+  ),
 }));
 
 vi.mock('./ToolConfirmationMessage.js', () => ({
@@ -119,6 +132,225 @@ describe('<ToolGroupMessage />', () => {
         {component}
       </ConfigContext.Provider>,
     );
+
+  const renderWithToolCallArgs = (component: React.ReactElement) =>
+    render(
+      <SettingsContext.Provider
+        value={
+          {
+            merged: { ui: { showToolCallArgs: true } },
+          } as LoadedSettings
+        }
+      >
+        <ConfigContext.Provider value={mockConfig}>
+          {component}
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+  describe('ui.showToolCallArgs', () => {
+    const readBatch = [
+      createToolCall({
+        callId: 'r1',
+        name: 'ReadFile',
+        description: 'a.ts',
+        args: { absolute_path: 'a.ts' },
+      }),
+      createToolCall({
+        callId: 'r2',
+        name: 'ReadFile',
+        description: 'b.ts',
+        args: { absolute_path: 'b.ts' },
+      }),
+      createToolCall({
+        callId: 'g1',
+        name: 'Grep',
+        description: 'pattern',
+        args: { pattern: 'pattern' },
+      }),
+    ];
+
+    it('keeps the compact partition summary when the setting is off', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders every collapsible tool individually when the setting is on', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[r2]');
+      expect(frame).toContain('MockTool[g1]');
+      expect(frame).not.toContain('read a.ts, b.ts');
+    });
+
+    it('forwards showToolCallArgs down to each ToolMessage', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('[args]');
+    });
+
+    it('does not force result output open (that stays Ctrl+O)', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      expect(lastFrame() ?? '').not.toContain('[forceShow]');
+    });
+
+    it('keeps the compact partition when no tool carries args (daemon path)', () => {
+      // Daemon-built groups never carry args across the boundary. Expanding
+      // them would give a noisier transcript and zero args rows, reading as
+      // "these tools were called with no arguments".
+      const daemonShaped = readBatch.map(({ args: _args, ...rest }) => rest);
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage {...baseProps} toolCalls={daemonShaped} />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('treats an empty args object as nothing to render', () => {
+      const emptyArgs = readBatch.map((t) => ({ ...t, args: {} }));
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage {...baseProps} toolCalls={emptyArgs} />,
+      );
+      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+    });
+
+    it('expands a memory-only group instead of collapsing to the badge', () => {
+      // "Wrote 1 memory" would hide the very parameters the setting exists to
+      // surface.
+      const memoryOps = [
+        createToolCall({
+          callId: 'm1',
+          name: 'WriteFile',
+          description: 'QWEN.md',
+          args: { file_path: 'QWEN.md', content: 'remember this' },
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={memoryOps}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).not.toContain('Wrote 1 memory');
+    });
+
+    it('keeps the memory badge when the setting is off', () => {
+      const memoryOps = [
+        createToolCall({
+          callId: 'm1',
+          name: 'WriteFile',
+          description: 'QWEN.md',
+          args: { file_path: 'QWEN.md' },
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={memoryOps}
+          memoryWriteCount={1}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('Wrote 1 memory');
+    });
+
+    it('keeps the dense panel for a pure parallel-agent group', () => {
+      // The deliberate carve-out: ToolGroupMessage documents that rendering
+      // running agents inline while LiveAgentPanel also lists them overflows
+      // the viewport and triggers ink's clear-screen scroll-snap loop (#5798).
+      // The setting must not reach that gate — this pins the exemption so a
+      // later "make it consistent" edit cannot silently reintroduce the bug.
+      const agent = (name: string): AgentResultDisplay => ({
+        type: 'task_execution',
+        subagentName: name,
+        taskDescription: `${name} task`,
+        taskPrompt: `Run ${name}`,
+        status: 'completed',
+        toolCalls: [],
+      });
+      const agents = [
+        createToolCall({
+          callId: 'agent-1',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          args: { prompt: 'review the diff' },
+          resultDisplay: agent('reviewer'),
+        }),
+        createToolCall({
+          callId: 'agent-2',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          args: { prompt: 'plan the work' },
+          resultDisplay: agent('planner'),
+        }),
+      ];
+      // InlineParallelAgentsDisplay reads the registry off config; the bare
+      // `{}` mockConfig would make `getBackgroundTaskRegistry` throw, ink
+      // would swallow it, and the frame would be empty — which a negative
+      // assertion alone would pass vacuously. Mirrors `registryConfig` below.
+      const registryConfig = {
+        getBackgroundTaskRegistry: () => ({ get: () => undefined }),
+      } as unknown as Config;
+      const { lastFrame } = render(
+        <SettingsContext.Provider
+          value={
+            { merged: { ui: { showToolCallArgs: true } } } as LoadedSettings
+          }
+        >
+          <ConfigContext.Provider value={registryConfig}>
+            <ToolGroupMessage
+              {...baseProps}
+              contentWidth={120}
+              toolCalls={agents}
+              isPending={false}
+            />
+          </ConfigContext.Provider>
+        </SettingsContext.Provider>,
+      );
+      const frame = lastFrame() ?? '';
+      // Positive first: the dense panel really rendered (an empty frame would
+      // satisfy the negation below on its own).
+      expect(frame).toContain('Parallel agents');
+      // And not per-agent ToolMessages. Ctrl+O (fullDetail) is the documented
+      // way to expand these — covered by its own test above.
+      expect(frame).not.toContain('MockSubagent[agent-1]');
+    });
+
+    it('renders without a SettingsProvider (defaults to off)', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
+      );
+      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+    });
+  });
 
   describe('Golden Snapshots', () => {
     it('renders single successful tool call', () => {
@@ -185,9 +417,41 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
-      expect(frame).toContain('Searched 1 pattern');
-      expect(frame).toContain('read 2 files');
+      expect(frame).toContain('Searched pattern');
+      expect(frame).toContain('read a.ts, b.ts');
       expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders image-bearing collapsible tools individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'image-read',
+          name: 'ReadFile',
+          description: 'chart.png',
+          images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }],
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      expect(lastFrame()).toContain('MockTool[image-read]');
+    });
+
+    it('renders an overflow-only collapsible tool individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'overflow-read',
+          name: 'ReadFile',
+          description: 'many charts',
+          omittedImageCount: 2,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      expect(lastFrame()).toContain('MockTool[overflow-read]');
     });
 
     it('renders mixed group with summary + individual tools', () => {
@@ -204,7 +468,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // Collapsible → summary line
-      expect(frame).toContain('Read 1 file');
+      expect(frame).toContain('Read a.ts');
       // Non-collapsible → individual ToolMessage
       expect(frame).toContain('MockTool[s1]');
     });
@@ -226,7 +490,7 @@ describe('<ToolGroupMessage />', () => {
       // All tools render individually — no summary line
       expect(frame).toContain('MockTool[r1]');
       expect(frame).toContain('MockTool[e1]');
-      expect(frame).not.toContain('Read 1 file');
+      expect(frame).not.toContain('Read a.ts');
     });
 
     it('forceExpandAll passes forceShowResult to Success siblings in error group', () => {
@@ -276,7 +540,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // Successful ReadFile → summary line
-      expect(frame).toContain('Read 1 file');
+      expect(frame).toContain('Read a.ts');
       // Canceled ReadFile → individual ToolMessage (partial output visible)
       expect(frame).toContain('MockTool[r2]');
     });
@@ -306,7 +570,7 @@ describe('<ToolGroupMessage />', () => {
       const frame = lastFrame() ?? '';
       expect(frame).toContain('Recalled 2 memories');
       // Collapsible tool still summarized
-      expect(frame).toContain('Read 1 file');
+      expect(frame).toContain('Read config.yaml');
       // Non-collapsible tool rendered individually
       expect(frame).toContain('MockTool[s1]');
     });
@@ -334,7 +598,7 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Read 2 files');
+      expect(frame).toContain('Read a.ts, b.ts');
       expect(frame).toContain('Recalled 1 memory');
     });
 
@@ -516,6 +780,195 @@ describe('<ToolGroupMessage />', () => {
       const frame = lastFrame() ?? '';
       expect(frame).toContain('Recalled 1 memory');
       expect(frame).not.toContain('Wrote');
+    });
+  });
+
+  // Full-detail mode must NOT be short-circuited by the
+  // memory-only / pure-parallel-agent early returns (which run before the
+  // forceExpandAll computation). Each tool must render in full.
+  describe('fullDetail bypasses compact early returns', () => {
+    it('renders memory ops individually (not the "Recalled N" badge) when fullDetail', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          description: 'recall project goals',
+          isMemoryOp: 'read',
+          resultDisplay: 'remembered: ship the transcript view',
+        }),
+        createToolCall({
+          callId: 'm2',
+          name: 'SaveMemory',
+          description: 'recall constraints',
+          isMemoryOp: 'read',
+          resultDisplay: 'remembered: keep main view clean',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={2}
+          fullDetail
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // The compact "Recalled N" badge must NOT short-circuit fullDetail:
+      // each memory op renders as its own ToolMessage with forceShowResult.
+      // (ToolMessage is mocked in this suite as `MockTool[id]…[forceShow]`.)
+      expect(frame).not.toContain('Recalled 2 memories');
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).toContain('MockTool[m2]');
+      expect(frame).toContain('[forceShow]');
+    });
+
+    it('renders a pure parallel-agent group as individual ToolMessages (not the dense panel) when fullDetail', () => {
+      const completedAgent = (name: string): AgentResultDisplay => ({
+        type: 'task_execution',
+        subagentName: name,
+        taskDescription: `${name} task`,
+        taskPrompt: `Run ${name}`,
+        status: 'completed',
+        toolCalls: [
+          {
+            callId: `${name}-read-1`,
+            name: 'read_file',
+            status: 'success',
+            description: 'Read file',
+          },
+        ],
+      });
+      const toolCalls = [
+        createToolCall({
+          callId: 'agent-1',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          resultDisplay: completedAgent('reviewer'),
+        }),
+        createToolCall({
+          callId: 'agent-2',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          resultDisplay: completedAgent('planner'),
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          isPending={false}
+          fullDetail
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // fullDetail must bypass isPureParallelAgentGroup → each agent gets its
+      // own full ToolMessage (mocked as MockSubagent[id]) instead of the dense
+      // InlineParallelAgentsDisplay panel.
+      expect(frame).toContain('MockSubagent[agent-1]');
+      expect(frame).toContain('MockSubagent[agent-2]');
+    });
+
+    it('lifts per-tool height truncation when fullDetail (no availableTerminalHeight passed to ToolMessage)', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'shell-1',
+          name: 'run_shell_command',
+          description: 'echo hi',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'a result with content',
+        }),
+      ];
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={10}
+          fullDetail
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-1');
+      expect(call).toBeDefined();
+      // fullDetail forces the height override to undefined so the tool output
+      // renders untruncated, even though availableTerminalHeight=10 was given.
+      expect(call?.[0].availableTerminalHeight).toBeUndefined();
+      expect(call?.[0].forceShowResult).toBe(true);
+    });
+
+    it('still truncates per-tool height when not fullDetail', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'shell-2',
+          name: 'run_shell_command',
+          description: 'echo hi',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'a result with content',
+        }),
+      ];
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={10}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-2');
+      expect(call?.[0].availableTerminalHeight).toBeTypeOf('number');
+    });
+
+    it('forwards fullDetail and detailedDisplay to each ToolMessage (§4.9)', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'Read 1 file',
+        }),
+      ];
+      // detailedDisplay is set on the display item by the scheduler/resume path.
+      (toolCalls[0] as { detailedDisplay?: string }).detailedDisplay =
+        'full a.ts contents';
+      renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} fullDetail />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'read-1');
+      expect(call?.[0].fullDetail).toBe(true);
+      expect((call?.[0] as { detailedDisplay?: string }).detailedDisplay).toBe(
+        'full a.ts contents',
+      );
+    });
+
+    it('passes fullDetail=false to ToolMessage in the normal (non-transcript) path', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'edit-1',
+          name: 'Edit',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'edited',
+        }),
+      ];
+      renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'edit-1');
+      expect(call?.[0].fullDetail).toBe(false);
     });
   });
 
@@ -809,6 +1262,79 @@ describe('<ToolGroupMessage />', () => {
       );
       expect(lastFrame()).toMatchSnapshot();
     });
+
+    it('reserves wrapped compact summary height before sizing tool results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-long',
+          name: 'ReadFile',
+          description:
+            'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'shell-result',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'shell output',
+        }),
+      ];
+
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={30}
+          toolCalls={toolCalls}
+          availableTerminalHeight={12}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-result');
+      expect(call?.[0].availableTerminalHeight).toBe(8);
+    });
+
+    it('reserves an active compact hint row before sizing tool results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-complete',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'read-pending',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Pending,
+        }),
+        createToolCall({
+          callId: 'shell-result',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'shell output',
+        }),
+      ];
+
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={12}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-result');
+      // 2 reads inline (no hint row) → summary is 1 row shorter than before.
+      expect(call?.[0].availableTerminalHeight).toBe(10);
+    });
   });
 
   describe('Confirmation Handling', () => {
@@ -853,12 +1379,10 @@ describe('<ToolGroupMessage />', () => {
     // ToolMessage path and `SubagentScrollbackSummary` would never
     // surface in scrollback. The committed-summary handoff promised
     // by the LiveAgentPanel design depends on this.
-    const renderCompact = (component: React.ReactElement, compactMode = true) =>
+    const renderCompact = (component: React.ReactElement) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          <CompactModeProvider value={{ compactMode, compactInline: false }}>
-            {component}
-          </CompactModeProvider>
+          {component}
         </ConfigContext.Provider>,
       );
 

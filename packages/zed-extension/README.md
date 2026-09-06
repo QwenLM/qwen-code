@@ -60,7 +60,7 @@ For additional environment variables, configure them in your Zed settings:
   "agent_servers": {
     "qwen-code": {
       "env": {
-        "QWEN_LOG_LEVEL": "info",
+        "QWEN_DEBUG_LOG_FILE": "1",
         "YOUR_CUSTOM_VAR": "value"
       }
     }

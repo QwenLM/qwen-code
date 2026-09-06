@@ -12,13 +12,17 @@ import {
   computeModelListVersion,
   findExistingProviderModels,
   findProviderByCredentials,
-  getAllProviderBaseUrls,
   getDefaultModelIds,
   resolveBaseUrl,
   shouldShowStep,
   providerMatchesCredentials,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
+import {
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
+} from '../presets/alibaba-token-plan.js';
 
 function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
@@ -58,8 +62,14 @@ describe('buildInstallPlan', () => {
   });
 
   it('builds a plan with editable models and unknown IDs', () => {
-    const config = makeConfig({ modelsEditable: true });
-    const plan = buildInstallPlan(config, {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [
+        { id: 'model-a', contextWindowSize: 8192, enableThinking: true },
+        { id: 'model-b' },
+      ],
+    });
+    const plan = buildInstallPlanSrc(config, {
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'sk-test',
       modelIds: ['model-a', 'unknown-model'],
@@ -73,6 +83,9 @@ describe('buildInstallPlan', () => {
       name: '[Test] unknown-model',
     });
     expect(models?.[1]?.generationConfig).toBeUndefined();
+    expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(models ?? []),
+    );
   });
 
   it('applies advancedConfig to editable unknown model IDs only', () => {
@@ -248,6 +261,24 @@ describe('specToModelConfig (via buildProviderTemplate)', () => {
     });
     const template = buildProviderTemplate(config);
     expect(template[0]?.description).toBe('A model');
+  });
+
+  it('preserves image-only model metadata in the provider template', () => {
+    const config = makeConfig({
+      models: [{ id: 'image-model', imageOnly: true }],
+    });
+
+    expect(buildProviderTemplate(config)[0]?.imageOnly).toBe(true);
+  });
+
+  it('preserves image generation capability in the provider template', () => {
+    const config = makeConfig({
+      models: [{ id: 'dual-role-model', supportsImageGeneration: true }],
+    });
+
+    expect(buildProviderTemplate(config)[0]?.supportsImageGeneration).toBe(
+      true,
+    );
   });
 });
 
@@ -621,21 +652,36 @@ describe('findProviderByCredentials', () => {
     expect(china?.id).toBe('coding-plan');
     expect(intl?.id).toBe('coding-plan');
   });
+
+  it('matches Token Plan credentials against both registered region URLs', () => {
+    const china = findProviderByCredentialsSrc(
+      TOKEN_PLAN_CHINA_BASE_URL,
+      TOKEN_PLAN_ENV_KEY,
+    );
+    const intl = findProviderByCredentialsSrc(
+      TOKEN_PLAN_GLOBAL_BASE_URL,
+      TOKEN_PLAN_ENV_KEY,
+    );
+    expect(china?.id).toBe('token-plan');
+    expect(intl?.id).toBe('token-plan');
+  });
 });
 
 describe('getAllProviderBaseUrls', () => {
   it('returns a non-empty list including known preset URLs', () => {
-    const urls = getAllProviderBaseUrls();
+    const urls = getAllProviderBaseUrlsSrc();
     expect(urls.length).toBeGreaterThan(0);
     expect(urls).toContain('https://api.deepseek.com');
     expect(urls).toContain('https://openrouter.ai/api/v1');
   });
 
   it('expands BaseUrlOption[] presets into each option URL', () => {
-    const urls = getAllProviderBaseUrls();
+    const urls = getAllProviderBaseUrlsSrc();
     // coding-plan has China + Singapore options
     expect(urls).toContain('https://coding.dashscope.aliyuncs.com/v1');
     expect(urls).toContain('https://coding-intl.dashscope.aliyuncs.com/v1');
+    expect(urls).toContain(TOKEN_PLAN_CHINA_BASE_URL);
+    expect(urls).toContain(TOKEN_PLAN_GLOBAL_BASE_URL);
   });
 });
 
@@ -643,7 +689,13 @@ describe('getAllProviderBaseUrls', () => {
 // branch that hasn't been built yet. Re-import via the relative source path so
 // these new edge-case tests exercise the in-tree implementation.
 import {
+  findProviderByCredentials as findProviderByCredentialsSrc,
+  getAllProviderBaseUrls as getAllProviderBaseUrlsSrc,
+} from '../all-providers.js';
+import {
+  buildInstallPlan as buildInstallPlanSrc,
   resolveBaseUrl as resolveBaseUrlSrc,
+  resolveMetadataKey as resolveMetadataKeySrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
 } from '../provider-config.js';
 
@@ -763,8 +815,6 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
     expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
   });
 });
-
-import { resolveMetadataKey as resolveMetadataKeySrc } from '../provider-config.js';
 
 describe('customHeaders in ProviderConfig', () => {
   it('merges customHeaders into generationConfig for fixed models', () => {

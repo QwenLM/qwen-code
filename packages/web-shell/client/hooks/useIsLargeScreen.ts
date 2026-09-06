@@ -7,10 +7,8 @@
 import { useEffect, useState } from 'react';
 
 /**
- * The width at or above which the app is considered a "large screen". The
- * Session Overview panel is only offered past this point: below it there is no
- * horizontal room to make managing several sessions at once worthwhile, and the
- * sidebar collapses to a mobile drawer (see the 760px breakpoint in App.tsx).
+ * The width at or above which the app is considered a "large screen" for
+ * layouts such as split view.
  */
 export const LARGE_SCREEN_QUERY = '(min-width: 1024px)';
 
@@ -27,7 +25,10 @@ export function useIsLargeScreen(query: string = LARGE_SCREEN_QUERY): boolean {
   const [isLarge, setIsLarge] = useState<boolean>(() => matchesQuery(query));
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    if (
+      typeof window === 'undefined' ||
+      typeof window.matchMedia !== 'function'
+    ) {
       return;
     }
     const mql = window.matchMedia(query);
@@ -43,7 +44,10 @@ export function useIsLargeScreen(query: string = LARGE_SCREEN_QUERY): boolean {
 }
 
 function matchesQuery(query: string): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+  if (
+    typeof window === 'undefined' ||
+    typeof window.matchMedia !== 'function'
+  ) {
     return false;
   }
   return window.matchMedia(query).matches;

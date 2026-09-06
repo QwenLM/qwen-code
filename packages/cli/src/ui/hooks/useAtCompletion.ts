@@ -11,6 +11,7 @@ import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
 import { getExtensionSuggestions } from './extension-mention-ref.js';
+import { getSessionSuggestions } from './session-completion.js';
 import { buildMcpServerRef } from '../../utils/mcp-server-mention.js';
 import { t } from '../../i18n/index.js';
 
@@ -441,16 +442,33 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         ...mcpServerMentionSuggestions,
         ...serverSuggestions,
         ...globalResourceSuggestions,
-      ];
+      ].map((s) => ({ ...s, category: s.category ?? ('mcp' as const) }));
+
+      // Prior-session suggestions (current project). Kicked off CONCURRENTLY so
+      // the disk listing never delays the file-search loading timer below;
+      // awaited only when assembling the final payload. A listing failure
+      // yields [] so it never blocks file/MCP/extension completion.
+      // Merge order invariant: sessions are always appended LAST in every
+      // SEARCH_SUCCESS dispatch path (mcp → file → session).
+      const sessionPromise = getSessionSuggestions(cwd, state.pattern);
 
       if (!fileSearch.current) {
-        // File index not ready yet; still surface any MCP matches so they
+        // File index not ready yet; still surface non-file matches so they
         // don't have to wait on the crawler.
-        if (mcpSuggestions.length > 0) {
+        const sessionSuggestions = await sessionPromise.catch(
+          () => [] as Suggestion[],
+        );
+        // The disk listing awaited above opens a window in which a newer
+        // keystroke may have superseded this search; drop a stale result.
+        if (cancelled) {
+          return;
+        }
+        const scoped = [...mcpSuggestions, ...sessionSuggestions];
+        if (scoped.length > 0) {
           if (slowSearchTimer.current) {
             clearTimeout(slowSearchTimer.current);
           }
-          dispatch({ type: 'SEARCH_SUCCESS', payload: mcpSuggestions });
+          dispatch({ type: 'SEARCH_SUCCESS', payload: scoped });
         }
         return;
       }
@@ -487,17 +505,35 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           label: p,
           value: escapePath(p),
           isDirectory: p.endsWith('/'),
+          category: 'file' as const,
         }));
+        const sessionSuggestions = await sessionPromise.catch(
+          () => [] as Suggestion[],
+        );
+        if (controller.signal.aborted || cancelled) {
+          return;
+        }
         dispatch({
           type: 'SEARCH_SUCCESS',
-          payload: [...mcpSuggestions, ...fileSuggestions],
+          payload: [
+            ...mcpSuggestions,
+            ...fileSuggestions,
+            ...sessionSuggestions,
+          ],
         });
       } catch (error) {
         if (!(error instanceof Error && error.name === 'AbortError')) {
-          // A file-search failure shouldn't swallow MCP matches we already
+          // A file-search failure shouldn't swallow non-file matches we already
           // have; show those rather than dropping to an error state.
-          if (mcpSuggestions.length > 0) {
-            dispatch({ type: 'SEARCH_SUCCESS', payload: mcpSuggestions });
+          const sessionSuggestions = await sessionPromise.catch(
+            () => [] as Suggestion[],
+          );
+          if (cancelled) {
+            return;
+          }
+          const scoped = [...mcpSuggestions, ...sessionSuggestions];
+          if (scoped.length > 0) {
+            dispatch({ type: 'SEARCH_SUCCESS', payload: scoped });
           } else {
             dispatch({ type: 'ERROR' });
           }

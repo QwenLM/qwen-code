@@ -11,6 +11,7 @@ import {
   matchTurnEvent,
   normalizePendingPromptLimit,
   type CreateSessionRequest,
+  type DaemonSseConnectReason,
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
@@ -22,13 +23,28 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTranscriptPageOptions,
+  DaemonSessionTurnIndexPage,
+  DaemonSessionTurnIndexPageOptions,
+  DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -37,14 +53,26 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowTasksStatus,
+  DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalStateResponse,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  DaemonSessionPrInfo,
 } from './types.js';
+import type {
+  CreateStandaloneSessionOptions,
+  DaemonRestoredStandaloneSession,
+  RestoreStandaloneSessionRequest,
+} from './standalone-sessions.js';
 
 /** Compacted replay snapshot returned by the daemon on session load. */
 export interface DaemonReplaySnapshot {
@@ -66,8 +94,41 @@ export interface DaemonSessionClientOptions {
    * `Last-Event-ID` resume cursors.
    */
   lastEventId?: number;
+  /**
+   * Epoch token of the event bus that produced `lastEventId` (the
+   * `eventEpoch` field of load/resume responses). Paired with the cursor
+   * on every subscription so a daemon restart is detected as an epoch
+   * mismatch instead of a numeric guess. Absent on older daemons — the
+   * first subscription then learns the epoch from the
+   * `X-Qwen-Event-Epoch` response header.
+   */
+  eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** True when the load response explicitly carried both replay arrays. */
+  replaySnapshotComplete?: boolean;
+  /** True when persisted replay was only partially reconstructed. */
+  replayPartial?: boolean;
+  /** Diagnostic for a partial persisted replay. */
+  replayError?: string;
+  /** True when older persisted records precede the replay snapshot. */
+  historyHasMore?: boolean;
+  /**
+   * Fallback pagination anchor from the daemon: the oldest
+   * `qwen.session.recordId` in the last persisted transcript page,
+   * read from the transcript when the replay
+   * snapshot's `history_truncated` marker carries none (live sessions
+   * whose in-flight turn capped the journal before any turn boundary).
+   * Clients use it as `beforeRecordId` when no recordId is available
+   * in the retained window.
+   */
+  historyAnchorRecordId?: string;
+  /**
+   * True when the daemon reported the replay snapshot as degraded (the
+   * compaction engine failed at least once for this session). Consumers
+   * should prefer the full transcript over the snapshot when set.
+   */
+  replayDegraded?: boolean;
   /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
@@ -77,13 +138,87 @@ export interface DaemonSessionClientOptions {
   maxPendingPromptsPerSession?: number | null;
 }
 
-export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
+export type DaemonSessionRestoreStrategy =
+  | { kind: 'workspace'; workspaceCwd: string }
+  | { kind: 'standalone' };
+
+export interface DaemonSessionSubscribeOptions
+  extends Omit<
+    SubscribeOptions,
+    'clientId' | 'previousSseStreamId' | 'onSseStreamAccepted'
+  > {
   /**
    * Reuse this client's last seen SSE event id when `lastEventId` is not
    * supplied. Defaults to true so reconnecting client adapters get replay
    * behavior without carrying the id through every call.
    */
   resume?: boolean;
+}
+
+function isSessionAttachmentReference(
+  value: unknown,
+): value is DaemonSessionAttachmentReference {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (record['type'] === 'image' || record['type'] === 'resource') &&
+    typeof record['attachmentId'] === 'string' &&
+    record['attachmentId'].length > 0 &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].length > 0 &&
+    (record['type'] !== 'image' || record['mimeType'].startsWith('image/')) &&
+    typeof record['size'] === 'number' &&
+    Number.isSafeInteger(record['size']) &&
+    record['size'] >= 0 &&
+    (record['type'] !== 'image' || record['size'] > 0)
+  );
+}
+
+const MAX_ATTACHMENT_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
+
+function createStandaloneRestoredClient(
+  client: DaemonClient,
+  restored: DaemonRestoredStandaloneSession,
+  includeReplay: boolean,
+): DaemonSessionClient {
+  const {
+    state,
+    hasActivePrompt,
+    compactedReplay,
+    liveJournal,
+    historyHasMore,
+    historyAnchorRecordId,
+    replayDegraded,
+    partial,
+    replayError,
+    lastEventId,
+    eventEpoch,
+    ...session
+  } = restored;
+  return new DaemonSessionClient({
+    client,
+    session,
+    hasActivePrompt,
+    state,
+    lastEventId: lastEventId ?? 0,
+    eventEpoch,
+    ...(includeReplay
+      ? {
+          replaySnapshot: {
+            compactedReplay: compactedReplay ?? [],
+            liveJournal: liveJournal ?? [],
+          },
+          replaySnapshotComplete:
+            Array.isArray(compactedReplay) && Array.isArray(liveJournal),
+          replayPartial: partial === true,
+          replayError,
+          historyHasMore,
+          historyAnchorRecordId,
+          replayDegraded,
+        }
+      : {}),
+  });
 }
 
 /**
@@ -100,14 +235,53 @@ export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
 export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
+  readonly restoreStrategy: DaemonSessionRestoreStrategy;
   readonly state: DaemonSessionState;
-  readonly replaySnapshot: DaemonReplaySnapshot;
+  /**
+   * Not `readonly`: {@link consumeReplaySnapshot} swaps it for an empty
+   * snapshot once the provider has injected it into the transcript store,
+   * releasing the raw wire events (tens of MiB on busy sessions) instead of
+   * retaining them for the session client's lifetime.
+   */
+  replaySnapshot: DaemonReplaySnapshot;
+  readonly replaySnapshotComplete: boolean;
+  readonly replayPartial: boolean;
+  readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
+  readonly historyHasMore: boolean;
+  /**
+   * Fallback pagination anchor from the daemon load response (see
+   * {@link DaemonSessionClientOptions.historyAnchorRecordId}). Undefined
+   * when the retained window already carries a recordId or the daemon
+   * could not read one from the persisted transcript.
+   */
+  readonly historyAnchorRecordId: string | undefined;
+  /**
+   * True when the load response flagged the replay snapshot as degraded
+   * (`replayDegraded` — compaction failed at least once, so
+   * `replaySnapshot` may lag behind live events). Prefer the full
+   * transcript (see `fullTranscriptAvailable`) when set.
+   */
+  readonly replayDegraded: boolean;
   private lastSeenEventId: number | undefined;
+  /**
+   * Epoch token paired with {@link lastSeenEventId}. Seeded from the
+   * load/resume/create response when available, refreshed from every
+   * subscription's `X-Qwen-Event-Epoch` response header.
+   */
+  private lastSeenEpoch: string | undefined;
+  private hasAcceptedRestStream = false;
+  private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
+  private cancelling?: Promise<void>;
   private readonly promptLimit: number;
+  private readonly attachmentCache = new Map<
+    string,
+    { pending: Promise<DaemonSessionAttachmentData>; size: number }
+  >();
+  private attachmentCacheBytes = 0;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -119,13 +293,25 @@ export class DaemonSessionClient {
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
     this.session = { ...opts.session };
+    const context = (opts.session as { context?: { kind?: unknown } }).context;
+    this.restoreStrategy =
+      opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
+        ? { kind: 'standalone' }
+        : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
+    this.historyHasMore = opts.historyHasMore ?? false;
+    this.historyAnchorRecordId = opts.historyAnchorRecordId;
+    this.replayDegraded = opts.replayDegraded ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
     };
+    this.replaySnapshotComplete = opts.replaySnapshotComplete ?? false;
+    this.replayPartial = opts.replayPartial ?? false;
+    this.replayError = opts.replayError;
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
       opts.maxPendingPromptsPerSession === undefined
         ? opts.client.maxPendingPromptsPerSession
@@ -157,23 +343,30 @@ export class DaemonSessionClient {
     //   guardrail events advertised via `mcp_guardrail_events` are
     //   useless without this seed because they predate any live
     //   subscription.
-    // - **Carve-out**: `modelServiceId` switch failures are
-    //   reported on SSE, not the create/attach HTTP response. The
-    //   original carve-out covered just this case; the unified rule
-    //   below subsumes it (newly-created sessions always seed) while
-    //   preserving the semantics for re-attached sessions where the
-    //   caller may have an existing event cursor it doesn't want to
-    //   reset.
+    // - **Carve-out**: attach-time `modelServiceId` and
+    //   `approvalMode` changes are reported on SSE, not only the
+    //   create/attach HTTP response. The original carve-out covered
+    //   just model changes; approval-mode changes have the same
+    //   pre-subscription event window. The unified rule below subsumes
+    //   newly-created sessions while preserving re-attach semantics for
+    //   callers without attach-time state changes.
     //
     // The daemon treats Last-Event-ID: 0 as "replay from the beginning
     // of the bounded ring"; if older events have already been evicted,
     // clients receive the retained suffix and continue live from there.
-    const lastEventId = !session.attached || req.modelServiceId ? 0 : undefined;
+    const lastEventId =
+      !session.attached || req.modelServiceId || req.approvalMode
+        ? 0
+        : undefined;
     return new DaemonSessionClient({
       client,
       session,
       hasActivePrompt: session.hasActivePrompt,
       lastEventId,
+      // Newer daemons may stamp the bus epoch on the create/attach
+      // response; older ones don't — the first subscription then learns it
+      // from the `X-Qwen-Event-Epoch` response header.
+      eventEpoch: session.eventEpoch,
     });
   }
 
@@ -188,25 +381,44 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
+    const restored = await client.loadSession(sessionId, req, clientId);
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
     const {
       state,
       hasActivePrompt,
       compactedReplay,
       liveJournal,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayDegraded,
+      partial,
+      replayError,
       lastEventId: serverLastEventId,
+      eventEpoch,
       ...session
-    } = await client.loadSession(sessionId, req, clientId);
-    return new DaemonSessionClient({
+    } = restored;
+    const result = new DaemonSessionClient({
       client,
       session,
       hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
       },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayDegraded,
     });
+    await result.hydrateReplaySnapshot();
+    return result;
   }
 
   /**
@@ -225,6 +437,7 @@ export class DaemonSessionClient {
       state,
       hasActivePrompt,
       lastEventId: serverLastEventId,
+      eventEpoch,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -233,7 +446,52 @@ export class DaemonSessionClient {
       hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
     });
+  }
+
+  static async createStandalone(
+    client: DaemonClient,
+    options: CreateStandaloneSessionOptions = {},
+  ): Promise<DaemonSessionClient> {
+    const session = await client.createStandaloneSession(options);
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      lastEventId: 0,
+      eventEpoch: session.eventEpoch,
+    });
+  }
+
+  static async loadStandalone(
+    client: DaemonClient,
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const restored = await client.loadStandaloneSession(
+      sessionId,
+      request,
+      clientId,
+    );
+    const result = createStandaloneRestoredClient(client, restored, true);
+    await result.hydrateReplaySnapshot();
+    return result;
+  }
+
+  static async resumeStandalone(
+    client: DaemonClient,
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const restored = await client.resumeStandaloneSession(
+      sessionId,
+      request,
+      clientId,
+    );
+    return createStandaloneRestoredClient(client, restored, false);
   }
 
   get sessionId(): string {
@@ -252,8 +510,46 @@ export class DaemonSessionClient {
     return this.session.clientId;
   }
 
+  get worktree(): DaemonSession['worktree'] {
+    return this.session.worktree;
+  }
+
+  get worktreeState(): DaemonSession['worktreeState'] {
+    return this.session.worktreeState;
+  }
+
+  get branch(): DaemonSession['branch'] {
+    return this.session.branch;
+  }
+
+  /**
+   * Present when this client was created with a `modelServiceId`: `false`
+   * means the spawn-time model switch failed and the session is running on
+   * the agent default model.
+   */
+  get modelApplied(): DaemonSession['modelApplied'] {
+    return this.session.modelApplied;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
+  }
+
+  get eventEpoch(): string | undefined {
+    return this.lastSeenEpoch;
+  }
+
+  /**
+   * Returns the retained replay snapshot and drops the client's reference
+   * to it. Call once the snapshot has been injected into a transcript
+   * store; the raw wire events are no longer needed (SSE continues from
+   * `lastEventId`, and older history is served by pagination) and can
+   * otherwise pin tens of MiB per session client.
+   */
+  consumeReplaySnapshot(): DaemonReplaySnapshot {
+    const snapshot = this.replaySnapshot;
+    this.replaySnapshot = { compactedReplay: [], liveJournal: [] };
+    return snapshot;
   }
 
   setLastEventId(lastEventId: number | undefined): void {
@@ -301,7 +597,7 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.client.cancel(this.sessionId, this.clientId).catch(() => {});
+          this.cancel().catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -350,6 +646,67 @@ export class DaemonSessionClient {
     return accepted;
   }
 
+  async uploadAttachment(
+    data: Blob,
+    name: string,
+    mimeType: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentReference> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.uploadSessionAttachment(
+        this.sessionId,
+        data,
+        name,
+        mimeType,
+        {
+          ...(signal ? { signal } : {}),
+          ...(this.clientId ? { clientId: this.clientId } : {}),
+        },
+      ),
+    );
+  }
+
+  async readAttachment(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentData> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.readSessionAttachment(this.sessionId, attachmentId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+  }
+
+  async listAttachments(
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionAttachmentReference[]> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.listSessionAttachments(this.sessionId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+  }
+
+  async removeAttachment(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const removed = await this.withClientIdSelfHeal(() =>
+      this.client.removeSessionAttachment(this.sessionId, attachmentId, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+    if (removed) {
+      const cached = this.attachmentCache.get(attachmentId);
+      this.attachmentCache.delete(attachmentId);
+      this.attachmentCacheBytes -= cached?.size ?? 0;
+    }
+    return removed;
+  }
+
   /**
    * Run a prompt-admission call, recovering from a stale `clientId`.
    *
@@ -379,15 +736,34 @@ export class DaemonSessionClient {
   private async reattach(): Promise<void> {
     if (this.reattaching) return this.reattaching;
     // Send no clientId so the bridge issues a fresh registration rather than
-    // validating the stale one. Pass workspaceCwd explicitly: the daemon's
-    // restore path resolves the workspace key before its existing-session fast
-    // path, and that resolution rejects a missing/relative path.
-    this.reattaching = this.client
-      .resumeSession(this.sessionId, { workspaceCwd: this.workspaceCwd })
-      .then((session) => {
-        // Refresh only the clientId; leave the SSE cursor and ACP state intact.
-        this.session.clientId = session.clientId;
-      });
+    // validating the stale one. Keep the original context explicit: workspace
+    // restore resolves by cwd, while standalone restore must use its dedicated
+    // route and never fall back to the primary runtime.
+    const resume =
+      this.restoreStrategy.kind === 'standalone'
+        ? this.client.resumeStandaloneSession(this.sessionId)
+        : this.client.resumeSession(this.sessionId, {
+            workspaceCwd: this.restoreStrategy.workspaceCwd,
+          });
+    this.reattaching = resume.then(async (session) => {
+      if (this.session.worktreeState === 'persisted-v1') {
+        const sameWorktree =
+          session.worktreeState === 'persisted-v1' &&
+          session.worktree?.path === this.session.worktree?.path;
+        if (!sameWorktree) {
+          await this.client
+            .detachSession(session.sessionId, session.clientId)
+            .catch(() => {});
+          throw new Error(
+            `Daemon lost durable worktree identity for session ${this.sessionId}`,
+          );
+        }
+        this.session.worktree = session.worktree;
+        this.session.worktreeState = session.worktreeState;
+      }
+      // Refresh only the client identity; leave the SSE cursor and ACP state intact.
+      this.session.clientId = session.clientId;
+    });
     try {
       await this.reattaching;
     } finally {
@@ -396,7 +772,16 @@ export class DaemonSessionClient {
   }
 
   async cancel(): Promise<void> {
-    await this.client.cancel(this.sessionId, this.clientId);
+    const cancelling =
+      this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
+    this.cancelling = cancelling;
+    try {
+      await cancelling;
+    } finally {
+      if (this.cancelling === cancelling) {
+        this.cancelling = undefined;
+      }
+    }
   }
 
   /**
@@ -406,56 +791,60 @@ export class DaemonSessionClient {
    * policy. Forwards the bound `clientId` so identified clients update
    * their per-client timestamp instead of just the session-wide one.
    */
-  async heartbeat(): Promise<HeartbeatResult> {
-    return await this.client.heartbeat(this.sessionId, this.clientId);
+  heartbeat(): Promise<HeartbeatResult> {
+    return this.client.heartbeat(this.sessionId, this.clientId);
   }
 
-  async artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
-    return await this.client.listSessionArtifacts(
-      this.sessionId,
-      this.clientId,
-    );
+  artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+    return this.client.listSessionArtifacts(this.sessionId, this.clientId);
   }
 
-  async addArtifact(
+  addArtifact(
     artifact: DaemonSessionArtifactInput,
   ): Promise<DaemonSessionArtifactMutationResult> {
-    return await this.client.addSessionArtifact(
+    return this.client.addSessionArtifact(
       this.sessionId,
       artifact,
       this.clientId,
     );
   }
 
-  async removeArtifact(
+  removeArtifact(
     artifactId: string,
   ): Promise<DaemonSessionArtifactMutationResult> {
-    return await this.client.removeSessionArtifact(
+    return this.client.removeSessionArtifact(
       this.sessionId,
       artifactId,
       this.clientId,
     );
   }
 
-  async setModel(modelId: string): Promise<SetModelResult> {
-    return await this.client.setSessionModel(
-      this.sessionId,
-      modelId,
-      this.clientId,
-    );
+  setModel(modelId: string): Promise<SetModelResult> {
+    return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
   }
 
-  async getRewindSnapshots(): Promise<{
+  setConfigOption(
+    configId: 'reasoning_effort',
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
+      clientId: this.clientId,
+      persist: opts?.persist,
+    });
+  }
+
+  getRewindSnapshots(): Promise<{
     snapshots: DaemonRewindSnapshotInfo[];
   }> {
-    return await this.client.getRewindSnapshots(this.sessionId);
+    return this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(
+  rewind(
     promptId: string,
     opts?: { rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
-    return await this.client.rewindSession(this.sessionId, promptId, {
+    return this.client.rewindSession(this.sessionId, promptId, {
       clientId: this.clientId,
       ...(opts?.rewindFiles !== undefined
         ? { rewindFiles: opts.rewindFiles }
@@ -463,8 +852,8 @@ export class DaemonSessionClient {
     });
   }
 
-  async fork(directive: string): Promise<DaemonForkSessionResult> {
-    return await this.client.forkSession(
+  fork(directive: string): Promise<DaemonForkSessionResult> {
+    return this.client.forkSession(
       this.sessionId,
       { directive },
       this.clientId,
@@ -479,20 +868,28 @@ export class DaemonSessionClient {
    * child both run to completion regardless (no cross-process abort
    * plumbing in v1).
    */
-  async recap(opts?: {
-    signal?: AbortSignal;
-  }): Promise<DaemonSessionRecapResult> {
-    return await this.client.recapSession(this.sessionId, {
+  recap(opts?: { signal?: AbortSignal }): Promise<DaemonSessionRecapResult> {
+    return this.client.recapSession(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
-  async btw(
+  generateContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonSessionGenerationEvent> {
+    return this.client.generateSessionContent(this.sessionId, prompt, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  btw(
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult> {
-    return await this.client.btwSession(this.sessionId, question, {
+    return this.client.btwSession(this.sessionId, question, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -501,83 +898,186 @@ export class DaemonSessionClient {
   /**
    * Queue a user message typed while this session's turn is still running so
    * the ACP child can drain it mid-turn. Forwards the client id bound at
-   * create/attach. Resolves `{ accepted: false }` when the session is idle —
-   * the caller should then send the message as a normal next-turn prompt.
+   * create/attach. Accepted requests become daemon-owned even when the active
+   * turn settles while the request is in flight.
    */
-  async enqueueMidTurnMessage(
+  enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult> {
-    return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
+    return this.client.enqueueMidTurnMessage(this.sessionId, message, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.messageId ? { messageId: opts.messageId } : {}),
+      ...(opts?.content && opts.content.length > 0
+        ? { content: opts.content }
+        : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  removeMidTurnMessage(
+    messageId: string,
+  ): Promise<DaemonRemoveMidTurnMessageResult> {
+    return this.client.removeMidTurnMessage(this.sessionId, messageId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot (queue + delivery-state rings) for
+   * this session. Forwards the bound client id. See
+   * `DaemonClient.getMidTurnMessages` — requires the daemon to advertise
+   * `session_mid_turn_message_query`; older daemons reject with 404 and
+   * callers preserve their current state.
+   */
+  async getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult> {
+    const result = await this.client.getMidTurnMessages(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
+    return {
+      ...result,
+      messages: await Promise.all(
+        result.messages.map(async (message) => ({
+          ...message,
+          ...(message.content
+            ? { content: await this.hydrateContent(message.content) }
+            : {}),
+        })),
+      ),
+    };
   }
 
   async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
-    return await this.client.getPendingPrompts(this.sessionId, {
+    const result = await this.client.getPendingPrompts(this.sessionId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+    return {
+      pendingPrompts: await Promise.all(
+        result.pendingPrompts.map(async (prompt) => ({
+          ...prompt,
+          ...(prompt.content
+            ? { content: await this.hydrateContent(prompt.content) }
+            : {}),
+        })),
+      ),
+    };
+  }
+
+  async getTranscriptPage(
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const page = await this.client.getSessionTranscriptPage(this.sessionId, {
+      ...opts,
+      clientId: opts.clientId ?? this.clientId,
+    });
+    return {
+      ...page,
+      events: await Promise.all(
+        page.events.map(async (event) => await this.hydrateEvent(event)),
+      ),
+    };
+  }
+
+  async getTurnIndexPage(
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    return this.client.getSessionTurnIndexPage(this.sessionId, {
+      ...opts,
+      clientId: opts.clientId ?? this.clientId,
     });
   }
 
-  async removePendingPrompt(
+  removePendingPrompt(
     promptId: string,
   ): Promise<DaemonRemovePendingPromptResult> {
-    return await this.client.removePendingPrompt(this.sessionId, promptId, {
+    return this.client.removePendingPrompt(this.sessionId, promptId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
   /**
    * Execute a direct daemon-side shell command for this session. Requires the
-   * daemon to opt in to direct session shell and bearer auth; this wrapper
-   * automatically forwards the client id bound when the session was created
-   * or attached.
+   * daemon to opt in to direct session shell with bearer auth or
+   * trusted-loopback authority; this wrapper automatically forwards the client
+   * id bound when the session was created or attached.
    */
-  async shellCommand(
+  shellCommand(
     command: string,
     signal?: AbortSignal,
   ): Promise<DaemonShellCommandResult> {
-    return await this.client.shellCommand(this.sessionId, command, {
+    return this.client.shellCommand(this.sessionId, command, {
       ...(signal ? { signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
-  async context(): Promise<DaemonSessionContextStatus> {
-    return await this.client.sessionContext(this.sessionId, this.clientId);
+  context(): Promise<DaemonSessionContextStatus> {
+    return this.client.sessionContext(this.sessionId, this.clientId);
   }
 
-  async contextUsage(
+  status(): Promise<DaemonSessionSummary> {
+    return this.client.sessionStatus(this.sessionId, this.clientId);
+  }
+
+  contextUsage(
     opts: { detail?: boolean } = {},
   ): Promise<DaemonSessionContextUsageStatus> {
-    return await this.client.sessionContextUsage(
+    return this.client.sessionContextUsage(this.sessionId, opts, this.clientId);
+  }
+
+  supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
+    return this.client.sessionSupportedCommands(this.sessionId, this.clientId);
+  }
+
+  tasks(): Promise<DaemonSessionTasksStatus> {
+    return this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  agents(signal?: AbortSignal): Promise<DaemonSessionAgentsStatus> {
+    return this.client.sessionAgents(this.sessionId, this.clientId, signal);
+  }
+
+  agentTrace(
+    opts: { rootAgentId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonAgentTrace> {
+    return this.client.sessionAgentTrace(this.sessionId, {
+      ...opts,
+      clientId: this.clientId,
+    });
+  }
+
+  workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
+    return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
+  }
+
+  savedWorkflow(name: string): Promise<DaemonSessionSavedWorkflowStatus> {
+    return this.client.sessionSavedWorkflow(
       this.sessionId,
-      opts,
+      name,
       this.clientId,
     );
   }
 
-  async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
-    return await this.client.sessionSupportedCommands(
-      this.sessionId,
-      this.clientId,
-    );
+  lspStatus(): Promise<DaemonSessionLspStatus> {
+    return this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
-  async tasks(): Promise<DaemonSessionTasksStatus> {
-    return await this.client.sessionTasks(this.sessionId, this.clientId);
+  resources(): Promise<DaemonSessionResourcesStatus> {
+    return this.client.sessionResources(this.sessionId, this.clientId);
   }
 
-  async lspStatus(): Promise<DaemonSessionLspStatus> {
-    return await this.client.sessionLspStatus(this.sessionId, this.clientId);
-  }
-
-  async cancelTask(
+  cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskStatus['kind'],
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
   ): Promise<{ cancelled: boolean }> {
-    return await this.client.sessionTaskCancel(
+    return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
@@ -585,12 +1085,40 @@ export class DaemonSessionClient {
     );
   }
 
-  async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
-    return await this.client.sessionGoalClear(this.sessionId, this.clientId);
+  controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return this.client.sessionWorkflowTaskAction(
+      this.sessionId,
+      taskId,
+      action,
+      this.clientId,
+    );
   }
 
-  async stats(): Promise<DaemonSessionStatsStatus> {
-    return await this.client.sessionStats(this.sessionId, this.clientId);
+  clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
+    return this.client.sessionGoalClear(this.sessionId, this.clientId);
+  }
+
+  goal(): Promise<GoalStateResponse> {
+    return this.client.sessionGoal(this.sessionId, this.clientId);
+  }
+
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse> {
+    return this.client.sessionGoalControl(
+      this.sessionId,
+      request,
+      this.clientId,
+    );
+  }
+
+  stats(): Promise<DaemonSessionStatsStatus> {
+    return this.client.sessionStats(this.sessionId, this.clientId);
   }
 
   async respondToPermission(
@@ -626,6 +1154,7 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
       this.sessionId,
@@ -705,17 +1234,57 @@ export class DaemonSessionClient {
     release: () => void,
   ): AsyncGenerator<DaemonEvent, void, unknown> {
     try {
-      const { resume = true, ...subscribeOpts } = opts;
+      const {
+        resume = true,
+        sseConnectReason: requestedConnectReason,
+        ...sessionSubscribeOpts
+      } = opts;
+      // `Omit` protects TypeScript callers; sanitize the runtime object too so
+      // untyped JavaScript cannot override session-owned REST stream identity.
+      const subscribeOpts: SubscribeOptions = { ...sessionSubscribeOpts };
+      delete subscribeOpts.clientId;
+      delete subscribeOpts.previousSseStreamId;
+      delete subscribeOpts.onSseStreamAccepted;
       const lastEventId =
         subscribeOpts.lastEventId ??
         (resume ? this.lastSeenEventId : undefined);
+      // Same seeding rhythm as the cursor: an explicit caller epoch wins,
+      // otherwise pair the resumed cursor with the epoch it was minted in.
+      const epoch =
+        subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
+      const callerOnEpoch = subscribeOpts.onEpoch;
+      const restSubscription = this.client.transport.type === 'rest';
+      if (!restSubscription) {
+        this.hasAcceptedRestStream = false;
+        this.lastAcceptedRestStreamId = undefined;
+      }
+      const sseConnectReason: DaemonSseConnectReason =
+        requestedConnectReason ??
+        (this.hasAcceptedRestStream ? 'resume' : 'initial');
 
       for await (const event of this.client.subscribeEvents(this.sessionId, {
         ...subscribeOpts,
         lastEventId,
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+        sseConnectReason,
+        ...(this.lastAcceptedRestStreamId
+          ? {
+              previousSseStreamId: this.lastAcceptedRestStreamId,
+            }
+          : {}),
+        onSseStreamAccepted: (streamId: string | undefined) => {
+          this.hasAcceptedRestStream = true;
+          this.lastAcceptedRestStreamId = streamId;
+        },
+        ...(epoch !== undefined ? { epoch } : {}),
+        onEpoch: (learned) => {
+          this.lastSeenEpoch = learned;
+          callerOnEpoch?.(learned);
+        },
       })) {
-        this._dispatchTurnEvent(event);
-        yield event;
+        const hydratedEvent = await this.hydrateEvent(event);
+        this._dispatchTurnEvent(hydratedEvent);
+        yield hydratedEvent;
         if (event.id !== undefined) {
           this.lastSeenEventId = Math.max(
             this.lastSeenEventId ?? 0,
@@ -726,6 +1295,135 @@ export class DaemonSessionClient {
     } finally {
       this._rejectAllPending(new Error('SSE stream ended'));
       release();
+    }
+  }
+
+  private async hydrateReplaySnapshot(): Promise<void> {
+    this.replaySnapshot.compactedReplay = await Promise.all(
+      this.replaySnapshot.compactedReplay.map(
+        async (event) => await this.hydrateEvent(event),
+      ),
+    );
+    this.replaySnapshot.liveJournal = await Promise.all(
+      this.replaySnapshot.liveJournal.map(
+        async (event) => await this.hydrateEvent(event),
+      ),
+    );
+  }
+
+  private async hydrateEvent(event: DaemonEvent): Promise<DaemonEvent> {
+    if (!event.data || typeof event.data !== 'object') return event;
+    const data = event.data as Record<string, unknown>;
+    if (event.type === 'session_update') {
+      const update = data['update'];
+      if (update && typeof update === 'object' && !Array.isArray(update)) {
+        const content = (update as Record<string, unknown>)['content'];
+        const hydrated = await this.hydrateBlock(content);
+        if (hydrated === content) return event;
+        return {
+          ...event,
+          data: { ...data, update: { ...update, content: hydrated } },
+        };
+      }
+      const content = data['content'];
+      const hydrated = await this.hydrateBlock(content);
+      if (hydrated === content) return event;
+      return { ...event, data: { ...data, content: hydrated } };
+    }
+    if (event.type !== 'mid_turn_message_injected') return event;
+    const items = data['items'];
+    if (!Array.isArray(items)) return event;
+    return {
+      ...event,
+      data: {
+        ...data,
+        items: await Promise.all(
+          items.map(async (item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+              return item;
+            }
+            const record = item as Record<string, unknown>;
+            return Array.isArray(record['content'])
+              ? {
+                  ...record,
+                  content: await this.hydrateContent(record['content']),
+                }
+              : item;
+          }),
+        ),
+      },
+    };
+  }
+
+  private async hydrateContent(
+    content: readonly unknown[],
+  ): Promise<PromptContentBlock[]> {
+    return await Promise.all(
+      content.map(async (block) => await this.hydrateBlock(block)),
+    );
+  }
+
+  private async hydrateBlock(block: unknown): Promise<PromptContentBlock> {
+    if (!isSessionAttachmentReference(block)) {
+      return block as PromptContentBlock;
+    }
+    if (block.type === 'resource') return block;
+    let cached = this.attachmentCache.get(block.attachmentId);
+    if (cached) {
+      this.attachmentCache.delete(block.attachmentId);
+      this.attachmentCache.set(block.attachmentId, cached);
+    } else {
+      const pending = this.withClientIdSelfHeal(() =>
+        this.client.readSessionAttachment(this.sessionId, block.attachmentId, {
+          ...(this.clientId ? { clientId: this.clientId } : {}),
+        }),
+      );
+      cached = { pending, size: block.size };
+      this.attachmentCache.set(block.attachmentId, cached);
+      this.attachmentCacheBytes += block.size;
+      while (
+        this.attachmentCache.size > MAX_ATTACHMENT_CACHE_ENTRIES ||
+        this.attachmentCacheBytes > MAX_ATTACHMENT_CACHE_BYTES
+      ) {
+        const oldestId = this.attachmentCache.keys().next().value;
+        if (oldestId === undefined) break;
+        const evicted = this.attachmentCache.get(oldestId);
+        this.attachmentCache.delete(oldestId);
+        this.attachmentCacheBytes -= evicted?.size ?? 0;
+      }
+      void pending.catch(() => {
+        if (this.attachmentCache.get(block.attachmentId)?.pending !== pending)
+          return;
+        this.attachmentCache.delete(block.attachmentId);
+        this.attachmentCacheBytes -= block.size;
+      });
+    }
+    try {
+      const attachment = await cached.pending;
+      return {
+        type: 'image',
+        data: attachment.data,
+        mimeType: attachment.mimeType,
+        // Keep the reference id on the hydrated block so message images stay
+        // re-fetchable after a reload (Web Shell previews persist the id
+        // instead of the data URL).
+        attachmentId: block.attachmentId,
+      };
+    } catch (err) {
+      // 404/410 means the daemon no longer holds the blob, so pin the
+      // placeholder. Any other failure is transient: return the reference
+      // unchanged so the snapshot keeps its attachment id and a later hydration
+      // pass can retry (the failed cache entry evicted itself above).
+      if (
+        err instanceof DaemonHttpError &&
+        (err.status === 404 || err.status === 410)
+      ) {
+        return {
+          type: 'text',
+          text: '[Attachment is no longer available]',
+        };
+      }
+      return block;
     }
   }
 

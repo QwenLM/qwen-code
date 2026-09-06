@@ -5,10 +5,15 @@
  */
 
 import type { Part } from '@google/genai';
-import { ToolNames } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Kind } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import { getToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
+import { sanitizeTerminalText } from '../textUtils.js';
 import type {
   ExportConfig,
   ExportMessage,
@@ -152,9 +157,23 @@ function buildToolCallMessageFromResult(
       (toolCallResult as { args?: unknown } | undefined)?.args,
   );
 
-  const content =
+  const resultContent =
     extractDiffContent(toolCallResult?.resultDisplay) ??
     transformPartsToToolCallContent(record.message?.parts ?? []);
+  const content = isVisionBridgeNoticeDisplay(toolCallResult?.resultDisplay)
+    ? [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: sanitizeTerminalText(
+              formatVisionBridgeNoticeDisplay(toolCallResult.resultDisplay),
+            ),
+          },
+        },
+        ...resultContent,
+      ]
+    : resultContent;
 
   return {
     uuid: record.uuid,
@@ -308,7 +327,10 @@ function extractDiffContent(
     return [
       {
         type: 'diff',
-        path: display['fileName'] as string,
+        path:
+          typeof display['filePath'] === 'string'
+            ? display['filePath']
+            : (display['fileName'] as string),
         oldText: (display['originalContent'] as string) ?? '',
         newText: display['newContent'] as string,
       },

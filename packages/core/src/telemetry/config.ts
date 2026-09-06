@@ -90,6 +90,19 @@ function parseSensitiveSpanAttributeMaxLengthSetting(
   return value;
 }
 
+function parseTelemetryUserId(
+  source: string,
+  value: unknown,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new FatalConfigError(
+      `Invalid ${source}: must be a string, got ${typeof value}`,
+    );
+  }
+  return value.trim() || undefined;
+}
+
 export interface TelemetryArgOverrides {
   telemetry?: boolean;
   telemetryTarget?: string | TelemetryTarget;
@@ -154,6 +167,12 @@ export async function resolveTelemetrySettings(options: {
     argv.telemetryLogPrompts ??
     parseBooleanEnvFlag(env['QWEN_TELEMETRY_LOG_PROMPTS']) ??
     settings.logPrompts;
+
+  const userId =
+    parseTelemetryUserId(
+      'QWEN_TELEMETRY_USER_ID',
+      env['QWEN_TELEMETRY_USER_ID'],
+    ) ?? parseTelemetryUserId('telemetry.userId', settings.userId);
 
   const includeSensitiveSpanAttributes =
     parseBooleanEnvFlag(
@@ -245,6 +264,7 @@ export async function resolveTelemetrySettings(options: {
     otlpLogsEndpoint,
     otlpMetricsEndpoint,
     logPrompts,
+    userId,
     includeSensitiveSpanAttributes,
     sensitiveSpanAttributeMaxLength,
     outfile,

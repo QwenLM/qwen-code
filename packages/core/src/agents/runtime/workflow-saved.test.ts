@@ -10,8 +10,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
+import { getShellContextEnvVars } from '../../services/shellContextEnv.js';
+import {
+  registerSessionProjectDir,
+  sessionIdContext,
+  unregisterSessionProjectDir,
+} from '../../utils/sessionIdContext.js';
 import {
   listSavedWorkflows,
+  persistInlineWorkflowScript,
   resolveSavedWorkflowScript,
   saveWorkflowScript,
   validateWorkflowName,
@@ -151,6 +158,7 @@ describe('workflow-saved', () => {
       );
       expect(resolved.script).toBe(`return 'custom';`);
       expect(resolved.name).toBe('custom');
+      expect(resolved.savedWorkflowName).toBe('custom');
     });
 
     it('throws a clear error for a missing path under a saved dir', async () => {
@@ -180,7 +188,146 @@ describe('workflow-saved', () => {
           { scriptPath: outside },
           fakeConfig(projectDir),
         ),
-      ).rejects.toThrow(/outside the saved-workflow directories/);
+      ).rejects.toThrow(/outside the workflow script roots/);
+    });
+  });
+
+  describe('resolveSavedWorkflowScript — generated-scripts root', () => {
+    let generatedDir: string;
+
+    beforeEach(() => {
+      generatedDir = new Storage(projectDir).getGeneratedWorkflowsDir();
+    });
+
+    it('reads a {scriptPath} under the generated root', async () => {
+      await fs.mkdir(generatedDir, { recursive: true });
+      const p = path.join(generatedDir, 'qwen-review-1a2b3c.js');
+      await fs.writeFile(p, `return 'generated';`, 'utf8');
+      const resolved = await resolveSavedWorkflowScript(
+        { scriptPath: p },
+        fakeConfig(projectDir),
+      );
+      expect(resolved.script).toBe(`return 'generated';`);
+      expect(resolved.name).toBe('qwen-review-1a2b3c');
+      expect(resolved.savedWorkflowName).toBeUndefined();
+    });
+
+    it('trusts the whole subtree, so a writer may nest per session', async () => {
+      const nested = path.join(generatedDir, 's-abc', 'fanout.js');
+      await fs.mkdir(path.dirname(nested), { recursive: true });
+      await fs.writeFile(nested, `return 'nested';`, 'utf8');
+      const resolved = await resolveSavedWorkflowScript(
+        { scriptPath: nested },
+        fakeConfig(projectDir),
+      );
+      expect(resolved.script).toBe(`return 'nested';`);
+    });
+
+    it('is neither listed as a slash command nor resolvable by name', async () => {
+      await fs.mkdir(generatedDir, { recursive: true });
+      await fs.writeFile(
+        path.join(generatedDir, 'emitted.js'),
+        `return 'generated';`,
+        'utf8',
+      );
+      expect(await listSavedWorkflows(fakeConfig(projectDir))).toEqual([]);
+      await expect(
+        resolveSavedWorkflowScript('emitted', fakeConfig(projectDir)),
+      ).rejects.toThrow(/no workflow with that name.*\(none\)/);
+    });
+
+    it('refuses a sibling of the generated root (no prefix match)', async () => {
+      // `<runs>/generated-evil/x.js` shares the string prefix `generated`
+      // with the root but is not inside it.
+      const sibling = path.join(`${generatedDir}-evil`, 'x.js');
+      await fs.mkdir(path.dirname(sibling), { recursive: true });
+      await fs.writeFile(sibling, `return 'pwned';`, 'utf8');
+      const attempt = resolveSavedWorkflowScript(
+        { scriptPath: sibling },
+        fakeConfig(projectDir),
+      );
+      await expect(attempt).rejects.toThrow(
+        /outside the workflow script roots \(checked: /,
+      );
+      // The refusal names every root it checked — the generated one lives in
+      // the runtime dir, which no debugger would guess from the path alone.
+      await expect(attempt).rejects.toThrow(generatedDir);
+    });
+
+    it('refuses a file that symlinks out of the generated root', async () => {
+      const outside = path.join(projectDir, 'secret.js');
+      await fs.writeFile(outside, `return 'EXFILTRATED';`, 'utf8');
+      await fs.mkdir(generatedDir, { recursive: true });
+      const link = path.join(generatedDir, 'link.js');
+      await fs.symlink(outside, link, 'file');
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: link },
+          fakeConfig(projectDir),
+        ),
+      ).rejects.toThrow(/outside the workflow script roots/);
+    });
+
+    it('refuses a symlinked generated root', async () => {
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-gen-evil-'));
+      try {
+        await fs.writeFile(
+          path.join(external, 'leak.js'),
+          `return 'EXFILTRATED';`,
+          'utf8',
+        );
+        await fs.mkdir(path.dirname(generatedDir), { recursive: true });
+        await fs.symlink(external, generatedDir, 'dir');
+        const attempt = resolveSavedWorkflowScript(
+          { scriptPath: path.join(generatedDir, 'leak.js') },
+          fakeConfig(projectDir),
+        );
+        await expect(attempt).rejects.toThrow(
+          /outside the workflow script roots/,
+        );
+        // The refused root stays visible in the message: a checked-list it
+        // is silently absent from reads as if the loader never considered it.
+        await expect(attempt).rejects.toThrow(
+          `(checked: ${new Storage(projectDir).getProjectWorkflowsDir()}, ${Storage.getUserWorkflowsDir()}; refused symlinked root: ${generatedDir})`,
+        );
+      } finally {
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('resolveSavedWorkflowScript — subprocess reachability contract', () => {
+    it('loads a script at $QWEN_CODE_PROJECT_DIR/workflows/generated', async () => {
+      const sessionId = 'wf-contract';
+      // Mirror Config at session start: publish the storage project dir
+      // under the session id, then read back what a subprocess is handed.
+      registerSessionProjectDir(
+        sessionId,
+        new Storage(projectDir).getProjectDir(),
+      );
+      try {
+        const env = sessionIdContext.run(sessionId, () =>
+          getShellContextEnvVars(),
+        );
+        expect(env['QWEN_CODE_PROJECT_DIR']).toBeDefined();
+        // Literal path segments on purpose: this test must fail if EITHER
+        // half of the contract moves — the env export or the loader root.
+        const p = path.join(
+          env['QWEN_CODE_PROJECT_DIR'],
+          'workflows',
+          'generated',
+          'x.js',
+        );
+        await fs.mkdir(path.dirname(p), { recursive: true });
+        await fs.writeFile(p, `return 'composed';`, 'utf8');
+        const resolved = await resolveSavedWorkflowScript(
+          { scriptPath: p },
+          fakeConfig(projectDir),
+        );
+        expect(resolved.script).toBe(`return 'composed';`);
+      } finally {
+        unregisterSessionProjectDir(sessionId);
+      }
     });
   });
 
@@ -376,9 +523,16 @@ describe('workflow-saved', () => {
 
     it('{scriptPath} into a symlinked root is refused', async () => {
       const p = path.join(projectWorkflowsDir, 'leak.js');
-      await expect(
-        resolveSavedWorkflowScript({ scriptPath: p }, fakeConfig(projectDir)),
-      ).rejects.toThrow(/outside the saved-workflow directories/);
+      const attempt = resolveSavedWorkflowScript(
+        { scriptPath: p },
+        fakeConfig(projectDir),
+      );
+      await expect(attempt).rejects.toThrow(
+        /outside the workflow script roots/,
+      );
+      await expect(attempt).rejects.toThrow(
+        `refused symlinked root: ${projectWorkflowsDir}`,
+      );
     });
 
     it('save into a symlinked root is refused (no write-through)', async () => {
@@ -393,6 +547,137 @@ describe('workflow-saved', () => {
       await expect(
         fs.access(path.join(external, 'planted.js')),
       ).rejects.toThrow();
+    });
+  });
+  // An inline `Workflow({script})` has no file behind it, which cost the
+  // model its only route back into the run: resuming meant re-sending the
+  // source. The copy lands in the generated root so the loader takes it back
+  // by path — that round trip is the contract, not just the write.
+  describe('persistInlineWorkflowScript', () => {
+    const RUN_ID = 'wf_0123456789abcdef';
+
+    it('writes the script where a {scriptPath} run can load it back', async () => {
+      const config = fakeConfig(projectDir);
+      const script = 'return "persisted"';
+
+      const written = await persistInlineWorkflowScript(config, RUN_ID, script);
+
+      expect(written).toBe(
+        path.join(
+          config.storage.getGeneratedWorkflowsDir(),
+          'inline',
+          `${RUN_ID}.js`,
+        ),
+      );
+      await expect(fs.readFile(written!, 'utf8')).resolves.toBe(script);
+      // The round trip: the loader's realpath boundary accepts it.
+      await expect(
+        resolveSavedWorkflowScript({ scriptPath: written! }, config),
+      ).resolves.toMatchObject({ script });
+    });
+
+    it('leaves no temp file behind', async () => {
+      const config = fakeConfig(projectDir);
+      await persistInlineWorkflowScript(config, RUN_ID, 'return 1');
+      const dir = path.join(
+        config.storage.getGeneratedWorkflowsDir(),
+        'inline',
+      );
+      await expect(fs.readdir(dir)).resolves.toEqual([`${RUN_ID}.js`]);
+    });
+
+    it('overwrites the previous copy when the same run is resumed', async () => {
+      const config = fakeConfig(projectDir);
+      await persistInlineWorkflowScript(config, RUN_ID, 'return "first"');
+      const written = await persistInlineWorkflowScript(
+        config,
+        RUN_ID,
+        'return "second"',
+      );
+
+      await expect(fs.readFile(written!, 'utf8')).resolves.toBe(
+        'return "second"',
+      );
+      const dir = path.join(
+        config.storage.getGeneratedWorkflowsDir(),
+        'inline',
+      );
+      await expect(fs.readdir(dir)).resolves.toEqual([`${RUN_ID}.js`]);
+    });
+
+    // The run id becomes a path segment, so it is checked before it is
+    // joined — the same `wf_<hex>` gate the tool's resumeFromRunId and the
+    // snapshot pruner apply.
+    it.each([
+      ['..'],
+      ['../../etc/evil'],
+      ['wf_../escape'],
+      ['wf_NOTHEX'],
+      ['run1'],
+    ])('refuses the run id %s', async (runId) => {
+      const config = fakeConfig(projectDir);
+      await expect(
+        persistInlineWorkflowScript(config, runId, 'return 1'),
+      ).resolves.toBeNull();
+      await expect(
+        fs.access(config.storage.getGeneratedWorkflowsDir()),
+      ).rejects.toThrow();
+    });
+
+    it('refuses a symlinked generated root and writes nothing through it', async () => {
+      const config = fakeConfig(projectDir);
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-ext-'));
+      const generated = config.storage.getGeneratedWorkflowsDir();
+      await fs.mkdir(path.dirname(generated), { recursive: true });
+      await fs.symlink(external, generated, 'dir');
+
+      try {
+        await expect(
+          persistInlineWorkflowScript(config, RUN_ID, 'return 1'),
+        ).resolves.toBeNull();
+        await expect(fs.readdir(external)).resolves.toEqual([]);
+      } finally {
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses a symlinked inline root and writes nothing through it', async () => {
+      const config = fakeConfig(projectDir);
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-ext-'));
+      const generated = config.storage.getGeneratedWorkflowsDir();
+      await fs.mkdir(generated, { recursive: true });
+      await fs.symlink(external, path.join(generated, 'inline'), 'dir');
+
+      try {
+        await expect(
+          persistInlineWorkflowScript(config, RUN_ID, 'return 1'),
+        ).resolves.toBeNull();
+        await expect(fs.readdir(external)).resolves.toEqual([]);
+      } finally {
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    });
+
+    it('returns null rather than throwing when the config has no storage', async () => {
+      await expect(
+        persistInlineWorkflowScript(
+          {} as unknown as Config,
+          RUN_ID,
+          'return 1',
+        ),
+      ).resolves.toBeNull();
+    });
+
+    it('returns null when a partial storage lacks the inline accessor', async () => {
+      const config = {
+        storage: {
+          getWorkflowRunJournalPath: () => '/tmp/journal.jsonl',
+        },
+      } as unknown as Config;
+
+      await expect(
+        persistInlineWorkflowScript(config, RUN_ID, 'return 1'),
+      ).resolves.toBeNull();
     });
   });
 });

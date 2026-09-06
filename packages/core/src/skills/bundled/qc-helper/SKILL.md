@@ -60,6 +60,7 @@ Use this index to locate the right document for the user's question. Load only t
 | Slash commands                              | `docs/features/commands.md`             |
 | Headless / non-interactive mode             | `docs/features/headless.md`             |
 | LSP integration                             | `docs/features/lsp.md`                  |
+| Computer Use (desktop automation)           | `docs/features/computer-use.md`         |
 | Token caching                               | `docs/features/token-caching.md`        |
 | Language / i18n                             | `docs/features/language.md`             |
 | Arena mode                                  | `docs/features/arena.md`                |

@@ -4,15 +4,38 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
+
+// The factory intercepts every `createDebugLogger` caller in this module
+// graph, not just usageHistoryService: jsonl-utils builds its own logger and
+// calls warn/error on the tolerant-parse and read paths. A partial mock turns
+// those into `TypeError: ... is not a function`, so the whole DebugLogger
+// interface has to be here.
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => false,
+    debug: debugMock,
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 import {
   metricsToUsageRecord,
   aggregateUsage,
   loadUsageHistory,
+  loadUsageHistoryWithLive,
   persistSessionUsage,
+  persistUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  commitUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -395,6 +418,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   let originalQwenHome: string | undefined;
 
   beforeEach(() => {
+    debugMock.mockClear();
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-usage-history-'));
     originalQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = path.join(tmpHome, '.qwen');
@@ -601,6 +625,31 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(fs.existsSync(usagePath)).toBe(true);
   });
 
+  it('rebuild excludes the prompt ledger sidecar from transcript enumeration', async () => {
+    plantChatJsonl('sess-real', 1600);
+    // The ledger sidecar shares the chats dir and ends in `.jsonl`; plant a
+    // summarizable transcript under a distinct sessionId and rename it to
+    // the sidecar name, so an accidental ingestion would surface as a
+    // second session.
+    plantChatJsonl('sess-ghost', 800);
+    const chatsDir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+      'chats',
+    );
+    fs.renameSync(
+      path.join(chatsDir, 'sess-ghost.jsonl'),
+      path.join(chatsDir, 'sess-real.ledger.jsonl'),
+    );
+
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe('sess-real');
+  });
+
   it('end-to-end: /stats during first turn + /clear must not 2x the session', async () => {
     const sessionId = 'sess-e2e';
     plantChatJsonl(sessionId, 1600);
@@ -625,6 +674,331 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     let totalTokens = 0;
     for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
     expect(totalTokens).toBe(1600);
+  });
+
+  // loadUsageHistoryWithLive: the daemon usage-dashboard loader. Unlike
+  // loadUsageHistory (persisted file verbatim when non-empty), it unions the
+  // persisted history with a replay of recent transcripts so daemon / Web Shell
+  // and in-progress sessions — which only the TUI /clear path ever persists —
+  // are counted. See issue: Web Shell "today" undercounted ~20x.
+  function planted(sessionId: string): string {
+    return path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+      'chats',
+      `${sessionId}.jsonl`,
+    );
+  }
+  function seedPersisted(records: UsageSummaryRecord[]) {
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+  }
+  function persistedRec(sessionId: string, totalTokens: number) {
+    return {
+      version: 1 as const,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now() - 60000,
+      project: '/p',
+      durationMs: 60000,
+      totalLatencyMs: 1200,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: totalTokens,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+    };
+  }
+
+  it('withLive: unions a never-persisted (daemon) session with the persisted history', async () => {
+    // Persisted: a finalized TUI session. Transcript-only: a daemon / Web Shell
+    // session that /clear never wrote to usage_record.jsonl.
+    seedPersisted([persistedRec('sess-persisted', 1000)]);
+    plantChatJsonl('sess-daemon', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    const ids = merged.map((r) => r.sessionId).sort();
+    expect(ids).toEqual(['sess-daemon', 'sess-persisted']);
+
+    const report = aggregateUsage(merged, 'all');
+    let totalTokens = 0;
+    for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
+    // 1000 persisted + 1600 replayed from the daemon transcript.
+    expect(totalTokens).toBe(2600);
+
+    // Read-only: the persisted file must still hold only the original record.
+    const lines = fs
+      .readFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        'utf8',
+      )
+      .trim()
+      .split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('withLive: a persisted session with a live transcript is not double-counted (persisted wins)', async () => {
+    // Same sessionId in both the persisted file (authoritative 1000) and the
+    // transcript (1600). Must appear exactly once, keeping the persisted value.
+    seedPersisted([persistedRec('sess-both', 1000)]);
+    plantChatJsonl('sess-both', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.sessionId).toBe('sess-both');
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
+    // A persisted base means the window engages (old days come from the file).
+    seedPersisted([persistedRec('sess-persisted', 500)]);
+    plantChatJsonl('sess-old', 1600);
+    // Age the never-persisted transcript well past the default trailing window.
+    const stale = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(planted('sess-old'), stale / 1000, stale / 1000);
+
+    // Default window: the stale, never-persisted transcript is not replayed.
+    const windowed = await loadUsageHistoryWithLive();
+    expect(windowed.map((r) => r.sessionId)).toEqual(['sess-persisted']);
+    // An unbounded window picks it back up alongside the persisted record.
+    const all = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(all.map((r) => r.sessionId).sort()).toEqual([
+      'sess-old',
+      'sess-persisted',
+    ]);
+  });
+
+  it('withLive: with no persisted base, replays full history (no silent trailing-window truncation)', async () => {
+    // No usage_record.jsonl: nothing else covers old history, so an old
+    // transcript must still be replayed rather than truncated by the window.
+    plantChatJsonl('sess-old', 1600);
+    const stale = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(planted('sess-old'), stale / 1000, stale / 1000);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-old']);
+  });
+
+  it('withLive: read-only rebuild — never writes usage_record.jsonl', async () => {
+    plantChatJsonl('sess-daemon-only', 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon-only']);
+    expect(fs.existsSync(usagePath)).toBe(false);
+  });
+
+  it('withLive: all sessions persisted (empty rebuild) returns the persisted records as-is', async () => {
+    // Common case: no live transcripts at all, only the persisted file.
+    seedPersisted([persistedRec('sess-only', 500)]);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.sessionId).toBe('sess-only');
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(500);
+  });
+
+  it('withLive: a corrupt usage_record.jsonl falls back to a full transcript replay', async () => {
+    // No usable persisted base (garbage file) — the loader must still surface
+    // the daemon transcript rather than returning nothing.
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+      '{ this is not valid json\nalso broken}\n',
+    );
+    plantChatJsonl('sess-daemon', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
+    // The garbage lines must be recovered by the tolerant JSONL parse, not by
+    // loadUsageHistoryWithLive's catch-all: a throwing `jsonl.read` would reach
+    // that catch and log here, hiding the regression behind a green test.
+    expect(debugMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('failed to read usage file'),
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'withLive: skips and logs non-regular transcript entries',
+    async () => {
+      // A FIFO passing the `*.jsonl` name filter must be skipped before any
+      // read: opening it would block forever (no writer ever arrives) and
+      // wedge the rebuild — the daemon usage dashboard serves from this path.
+      // Observed in the wild from a test-suite leftover. The mkfifo call is
+      // skipped on Windows, matching storage.test.ts.
+      plantChatJsonl('sess-real', 1600);
+      const fifoPath = planted('sess-fifo');
+      const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
+      expect(mkfifo.status).toBe(0);
+      const danglingPath = planted('dangling');
+      fs.symlinkSync(
+        path.join(path.dirname(danglingPath), 'missing'),
+        danglingPath,
+      );
+
+      const merged = await loadUsageHistoryWithLive();
+      expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+      expect(debugMock).toHaveBeenCalledWith(
+        `rebuildFromSessionJsonl: skipping non-regular entry ${fifoPath}`,
+      );
+      expect(debugMock).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `rebuildFromSessionJsonl: cannot stat ${danglingPath}`,
+        ),
+      );
+    },
+  );
+});
+
+// Regression for #7384: deleting a session erased its usage from the
+// rebuild-from-transcript fallback forever. The salvage runs right before
+// transcript deletion.
+describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
+  let tmpHome: string;
+  let originalQwenHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-usage-salvage-'));
+    originalQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(tmpHome, '.qwen');
+    fs.mkdirSync(process.env['QWEN_HOME'], { recursive: true });
+  });
+
+  afterEach(() => {
+    if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = originalQwenHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function plantTranscript(sessionId: string, withTelemetry: boolean): string {
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'salvage-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${sessionId}.jsonl`);
+    const start = new Date('2026-07-01T00:00:00Z').toISOString();
+    const mid = new Date('2026-07-01T00:01:00Z').toISOString();
+    const records: unknown[] = [
+      {
+        sessionId,
+        cwd: '/salvage/project',
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: start,
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+    ];
+    if (withTelemetry) {
+      records.push({
+        sessionId,
+        cwd: '/salvage/project',
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: mid,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': mid,
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 900,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      });
+    }
+    fs.writeFileSync(
+      filePath,
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+    return filePath;
+  }
+
+  function usagePath(): string {
+    return path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl');
+  }
+
+  it('writes the session summary before the transcript disappears', async () => {
+    const filePath = plantTranscript('sess-salvage-1', true);
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      true,
+    );
+    const lines = fs
+      .readFileSync(usagePath(), 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0].sessionId).toBe('sess-salvage-1');
+    expect(lines[0].models['qwen-max'].totalTokens).toBe(1000);
+    expect(lines[0].project).toBe('/salvage/project');
+  });
+
+  it('skips the write when the history already has the session (no #4994 duplicates)', async () => {
+    const filePath = plantTranscript('sess-salvage-2', true);
+    await persistUsageBeforeTranscriptDeletion(filePath);
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      false,
+    );
+    const lines = fs.readFileSync(usagePath(), 'utf-8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('does not append stale salvage after authoritative usage is persisted', async () => {
+    const sessionId = 'sess-salvage-race';
+    const filePath = plantTranscript(sessionId, true);
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared).not.toBeNull();
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project',
+      startTime: new Date('2026-07-01T00:00:00Z'),
+      endTime: new Date('2026-07-01T00:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(false);
+    const lines = fs.readFileSync(usagePath(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('returns false for a transcript with no telemetry and writes nothing', async () => {
+    const filePath = plantTranscript('sess-salvage-3', false);
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      false,
+    );
+    expect(fs.existsSync(usagePath())).toBe(false);
+  });
+
+  it('never throws for a missing transcript', async () => {
+    await expect(
+      persistUsageBeforeTranscriptDeletion(
+        path.join(tmpHome, 'nope', 'missing.jsonl'),
+      ),
+    ).resolves.toBe(false);
   });
 });
 

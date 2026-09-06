@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -12,9 +12,10 @@ interface ModelDialogProps {
   onSelect: (modelId: string) => void;
   models?: ModelDialogModel[];
   currentModelId?: string;
+  filterModel?: (model: ModelDialogModel) => boolean;
 }
 
-interface ModelDialogModel {
+export interface ModelDialogModel {
   id: string;
   baseModelId?: string;
   label?: string;
@@ -96,13 +97,15 @@ export function ModelDialog({
   onSelect,
   models,
   currentModelId,
+  filterModel,
 }: ModelDialogProps) {
   const connection = useConnection();
   const currentModel = currentModelId ?? connection.currentModel ?? '';
-  const availableModels = useMemo(
-    () => models ?? ((connection.models ?? []) as ModelDialogModel[]),
-    [models, connection.models],
-  );
+  const availableModels = useMemo(() => {
+    const candidates =
+      models ?? ((connection.models ?? []) as ModelDialogModel[]);
+    return filterModel ? candidates.filter(filterModel) : candidates;
+  }, [models, connection.models, filterModel]);
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';
@@ -176,6 +179,7 @@ export function ModelDialog({
                 ? t('model.setVision')
                 : t('model.select')
         }
+        data-web-shell-model-dialog
       >
         {availableModels.length === 0 ? (
           <div className={styles.empty}>{t('model.none')}</div>
@@ -200,6 +204,8 @@ export function ModelDialog({
               className={`${styles.row} ${selected ? styles.selected : ''} ${
                 isCurrent ? dp('dialog-current') : ''
               }`}
+              data-web-shell-model-option
+              data-model-id={model.id}
               onClick={() => confirm(index)}
               onMouseMove={() => moveHighlight(index)}
             >
@@ -209,7 +215,7 @@ export function ModelDialog({
               ) : null}
               <span className={styles.label}>{getModelName(model)}</span>
               {model.isRuntime ? (
-                <span className={styles.badge}>Runtime</span>
+                <span className={styles.badge}>{t('common.runtime')}</span>
               ) : null}
             </div>
           );

@@ -31,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
@@ -46,6 +47,7 @@ import type {
   UserFeedbackEvent,
   UserRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
   ArenaSessionStartedEvent,
@@ -69,7 +71,7 @@ import {
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { sanitizeHookName } from '../sanitize.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
 
@@ -536,9 +538,13 @@ export class QwenLogger {
       `tool_call#${event.function_name}`,
       {
         properties: {
+          call_id: event.call_id,
           prompt_id: event.prompt_id,
           response_id: event.response_id,
           tool_name: event.function_name,
+          status: event.status,
+          execution_status: event.execution_status,
+          tool_type: event.tool_type,
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
@@ -578,6 +584,7 @@ export class QwenLogger {
         subagent_name: event.subagent_name,
         status: event.status,
         terminate_reason: event.terminate_reason,
+        ...(event.loop_type ? { loop_type: event.loop_type } : {}),
       },
       snapshots: JSON.stringify({
         ...(event.execution_summary
@@ -884,6 +891,28 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logRipgrepRuntimeRecoveryEvent(event: RipgrepRuntimeRecoveryEvent): void {
+    const rumEvent = this.createActionEvent(
+      'misc',
+      'ripgrep_runtime_recovery',
+      {
+        properties: {
+          platform: process.platform,
+          arch: process.arch,
+          selection_mode: event.selection_mode,
+          retry_triggered: event.retry_triggered,
+          ...(event.retry_succeeded !== undefined
+            ? { retry_succeeded: event.retry_succeeded }
+            : {}),
+          failure_kind: event.failure_kind,
+        },
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logLoopDetectionDisabledEvent(): void {
     const rumEvent = this.createActionEvent(
       'misc',
@@ -961,8 +990,23 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
-  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  // logContentRetryEvent which is fired by llmChat's content-recovery loop.
   logApiRetryEvent(event: ApiRetryEvent): void {
     const rumEvent = this.createActionEvent('misc', 'api_retry', {
       properties: {

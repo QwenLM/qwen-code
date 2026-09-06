@@ -1,3 +1,4 @@
+import { CircleXIcon } from 'lucide-react';
 import styles from './ToolChrome.module.css';
 import { useI18n } from '../../../i18n';
 export {
@@ -17,8 +18,13 @@ export function StatusIcon({ status }: { status: string }) {
     case 'cancelled':
     case 'canceled':
       return (
-        <span className={`${styles.icon} ${styles.iconError}`}>
-          {t('tool.status.failed')}
+        <span
+          className={`${styles.icon} ${styles.iconError}`}
+          role="img"
+          aria-label={t('tool.status.failed')}
+          title={t('tool.status.failed')}
+        >
+          <CircleXIcon size={14} strokeWidth={1.25} aria-hidden="true" />
         </span>
       );
     case 'in_progress':

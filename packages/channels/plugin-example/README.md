@@ -68,7 +68,7 @@ cd /path/to/your/project
 qwen serve --channel my-plugin-test
 ```
 
-`qwen serve --channel` requires the channel's configured `cwd` to resolve to the daemon workspace.
+`qwen serve --channel` requires the channel's configured `cwd` to resolve to one registered, trusted daemon workspace. In a multi-workspace daemon, named channels are grouped into one worker per owning workspace; `--channel all` still selects only the primary workspace's channels.
 
 ### 6. Send a message
 
@@ -116,6 +116,8 @@ Existing TypeScript plugins that explicitly type the adapter constructor or fact
 - **Attachments** — populate `envelope.attachments` with images/files and `handleInbound()` routes them to the agent (images as vision input, files as paths in the prompt)
 - **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
 - Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
+
+Daemon-managed named tasks attach an optional delivery-only `sourceLabel` to output-segment contexts and thread delivery. A streaming adapter must render it on the first independently visible chunk of each segment and on a separately visible final response. Keep the raw model text unchanged, parse sentinels or media markers before adding the label, escape the label for the platform's markup dialect, and reserve room for it when splitting platform-sized messages. The example adapter demonstrates this contract without persisting the label in its WebSocket protocol state.
 
 ## Lifecycle status
 

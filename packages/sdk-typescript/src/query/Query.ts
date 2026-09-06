@@ -33,7 +33,13 @@ import {
 } from '../types/protocol.js';
 import type { Transport } from '../transport/Transport.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { QueryOptions, CLIMcpServerConfig } from '../types/types.js';
+import type {
+  QueryOptions,
+  CLIMcpServerConfig,
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from '../types/types.js';
 import { isSdkMcpServerConfig } from '../types/types.js';
 import { Stream } from '../utils/Stream.js';
 import { serializeJsonLine } from '../utils/jsonLines.js';
@@ -44,6 +50,7 @@ import {
   type SdkControlServerTransportOptions,
 } from '../daemon-mcp/SdkControlServerTransport.js';
 import { ControlRequestType } from '../types/protocol.js';
+import type { PermissionMode } from '../types/permission-mode.js';
 
 interface PendingControlRequest {
   resolve: (response: Record<string, unknown> | null) => void;
@@ -63,6 +70,27 @@ interface TransportWithEndInput extends Transport {
 
 const logger = SdkLogger.createLogger('Query');
 
+function parseEffortStatus(value: unknown): EffortStatus | undefined {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('applied' in value) ||
+    typeof value.applied !== 'boolean'
+  ) {
+    return undefined;
+  }
+  const record = value as {
+    applied: boolean;
+    override?: EffortOverride | null;
+    reason?: unknown;
+  };
+  return {
+    applied: record.applied,
+    override: record.override ?? null,
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
+  };
+}
+
 export class Query implements AsyncIterable<SDKMessage> {
   private transport: Transport;
   private options: QueryOptions;
@@ -76,6 +104,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private sdkMcpTransports: Map<string, SdkControlServerTransport> = new Map();
   private sdkMcpServers: Map<string, McpServer> = new Map();
   readonly initialized: Promise<void>;
+  private initialEffortStatus: EffortStatus | undefined;
   private closed = false;
   private messageRouterStarted = false;
   private transportReadFinalized = false;
@@ -93,8 +122,11 @@ export class Query implements AsyncIterable<SDKMessage> {
   ) {
     this.transport = transport;
     this.options = options;
-    // Use sessionId from options if provided (for SDK-CLI alignment), otherwise generate one
-    this.sessionId = options.resume ?? options.sessionId ?? randomUUID();
+    // When forkSession is true, sessionId is a fresh UUID (computed in createQuery)
+    // that should be used instead of the resume (source) session ID
+    this.sessionId = options.forkSession
+      ? (options.sessionId ?? randomUUID())
+      : (options.resume ?? options.sessionId ?? randomUUID());
     this.inputStream = new Stream<SDKMessage>();
     this.abortController = options.abortController ?? new AbortController();
     this.isSingleTurn = singleTurn;
@@ -292,21 +324,36 @@ export class Query implements AsyncIterable<SDKMessage> {
       const sdkMcpServersForCli = this.getSdkMcpServersForCli();
       const mcpServersForCli = this.getMcpServersForCli();
 
-      await this.sendControlRequest(ControlRequestType.INITIALIZE, {
-        hooks: null,
-        timeout: this.options.timeout?.canUseTool
-          ? { canUseTool: this.options.timeout.canUseTool }
-          : undefined,
-        sdkMcpServers:
-          Object.keys(sdkMcpServersForCli).length > 0
-            ? sdkMcpServersForCli
+      const response = await this.sendControlRequest(
+        ControlRequestType.INITIALIZE,
+        {
+          hooks: null,
+          timeout: this.options.timeout?.canUseTool
+            ? { canUseTool: this.options.timeout.canUseTool }
             : undefined,
-        mcpServers:
-          Object.keys(mcpServersForCli).length > 0
-            ? mcpServersForCli
-            : undefined,
-        agents: this.options.agents,
-      });
+          sdkMcpServers:
+            Object.keys(sdkMcpServersForCli).length > 0
+              ? sdkMcpServersForCli
+              : undefined,
+          mcpServers:
+            Object.keys(mcpServersForCli).length > 0
+              ? mcpServersForCli
+              : undefined,
+          agents: this.options.agents,
+          effort: this.options.effort,
+        },
+      );
+      this.initialEffortStatus = parseEffortStatus(response?.['effort_status']);
+      if (this.initialEffortStatus?.applied === false) {
+        // The CLI-side reason joins every cause that holds; prefer it over
+        // re-deriving one so no cause is silently dropped here.
+        const reason =
+          this.initialEffortStatus.reason ??
+          (this.initialEffortStatus.override
+            ? `${this.initialEffortStatus.override.source}.${this.initialEffortStatus.override.field} takes precedence`
+            : 'thinking may be disabled');
+        logger.warn(`Initial reasoning effort was not applied (${reason})`);
+      }
       logger.info('Query initialized successfully');
     } catch (error) {
       logger.error('Initialization error:', error);
@@ -958,7 +1005,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     return this.sendControlRequest(ControlRequestType.CONTINUE_LAST_TURN);
   }
 
-  async setPermissionMode(mode: string): Promise<void> {
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
     await this.sendControlRequest(ControlRequestType.SET_PERMISSION_MODE, {
       mode,
     });
@@ -980,6 +1027,56 @@ export class Query implements AsyncIterable<SDKMessage> {
   ): Promise<Record<string, unknown> | null> {
     return this.sendControlRequest(ControlRequestType.GET_CONTEXT_USAGE, {
       show_details: showDetails,
+    });
+  }
+
+  /**
+   * Set the reasoning effort tier at runtime.
+   *
+   * @param effort - One of 'low', 'medium', 'high', 'xhigh', 'max'
+   * @returns `true` when the tier is active. Use {@link setEffortStatus} to
+   * distinguish disabled thinking from a higher-priority wire override.
+   */
+  async setEffort(effort: EffortTier): Promise<boolean> {
+    return (await this.setEffortStatus(effort)).applied;
+  }
+
+  /** Set the reasoning effort and return the effective wire status. */
+  async setEffortStatus(effort: EffortTier): Promise<EffortStatus> {
+    const response = await this.sendControlRequest(
+      ControlRequestType.SET_EFFORT,
+      { effort },
+    );
+    return parseEffortStatus(response) ?? { applied: false, override: null };
+  }
+
+  /** Return the server-reported status for the initial effort request. */
+  getInitialEffortStatus(): EffortStatus | undefined {
+    return this.initialEffortStatus;
+  }
+
+  /**
+   * Get the list of models available for the current auth type.
+   *
+   * @returns Promise resolving to available models data
+   * @throws Error if query is closed
+   */
+  async getAvailableModels(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_AVAILABLE_MODELS);
+  }
+
+  /**
+   * Get usage dashboard data from the CLI.
+   *
+   * @param range - Time range for usage data: 'today' (default), 'week', 'month', 'all'
+   * @returns Promise resolving to usage dashboard data
+   * @throws Error if query is closed
+   */
+  async getUsageInfo(
+    range?: 'today' | 'week' | 'month' | 'all',
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_USAGE_INFO, {
+      ...(range ? { range } : {}),
     });
   }
 

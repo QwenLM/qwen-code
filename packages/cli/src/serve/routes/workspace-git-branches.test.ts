@@ -1,0 +1,715 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import express from 'express';
+import request from 'supertest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { sendBridgeError } from '../server/error-response.js';
+import {
+  createWorkspaceGenerationGuard,
+  createWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
+import {
+  registerWorkspaceGitBranchRoutes,
+  registerWorkspaceQualifiedGitBranchRoutes,
+} from './workspace-git-branches.js';
+
+const passthroughMutate = () =>
+  ((_req: unknown, _res: unknown, next: () => void) => next()) as never;
+
+function app() {
+  const app = express();
+  app.use(express.json());
+  registerWorkspaceGitBranchRoutes(app, {
+    boundWorkspace: '/work/main',
+    sendBridgeError,
+    mutate: passthroughMutate,
+  });
+  return app;
+}
+
+describe('workspace Git branch routes', () => {
+  it.each(['-evil', '-f', '--output=/tmp/pwn'])(
+    'rejects a dash-prefixed branch name %s with 400 invalid_branch_name',
+    async (name) => {
+      const response = await request(app())
+        .post('/workspace/git/branch')
+        .send({ name });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'invalid_branch_name',
+        message: 'Invalid branch name',
+      });
+    },
+  );
+
+  it('rejects a wrong-typed startPoint with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/branch')
+      .send({ name: 'release', startPoint: 1234567 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_start_point');
+  });
+
+  it('rejects a wrong-typed fetchOnly with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ fetchOnly: 'true' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_fetch_only');
+  });
+
+  it('rejects a wrong-typed rebase with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ rebase: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_rebase');
+  });
+
+  it('rejects a wrong-typed stash with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ stash: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash');
+  });
+
+  it('rejects a wrong-typed force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ force: 1 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_force');
+  });
+
+  it('rejects combining stash and force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ stash: true, force: true });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash_force');
+  });
+
+  it.each([{ stash: true }, { force: true }])(
+    'rejects combining fetchOnly with %o with 400',
+    async (extra) => {
+      const response = await request(app())
+        .post('/workspace/git/pull')
+        .send({ fetchOnly: true, ...extra });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('invalid_fetch_only_combination');
+    },
+  );
+
+  it('rejects a checkout with a missing ref with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('missing_ref');
+  });
+
+  it('rejects a checkout with an invalid ref with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({ ref: 'bad ref' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_ref');
+  });
+
+  it('rejects a wrong-typed setUpstream with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/push')
+      .send({ setUpstream: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_set_upstream');
+  });
+
+  it('rejects a commit with a missing message with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/commit')
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('missing_message');
+  });
+
+  it('rejects a wrong-typed all with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/commit')
+      .send({ message: 'x', all: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_all');
+  });
+});
+
+describe('legacy route trust guard', () => {
+  it('rejects all six legacy endpoints when the workspace is untrusted', async () => {
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceGitBranchRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+      isWorkspaceTrusted: () => false,
+      mutate: passthroughMutate,
+    });
+
+    const get = await request(app).get('/workspace/git/branches');
+    expect(get.status).toBe(403);
+    expect(get.body.code).toBe('untrusted_workspace');
+
+    for (const [method, path, body] of [
+      ['post', '/workspace/git/checkout', { ref: 'main' }],
+      ['post', '/workspace/git/branch', { name: 'feat' }],
+      ['post', '/workspace/git/push', {}],
+      ['post', '/workspace/git/pull', {}],
+      ['post', '/workspace/git/commit', { message: 'x' }],
+    ] as const) {
+      const res = await request(app)[method](path).send(body);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    }
+  });
+});
+
+const tmpRoots: string[] = [];
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+function makeRepo(): string {
+  const dir = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-route-')),
+  );
+  tmpRoots.push(dir);
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.email', 'test@example.com');
+  git(dir, 'config', 'user.name', 'Test');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'init');
+  return dir;
+}
+
+/**
+ * Give `dir` a bare upstream plus a second clone that stands in for another
+ * developer; `pull.rebase` is pinned so a diverged pull merges regardless of
+ * the host's git policy.
+ */
+function makeUpstream(dir: string): string {
+  const remote = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+  );
+  tmpRoots.push(remote);
+  git(remote, 'init', '-q', '--bare');
+  git(dir, 'remote', 'add', 'origin', remote);
+  git(dir, 'config', 'pull.rebase', 'false');
+  git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+  const clone = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+  );
+  tmpRoots.push(clone);
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  return clone;
+}
+
+function commitAndPush(cwd: string, file: string, content: string): void {
+  fs.writeFileSync(path.join(cwd, file), content);
+  git(cwd, 'add', '.');
+  git(cwd, 'commit', '-q', '-m', `edit ${file}`);
+  git(cwd, 'push', '-q', 'origin', 'HEAD');
+}
+
+function appWithWorkspace(cwd: string) {
+  const app = express();
+  app.use(express.json());
+  registerWorkspaceGitBranchRoutes(app, {
+    boundWorkspace: cwd,
+    sendBridgeError,
+    mutate: passthroughMutate,
+  });
+  return app;
+}
+
+afterEach(() => {
+  for (const dir of tmpRoots.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+describe('workspace Git branch routes against a real repo (R10 #2)', () => {
+  it('rejects a commit --all when write-tree cannot snapshot the index', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    // Wedge the index lock so `write-tree` fails before `add -A` runs.
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: x', all: true });
+
+    expect(response.status).toBe(500);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    expect(body).toContain('failed to snapshot index');
+  });
+
+  it('does not leak the git root when the workspace is a sub-directory', async () => {
+    const dir = makeRepo();
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    // Wedge the index lock so write-tree fails.
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: x', all: true });
+
+    expect(response.status).toBe(500);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    expect(body).toContain('failed to snapshot index');
+  });
+
+  it('classifies a pull with no tracking information as no_upstream', async () => {
+    const dir = makeRepo();
+    const remote = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+    );
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('no_upstream');
+  });
+
+  it('classifies a plain pull on a dirty tree as dirty_working_tree', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
+  it('updates a dirty tree and restores the local changes with stash', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(response.body.stashRestoreConflict).toBeUndefined();
+    expect(fs.readFileSync(path.join(dir, 'remote-only.txt'), 'utf8')).toBe(
+      'remote\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('local\n');
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('reports stashRestoreConflict when the stash restore conflicts', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.stashRestoreConflict).toBe(true);
+    expect(response.body.stashSha).toBe(
+      git(dir, 'rev-parse', 'refs/stash').trim(),
+    );
+    expect(git(dir, 'stash', 'list')).toContain('auto-stash before pull');
+  });
+
+  it('maps a recovered stash pull failure to 409 pull_failed with the path redacted', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    // A conflicting local commit so the merge stops, plus untracked work
+    // the auto-stash has to bring back.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local commit\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('pull_failed');
+    expect(response.body.message).toContain('restored');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'untracked\n',
+    );
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+  });
+
+  it('discards the local changes and updates with force', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(200);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
+    expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+  });
+
+  it('maps the force refusal on a diverged branch to 409 diverged', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('diverged');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('local\n');
+  });
+
+  it('maps the subdirectory force refusal to 409 force_unsupported without discarding', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'index.txt'), 'app\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'app');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'outside edit\n');
+    fs.writeFileSync(path.join(sub, 'index.txt'), 'inside edit\n');
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('force_unsupported');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'outside edit\n',
+    );
+    expect(fs.readFileSync(path.join(sub, 'index.txt'), 'utf8')).toBe(
+      'inside edit\n',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'redacts the repository path from a successful pull whose restore failed',
+    async () => {
+      const dir = makeRepo();
+      const clone = makeUpstream(dir);
+      commitAndPush(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+      // Wedge refs/stash after the merge so dropping the restored entry
+      // fails with git's "Unable to create '<abs path>.lock'" notice.
+      git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
+      const hook = path.join(dir, '.git', 'hooks', 'post-merge');
+      fs.writeFileSync(hook, '#!/bin/sh\n: > .git/refs/stash.lock\n');
+      fs.chmodSync(hook, 0o755);
+
+      const response = await request(appWithWorkspace(dir))
+        .post('/workspace/git/pull')
+        .send({ stash: true });
+
+      expect(response.status).toBe(200);
+      expect(response.body.output).toContain('could not be dropped');
+      // The kept entry is named by SHA, not only by its volatile slot.
+      expect(response.body.output).toContain(
+        git(dir, 'rev-parse', 'refs/stash').trim(),
+      );
+      expect(response.body.output).toContain('<workspace>');
+      expect(JSON.stringify(response.body)).not.toContain(dir);
+    },
+  );
+
+  it('maps an in-progress merge to 409 operation_in_progress', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local commit\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    git(dir, 'fetch', '-q');
+    expect(() => git(dir, 'merge', '--no-edit', '@{upstream}')).toThrow();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'resolved\n');
+    git(dir, 'add', 'a.txt');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('operation_in_progress');
+    expect(response.body.message).toContain('merge');
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+  });
+
+  it('does not misclassify a non-dirty error when the workspace path contains "dirty"', async () => {
+    const parent = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-dirty-utils-')),
+    );
+    tmpRoots.push(parent);
+    const dir = path.join(parent, 'dirty-project');
+    fs.mkdirSync(dir);
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 'test@example.com');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'init');
+    // Wedge the index lock so write-tree fails (a 500, not a dirty-tree 409).
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: x', all: true });
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).not.toBe('dirty_working_tree');
+  });
+});
+
+describe('workspace qualified Git branch routes (generation guard)', () => {
+  function qualifiedRuntime(
+    workspaceId: string,
+    workspaceCwd: string,
+    trusted: boolean,
+  ): WorkspaceRuntime {
+    return {
+      workspaceId,
+      workspaceCwd,
+      primary: workspaceId === 'primary',
+      trusted,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
+    } as unknown as WorkspaceRuntime;
+  }
+
+  it('returns runtime-unavailable when the generation is already closed', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const guarded = {
+      ...qualifiedRuntime('primary', '/work/main', true),
+      generationGuard,
+    };
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([guarded]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get('/workspaces/primary/git/branches');
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('returns runtime-unavailable on POST checkout when the generation is closed', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const guarded = {
+      ...qualifiedRuntime('primary', '/work/main', true),
+      generationGuard,
+    };
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([guarded]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/checkout')
+      .send({ ref: 'main' });
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+});
+
+describe('workspace qualified Git branch routes (trust guard)', () => {
+  function qualifiedRuntime(
+    workspaceId: string,
+    workspaceCwd: string,
+    trusted: boolean,
+  ): WorkspaceRuntime {
+    return {
+      workspaceId,
+      workspaceCwd,
+      primary: workspaceId === 'primary',
+      trusted,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
+    } as unknown as WorkspaceRuntime;
+  }
+
+  it('rejects all six qualified endpoints when the workspace is untrusted', async () => {
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([
+        qualifiedRuntime('primary', '/work/main', false),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const get = await request(app).get('/workspaces/primary/git/branches');
+    expect(get.status).toBe(403);
+    expect(get.body.code).toBe('untrusted_workspace');
+
+    for (const [method, path, body] of [
+      ['post', '/workspaces/primary/git/checkout', { ref: 'main' }],
+      ['post', '/workspaces/primary/git/branch', { name: 'feat' }],
+      ['post', '/workspaces/primary/git/push', {}],
+      ['post', '/workspaces/primary/git/pull', {}],
+      ['post', '/workspaces/primary/git/commit', { message: 'x' }],
+    ] as const) {
+      const res = await request(app)[method](path).send(body);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    }
+  });
+});
+
+describe('workspace qualified Git branch routes (input validation)', () => {
+  function trustedRuntime(workspaceCwd: string): WorkspaceRuntime {
+    return {
+      workspaceId: 'primary',
+      workspaceCwd,
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
+    } as unknown as WorkspaceRuntime;
+  }
+
+  it('rejects a dash-prefixed branch name on the qualified route', async () => {
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([
+        trustedRuntime('/work/main'),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/branch')
+      .send({ name: '-evil' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_branch_name');
+  });
+
+  it('rejects a cwd that escapes the workspace on mutation endpoints', async () => {
+    const dir = makeRepo();
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([trustedRuntime(dir)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    for (const [method, path, body] of [
+      ['post', '/workspaces/primary/git/checkout', { ref: 'main' }],
+      ['post', '/workspaces/primary/git/branch', { name: 'feat' }],
+      ['post', '/workspaces/primary/git/push', {}],
+      ['post', '/workspaces/primary/git/pull', {}],
+      ['post', '/workspaces/primary/git/commit', { message: 'x' }],
+    ] as const) {
+      const res = await request(app)[method](`${path}?cwd=/etc`).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_cwd');
+    }
+  });
+
+  it('lists branches from a real repo via the qualified route', async () => {
+    const dir = makeRepo();
+    git(dir, 'branch', 'feature-x');
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([trustedRuntime(dir)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get('/workspaces/primary/git/branches');
+
+    expect(response.status).toBe(200);
+    expect(response.body.available).toBe(true);
+    const names = response.body.local.map((b: { name: string }) => b.name);
+    expect(names).toContain(response.body.head);
+    expect(names).toContain('feature-x');
+  });
+});

@@ -139,9 +139,9 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
       }
 
       // Update the client with the new tools
-      const geminiClient = config.getGeminiClient();
-      if (geminiClient) {
-        await geminiClient.setTools();
+      const llmClient = config.getLlmClient();
+      if (llmClient) {
+        await llmClient.setTools();
       }
 
       setMessages((prev) => [

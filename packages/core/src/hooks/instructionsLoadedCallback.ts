@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { InstructionsLoadedNotification } from '../utils/memoryDiscovery.js';
+import type { InstructionsLoadedNotification } from '../memory/memoryDiscovery.js';
 import type { HookSystem } from './hookSystem.js';
 import { HookEventName } from './types.js';
 
@@ -19,6 +19,7 @@ export type InstructionsLoadedCallback = (
  */
 export function createInstructionsLoadedCallback(
   getHookSystem: () => HookSystem | undefined,
+  signal?: AbortSignal,
 ): InstructionsLoadedCallback {
   return async (notification: InstructionsLoadedNotification) => {
     const hookSystem = getHookSystem();
@@ -34,6 +35,7 @@ export function createInstructionsLoadedCallback(
         triggerFilePath: notification.triggerFilePath,
         parentFilePath: notification.parentFilePath,
       },
+      signal,
     );
   };
 }

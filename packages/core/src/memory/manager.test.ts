@@ -19,6 +19,15 @@ import type { Config } from '../config/config.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
+const telemetryMocks = vi.hoisted(() => ({
+  logMemoryExtract: vi.fn(),
+}));
+
+vi.mock('../telemetry/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../telemetry/index.js')>()),
+  logMemoryExtract: telemetryMocks.logMemoryExtract,
+}));
+
 vi.mock('./extract.js', () => ({
   runAutoMemoryExtract: vi.fn(),
 }));
@@ -135,6 +144,38 @@ describe('MemoryManager', () => {
       await mgr.drain();
       const tasks = mgr.listTasksByType('extract', projectRoot);
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
+    });
+
+    it('records a session mismatch as skipped', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        skippedReason: 'session_mismatch',
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const config = makeMockConfig();
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBe('session_mismatch');
+      expect(mgr.listTasksByType('extract', projectRoot)[0]).toMatchObject({
+        status: 'skipped',
+        progressText: 'Skipped: session mismatch.',
+        metadata: { skippedReason: 'session_mismatch' },
+      });
+      const event = telemetryMocks.logMemoryExtract.mock.calls[0]?.[1] as {
+        status: string;
+        skipped_reason?: string;
+      };
+      expect(event).toMatchObject({
+        status: 'skipped',
+        skipped_reason: 'session_mismatch',
+      });
     });
 
     it.each([
@@ -416,6 +457,39 @@ describe('MemoryManager', () => {
 
       // The skill must no longer be under .qwen/skills/
       await expect(fs.access(skillFilePath)).rejects.toThrow();
+    });
+
+    it('stages a new skill whose name exists only in the archive', async () => {
+      const archivedManifest = path.join(
+        projectRoot,
+        '.qwen',
+        'archived-skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await fs.mkdir(path.dirname(archivedManifest), { recursive: true });
+      await fs.writeFile(archivedManifest, 'archived');
+      const mgr = new MemoryManager();
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+
+      const pendingSkills = record.metadata?.['pendingSkills'] as Array<{
+        stagedManifestPath: string;
+      }>;
+      expect(pendingSkills).toHaveLength(1);
+      await expect(fs.access(skillFilePath)).rejects.toThrow();
+      await expect(
+        fs.access(pendingSkills[0]!.stagedManifestPath),
+      ).resolves.toBeUndefined();
+      await expect(fs.access(archivedManifest)).resolves.toBeUndefined();
     });
 
     it('leaves the skill in place and sets no pendingSkills when confirmBeforePersist is false', async () => {
@@ -1635,20 +1709,18 @@ describe('MemoryManager', () => {
     });
   });
 
-  describe('appendToUserMemory', () => {
+  describe('buildAutoMemoryPrompt', () => {
     it('forwards options to buildManagedAutoMemoryPrompt', () => {
       const mgr = new MemoryManager();
 
       // Without forceFullProtocol (all indexes empty → condensed path)
-      const condensed = mgr.appendToUserMemory(
-        '',
+      const condensed = mgr.buildAutoMemoryPrompt(
         '/project/.qwen/memory',
         null,
       );
 
       // With forceFullProtocol → full verbose path
-      const full = mgr.appendToUserMemory(
-        '',
+      const full = mgr.buildAutoMemoryPrompt(
         '/project/.qwen/memory',
         null,
         undefined,

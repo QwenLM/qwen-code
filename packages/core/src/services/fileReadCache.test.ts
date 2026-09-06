@@ -38,6 +38,24 @@ describe('FileReadCache', () => {
       const b = FileReadCache.inodeKey(makeStats({ dev: 2, ino: 1 }));
       expect(a).not.toBe(b);
     });
+
+    it('treats ino 0 as unverifiable identity', () => {
+      expect(FileReadCache.hasVerifiableIdentity(makeStats({ ino: 0 }))).toBe(
+        false,
+      );
+      expect(FileReadCache.hasVerifiableIdentity(makeStats({ ino: 1 }))).toBe(
+        true,
+      );
+    });
+
+    it('treats a bigint ino 0 as unverifiable identity', () => {
+      // `stat(..., { bigint: true })` is used elsewhere in the repo, and
+      // `0n !== 0` is true, so the check must not be a raw `!==`.
+      const bigintStats = makeStats({
+        ino: 0n as unknown as number,
+      });
+      expect(FileReadCache.hasVerifiableIdentity(bigintStats)).toBe(false);
+    });
   });
 
   describe('check', () => {
@@ -87,6 +105,19 @@ describe('FileReadCache', () => {
       expect(cache.check(makeStats({ ino: 200 })).state).toBe('unknown');
     });
 
+    it('returns unverifiable for ino 0 even after a read was recorded', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats({ dev: 7, ino: 0 });
+      const entry = cache.recordRead('/x/foo.ts', stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(entry.inodeKey).toBe('7:0');
+      expect(cache.size()).toBe(0);
+      expect(cache.check(stats).state).toBe('unverifiable');
+    });
+
     it('attaches the entry on fresh and stale results', () => {
       const cache = new FileReadCache();
       cache.recordRead('/x/foo.ts', makeStats(), {
@@ -123,6 +154,33 @@ describe('FileReadCache', () => {
         cacheable: true,
       });
       expect(entry.lastReadAt).toBe(Date.now());
+    });
+
+    it('does not let ino 0 reads collide across paths', () => {
+      const cache = new FileReadCache();
+      const first = makeStats({ dev: 9, ino: 0, size: 10 });
+      const second = makeStats({ dev: 9, ino: 0, size: 20 });
+
+      cache.recordRead('/x/a.ts', first, { full: true, cacheable: true });
+      cache.recordRead('/x/b.ts', second, { full: true, cacheable: true });
+
+      expect(cache.size()).toBe(0);
+      expect(cache.check(first).state).toBe('unverifiable');
+      expect(cache.check(second).state).toBe('unverifiable');
+    });
+
+    it('returns a detached entry for an ino 0 read', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats({ dev: 9, ino: 0 });
+
+      const entry = cache.recordRead('/x/a.ts', stats, {
+        full: true,
+        cacheable: true,
+      });
+      entry.readResidentInHistory = true;
+
+      expect(cache.size()).toBe(0);
+      expect(cache.check(stats).state).toBe('unverifiable');
     });
 
     it('preserves full vs ranged read distinction', () => {
@@ -260,6 +318,17 @@ describe('FileReadCache', () => {
       const cache = new FileReadCache();
       const entry = cache.recordWrite('/x/foo.ts', makeStats());
       expect(entry.lastWriteAt).toBe(Date.now());
+    });
+
+    it('does not cache writes with ino 0', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats({ dev: 7, ino: 0 });
+
+      const entry = cache.recordWrite('/x/foo.ts', stats);
+
+      expect(entry.lastWriteAt).toBe(Date.now());
+      expect(cache.size()).toBe(0);
+      expect(cache.check(stats).state).toBe('unverifiable');
     });
 
     it('seeds read metadata when recording a write on a brand-new entry', () => {
@@ -679,7 +748,7 @@ describe('FileReadCache', () => {
     it('evicts the oldest entry when the cache exceeds MAX_ENTRIES', () => {
       // Fill cache to capacity (MAX_ENTRIES = 4096).
       const cache = new FileReadCache();
-      for (let i = 0; i < 4096; i++) {
+      for (let i = 1; i <= 4096; i++) {
         cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
           full: true,
           cacheable: true,
@@ -687,17 +756,17 @@ describe('FileReadCache', () => {
       }
       expect(cache.size()).toBe(4096);
 
-      // The 4097th write triggers eviction of the oldest (ino=0).
-      cache.recordWrite('/x/file-new.ts', makeStats({ ino: 4096 }));
+      // The 4097th write triggers eviction of the oldest (ino=1).
+      cache.recordWrite('/x/file-new.ts', makeStats({ ino: 4097 }));
       expect(cache.size()).toBeLessThanOrEqual(4096);
-      expect(cache.check(makeStats({ ino: 0 })).state).toBe('unknown');
-      expect(cache.check(makeStats({ ino: 4096 })).state).toBe('fresh');
+      expect(cache.check(makeStats({ ino: 1 })).state).toBe('unknown');
+      expect(cache.check(makeStats({ ino: 4097 })).state).toBe('fresh');
     });
 
     it('keeps size at MAX_ENTRIES after multiple overflows', () => {
       const cache = new FileReadCache();
       // Add MAX_ENTRIES + 100 distinct inodes.
-      for (let i = 0; i < 4196; i++) {
+      for (let i = 1; i <= 4196; i++) {
         cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
           full: true,
           cacheable: true,
@@ -709,17 +778,17 @@ describe('FileReadCache', () => {
     it('should have bumped entries survive eviction', () => {
       const cache = new FileReadCache();
       // Fill to capacity.
-      for (let i = 0; i < 4096; i++) {
+      for (let i = 1; i <= 4096; i++) {
         cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
           full: true,
           cacheable: true,
         });
       }
 
-      // Frequently update ino=0 — after bump lands this moves it to the
+      // Frequently update ino=1 — after bump lands this moves it to the
       // back of the eviction queue.
       for (let i = 0; i < 10; i++) {
-        cache.recordRead('/x/file-0.ts', makeStats({ ino: 0 }), {
+        cache.recordRead('/x/file-1.ts', makeStats({ ino: 1 }), {
           full: true,
           cacheable: true,
         });
@@ -734,7 +803,7 @@ describe('FileReadCache', () => {
       }
 
       expect(cache.size()).toBeLessThanOrEqual(4096);
-      expect(cache.check(makeStats({ ino: 0 })).state).not.toBe('unknown');
+      expect(cache.check(makeStats({ ino: 1 })).state).not.toBe('unknown');
     });
   });
 
@@ -812,7 +881,7 @@ describe('FileReadCache', () => {
       vi.setSystemTime(now);
 
       // 3 recent entries
-      for (let i = 0; i < 3; i++) {
+      for (let i = 1; i <= 3; i++) {
         cache.recordRead(`/x/recent-${i}.ts`, makeStats({ ino: i }), {
           full: true,
           cacheable: true,

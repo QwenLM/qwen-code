@@ -10,6 +10,7 @@
  * Responsible for handling file read and write operations in the ACP protocol
  */
 
+import { logger } from '../utils/logger.js';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { getErrorMessage } from '../utils/errorMessage.js';
@@ -36,8 +37,8 @@ export class AcpFileHandler {
     line: number | null;
     limit: number | null;
   }): Promise<{ content: string }> {
-    console.log(`[ACP] fs/read_text_file request received for: ${params.path}`);
-    console.log(`[ACP] Parameters:`, {
+    logger.log(`[ACP] fs/read_text_file request received for: ${params.path}`);
+    logger.log(`[ACP] Parameters:`, {
       line: params.line,
       limit: params.limit,
       sessionId: params.sessionId,
@@ -50,7 +51,7 @@ export class AcpFileHandler {
       // source encoding (UTF-8, GBK, Shift-JIS, etc.).
       const document = await vscode.workspace.openTextDocument(uri);
       const content = document.getText();
-      console.log(
+      logger.log(
         `[ACP] Successfully read file: ${params.path} (${content.length} chars)`,
       );
 
@@ -62,16 +63,16 @@ export class AcpFileHandler {
         const endLine = params.limit ? startLine + params.limit : lines.length;
         const selectedLines = lines.slice(startLine, endLine);
         const result = { content: selectedLines.join('\n') };
-        console.log(`[ACP] Returning ${selectedLines.length} lines`);
+        logger.log(`[ACP] Returning ${selectedLines.length} lines`);
         return result;
       }
 
       const result = { content };
-      console.log(`[ACP] Returning full file content`);
+      logger.log(`[ACP] Returning full file content`);
       return result;
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error(`[ACP] Failed to read file ${params.path}:`, errorMsg);
+      logger.error(`[ACP] Failed to read file ${params.path}:`, errorMsg);
 
       // Detect "file not found" from both Node.js (code === 'ENOENT') and
       // VS Code's FileSystemError.FileNotFound (code === 'FileNotFound').
@@ -110,17 +111,15 @@ export class AcpFileHandler {
     content: string;
     sessionId: string;
   }): Promise<null> {
-    console.log(
-      `[ACP] fs/write_text_file request received for: ${params.path}`,
-    );
-    console.log(`[ACP] Content size: ${params.content.length} bytes`);
+    logger.log(`[ACP] fs/write_text_file request received for: ${params.path}`);
+    logger.log(`[ACP] Content size: ${params.content.length} bytes`);
 
     try {
       const uri = vscode.Uri.file(params.path);
 
       // Ensure the parent directory exists.
       const dirUri = vscode.Uri.file(path.dirname(params.path));
-      console.log(`[ACP] Ensuring directory exists: ${dirUri.fsPath}`);
+      logger.log(`[ACP] Ensuring directory exists: ${dirUri.fsPath}`);
       await vscode.workspace.fs.createDirectory(dirUri);
 
       // Determine whether the file already exists so we can choose the right
@@ -162,11 +161,11 @@ export class AcpFileHandler {
         await vscode.workspace.fs.writeFile(uri, bytes);
       }
 
-      console.log(`[ACP] Successfully wrote file: ${params.path}`);
+      logger.log(`[ACP] Successfully wrote file: ${params.path}`);
       return null;
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error(`[ACP] Failed to write file ${params.path}:`, errorMsg);
+      logger.error(`[ACP] Failed to write file ${params.path}:`, errorMsg);
 
       throw new Error(`Failed to write file '${params.path}': ${errorMsg}`);
     }

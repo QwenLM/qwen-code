@@ -120,9 +120,8 @@ export interface SubagentConfig {
   color?: string;
 
   /**
-   * When true, this agent always runs as a background task when spawned.
-   * OR'd with the `run_in_background` tool parameter — if either is true,
-   * the agent runs in the background.
+   * When true, this agent defaults to a background task when spawned.
+   * An explicit `run_in_background` tool parameter takes precedence.
    */
   background?: boolean;
 
@@ -172,6 +171,20 @@ export interface SubagentConfig {
    * For extension-level subagents: the name of the providing extension
    */
   extensionName?: string;
+}
+
+/**
+ * Concrete model route a subagent definition's `model:` selector resolves
+ * to: the model ID plus the auth type a dedicated ContentGenerator must be
+ * created with. Returned by `SubagentManager.resolveSubagentModelRoute`
+ * for spawn paths that need the definition's provider route (e.g. Agent
+ * Team teammates, #10071).
+ */
+export interface SubagentModelRoute {
+  /** Concrete model ID the selector resolved to. */
+  modelId: string;
+  /** Auth type that hosts the model on this route. */
+  authType: string;
 }
 
 /**
@@ -238,6 +251,9 @@ export interface CreateSubagentOptions {
 
   /** Custom directory path (overrides default level-based path) */
   customPath?: string;
+
+  /** Reject the mutation immediately before writing the agent file. */
+  assertCanCommit?: () => void;
 }
 
 /**

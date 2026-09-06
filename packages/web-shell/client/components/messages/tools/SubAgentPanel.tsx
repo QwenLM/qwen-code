@@ -6,9 +6,10 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import type { ACPToolCall } from '../../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
+import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
 // Circular import with ToolGroup (agents render tool rows; agent tool
 // rows render SubAgentPanel). Safe only while both modules dereference
 // each other's exports at render time — never in top-level code.
@@ -26,6 +27,7 @@ import {
   formatTokenCount,
   getAgentType,
   getAgentDescription,
+  localizeAgentTypeName,
   localizeToolDisplayName,
 } from '../toolFormatting';
 import chromeStyles from './ToolChrome.module.css';
@@ -33,6 +35,7 @@ import styles from './SubAgentPanel.module.css';
 
 interface SubAgentPanelProps {
   tool: ACPToolCall;
+  approval?: PermissionRequest | null;
   defaultExpanded?: boolean;
   hideHeader?: boolean;
   inline?: boolean;
@@ -86,7 +89,8 @@ function SubToolTime({
   timestamp?: number;
   children: ReactNode;
 }) {
-  if (timestamp === undefined) return <>{children}</>;
+  const documentMode = useTranscriptRenderMode() === 'document';
+  if (documentMode || timestamp === undefined) return <>{children}</>;
   return (
     <div className={styles.toolTimeRow}>
       {children}
@@ -97,14 +101,29 @@ function SubToolTime({
   );
 }
 
-const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
-  // Same row as the main transcript: one-line summary, expandable to
-  // the full output / diff / file content where the tool has any.
+const SubToolLine = memo(function SubToolLine({
+  tool,
+  approval,
+}: {
+  tool: ACPToolCall;
+  approval?: PermissionRequest | null;
+}) {
+  const documentMode = useTranscriptRenderMode() === 'document';
+  // Same expandable row as the main transcript.
   const body =
     tool.subTools || tool.subContent ? (
-      <SubAgentPanel tool={tool} />
+      <SubAgentPanel
+        tool={tool}
+        approval={approval}
+        defaultExpanded={documentMode}
+      />
     ) : (
-      <ToolLine tool={tool} forceExpandable hideCollapsedOutput />
+      <ToolLine
+        tool={tool}
+        approval={approval}
+        forceExpanded={documentMode}
+        hideCollapsedOutput
+      />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
@@ -151,8 +170,6 @@ function getAgentResultText(tool: ACPToolCall): string {
   return '';
 }
 
-type SubAgentTab = 'result' | 'tools';
-
 /**
  * Live sub-agent stream (thinking + output) shown while the agent runs.
  * With compactThinking enabled it collapses to a 5-line window pinned to
@@ -161,11 +178,12 @@ type SubAgentTab = 'result' | 'tools';
 function SubAgentStream({ text }: { text: string }) {
   const { compactThinking } = useWebShellCustomization();
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [streamExpanded, setStreamExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const streamRef = useRef<HTMLPreElement>(null);
 
-  const collapsed = compactThinking && !streamExpanded;
+  const collapsed = compactThinking && !documentMode && !streamExpanded;
 
   useEffect(() => {
     const el = streamRef.current;
@@ -196,7 +214,7 @@ function SubAgentStream({ text }: { text: string }) {
       >
         {text}
       </pre>
-      {compactThinking && (overflowing || streamExpanded) && (
+      {compactThinking && !documentMode && (overflowing || streamExpanded) && (
         <button
           className={styles.expandToggle}
           onClick={() => setStreamExpanded((v) => !v)}
@@ -219,18 +237,24 @@ function SubAgentStream({ text }: { text: string }) {
  */
 function SubAgentResult({ content }: { content: string }) {
   const { compactThinking } = useWebShellCustomization();
+  const documentMode = useTranscriptRenderMode() === 'document';
   return (
-    <div className={compactThinking ? styles.scrollWindow : undefined}>
+    <div
+      className={
+        compactThinking && !documentMode ? styles.scrollWindow : undefined
+      }
+    >
       <Markdown content={content} source="assistant" />
     </div>
   );
 }
 
 /**
- * Sub-tool list, capped to the same scrollable window as the result
- * with compactThinking enabled. While the agent is still running the
- * window follows the newest call; once it completes it snaps back to
- * the top for reading.
+ * Step timeline: the sub-tool list in execution order, always capped to
+ * its own scrollable window — with the conclusion rendered above it (no
+ * tabs), an uncapped list would grow the panel past a screen. While the
+ * agent is still running the window follows the newest call; once it
+ * completes it snaps back to the top for reading.
  */
 function SubAgentTools({
   pinTail,
@@ -241,22 +265,20 @@ function SubAgentTools({
   itemCount: number;
   children: ReactNode;
 }) {
-  const { compactThinking } = useWebShellCustomization();
   const windowRef = useRef<HTMLDivElement>(null);
+  const documentMode = useTranscriptRenderMode() === 'document';
 
   useEffect(() => {
     const el = windowRef.current;
-    if (!el || !compactThinking) return;
-    el.scrollTop = pinTail ? el.scrollHeight : 0;
-  }, [compactThinking, pinTail, itemCount]);
+    if (!el) return;
+    if (!documentMode) el.scrollTop = pinTail ? el.scrollHeight : 0;
+  }, [documentMode, pinTail, itemCount]);
 
   return (
     <div
       ref={windowRef}
       className={
-        compactThinking
-          ? `${styles.tools} ${styles.scrollWindow}`
-          : styles.tools
+        documentMode ? styles.tools : `${styles.tools} ${styles.scrollWindow}`
       }
     >
       {children}
@@ -266,14 +288,16 @@ function SubAgentTools({
 
 export function SubAgentPanel({
   tool,
+  approval,
   defaultExpanded,
   hideHeader,
   inline,
 }: SubAgentPanelProps) {
+  const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const isComplete = tool.status === 'completed' || tool.status === 'failed';
   const displayStatus = getAgentDisplayStatus(tool);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
-  const [activeTab, setActiveTab] = useState<SubAgentTab>('result');
 
   const taskExec = isTaskExecution(tool.rawOutput) ? tool.rawOutput : null;
 
@@ -301,19 +325,31 @@ export function SubAgentPanel({
     (tool.subTools && tool.subTools.length > 0) ||
     (taskToolCalls && taskToolCalls.length > 0)
   );
-  const showTabs = hasResult && hasTools;
+  // Captions only where they disambiguate: a completed agent showing both
+  // its conclusion and the steps that produced it. A single section — or
+  // the live steps+stream flow while running — reads on its own.
+  const showSectionCaps = isComplete && hasResult && hasTools;
 
   return (
     <div className={inline ? undefined : styles.panel}>
       {!hideHeader && (
-        <div className={styles.header} onClick={() => setExpanded(!expanded)}>
+        <div
+          className={`${styles.header}${documentMode ? ` ${styles.documentHeader}` : ''}`}
+          onClick={() => {
+            if (!documentMode) setExpanded(!expanded);
+          }}
+        >
           <StatusIcon status={displayStatus} />
-          <span className={chromeStyles.lineName}>{agentType}:</span>
+          <span className={chromeStyles.lineName}>
+            {localizeAgentTypeName(agentType, t)}:
+          </span>
           {description && (
             <span className={styles.desc}>{truncateText(description, 50)}</span>
           )}
           {isComplete && subToolCount > 0 && (
-            <span className={styles.meta}>· {subToolCount} tools</span>
+            <span className={styles.meta}>
+              · {t('subagent.toolsCount', { count: subToolCount })}
+            </span>
           )}
           {elapsed && <span className={styles.meta}>· {elapsed}</span>}
           {tokens && <span className={styles.meta}>· {tokens}</span>}
@@ -323,58 +359,64 @@ export function SubAgentPanel({
         </div>
       )}
 
-      {(expanded || hideHeader) && (
+      {(documentMode || expanded || hideHeader) && (
         <div className={styles.body}>
-          {showTabs && (
-            <div className={styles.tabBar}>
-              <button
-                className={`${styles.tab} ${activeTab === 'result' ? styles.tabActive : ''}`}
-                onClick={() => setActiveTab('result')}
-              >
-                Result
-              </button>
-              <button
-                className={`${styles.tab} ${activeTab === 'tools' ? styles.tabActive : ''}`}
-                onClick={() => setActiveTab('tools')}
-              >
-                Tools ({subToolCount})
-              </button>
-            </div>
-          )}
-
-          {(!showTabs || activeTab === 'result') && hasResult && (
+          {/* One chronological story instead of Result/Tools tabs.
+              Completed: conclusion first, then the steps that produced it
+              in their own scroll window, so the payoff stays in view.
+              Running: no conclusion exists yet — the step window pins to
+              the newest call and the live stream tails it. */}
+          {isComplete && hasResult && (
             <div className={styles.content}>
-              {isComplete ? (
-                <SubAgentResult content={tool.subContent || resultText} />
-              ) : (
-                tool.subContent && <SubAgentStream text={tool.subContent} />
+              {showSectionCaps && (
+                <div className={styles.sectionCap}>{t('subagent.result')}</div>
               )}
+              <SubAgentResult content={tool.subContent || resultText} />
             </div>
           )}
 
-          {(!showTabs || activeTab === 'tools') && (
-            <>
-              {tool.subTools && tool.subTools.length > 0 && (
-                <SubAgentTools
-                  pinTail={!isComplete}
-                  itemCount={tool.subTools.length}
+          {showSectionCaps && (
+            <div className={styles.sectionCap}>
+              {t('subagent.tools', { count: subToolCount })}
+            </div>
+          )}
+          {tool.subTools && tool.subTools.length > 0 && (
+            <SubAgentTools
+              pinTail={!isComplete}
+              itemCount={tool.subTools.length}
+            >
+              {tool.subTools.map((sub) => (
+                <div
+                  key={sub.callId}
+                  className={styles.step}
+                  data-status={sub.status}
                 >
-                  {tool.subTools.map((sub) => (
-                    <SubToolLine key={sub.callId} tool={sub} />
-                  ))}
-                </SubAgentTools>
-              )}
-              {taskToolCalls && taskToolCalls.length > 0 && (
-                <SubAgentTools
-                  pinTail={!isComplete}
-                  itemCount={taskToolCalls.length}
+                  <SubToolLine tool={sub} approval={approval} />
+                </div>
+              ))}
+            </SubAgentTools>
+          )}
+          {taskToolCalls && taskToolCalls.length > 0 && (
+            <SubAgentTools
+              pinTail={!isComplete}
+              itemCount={taskToolCalls.length}
+            >
+              {taskToolCalls.map((tc) => (
+                <div
+                  key={tc.callId}
+                  className={styles.step}
+                  data-status={tc.status}
                 >
-                  {taskToolCalls.map((tc) => (
-                    <TaskToolCallLine key={tc.callId} tc={tc} />
-                  ))}
-                </SubAgentTools>
-              )}
-            </>
+                  <TaskToolCallLine tc={tc} />
+                </div>
+              ))}
+            </SubAgentTools>
+          )}
+
+          {!isComplete && tool.subContent && (
+            <div className={styles.content}>
+              <SubAgentStream text={tool.subContent} />
+            </div>
           )}
         </div>
       )}

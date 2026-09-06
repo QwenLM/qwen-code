@@ -32,7 +32,6 @@ export function partToString(
   // Cast to Part, assuming it might contain project-specific fields
   const part = value as Part & {
     videoMetadata?: unknown;
-    thought?: string;
     codeExecutionResult?: unknown;
     executableCode?: unknown;
   };
@@ -41,8 +40,14 @@ export function partToString(
     if (part.videoMetadata !== undefined) {
       return `[Video Metadata]`;
     }
-    if (part.thought !== undefined) {
-      return `[Thought: ${part.thought}]`;
+    // `thought` is a boolean flag and the reasoning itself is in `part.text` --
+    // that is what `createOpenAIReasoningThoughtPart` builds and what every
+    // other consumer reads. Interpolating the flag rendered every thought as
+    // the literal `[Thought: true]`, dropping the reasoning entirely, and
+    // testing `!== undefined` also caught a part carrying `thought: false`,
+    // which is an ordinary part and should render as its own text.
+    if (part.thought) {
+      return part.text ? `[Thought: ${part.text}]` : `[Thought]`;
     }
     if (part.codeExecutionResult !== undefined) {
       return `[Code Execution Result]`;

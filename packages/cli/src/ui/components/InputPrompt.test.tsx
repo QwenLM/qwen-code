@@ -3,11 +3,16 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
-import { InputPrompt, classifyPastedImagePaths } from './InputPrompt.js';
+import {
+  InputPrompt,
+  classifyPastedImagePaths,
+  expandPendingPastePlaceholders,
+} from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -28,11 +33,14 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from '../voice/voice-recorder.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { StreamingState } from '../types.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
   useAgentViewActions,
@@ -42,6 +50,10 @@ import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
+import {
+  clearPromptStash,
+  savePromptStash,
+} from '../../services/prompt-stash.js';
 
 const mockViewActions = vi.hoisted(() => ({
   setAgentTabBarFocused: vi.fn(),
@@ -57,7 +69,11 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
+vi.mock('../voice/voice-recorder.js', () => ({
+  createVoiceRecorder: vi.fn(),
+}));
 vi.mock('../utils/clipboardUtils.js');
+vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
@@ -66,6 +82,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+    invalidateSubmittedPromptProvenance: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -98,6 +115,12 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
 
 const mockSlashCommands: SlashCommand[] = [
   {
+    name: 'quit',
+    kind: CommandKind.BUILT_IN,
+    description: 'Quit',
+    action: vi.fn(),
+  },
+  {
     name: 'clear',
     kind: CommandKind.BUILT_IN,
     description: 'Clear screen',
@@ -107,6 +130,8 @@ const mockSlashCommands: SlashCommand[] = [
     name: 'memory',
     kind: CommandKind.BUILT_IN,
     description: 'Manage memory',
+    // InputPrompt's live-slash submit gate requires action !== undefined.
+    action: vi.fn(),
     subCommands: [
       {
         name: 'show',
@@ -188,9 +213,13 @@ describe('InputPrompt', () => {
     useReverseSearchCompletion,
   );
   const mockedUseVoiceInput = vi.mocked(useVoiceInput);
+  const mockedSavePromptStash = vi.mocked(savePromptStash);
+  const mockedClearPromptStash = vi.mocked(clearPromptStash);
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockedSavePromptStash.mockReturnValue(true);
+    mockedClearPromptStash.mockReturnValue(true);
     mockViewActions.setAgentTabBarFocused.mockReset();
     mockViewActions.setBgPillFocused.mockReset();
     mockViewActions.setLivePanelFocused.mockReset();
@@ -201,12 +230,13 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
+      invalidateSubmittedPromptProvenance: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -304,6 +334,10 @@ describe('InputPrompt', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
+      activeCategory: 'all' as const,
+      availableCategories: ['all'] as Array<'all'>,
+      selectCategory: vi.fn(),
+      switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
 
@@ -360,6 +394,127 @@ describe('InputPrompt', () => {
       focus: true,
       placeholder: '  Type your message or @path/to/file',
     };
+  });
+
+  it('stashes non-empty input on Ctrl+S', async () => {
+    props.buffer.setText('draft prompt');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\x13');
+    });
+
+    await waitFor(() => {
+      expect(mockedSavePromptStash).toHaveBeenCalledWith(
+        path.join('test', 'project', 'src'),
+        'draft prompt',
+      );
+    });
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('clears the stash when the prompt is submitted', async () => {
+    props.buffer.setText('send this');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\r');
+    });
+
+    await waitFor(() => {
+      expect(mockedClearPromptStash).toHaveBeenCalledWith(
+        path.join('test', 'project', 'src'),
+      );
+      expect(props.onSubmit).toHaveBeenCalledWith('send this', {
+        deferUntilIdle: false,
+        submittedPrompt: 'send this',
+      });
+    });
+    unmount();
+  });
+
+  it('captures explicit provenance before clearing the input buffer', async () => {
+    props.buffer.setText('restored prompt');
+    vi.mocked(props.buffer.setText).mockClear();
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\r');
+    });
+
+    await waitFor(() => {
+      expect(props.buffer.setText).toHaveBeenCalledWith('');
+      expect(props.onSubmit).toHaveBeenCalledWith('restored prompt', {
+        deferUntilIdle: false,
+        submittedPrompt: 'restored prompt',
+      });
+    });
+    expect(
+      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
+    unmount();
+  });
+
+  it('clears restored provenance before applying same-text history', async () => {
+    const invalidateSubmittedPromptProvenance = vi.fn();
+    mockedUseUIActions.mockReturnValue({
+      handleRetryLastPrompt: vi.fn(),
+      temporaryCloseFeedbackDialog: vi.fn(),
+      popAllQueuedMessages: vi.fn(() => null),
+      invalidateSubmittedPromptProvenance,
+    } as unknown as ReturnType<typeof useUIActions>);
+    props.buffer.setText('repeat prompt');
+    vi.mocked(props.buffer.setText).mockClear();
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) {
+      throw new Error('useInputHistory was not called');
+    }
+
+    act(() => {
+      historyArgs.onChange('repeat prompt');
+    });
+
+    expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+    expect(props.buffer.setText).toHaveBeenCalledWith('repeat prompt');
+    expect(
+      invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
+    unmount();
+  });
+
+  it('queues the prompt for the next turn on Ctrl+Q', async () => {
+    props.buffer.setText('send this later');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\x11');
+    });
+
+    await waitFor(() => {
+      expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
+        deferUntilIdle: true,
+        submittedPrompt: 'send this later',
+      });
+    });
+    expect(props.buffer.setText).toHaveBeenCalledWith('');
+    unmount();
+  });
+
+  it('expands large paste placeholders before stashing', () => {
+    const pending = new Map([
+      ['[Pasted Content 1200 chars]', 'full pasted content'],
+    ]);
+
+    expect(
+      expandPendingPastePlaceholders(
+        'before [Pasted Content 1200 chars] after',
+        pending,
+      ),
+    ).toBe('before full pasted content after');
   });
 
   it('routes Space through voice input when the prompt is empty', async () => {
@@ -495,7 +650,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: true,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -506,6 +661,217 @@ describe('InputPrompt', () => {
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
     unmount();
+  });
+
+  describe('voice microphone permission', () => {
+    const setupRecorder = (status: MicrophonePermission) => {
+      const microphoneStatus = vi.fn().mockResolvedValue(status);
+      const { addItem } = setupRecorderWith(microphoneStatus);
+      return { addItem, microphoneStatus };
+    };
+
+    const setupRecorderWith = (
+      microphoneStatus: (() => Promise<MicrophonePermission>) | undefined,
+    ) => {
+      const addItem = vi.fn();
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(createVoiceRecorder).mockReturnValue({
+        start: vi.fn(),
+        stop: vi.fn(),
+        warmup: vi.fn(),
+        microphoneStatus,
+      } as unknown as ReturnType<typeof createVoiceRecorder>);
+      return { addItem };
+    };
+
+    const lastVoiceArgs = () =>
+      mockedUseVoiceInput.mock.calls.at(-1)![0] as Parameters<
+        typeof useVoiceInput
+      >[0];
+
+    it('does not probe or warn about microphone permission during warmup', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        await lastVoiceArgs().warmup?.();
+      });
+
+      expect(microphoneStatus).not.toHaveBeenCalled();
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('warns about a pending permission when a recording starts', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining('needs microphone access'),
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(microphoneStatus).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('reports a denied permission as an error when a recording starts', async () => {
+      const { addItem } = setupRecorder('denied');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'error',
+            text: expect.stringContaining('Microphone access is denied.'),
+          }),
+          expect.any(Number),
+        );
+      });
+      unmount();
+    });
+
+    it('warns only once for repeated recordings with the same status', async () => {
+      const { addItem } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('warns again when the permission status changes between recordings', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      // The user dismisses or denies the OS dialog: the next probe reports
+      // 'denied', which must re-warn — as an error — despite the earlier
+      // 'prompt' notice.
+      microphoneStatus.mockResolvedValue('denied');
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(2);
+      });
+      expect(addItem).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining('Microphone access is denied'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
+
+    it('warns only once across remounts when a session ref is supplied', async () => {
+      const { addItem } = setupRecorder('prompt');
+      const voiceMicWarnedStatusRef = { current: null };
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+        />,
+      );
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+        />,
+      );
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      second.unmount();
+    });
+
+    it('stays quiet when the recorder cannot report permission', async () => {
+      const { addItem } = setupRecorderWith(undefined);
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('stays quiet when the permission probe rejects', async () => {
+      const { addItem } = setupRecorderWith(() =>
+        Promise.reject(new Error('TCC query failed')),
+      );
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('stays quiet when permission is already granted', async () => {
+      const { addItem } = setupRecorder('granted');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
   });
 
   it('lets non-voice keys fall through while voice recording is active', async () => {
@@ -830,7 +1196,10 @@ describe('InputPrompt', () => {
 
           // Submitting a non-empty buffer clears the stale suggestion too, so a
           // synchronous slash command (/clear, /help) can't leave a ghost.
-          expect(props.onSubmit).toHaveBeenCalledWith('ship it');
+          expect(props.onSubmit).toHaveBeenCalledWith('ship it', {
+            deferUntilIdle: false,
+            submittedPrompt: 'ship it',
+          });
           expect(onPromptSuggestionDismiss).toHaveBeenCalled();
         } finally {
           vi.useRealTimers();
@@ -1118,6 +1487,13 @@ describe('InputPrompt', () => {
 
   it('should set the buffer text when a shell history command is retrieved', async () => {
     props.shellModeActive = true;
+    const invalidateSubmittedPromptProvenance = vi.fn();
+    mockedUseUIActions.mockReturnValue({
+      handleRetryLastPrompt: vi.fn(),
+      temporaryCloseFeedbackDialog: vi.fn(),
+      popAllQueuedMessages: vi.fn(() => null),
+      invalidateSubmittedPromptProvenance,
+    } as unknown as ReturnType<typeof useUIActions>);
     vi.mocked(mockShellHistory.getPreviousCommand).mockReturnValue(
       'previous command',
     );
@@ -1128,6 +1504,10 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockShellHistory.getPreviousCommand).toHaveBeenCalled();
+    expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+    expect(
+      invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
     expect(props.buffer.setText).toHaveBeenCalledWith('previous command');
     unmount();
   });
@@ -1142,7 +1522,10 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith('ls -l');
-    expect(props.onSubmit).toHaveBeenCalledWith('ls -l');
+    expect(props.onSubmit).toHaveBeenCalledWith('ls -l', {
+      deferUntilIdle: false,
+      submittedPrompt: 'ls -l',
+    });
     unmount();
   });
 
@@ -1168,7 +1551,10 @@ describe('InputPrompt', () => {
 
     expect(mockInputHistory.navigateUp).toHaveBeenCalled();
     expect(mockInputHistory.navigateDown).toHaveBeenCalled();
-    expect(props.onSubmit).toHaveBeenCalledWith('some text');
+    expect(props.onSubmit).toHaveBeenCalledWith('some text', {
+      deferUntilIdle: false,
+      submittedPrompt: 'some text',
+    });
     unmount();
   });
 
@@ -1322,6 +1708,40 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('keeps generated attachment references out of submitted provenance', async () => {
+      const imagePath = path.join(
+        'test',
+        'project',
+        'src',
+        '.qwen',
+        'tmp',
+        'clipboard.png',
+      );
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
+      props.buffer.setText('describe this image');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      stdin.write('\r');
+
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          `@${path.join('.qwen', 'tmp', 'clipboard.png')}\n\ndescribe this image`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt: 'describe this image',
+          },
+        );
+      });
+      unmount();
+    });
+
     it('should not insert anything when clipboard has no image', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
 
@@ -1338,6 +1758,58 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).not.toHaveBeenCalled();
       expect(mockBuffer.setText).not.toHaveBeenCalled();
       unmount();
+    });
+
+    it('should show the native clipboard error only once across remounts', async () => {
+      const addItem = vi.fn();
+      const clipboardUnavailableShownRef = { current: false };
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+        async (onUnavailable) => {
+          onUnavailable?.();
+          return false;
+        },
+      );
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+
+      const pasteKey = isWindows ? '\x1Bv' : '\x16';
+      first.stdin.write(pasteKey);
+      await wait();
+      first.stdin.write(pasteKey);
+      await wait();
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+      second.stdin.write(pasteKey);
+      await wait();
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        },
+        expect.any(Number),
+      );
+      second.unmount();
     });
 
     it('should handle image save failure gracefully', async () => {
@@ -1570,7 +2042,57 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
+      deferUntilIdle: false,
+      submittedPrompt: '/clear',
+    });
+    unmount();
+  });
+
+  it('should submit a live exact slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'model', value: 'model' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/quit');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/quit', {
+      deferUntilIdle: false,
+      submittedPrompt: '/quit',
+    });
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should not submit a live partial slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'clear', value: 'clear' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/cle');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     unmount();
   });
 
@@ -1595,7 +2117,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export');
+    expect(props.onSubmit).toHaveBeenCalledWith('/export', {
+      deferUntilIdle: false,
+      submittedPrompt: '/export',
+    });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
@@ -1628,7 +2153,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export md');
+    expect(props.onSubmit).toHaveBeenCalledWith('/export md', {
+      deferUntilIdle: false,
+      submittedPrompt: '/export md',
+    });
     unmount();
   });
 
@@ -2323,7 +2851,10 @@ describe('InputPrompt', () => {
     stdinFinal.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
+      deferUntilIdle: false,
+      submittedPrompt: '/memory',
+    });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmountFinal();
   });
@@ -2348,7 +2879,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
+      deferUntilIdle: false,
+      submittedPrompt: '/memory',
+    });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
@@ -2419,6 +2953,202 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should NOT switch category on left/right when availableCategories <= 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts' },
+        { label: 'other.ts', value: 'other.ts' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all'],
+      switchCategory,
+    });
+    props.buffer.setText('@file');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on left/right when availableCategories is exactly 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file'],
+      switchCategory,
+    });
+    props.buffer.setText('@file');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    // With only 2 entries (all + one real category) the tab bar is hidden,
+    // so the arrows must not trigger category switching.
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should switch category on plain arrows before Vim handling', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+    props.vimHandleInput = vi.fn().mockReturnValue(true);
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // plain right arrow
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
+
+    stdin.write('\x1b[D'); // plain left arrow
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(-1);
+    expect(props.vimHandleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on bare arrows while command search is active', async () => {
+    props.shellModeActive = false;
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@ses');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x12');
+    await wait();
+    stdin.write('\x1b[C');
+    await wait();
+    stdin.write('\x1b[D');
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should hide category tabs and keep bare arrows for attachments', async () => {
+    const isWindows = process.platform === 'win32';
+    vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+    vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
+      path.join('test', 'project', '.qwen', 'tmp', 'clipboard.png'),
+    );
+    vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
+      undefined,
+    );
+
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <InputPrompt {...props} />,
+    );
+    await wait();
+
+    stdin.write(isWindows ? '\x1Bv' : '\x16');
+    await wait();
+    stdin.write('\x1b[A');
+    await wait();
+    stdin.write('\x1b[C');
+    await wait();
+    stdin.write('\x1b[D');
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('(←/→ to switch)');
+    unmount();
+  });
+
+  it('should NOT consume Ctrl+left/right for category switching (#8069)', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
+    await wait();
+    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
+    await wait();
+
+    // Ctrl+arrows are no longer bound: terminals and macOS Mission Control
+    // intercept them, so they are left to fall through to the terminal.
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -2433,7 +3163,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history');
+    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history', {
+      deferUntilIdle: false,
+      submittedPrompt: 'a prompt from history',
+    });
     expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
   });
@@ -2452,7 +3185,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
+      deferUntilIdle: false,
+      submittedPrompt: '/clear',
+    });
     unmount();
   });
 
@@ -3389,7 +4125,10 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify that onSubmit was called after the timeout
-        expect(props.onSubmit).toHaveBeenCalledWith('test command');
+        expect(props.onSubmit).toHaveBeenCalledWith('test command', {
+          deferUntilIdle: false,
+          submittedPrompt: 'test command',
+        });
       } finally {
         vi.useRealTimers();
         unmount();
@@ -3410,7 +4149,10 @@ describe('InputPrompt', () => {
       await wait();
 
       // Verify that onSubmit was called normally
-      expect(props.onSubmit).toHaveBeenCalledWith('normal command');
+      expect(props.onSubmit).toHaveBeenCalledWith('normal command', {
+        deferUntilIdle: false,
+        submittedPrompt: 'normal command',
+      });
 
       unmount();
     });
@@ -3601,6 +4343,13 @@ describe('InputPrompt', () => {
     });
 
     it('completes the highlighted entry on Tab and exits reverse-search', async () => {
+      const invalidateSubmittedPromptProvenance = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance,
+      } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion
       const mockHandleAutocomplete = vi.fn(() => {
         props.buffer.setText('echo hello');
@@ -3642,11 +4391,22 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockHandleAutocomplete).toHaveBeenCalledWith(0);
+      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+      expect(
+        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockHandleAutocomplete.mock.invocationCallOrder[0]);
       expect(props.buffer.setText).toHaveBeenCalledWith('echo hello');
       unmount();
     }, 15000);
 
     it('submits the highlighted entry on Enter and exits reverse-search', async () => {
+      const invalidateSubmittedPromptProvenance = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance,
+      } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion to return suggestions
       mockedUseReverseSearchCompletion.mockReturnValue({
         ...mockReverseSearchCompletion,
@@ -3678,7 +4438,14 @@ describe('InputPrompt', () => {
         expect(stdout.lastFrame()).not.toContain('(r:)');
       });
 
-      expect(props.onSubmit).toHaveBeenCalledWith('echo hello');
+      expect(props.onSubmit).toHaveBeenCalledWith('echo hello', {
+        deferUntilIdle: false,
+        submittedPrompt: 'echo hello',
+      });
+      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+      expect(
+        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
       unmount();
     });
 
@@ -3823,6 +4590,59 @@ describe('InputPrompt', () => {
       expect(frame).toContain('(r:)');
       expect(frame).toContain('git commit');
       expect(frame).toContain('git push');
+      unmount();
+    });
+
+    it('invalidates provenance before submitting a command-history match', async () => {
+      props.shellModeActive = false;
+      const invalidateSubmittedPromptProvenance = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance,
+      } as unknown as ReturnType<typeof useUIActions>);
+      vi.mocked(useReverseSearchCompletion).mockImplementation(
+        (_buffer, _data, isActive) => ({
+          ...mockReverseSearchCompletion,
+          suggestions: isActive
+            ? [
+                {
+                  label:
+                    '<system-reminder>generated</system-reminder>\nuser text',
+                  value:
+                    '<system-reminder>generated</system-reminder>\nuser text',
+                },
+              ]
+            : [],
+          showSuggestions: !!isActive,
+          activeSuggestionIndex: isActive ? 0 : -1,
+        }),
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x12');
+      await wait();
+      stdin.write('\r');
+
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          '<system-reminder>generated</system-reminder>\nuser text',
+          {
+            deferUntilIdle: false,
+            submittedPrompt:
+              '<system-reminder>generated</system-reminder>\nuser text',
+          },
+        );
+      });
+      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+      expect(
+        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
       unmount();
     });
 
@@ -4154,7 +4974,10 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify onSubmit was called with expanded content
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
+          deferUntilIdle: false,
+          submittedPrompt: '[Pasted Content 1001 chars]',
+        });
       } finally {
         vi.useRealTimers();
         unmount();
@@ -4196,6 +5019,11 @@ describe('InputPrompt', () => {
 
         expect(props.onSubmit).toHaveBeenCalledWith(
           `${secondPaste}\n${firstPaste}`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt:
+              '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+          },
         );
       } finally {
         vi.useRealTimers();
@@ -4233,7 +5061,10 @@ describe('InputPrompt', () => {
         expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith(
           largeContent,
         );
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
+          deferUntilIdle: false,
+          submittedPrompt: '[Pasted Content 1001 chars]',
+        });
       } finally {
         vi.useRealTimers();
         unmount();
@@ -4711,7 +5542,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [
+        pendingLlmHistoryItems: [
           {
             type: 'tool_group',
             tools: [
@@ -5206,6 +6037,160 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(true);
       unmountEdited();
+    });
+  });
+
+  describe('ESC during active agent response (#8201)', () => {
+    it('does not pop queued messages into input when responding', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued message'],
+        pendingLlmHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // popAllQueuedMessages must NOT be called when agent is responding
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      // ...and the shared buffer must stay empty so AppContainer's global ESC
+      // handler takes its cancel branch instead of "input has content".
+      expect(props.buffer.text).toBe('');
+      unmount();
+    });
+
+    it('does not silently clear typed input on single ESC when responding', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+
+      props.buffer.setText('half typed message');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // Buffer must NOT be cleared - double-ESC confirmation still applies
+      expect(props.buffer.text).toBe('half typed message');
+      unmount();
+    });
+
+    it('does not pop the queue or clear the buffer on ESC when responding with an empty buffer', async () => {
+      // Pins the no-side-effect contract for ESC while the agent is Responding
+      // and both the buffer and the queue are empty. This branch consumes the
+      // key (returns true) but mutates nothing; AppContainer's broadcast ESC
+      // handler runs after this one regardless of return values and cancels
+      // because the buffer stayed empty. #8201.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+      props.buffer.setText('');
+      const setTextSpy = vi.spyOn(props.buffer, 'setText');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // No queue pop, no buffer mutation - the branch returns false so
+      // AppContainer's broadcast ESC handler is the one that acts.
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      expect(setTextSpy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not pop queued messages on ESC when responding with typed text AND a queue (#8201)', async () => {
+      // R6-1: the pop-skip guard is pinned only for the empty-buffer case
+      // without this. A mutation to `!== Responding || buffer.text !== ''`
+      // survives all tests unless this combination is covered.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued follow-up'],
+        pendingLlmHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+      props.buffer.setText('half typed message');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // Queue must NOT be popped (guard fires regardless of buffer content).
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      // Typed text survives single ESC (double-press still required).
+      expect(props.buffer.text).toBe('half typed message');
+      unmount();
+    });
+
+    it('still clears typed input on double-ESC while responding (#8201)', async () => {
+      // R6-2: the double-press contract this diff preserves - double-ESC
+      // clears typed input even while Responding - had no test. Without it,
+      // adding `if (streamingState === Responding) return true` before the
+      // double-ESC block ships green.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      props.buffer.setText('draft to clear');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait(50);
+      // First ESC: show double-press prompt, buffer preserved.
+      expect(props.buffer.text).toBe('draft to clear');
+
+      stdin.write('\x1B');
+      await wait(50);
+      // Second ESC within the timeout: clear typed input.
+      expect(props.buffer.text).toBe('');
+      unmount();
     });
   });
 });

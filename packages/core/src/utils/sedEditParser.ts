@@ -152,10 +152,17 @@ function isSafeCombinedFlagArg(arg: string): boolean {
     return false;
   }
   const flags = arg.slice(1);
-  // GNU sed treats everything after -i in a combined flag as the backup suffix:
-  // -iE means in-place with .E backup, not -i + -E. Only forms with i last
+  // sed treats everything after -i in a combined flag as the backup suffix:
+  // -iE means in-place with an .E backup, not -i + -E. Only forms with i last
   // (for example, -Ei/-ri) are safe.
-  if (flags.startsWith('i') || !/^[Eri]+$/u.test(flags)) {
+  //
+  // Testing `startsWith('i')` only rejected i FIRST, not i anywhere but last,
+  // so -Eir and -riE were accepted. Real sed reads those as -E plus in-place
+  // with the backup suffix `r` / `E`, writing an f.txtr or f.txtE alongside
+  // the edit. The simulation creates no backup, so the user asked for one and
+  // silently did not get it -- the same reason `-i.bak` is already declined a
+  // few lines up, just spelled as a combined flag.
+  if (!/^[Er]*i?$/u.test(flags)) {
     return false;
   }
   return true;
@@ -173,6 +180,7 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
     const jsPattern = toJavascriptPattern(sedInfo);
     if (
       hasPosixBracketExpression(jsPattern) ||
+      hasLeadingBracketLiteral(jsPattern) ||
       hasSedJavascriptDivergentEscape(jsPattern)
     ) {
       return false;
@@ -194,6 +202,28 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
 
 function hasPosixBracketExpression(pattern: string): boolean {
   return /\[\[:[A-Za-z]+:\]\]/u.test(pattern);
+}
+
+/**
+ * `]` immediately after `[` or `[^` is a literal member of a POSIX bracket
+ * expression, but means something else entirely in JavaScript: `[]` is an
+ * empty class that matches nothing, and `[^]` matches ANY character. So
+ * `s/[]a]/X/g` silently does nothing, and `s/[^]]/X/g` on `a]b` writes `Xb`
+ * where sed writes `X]X` -- a byte deleted from the user's file.
+ *
+ * Since these edits are simulated and written to disk rather than handed to
+ * sed, declining is the safe answer: the command then runs as the real sed
+ * and behaves exactly as asked. That is already what this parser does for
+ * the other constructs it cannot translate faithfully -- see
+ * `hasPosixBracketExpression` above.
+ *
+ * The test is deliberately blunt and matches the byte sequence anywhere, so
+ * a pattern such as `[a[]]` (a class containing `[`, which would in fact
+ * translate correctly) is declined too. Erring toward the real sed costs
+ * nothing but a fast path; erring the other way rewrites a file wrongly.
+ */
+function hasLeadingBracketLiteral(pattern: string): boolean {
+  return /\[\^?\]/u.test(pattern);
 }
 
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {

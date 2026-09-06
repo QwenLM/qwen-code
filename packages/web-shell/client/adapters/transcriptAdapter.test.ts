@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   DaemonTranscriptBlock,
   DaemonTranscriptState,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { extractPendingPermission } from './transcriptAdapter';
 
 function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
@@ -144,6 +144,45 @@ describe('extractPendingPermission', () => {
 
     const result = extractPendingPermission(state([permission]).blocks);
     expect(result?.toolName).toBe('agent');
+  });
+
+  it('extracts the plan body from exit-plan permission content', () => {
+    const permission = {
+      id: 'perm-plan',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-plan',
+      title: 'Plan:',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'call-plan',
+        kind: 'switch_mode',
+        _meta: {
+          toolName: 'exit_plan_mode',
+          qwenTodoApproval: {
+            planId: 'plan-1',
+            sourceCallId: 'todo-call-1',
+          },
+        },
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: '1. Prepare\n2. Ship' },
+          },
+        ],
+        rawInput: { plan: '1. Prepare\n2. Ship' },
+      },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    expect(extractPendingPermission(state([permission]).blocks)).toMatchObject({
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      content: [{ type: 'text', text: '1. Prepare\n2. Ship' }],
+    });
   });
 
   it('leaves toolName undefined when _meta is absent', () => {

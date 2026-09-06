@@ -1,5 +1,9 @@
 import type { ServeChannelSelection } from './types.js';
 
+export function isAllChannelSelectionName(name: string): boolean {
+  return name.trim() === 'all';
+}
+
 export function normalizeServeChannelSelection(
   rawChannels: string[] | undefined,
 ): ServeChannelSelection | undefined {
@@ -19,7 +23,7 @@ export function normalizeServeChannelSelection(
     names.push(name);
   }
 
-  if (seen.has('all')) {
+  if (names.some(isAllChannelSelectionName)) {
     if (names.length > 1) {
       throw new Error('--channel all cannot be combined with channel names.');
     }

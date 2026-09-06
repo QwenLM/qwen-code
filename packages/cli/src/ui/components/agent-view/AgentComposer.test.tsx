@@ -6,14 +6,14 @@
 
 import { render } from 'ink-testing-library';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { AgentStatus, ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   useAgentViewActions,
   useAgentViewState,
 } from '../../contexts/AgentViewContext.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
-import { useKeypress } from '../../hooks/useKeypress.js';
+import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { StreamingState } from '../../types.js';
@@ -34,13 +34,17 @@ vi.mock('../QueuedMessageDisplay.js', () => ({
 }));
 vi.mock('./AgentFooter.js', () => ({ AgentFooter: () => null }));
 
+type KeypressHandler = (key: Key) => void;
+
 describe('AgentComposer', () => {
   const setAgentInputBufferText = vi.fn();
   const setAgentTabBarFocused = vi.fn();
   const setAgentApprovalMode = vi.fn();
+  let capturedKeypressHandlers: KeypressHandler[];
 
   beforeEach(() => {
     vi.clearAllMocks();
+    capturedKeypressHandlers = [];
 
     vi.mocked(useAgentViewState).mockReturnValue({
       activeView: 'agent-1',
@@ -63,18 +67,24 @@ describe('AgentComposer', () => {
       agentInputBufferText: '',
       agentTabBarFocused: false,
       agentApprovalModes: new Map(),
+      agentMessageQueues: new Map(),
     } as never);
     vi.mocked(useAgentViewActions).mockReturnValue({
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
+      setAgentMessageQueue: vi.fn(),
     } as never);
     vi.mocked(useConfig).mockReturnValue({
       getContentGeneratorConfig: () => undefined,
     } as never);
     vi.mocked(usePreferredEditor).mockReturnValue(undefined);
     vi.mocked(useTerminalSize).mockReturnValue({ columns: 80, rows: 24 });
-    vi.mocked(useKeypress).mockImplementation(() => {});
+    vi.mocked(useKeypress).mockImplementation(
+      (handler: KeypressHandler, _options) => {
+        capturedKeypressHandlers.push(handler);
+      },
+    );
     vi.mocked(useAgentStreamingState).mockReturnValue({
       status: AgentStatus.IDLE,
       streamingState: StreamingState.Idle,
@@ -98,5 +108,30 @@ describe('AgentComposer', () => {
     unmount();
 
     expect(setAgentInputBufferText).not.toHaveBeenCalled();
+  });
+
+  // The second useKeypress call is the Shift+Tab approval-mode cycler.
+  const getShiftTabHandler = (): KeypressHandler => {
+    render(<AgentComposer agentId="agent-1" />);
+    return capturedKeypressHandlers[1]!;
+  };
+
+  it('cycles approval mode on Shift+Tab', () => {
+    const handler = getShiftTabHandler();
+
+    handler({ name: 'tab', shift: true, ctrl: false } as Key);
+
+    expect(setAgentApprovalMode).toHaveBeenCalledWith(
+      'agent-1',
+      ApprovalMode.AUTO_EDIT,
+    );
+  });
+
+  it('does not cycle approval mode on Ctrl+Shift+Tab', () => {
+    const handler = getShiftTabHandler();
+
+    handler({ name: 'tab', shift: true, ctrl: true } as Key);
+
+    expect(setAgentApprovalMode).not.toHaveBeenCalled();
   });
 });

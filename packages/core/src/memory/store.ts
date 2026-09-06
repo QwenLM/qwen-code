@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryExtractCursorPath,
@@ -41,6 +42,11 @@ export function createDefaultAutoMemoryExtractCursor(
 
 export function createDefaultAutoMemoryIndex(): string {
   return '';
+}
+
+export interface AutoMemoryIndexRead {
+  content: string;
+  stats: Stats;
 }
 
 async function writeFileIfMissing(
@@ -95,6 +101,28 @@ export async function readAutoMemoryIndex(
   }
 }
 
+async function readMemoryIndexWithStats(
+  indexPath: string,
+): Promise<AutoMemoryIndexRead | null> {
+  try {
+    const stats = await fs.stat(indexPath);
+    const content = await fs.readFile(indexPath, 'utf-8');
+    return { content, stats };
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function readAutoMemoryIndexWithStats(
+  projectRoot: string,
+): Promise<AutoMemoryIndexRead | null> {
+  return readMemoryIndexWithStats(getAutoMemoryIndexPath(projectRoot));
+}
+
 /**
  * Ensure the user-level (cross-project) auto-memory dir + empty index exist.
  * Unlike the per-project scaffold, this does NOT seed meta.json or
@@ -118,6 +146,10 @@ export async function readUserAutoMemoryIndex(): Promise<string | null> {
     }
     throw error;
   }
+}
+
+export async function readUserAutoMemoryIndexWithStats(): Promise<AutoMemoryIndexRead | null> {
+  return readMemoryIndexWithStats(getUserAutoMemoryIndexPath());
 }
 
 export { AUTO_MEMORY_INDEX_FILENAME };

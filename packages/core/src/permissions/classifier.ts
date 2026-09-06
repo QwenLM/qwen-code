@@ -29,16 +29,17 @@ import {
   STAGE2_SUFFIX,
 } from './classifier-prompts/system-prompt.js';
 import { buildClassifierContents } from './classifier-transcript.js';
+import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 
 // Tag-scoped logger so an operator debugging "every AUTO call gets
 // unavailable=true" can grep for [CLASSIFIER] in the debug log and see
 // the underlying API / timeout / context-overflow error.
 const debugLogger = createDebugLogger('CLASSIFIER');
 
-// A timeout is fail-closed (action BLOCKED as "unavailable"), so too tight a
-// budget turns transient slowness into spurious blocks. The fast model's p99
-// is ~1.5s but the tail is long under load, so budgets are kept generous —
-// better to wait than fail closed on a healthy call.
+// A timeout yields an unavailable result and manual fallback downstream, so
+// too tight a budget turns transient slowness into repeated prompts. The fast
+// model's p99 is ~1.5s but the tail is long under load, so budgets are kept
+// generous.
 /** Stage-1 timeout: generous headroom over the fast model's p99 (~1.5s). */
 export const STAGE1_TIMEOUT_MS = 10_000;
 /** Stage-2 timeout: review stage runs a larger prompt; cap infra failure. */
@@ -64,6 +65,8 @@ export interface ClassifierInput {
    *  tool results — see classifier-transcript module. Forwarded by reference
    *  (read-only). */
   messages: readonly Content[];
+  /** Genuine answers accepted by this session's built-in question host. */
+  trustedUserAnswers?: TrustedUserAnswerSnapshot;
   config: Config;
   signal: AbortSignal;
 }
@@ -133,7 +136,7 @@ const STAGE2_SCHEMA: Record<string, unknown> = {
  *
  * Returns a `ClassifierResult` describing the verdict. Throws `AbortError`
  * only when the user-supplied `input.signal` is aborted; all other failures
- * are converted into `unavailable=true` block results (fail-closed).
+ * are converted into `unavailable=true` results for downstream fallback.
  */
 export async function classifyAction(
   input: ClassifierInput,
@@ -143,7 +146,7 @@ export async function classifyAction(
   // buildClassifierContents and buildClassifierSystemPrompt are wrapped so
   // any pathological input (a tool returning a circular projected-args
   // structure that crashes JSON.stringify, a registry lookup error, etc.)
-  // is converted to a fail-closed unavailable verdict instead of crashing
+  // is converted to an unavailable result instead of crashing
   // the tool-execution loop with an uncaught exception.
   let contents;
   let baseSystemPrompt: string;
@@ -152,10 +155,11 @@ export async function classifyAction(
       input.messages,
       input.config.getToolRegistry(),
       { toolName: input.toolName, toolParams: input.toolParams },
+      input.trustedUserAnswers,
     );
     baseSystemPrompt = buildClassifierSystemPrompt(input.config);
   } catch (err) {
-    return failClosed(
+    return failUnavailable(
       'Classifier prompt construction failed',
       err,
       'fast',
@@ -184,13 +188,17 @@ export async function classifyAction(
       maxAttempts: 2,
       config: {
         temperature: 0,
-        maxOutputTokens: 32,
+        // 32 tokens is insufficient for adaptive-thinking models (Claude
+        // 4.6+) which emit server-driven thinking that consumes output
+        // budget before any tool_use. 256 gives enough headroom for
+        // thinking + the respond_in_schema tool call without being wasteful.
+        maxOutputTokens: 256,
         thinkingConfig: { includeThoughts: false },
       },
     })) as Stage1Response;
   } catch (err) {
     if (input.signal.aborted) throw err;
-    return failClosed(
+    return failUnavailable(
       'Classifier stage 1 unavailable',
       err,
       'fast',
@@ -235,7 +243,7 @@ export async function classifyAction(
         temperature: 0,
         maxOutputTokens: 4096,
         // API thinking stays off by default: this gate is latency-sensitive
-        // and a reasoning budget can worsen fail-closed timeouts. The
+        // and a reasoning budget can worsen unavailable-result timeouts. The
         // `thinking` output field still carries the model's plain-text
         // reasoning unless API thinking is explicitly enabled.
         thinkingConfig: {
@@ -352,7 +360,7 @@ export function sanitizeClassifierReason(raw: string): string {
   );
 }
 
-function failClosed(
+function failUnavailable(
   baseMessage: string,
   err: unknown,
   stage: 'fast' | 'thinking',
@@ -361,13 +369,13 @@ function failClosed(
 ): ClassifierResult {
   const reason = isContextLengthExceededError(err)
     ? 'Conversation transcript exceeds classifier context window'
-    : `${baseMessage} - blocked for safety`;
+    : baseMessage;
   // Log the underlying error so operators can distinguish timeout / API /
   // schema-validation / context-overflow failure modes when AUTO mode
-  // starts silently blocking every call. The public `ClassifierResult`
+  // starts routing every call to manual approval. The public `ClassifierResult`
   // only carries the sanitized `reason` and `unavailable` flag.
   debugLogger.warn(
-    `failClosed stage=${stage} durationMs=${Date.now() - startedAt} ` +
+    `failUnavailable stage=${stage} durationMs=${Date.now() - startedAt} ` +
       `reason="${reason}" cause="${errMessage(err)}"`,
   );
   return {

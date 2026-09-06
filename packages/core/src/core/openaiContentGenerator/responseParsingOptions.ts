@@ -6,4 +6,6 @@
 
 export interface OpenAIResponseParsingOptions {
   taggedThinkingTags?: boolean;
+  taggedThinkingTagsAfterReasoning?: boolean;
+  contentOnlyThinkingTagLeaks?: boolean;
 }

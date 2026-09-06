@@ -21,18 +21,21 @@ import {
 import {
   DiscoveredMCPTool,
   uiTelemetryService,
-  getCoreSystemPrompt,
+  getMainSessionBaseSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  estimateContextTextTokens,
+  formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import * as path from 'node:path';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
- * the gating logic in `chatCompressionService` / `geminiChat` so the
+ * the gating logic in `chatCompressionService` / `llmChat` so the
  * `/context` output's "current tier" label reflects exactly which tier the
  * runtime would treat the session as sitting in.
  */
@@ -47,30 +50,13 @@ function currentTier(
 }
 
 /**
- * Estimate token count for a string using a character-based heuristic.
- * ASCII chars ≈ 4 chars/token, CJK/non-ASCII chars ≈ 1.5 tokens/char.
- */
-function estimateTokens(text: string): number {
-  if (!text || text.length === 0) return 0;
-  let asciiChars = 0;
-  let nonAsciiChars = 0;
-  for (let i = 0; i < text.length; i++) {
-    const charCode = text.charCodeAt(i);
-    if (charCode < 128) {
-      asciiChars++;
-    } else {
-      nonAsciiChars++;
-    }
-  }
-  // CJK and other non-ASCII characters typically produce 1.5-2 tokens each
-  return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
-}
-
-/**
  * Parse concatenated memory content into individual file entries.
  * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
  */
-function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
+function parseMemoryFiles(
+  memoryContent: string,
+  workingDir: string,
+): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
@@ -83,8 +69,15 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
     const filePath = match[1]!;
     const content = match[2]!;
     results.push({
-      path: filePath,
-      tokens: estimateTokens(content),
+      // Marker paths are relative to the session working directory (where
+      // memory discovery ran, which may differ from process.cwd() in
+      // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
+      // global memory files don't render as `../../..` chains.
+      path: formatContextFileDisplayPath(
+        path.resolve(workingDir, filePath),
+        workingDir,
+      ),
+      tokens: estimateContextTextTokens(content),
     });
   }
 
@@ -92,7 +85,7 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
   if (results.length === 0 && memoryContent.trim().length > 0) {
     results.push({
       path: t('memory'),
-      tokens: estimateTokens(memoryContent),
+      tokens: estimateContextTextTokens(memoryContent),
     });
   }
 
@@ -114,17 +107,20 @@ export async function collectContextData(
   // (#5763). The active chat carries the correct per-session value; fall back
   // to the global singleton only when no chat exists yet (first /context,
   // --continue resume before any send).
-  const geminiClient = config.getGeminiClient?.();
-  const apiTotalTokens = geminiClient?.isInitialized?.()
-    ? geminiClient.getChat().getLastPromptTokenCount()
+  const llmClient = config.getLlmClient?.();
+  const activeChat = llmClient?.isInitialized?.()
+    ? llmClient.getChat()
+    : undefined;
+  const apiTotalTokens = activeChat
+    ? activeChat.getLastPromptTokenCount()
     : uiTelemetryService.getLastPromptTokenCount();
   // Cached-content tokens have no per-chat mirror today (only the global
-  // singleton is written, geminiChat.ts), so this read stays global. It only
+  // singleton is written, llm-chat.ts), so this read stays global. It only
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(undefined, modelName);
-  const systemPromptTokens = estimateTokens(systemPromptText);
+  const systemPromptText = getMainSessionBaseSystemPrompt(config);
+  const systemPromptTokens = estimateContextTextTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
@@ -138,7 +134,7 @@ export async function collectContextData(
     ? toolRegistry.getFunctionDeclarations()
     : [];
   const toolsJsonStr = JSON.stringify(toolDeclarations);
-  const allToolsTokens = estimateTokens(toolsJsonStr);
+  const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
@@ -147,7 +143,7 @@ export async function collectContextData(
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);
-    const tokens = estimateTokens(toolJsonStr);
+    const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
         name: `${tool.serverName}__${tool.serverToolName || tool.name}`,
@@ -162,12 +158,19 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent);
+  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
+  const autoMemoryPrompt = config.getAutoMemoryPrompt();
+  if (autoMemoryPrompt) {
+    memoryFiles.push({
+      path: t('auto memory'),
+      tokens: estimateContextTextTokens(autoMemoryPrompt),
+    });
+  }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
   const skillToolDefinitionTokens = skillTool
-    ? estimateTokens(JSON.stringify(skillTool.schema))
+    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
     : 0;
 
   const loadedSkillNames: ReadonlySet<string> =
@@ -179,9 +182,14 @@ export async function collectContextData(
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
+  const enabledSkillNames = new Set(
+    skillConfigs
+      .filter((skill) => config.isSkillEnabled(skill))
+      .map((skill) => skill.name.toLowerCase()),
+  );
   let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
-    const listingTokens = estimateTokens(
+    const listingTokens = estimateContextTextTokens(
       `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
     );
     const isLoaded = loadedSkillNames.has(skill.name);
@@ -190,7 +198,9 @@ export async function collectContextData(
       const baseDir = skill.filePath
         ? skill.filePath.replace(/\/[^/]+$/, '')
         : '';
-      bodyTokens = estimateTokens(buildSkillLlmContent(baseDir, skill.body));
+      bodyTokens = estimateContextTextTokens(
+        buildSkillLlmContent(baseDir, skill.body),
+      );
       loadedBodiesTokens += bodyTokens;
     }
     return {
@@ -223,7 +233,9 @@ export async function collectContextData(
     memoryFilesTokens +
     loadedBodiesTokens;
 
-  const isEstimated = apiTotalTokens === 0;
+  const hasTokenCount = apiTotalTokens > 0;
+  const isEstimated =
+    !hasTokenCount || activeChat?.isLastPromptTokenCountEstimated() === true;
 
   const mcpToolsTotalTokens = mcpTools.reduce(
     (sum, tool) => sum + tool.tokens,
@@ -243,7 +255,7 @@ export async function collectContextData(
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
 
-  if (isEstimated) {
+  if (!hasTokenCount) {
     totalTokens = 0;
     displaySystemPrompt = systemPromptTokens;
     displaySkills = skillsTokens;
@@ -340,7 +352,7 @@ export async function collectContextData(
   // estimatePromptTokens(history, undefined, 0, 0, imageTokenEstimate) here
   // for same-source-of-truth as the cheap-gate. Defer because Config
   // doesn't expose the active chat instance today.
-  const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
+  const tierTokens = hasTokenCount ? apiTotalTokens : rawOverhead;
 
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,
@@ -364,7 +376,11 @@ export async function collectContextData(
     builtinTools: showDetails ? detailBuiltinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
-    skills: showDetails ? detailSkills : [],
+    skills: showDetails
+      ? detailSkills.filter((skill) =>
+          enabledSkillNames.has(skill.name.toLowerCase()),
+        )
+      : [],
     isEstimated,
     showDetails,
   };
@@ -422,12 +438,13 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     isEstimated,
     showDetails,
   } = data;
+  const hasTokenCount = totalTokens > 0;
 
   const lines: string[] = [];
   lines.push('## Context Usage');
   lines.push('');
 
-  if (isEstimated) {
+  if (!hasTokenCount) {
     lines.push('*No API response yet. Send a message to see actual usage.*');
     lines.push('');
     lines.push('**Estimated pre-conversation overhead**');
@@ -440,6 +457,12 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
     );
     lines.push('');
+    if (isEstimated) {
+      lines.push(
+        '*Token usage is estimated until provider usage is received.*',
+      );
+      lines.push('');
+    }
     lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
     lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
     lines.push('');
@@ -470,7 +493,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
-  if (!isEstimated) {
+  if (hasTokenCount) {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );

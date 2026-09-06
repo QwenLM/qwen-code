@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import stripAnsi from 'strip-ansi';
@@ -72,6 +73,26 @@ describe('textBufferReducer', () => {
       expect(state).toHaveOnlyValidCharacters();
       expect(state.lines).toEqual(['no undo']);
       expect(state.undoStack.length).toBe(0);
+    });
+
+    it('should clear undo and redo history when requested', () => {
+      const stateWithHistory: TextBufferState = {
+        ...initialState,
+        lines: ['history-derived'],
+        undoStack: [{ lines: ['draft'], cursorRow: 0, cursorCol: 5 }],
+        redoStack: [{ lines: ['other'], cursorRow: 0, cursorCol: 5 }],
+      };
+      const state = textBufferReducer(stateWithHistory, {
+        type: 'set_text',
+        payload: '',
+        clearUndoHistory: true,
+      });
+
+      expect(state.lines).toEqual(['']);
+      expect(state.undoStack).toEqual([]);
+      expect(state.redoStack).toEqual([]);
+      expect(textBufferReducer(state, { type: 'undo' }).lines).toEqual(['']);
+      expect(textBufferReducer(state, { type: 'redo' }).lines).toEqual(['']);
     });
   });
 

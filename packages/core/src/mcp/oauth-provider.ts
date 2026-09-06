@@ -277,6 +277,12 @@ export class MCPOAuthProvider {
             const state = url.searchParams.get('state');
             const error = url.searchParams.get('error');
 
+            if (!state || state !== expectedState) {
+              res.writeHead(400);
+              res.end('Invalid state parameter');
+              return;
+            }
+
             if (error) {
               res.writeHead(HTTP_OK, { 'Content-Type': 'text/html' });
               res.end(`
@@ -299,22 +305,9 @@ export class MCPOAuthProvider {
               return;
             }
 
-            if (!code || !state) {
+            if (!code) {
               res.writeHead(400);
-              res.end('Missing code or state parameter');
-              return;
-            }
-
-            if (state !== expectedState) {
-              res.writeHead(400);
-              res.end('Invalid state parameter');
-              activeCallbackServer = null;
-              if (activeCallbackTimeout) {
-                clearTimeout(activeCallbackTimeout);
-                activeCallbackTimeout = null;
-              }
-              server.close();
-              reject(new Error('State mismatch - possible CSRF attack'));
+              res.end('Missing code parameter');
               return;
             }
 
@@ -350,7 +343,7 @@ export class MCPOAuthProvider {
       );
 
       server.on('error', reject);
-      server.listen(OAUTH_REDIRECT_PORT, () => {
+      server.listen({ port: OAUTH_REDIRECT_PORT, host: '127.0.0.1' }, () => {
         debugLogger.debug(
           `OAuth callback server listening on port ${OAUTH_REDIRECT_PORT}`,
         );

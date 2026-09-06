@@ -21,34 +21,20 @@
 import * as fs from 'node:fs';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { openSyncNoFollow } from '../utils/no-follow-open.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  isBidiControlChar,
+  stripDisplayControlChars,
+  truncateNotificationLabel,
+} from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
-const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
-
-/**
- * Strip C0 control characters (except tab) and C1 control characters from
- * terminal/UI display strings. Shell commands and errors are usually
- * user-authored, but this keeps escape sequences out of the visible
- * notification surface if a caller passes unsanitized text.
- */
-function stripDisplayControlChars(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x09) {
-      out += text[i];
-      continue;
-    }
-    if (code < 0x20) continue;
-    if (code >= 0x80 && code <= 0x9f) continue;
-    out += text[i];
-  }
-  return out;
-}
 
 function stripOutputControlChars(text: string): string {
   let out = '';
@@ -60,6 +46,9 @@ function stripOutputControlChars(text: string): string {
     }
     if (code < 0x20) continue;
     if (code >= 0x80 && code <= 0x9f) continue;
+    // Same bidi set as the shared display helper, in its own loop only
+    // because the tail must keep \n and \r, which that helper strips.
+    if (isBidiControlChar(code)) continue;
     out += text[i];
   }
   return out;
@@ -73,7 +62,10 @@ type OutputTailResult =
 function readOutputTail(outputFile: string): OutputTailResult {
   let fd: number | undefined;
   try {
-    fd = fs.openSync(outputFile, getReadOutputOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the output
+    // file, so the tail can never be read through it (#8227).
+    fd = openSyncNoFollow(outputFile);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
@@ -117,19 +109,6 @@ function readOutputTail(outputFile: string): OutputTailResult {
       }
     }
   }
-}
-
-function getReadOutputOpenFlags(): number {
-  const constants = fs.constants;
-  return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
-}
-
-function truncateCommandForDisplay(command: string): string {
-  const normalized = stripDisplayControlChars(command).replace(/\s+/g, ' ');
-  if (normalized.length <= MAX_NOTIFICATION_COMMAND_LENGTH) {
-    return normalized;
-  }
-  return normalized.slice(0, MAX_NOTIFICATION_COMMAND_LENGTH - 3) + '...';
 }
 
 function truncateCommandForModel(command: string): {
@@ -224,6 +203,18 @@ export type ShellTaskRegistration = Omit<
   'description' | 'outputFile'
 >;
 
+/**
+ * Derives the status sidecar path from an entry's output path:
+ * `shell-<id>.output` → `shell-<id>.status`. Falls back to appending
+ * `.status` for paths without the canonical suffix so the two files
+ * always sit next to each other (same directory, same auto-allow rules).
+ */
+export function statusFilePathFor(outputFile: string): string {
+  return outputFile.endsWith('.output')
+    ? `${outputFile.slice(0, -'.output'.length)}.status`
+    : `${outputFile}.status`;
+}
+
 /** Fires when a new entry is registered. */
 export type BackgroundShellRegisterCallback = (entry: ShellTask) => void;
 
@@ -231,6 +222,7 @@ export interface ShellNotificationMeta {
   shellId: string;
   status: BackgroundShellStatus;
   exitCode?: number;
+  todoWorkChainId?: string;
 }
 
 export type BackgroundShellNotificationCallback = (
@@ -240,9 +232,9 @@ export type BackgroundShellNotificationCallback = (
 ) => void;
 
 /**
- * Fires on every status transition (running → terminal). Symmetric with
- * `BackgroundTaskRegistry.setStatusChangeCallback` so the same UI hook can
- * subscribe to both registries.
+ * Fires after registration and every status transition (running →
+ * terminal). Symmetric with `BackgroundTaskRegistry.setStatusChangeCallback`
+ * so the same UI hook can subscribe to both registries.
  */
 export type BackgroundShellStatusChangeCallback = (entry?: ShellTask) => void;
 
@@ -256,8 +248,8 @@ export class BackgroundShellRegistry {
   /**
    * Subscribe to new-entry events. Called synchronously inside `register()`.
    * Setting `undefined` clears the existing subscriber. Single-subscriber on
-   * purpose — the UI hook is the only consumer in the codebase, and a list
-   * would invite drift in error-handling.
+   * purpose — each runtime installs one owner callback, and a list would
+   * invite drift in error-handling.
    */
   setRegisterCallback(cb: BackgroundShellRegisterCallback | undefined): void {
     this.registerCallback = cb;
@@ -270,15 +262,21 @@ export class BackgroundShellRegistry {
   }
 
   /**
-   * Subscribe to status transitions (running → terminal). Called
-   * synchronously inside `complete()` / `fail()` / `cancel()` after the
-   * entry has been mutated. Same single-subscriber rationale as
-   * `setRegisterCallback`.
+   * Subscribe to registration and status transitions (running → terminal).
+   * Called synchronously after the registry has been mutated. Same
+   * single-subscriber rationale as `setRegisterCallback`.
    */
   setStatusChangeCallback(
     cb: BackgroundShellStatusChangeCallback | undefined,
   ): void {
     this.statusChangeCallback = cb;
+  }
+
+  /** Retract `cb` only if it is still the installed callback. */
+  clearStatusChangeCallback(cb: BackgroundShellStatusChangeCallback): void {
+    if (this.statusChangeCallback === cb) {
+      this.statusChangeCallback = undefined;
+    }
   }
 
   register(registration: ShellTaskRegistration): ShellTask {
@@ -296,7 +294,9 @@ export class BackgroundShellRegistry {
     entry.outputFile = registration.outputPath;
     entry.outputOffset = 0;
     entry.notified = false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     this.entries.set(entry.shellId, entry);
+    this.writeStatusFile(entry);
     this.fireRegister(entry);
     // Mirror BackgroundTaskRegistry: registration is a status transition
     // (nothing → running) so subscribers that only care about
@@ -327,6 +327,7 @@ export class BackgroundShellRegistry {
     entry.status = 'completed';
     entry.exitCode = exitCode;
     entry.endTime = endTime;
+    this.writeStatusFile(entry);
     this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
@@ -338,6 +339,7 @@ export class BackgroundShellRegistry {
     entry.status = 'failed';
     entry.error = error;
     entry.endTime = endTime;
+    this.writeStatusFile(entry);
     this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
@@ -369,6 +371,10 @@ export class BackgroundShellRegistry {
   ): void {
     entry.status = 'cancelled';
     entry.endTime = endTime;
+    // Written here rather than in `cancel()` so the `abortAll()` batch
+    // path settles sidecars too — CLI exit is exactly when a stale
+    // `running` sidecar would otherwise mislead the next reader.
+    this.writeStatusFile(entry);
     entry.abortController.abort();
   }
 
@@ -394,6 +400,56 @@ export class BackgroundShellRegistry {
       if (oldest) {
         this.entries.delete(oldest.shellId);
       }
+    }
+  }
+
+  /**
+   * Mirrors the entry into a machine-readable JSON sidecar next to the
+   * output file (see {@link statusFilePathFor}) so the model can check
+   * whether a background shell is still alive instead of inferring
+   * liveness from the output file — which block-buffering children keep
+   * empty for their whole run (#7626). Timestamps are ISO strings for
+   * model readability; `pid` is included so a `running` sidecar left
+   * behind by a hard-killed CLI can still be cross-checked.
+   *
+   * Fire-and-forget: a write failure (disk full, permission change)
+   * must not poison the registry or the spawn path — mirror of the
+   * output-stream error handling in shell.ts. Temp-file + rename keeps
+   * readers from ever seeing a half-written JSON document.
+   */
+  private writeStatusFile(entry: ShellTask): void {
+    const statusPath = statusFilePathFor(entry.outputFile);
+    const payload: Record<string, unknown> = {
+      id: entry.id,
+      status: entry.status,
+      command: entry.command,
+      cwd: entry.cwd,
+      startTime: new Date(entry.startTime).toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (entry.pid !== undefined) payload['pid'] = entry.pid;
+    if (entry.endTime !== undefined) {
+      payload['endTime'] = new Date(entry.endTime).toISOString();
+    }
+    if (entry.exitCode !== undefined) payload['exitCode'] = entry.exitCode;
+    if (entry.error !== undefined) payload['error'] = entry.error;
+    try {
+      // 0o600 + forceMode + noFollow: the sidecar embeds the full
+      // `command`, so it matches the credential write sites' posture.
+      // forceMode heals a looser pre-existing file back to 0o600;
+      // noFollow refuses to write through a pre-placed symlink.
+      atomicWriteFileSync(statusPath, JSON.stringify(payload, null, 2), {
+        flush: false,
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `status sidecar write failed for shell ${entry.shellId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -435,7 +491,7 @@ export class BackgroundShellRegistry {
         : entry.status === 'failed'
           ? 'failed'
           : 'was cancelled';
-    const commandLabel = truncateCommandForDisplay(entry.command);
+    const commandLabel = truncateNotificationLabel(entry.command);
     const commandForModel = truncateCommandForModel(entry.command);
     const displayText = `Background shell "${commandLabel}" ${statusText}.`;
 
@@ -480,6 +536,7 @@ export class BackgroundShellRegistry {
       shellId: entry.shellId,
       status: entry.status,
       exitCode: entry.exitCode,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     try {
@@ -537,8 +594,8 @@ export class BackgroundShellRegistry {
    * statusChange callback exactly once after the loop. The per-entry
    * `cancel()` path would have triggered both side channels for every
    * running shell — wasteful on shutdown / `/clear` where the only
-   * subscriber (`useBackgroundTaskView`) just re-pulls `getAll()`
-   * regardless of the entry argument.
+   * current subscriber just re-pulls the registry regardless of the entry
+   * argument.
    */
   abortAll(): void {
     const endTime = Date.now();
@@ -550,10 +607,9 @@ export class BackgroundShellRegistry {
     }
     if (!lastCancelled) return;
     this.pruneTerminalEntries();
-    // The single subscriber (`useBackgroundTaskView`) ignores the entry
-    // arg and re-pulls `getAll()`, so passing the last cancelled entry
-    // here is informational only — any of the just-cancelled entries
-    // would be equally valid as the "what changed" signal.
+    // The current subscriber re-pulls the registry, so passing the last
+    // cancelled entry here is informational only — any of the just-cancelled
+    // entries would be equally valid as the "what changed" signal.
     this.fireStatusChange(lastCancelled);
   }
 }

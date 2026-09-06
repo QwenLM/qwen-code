@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveGitDir } from './gitDiff.js';
+import { readFirstLineNoFollow } from './gitUtils.js';
 import { createDebugLogger } from './debugLogger.js';
 
 /**
@@ -32,8 +33,6 @@ const SHORT_SHA_LENGTH = 7;
 // (watcher errors) emit a debug line, consistent with the other utils here.
 const debug = createDebugLogger('gitDirect');
 
-// Bound the HEAD read: it is one short line, never megabytes.
-const MAX_HEAD_BYTES = 4096;
 // git's per-component length cap (a filesystem limit). Applied per
 // slash-separated component, NOT to the whole ref — a valid ref can be longer
 // than one component's limit.
@@ -118,39 +117,6 @@ async function hasGitStore(dir: string): Promise<boolean> {
     isDir(path.join(dir, 'refs')),
   ]);
   return objects && refs;
-}
-
-/**
- * Read the first line of a file with O_NOFOLLOW (refuse symlinks atomically) and
- * a bounded prefix (never load a pathologically large file). Returns null on any
- * failure. Shared by the HEAD and commondir reads.
- */
-async function readFirstLineNoFollow(filePath: string): Promise<string | null> {
-  let fh: fsPromises.FileHandle;
-  try {
-    // O_NOFOLLOW refuses a symlink (ELOOP). O_NONBLOCK never blocks on a FIFO —
-    // a crafted `.git/HEAD` or commondir named pipe would otherwise hang here
-    // and pin a libuv thread-pool slot. Both are no-ops on a regular file.
-    fh = await fsPromises.open(
-      filePath,
-      (fs.constants?.O_RDONLY ?? 0) |
-        (fs.constants?.O_NOFOLLOW ?? 0) |
-        (fs.constants?.O_NONBLOCK ?? 0),
-    );
-  } catch {
-    return null;
-  }
-  try {
-    const buf = Buffer.allocUnsafe(MAX_HEAD_BYTES);
-    const { bytesRead } = await fh.read(buf, 0, MAX_HEAD_BYTES, 0);
-    return buf.toString('utf-8', 0, bytesRead).split('\n', 1)[0] ?? '';
-  } catch {
-    return null;
-  } finally {
-    // Per the codebase convention a close error must not escape — the docstring
-    // promises null on any failure.
-    await fh.close().catch(() => {});
-  }
 }
 
 /**

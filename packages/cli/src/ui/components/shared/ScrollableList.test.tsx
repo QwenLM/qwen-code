@@ -5,17 +5,34 @@
  */
 
 import type React from 'react';
+import { createRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Text } from 'ink';
-import { ScrollableList } from './ScrollableList.js';
+import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
 import { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 
 vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: () => ({ x: 0, y: 0, width: 40, height: 5 }),
 }));
+
+// ink-testing-library's fake stdout has no `isTTY`, but `useMouseEvents` now
+// gates SGR mouse mode on `stdout.isTTY` (so it never leaks escapes into piped
+// output). Report a TTY here so the scrollbar/wheel pipeline arms as it does in
+// a real terminal; without this the mouse-scroll assertions never receive
+// events. Preserve every other ink export.
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  return {
+    ...actual,
+    useStdout: () => ({
+      stdout: { write: vi.fn(), isTTY: true },
+      writeToStdout: vi.fn(),
+    }),
+  };
+});
 
 type Item = { id: number; label: string };
 
@@ -86,6 +103,38 @@ describe('<ScrollableList /> mouse scrolling', () => {
     });
     await flushScrollFrame();
     expect(lastFrame()).toContain('item-0');
+  });
+
+  it('preserves the full delta of a coalesced wheel burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(200)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    await act(async () => {
+      for (let i = 0; i < 30; i++) stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(105);
   });
 
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {

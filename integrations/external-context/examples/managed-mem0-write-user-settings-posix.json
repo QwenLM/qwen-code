@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__external-context__context_remember",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec '/absolute/path/to/node' '/administrator/path/to/qwen-code/integrations/external-context/dist/write-confirmation.js'",
+            "timeout": 8000,
+            "name": "external-context-memory-write-confirmation",
+            "statusMessage": "Confirming external memory write"
+          }
+        ]
+      }
+    ]
+  },
+  "$version": 4
+}

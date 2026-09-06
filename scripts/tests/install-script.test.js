@@ -20,7 +20,7 @@ const {
   symlinkSync,
   writeFileSync,
 } = await vi.importActual('node:fs');
-const { execFileSync } = await vi.importActual('node:child_process');
+const { execFileSync, spawnSync } = await vi.importActual('node:child_process');
 const crypto = await vi.importActual('node:crypto');
 const { tmpdir } = await vi.importActual('node:os');
 const path = await vi.importActual('node:path');
@@ -28,6 +28,9 @@ const { pathToFileURL } = await vi.importActual('node:url');
 const readScript = (path) => readFileSync(path, 'utf8');
 const standaloneReleaseScriptUrl = pathToFileURL(
   path.resolve('scripts/build-standalone-release.js'),
+).href;
+const standalonePackageScriptUrl = pathToFileURL(
+  path.resolve('scripts/create-standalone-package.js'),
 ).href;
 const hostedInstallationScriptUrl = pathToFileURL(
   path.resolve('scripts/build-hosted-installation-assets.js'),
@@ -42,8 +45,20 @@ const releaseScriptUtilsUrl = pathToFileURL(
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
-
-vi.setConfig({ testTimeout: 30_000 });
+// The POSIX fixture helpers shell out to the `zip` and `unzip` binaries.
+// Local minimal images may omit them, but CI must keep the archive-safety
+// cases active.
+const zipAvailable =
+  process.platform === 'win32' ||
+  (spawnSync('zip', ['--version']).error === undefined &&
+    spawnSync('unzip', ['-v']).error === undefined);
+if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
+  throw new Error(
+    '`zip`/`unzip` missing on a CI host; archive tests would skip.',
+  );
+}
+const itWithZip = zipAvailable ? it : it.skip;
+const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
@@ -262,6 +277,7 @@ describe('installation scripts', () => {
     const script = readScript(
       'scripts/installation/install-qwen-standalone.bat',
     );
+    const verifyChecksum = readBatchRoutine(script, 'VerifyChecksum');
 
     expect(script).toContain('--method METHOD');
     expect(script).toContain('--mirror MIRROR');
@@ -273,7 +289,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'SHA256SUMS not found at !CHECKSUM_FILE!; cannot verify archive',
     );
-    expect(script).toContain('Get-FileHash -Algorithm SHA256');
+    expect(script).not.toContain('Get-FileHash');
     expect(script).toContain('tokens=1,2');
     expect(script).toContain('CHECKSUM_NAME');
     expect(script).toContain('if "!CHECKSUM_NAME!"=="!ARCHIVE_NAME!"');
@@ -296,6 +312,25 @@ describe('installation scripts', () => {
       'installer options contain unsafe command characters',
     );
     expect(script).not.toContain('-EncodedCommand');
+    expect(verifyChecksum).toContain('[IO.File]::OpenRead');
+    expect(verifyChecksum).toContain(
+      '[Security.Cryptography.SHA256]::Create()',
+    );
+    expect(verifyChecksum).toContain('.ComputeHash($stream)');
+    expect(verifyChecksum).toContain("-cnotmatch '\\A[0-9A-F]{64}\\z'");
+    expect(verifyChecksum).toContain('[Console]::Write($hash)');
+    expect(verifyChecksum).toContain('SHA-256 calculation failed: ');
+    expect(verifyChecksum).not.toMatch(/ReadAllBytes|ReadToEnd/);
+    expect(verifyChecksum).toContain(
+      'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command',
+    );
+    expect(verifyChecksum.indexOf('finally')).toBeGreaterThan(-1);
+    expect(verifyChecksum).toContain('$stream.Dispose()');
+    expect(verifyChecksum).toContain('$sha256.Dispose()');
+    expect(verifyChecksum.indexOf('$stream.Dispose()')).toBeLessThan(
+      verifyChecksum.indexOf('$sha256.Dispose()'),
+    );
+    expect(verifyChecksum).not.toContain('2^>nul');
     expect(script).toContain('QWEN_VALIDATE_OPTIONS_SCRIPT');
     expect(script).toContain('$unsafe = [char[]](10,13,33,34');
     expect(script).toContain(
@@ -439,23 +474,25 @@ describe('installation scripts', () => {
     }
   });
 
-  it('injects Windows processor overrides directly into cmd commands', () => {
+  it('injects Windows command overrides case-insensitively', () => {
     const prepared = prepareWindowsCommand(
       'call "C:\\tools\\install-qwen-standalone.bat"',
       {
         Path: 'C:\\fake-bin',
         PROCESSOR_ARCHITECTURE: 'AMD64',
         PROCESSOR_ARCHITEW6432: '',
+        PSModulePath: 'C:\\PowerShell\\7\\Modules',
       },
       {
         Path: 'C:\\Windows\\System32',
         processor_architecture: 'ARM64',
         PROCESSOR_ARCHITEW6432: 'ARM64',
+        psmodulepath: 'C:\\WindowsPowerShell\\Modules',
       },
     );
 
     expect(prepared.command).toBe(
-      'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && call "C:\\tools\\install-qwen-standalone.bat"',
+      'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && set "PSModulePath=C:\\PowerShell\\7\\Modules" && call "C:\\tools\\install-qwen-standalone.bat"',
     );
     expect(prepared.env).toEqual({ Path: 'C:\\fake-bin' });
   });
@@ -642,6 +679,7 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('symlink cycle');
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
     expect(packageScript).toContain('--skip-checksums');
+    expect(packageScript).toContain('--native-modules-dir');
     expect(packageScript).toContain('dereference: true');
     expect(packageScript).toContain('fs.createReadStream');
     expect(packageScript).toContain('Expand-Archive');
@@ -652,8 +690,10 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('https://nodejs.org/dist/v${nodeVersion}');
     expect(releaseScript).toContain('SHASUMS256.txt');
     expect(releaseScript).toContain('verifyNodeArchive');
+    // Archive names come from the shared standaloneArchiveName() helper so the
+    // -opentui-preview flavor suffix stays consistent across release scripts.
     expect(releaseScript).toContain(
-      'EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length',
+      'standaloneArchiveName(qwenTarget, runtime)',
     );
     expect(releaseScript).toContain('nodeArchiveExtension');
     expect(releaseScript).toContain('fs.createReadStream');
@@ -663,6 +703,7 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('--license-file');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
+    expect(releaseScript).toContain('--include-opentui-preview');
 
     const hostedInstallScript = readScript(
       'scripts/build-hosted-installation-assets.js',
@@ -798,6 +839,35 @@ describe('standalone release packaging', () => {
     expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
   });
 
+  it('stages the locked clipboard packages for every release target', async () => {
+    const { readClipboardPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+
+    expect(readClipboardPackageSpecs()).toEqual([
+      '@teddyzhu/clipboard@0.0.5',
+      '@teddyzhu/clipboard-darwin-arm64@0.0.5',
+      '@teddyzhu/clipboard-darwin-x64@0.0.5',
+      '@teddyzhu/clipboard-linux-arm64-gnu@0.0.5',
+      '@teddyzhu/clipboard-linux-x64-gnu@0.0.5',
+      '@teddyzhu/clipboard-win32-x64-msvc@0.0.5',
+    ]);
+  });
+
+  it('maps every release target to its clipboard native package', async () => {
+    const { TARGET_CLIPBOARD_PACKAGE } = await import(
+      standalonePackageScriptUrl
+    );
+
+    expect([...TARGET_CLIPBOARD_PACKAGE]).toEqual([
+      ['darwin-arm64', '@teddyzhu/clipboard-darwin-arm64'],
+      ['darwin-x64', '@teddyzhu/clipboard-darwin-x64'],
+      ['linux-arm64', '@teddyzhu/clipboard-linux-arm64-gnu'],
+      ['linux-x64', '@teddyzhu/clipboard-linux-x64-gnu'],
+      ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
+    ]);
+  });
+
   it('validates standalone release checksum output', async () => {
     const { assertStandaloneOutput, RELEASE_TARGETS } = await import(
       standaloneReleaseScriptUrl
@@ -817,6 +887,31 @@ describe('standalone release packaging', () => {
         path.join(tmpDir, 'SHA256SUMS'),
         `${lines.join('\n')}\n${'b'.repeat(64)}  qwen-code-extra.tar.gz\n`,
       );
+      expect(() => assertStandaloneOutput(tmpDir)).toThrow(/Extra/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts opentui-preview archives only for a dual-flavor build', async () => {
+    const { assertStandaloneOutput, RELEASE_TARGETS } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-test-'));
+
+    try {
+      const lines = RELEASE_TARGETS.flatMap(({ qwenTarget }) => {
+        const extension = qwenTarget === 'win-x64' ? 'zip' : 'tar.gz';
+        return [
+          `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`,
+          `${'b'.repeat(64)}  qwen-code-${qwenTarget}-opentui-preview.${extension}`,
+        ];
+      });
+      writeFileSync(path.join(tmpDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+
+      expect(() =>
+        assertStandaloneOutput(tmpDir, ['node', 'bun']),
+      ).not.toThrow();
       expect(() => assertStandaloneOutput(tmpDir)).toThrow(/Extra/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -1362,6 +1457,48 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('gates opentui-preview archives behind the preview flag', async () => {
+    const { standaloneArchiveNames, verifyReleaseDirectory } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-preview-'));
+
+    try {
+      writeStandaloneReleaseAssets(
+        tmpDir,
+        standaloneArchiveNames({ includeOpentuiPreview: true }),
+      );
+      await expect(
+        verifyReleaseDirectory(tmpDir, {
+          archiveNames: standaloneArchiveNames({ includeOpentuiPreview: true }),
+        }),
+      ).resolves.not.toThrow();
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected release asset checksum: qwen-code-darwin-arm64-opentui-preview\.tar\.gz/,
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          'scripts/verify-installation-release.js',
+          '--dir',
+          tmpDir,
+          '--list-release-asset-paths',
+          '--include-opentui-preview',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(output.trim().split('\n')).toEqual(
+        [
+          ...standaloneArchiveNames({ includeOpentuiPreview: true }),
+          'SHA256SUMS',
+        ].map((assetName) => path.join(tmpDir, assetName)),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix('rejects symlinked release assets and checksum files', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseDirectory } =
       await import(installationReleaseVerificationScriptUrl);
@@ -1756,7 +1893,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('requires the standalone cli-entry wrapper in dist', () => {
+  itWithZip('requires the standalone cli-entry wrapper in dist', () => {
     const createdDist = ensureMinimalDist({ includeCliEntry: false });
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -1786,7 +1923,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('packages a win-x64 standalone archive', () => {
+  itWithZip('packages a win-x64 standalone archive', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -1826,14 +1963,13 @@ describe('standalone release packaging', () => {
       const shim = readScript(
         path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
       );
-      expect(shim).toContain('if "%~1"=="serve" goto serve');
       expect(shim).toContain(
-        '"%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*',
+        'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
       );
       expect(shim).toContain(
         '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
       );
-      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(2);
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
       expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
         'qwen-code-win-x64.zip',
       );
@@ -1841,9 +1977,9 @@ describe('standalone release packaging', () => {
       rmSync(tmpDir, { recursive: true, force: true });
       restoreMinimalDist(createdDist);
     }
-  }, 30_000);
+  });
 
-  it('skips npm-only artifacts staged in dist', () => {
+  itWithZip('skips npm-only artifacts staged in dist', () => {
     const createdDist = ensureMinimalDist({
       includeNpmPackageArtifacts: true,
     });
@@ -1880,11 +2016,21 @@ describe('standalone release packaging', () => {
       expect(
         existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
       ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.js',
+          ),
+        ),
+      ).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       restoreMinimalDist(createdDist);
     }
-  }, 30_000);
+  });
 
   it('requires the native audio prebuild when release packaging opts in', () => {
     const createdDist = ensureMinimalDist();
@@ -1981,7 +2127,7 @@ describe('standalone release packaging', () => {
   });
 
   itOnUnix(
-    'packages a Unix standalone archive with a serve fast path shim',
+    'packages a Unix standalone archive through the CLI entry wrapper',
     () => {
       const createdDist = ensureMinimalDist();
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -2000,12 +2146,8 @@ describe('standalone release packaging', () => {
         const shim = readScript(
           path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
         );
-        expect(shim).toContain('if [ "${1:-}" = "serve" ]; then');
         expect(shim).toContain(
-          'exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
-        );
-        expect(shim).toContain(
-          'exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"',
+          'QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
         );
       } finally {
         restoreMinimalDist(createdDist);
@@ -2067,6 +2209,230 @@ describe('standalone release packaging', () => {
       if (createdPrebuildDir) {
         rmSync(prebuildDir, { recursive: true, force: true });
       }
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('packages only the matching clipboard native addon', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeClipboardModules(tmpDir, [
+        '@teddyzhu/clipboard-linux-x64-gnu',
+        '@teddyzhu/clipboard-darwin-arm64',
+      ]);
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      const clipboardScope = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@teddyzhu',
+      );
+      expect(
+        existsSync(path.join(clipboardScope, 'clipboard', 'index.js')),
+      ).toBe(true);
+      expect(
+        existsSync(
+          path.join(
+            clipboardScope,
+            'clipboard-linux-x64-gnu',
+            'clipboard.linux-x64-gnu.node',
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(clipboardScope, 'clipboard-darwin-arm64')),
+      ).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix(
+    'packages the bun flavor as an opentui-preview archive with a renderer-default shim',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const bunOutDir = path.join(tmpDir, 'out-bun');
+        mkdirSync(bunOutDir, { recursive: true });
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'linux-x64',
+            '--node-archive',
+            createFakeBunArchive(tmpDir),
+            '--out-dir',
+            bunOutDir,
+            '--version',
+            '0.0.0-smoke',
+            '--runtime',
+            'bun',
+          ],
+          { stdio: 'pipe' },
+        );
+
+        const archive = path.join(
+          bunOutDir,
+          'qwen-code-linux-x64-opentui-preview.tar.gz',
+        );
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+          stdio: 'ignore',
+        });
+
+        const packageRoot = path.join(extractDir, 'qwen-code');
+        const shim = readScript(path.join(packageRoot, 'bin', 'qwen'));
+        expect(shim).toContain(
+          'export QWEN_TUI_RENDERER="${QWEN_TUI_RENDERER:-opentui}"',
+        );
+        expect(shim).toContain('exec "$ROOT/bun/bin/bun"');
+        expect(readScript(path.join(packageRoot, 'manifest.json'))).toContain(
+          '"runtime": "bun"',
+        );
+        // Installer-compat mirror stays a regular file at the Node layout path.
+        const compatNode = path.join(packageRoot, 'node', 'bin', 'node');
+        expect(existsSync(compatNode)).toBe(true);
+        expect(lstatSync(compatNode).isSymbolicLink()).toBe(false);
+        expect(readScript(path.join(bunOutDir, 'SHA256SUMS'))).toContain(
+          'qwen-code-linux-x64-opentui-preview.tar.gz',
+        );
+
+        // The classic flavor keeps a renderer-neutral shim.
+        const nodeArchive = packageFakeStandalone(tmpDir);
+        expect(nodeArchive).toContain('qwen-code-linux-x64.tar.gz');
+        const nodeExtractDir = path.join(tmpDir, 'extract-node');
+        mkdirSync(nodeExtractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', nodeArchive, '-C', nodeExtractDir], {
+          stdio: 'ignore',
+        });
+        expect(
+          readScript(path.join(nodeExtractDir, 'qwen-code', 'bin', 'qwen')),
+        ).not.toContain('QWEN_TUI_RENDERER');
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('ships a thin opentui-preview installer pair', () => {
+    const previewInstallShell = readScript(
+      'scripts/installation/install-opentui-preview.sh',
+    );
+    expect(previewInstallShell).toContain('-opentui-preview.tar.gz');
+    expect(previewInstallShell).toContain(
+      'https://github.com/${REPO}/releases/download/${tag}',
+    );
+    expect(previewInstallShell).toContain('SHA256SUMS');
+    expect(previewInstallShell).toContain('sha256sum');
+    expect(previewInstallShell).toContain('shasum -a 256');
+    expect(previewInstallShell).toContain('tar -xzf');
+    expect(previewInstallShell).toContain(
+      'linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64',
+    );
+    // Scratch-directory install only: never touches PATH or the hosted
+    // installer chain.
+    expect(previewInstallShell).not.toContain('PATH=');
+    expect(previewInstallShell).not.toContain('install-qwen-standalone');
+
+    const previewInstallPs1 = readScript(
+      'scripts/installation/install-opentui-preview.ps1',
+    );
+    expect(previewInstallPs1).toContain('-opentui-preview.zip');
+    expect(previewInstallPs1).toContain('releases/download');
+    expect(previewInstallPs1).toContain('Get-FileHash -Algorithm SHA256');
+    expect(previewInstallPs1).toContain('Expand-Archive');
+    expect(previewInstallPs1).not.toContain('$env:PATH');
+  });
+
+  itOnUnix('installs a local preview archive with the thin installer', () => {
+    const installer = 'scripts/installation/install-opentui-preview.sh';
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-preview-install-'));
+
+    try {
+      const archiveRoot = path.join(tmpDir, 'pkg');
+      mkdirSync(path.join(archiveRoot, 'qwen-code', 'bin'), {
+        recursive: true,
+      });
+      writeFileSync(
+        path.join(archiveRoot, 'qwen-code', 'bin', 'qwen'),
+        '#!/usr/bin/env sh\n',
+      );
+      const archive = path.join(
+        tmpDir,
+        'qwen-code-linux-x64-opentui-preview.tar.gz',
+      );
+      execFileSync('tar', ['-czf', archive, '-C', archiveRoot, 'qwen-code'], {
+        env: { ...process.env, LC_ALL: 'C' },
+        stdio: 'ignore',
+      });
+
+      const installDir = path.join(tmpDir, 'install');
+      const output = execFileSync(
+        'sh',
+        [installer, '--archive', archive, '--dir', installDir],
+        { encoding: 'utf8' },
+      );
+      expect(output).toContain(`run: ${installDir}/qwen-code/bin/qwen`);
+      expect(
+        existsSync(path.join(installDir, 'qwen-code', 'bin', 'qwen')),
+      ).toBe(true);
+
+      // Reinstalling over an existing directory replaces it cleanly.
+      execFileSync(
+        'sh',
+        [installer, '--archive', archive, '--dir', installDir],
+        {
+          stdio: 'ignore',
+        },
+      );
+      expect(
+        existsSync(path.join(installDir, 'qwen-code', 'bin', 'qwen')),
+      ).toBe(true);
+
+      // Malformed tags/targets are rejected before any network access.
+      const badTag = spawnSync('sh', [installer, '--tag', '../evil'], {
+        encoding: 'utf8',
+      });
+      expect(badTag.status).not.toBe(0);
+      expect(badTag.stderr).toContain('--tag must look like');
+      const badTarget = spawnSync(
+        'sh',
+        [installer, '--tag', 'v0.0.1', '--target', 'win-x64'],
+        { encoding: 'utf8' },
+      );
+      expect(badTarget.status).not.toBe(0);
+      expect(badTarget.stderr).toContain('unsupported --target');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('rejects incomplete explicit clipboard staging', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeClipboardModules(tmpDir, []);
+      expect(() =>
+        packageFakeStandalone(tmpDir, {}, { nativeModulesDir }),
+      ).toThrow(/Required clipboard packages for linux-x64/);
+    } finally {
       restoreMinimalDist(createdDist);
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -2159,7 +2525,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('rejects unexpected dist assets', () => {
+  itWithZip('rejects unexpected dist assets', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -2201,6 +2567,8 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(releaseWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(releaseWorkflow).toContain('--include-opentui-preview');
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
@@ -2226,6 +2594,8 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(ossWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(ossWorkflow).toContain('--include-opentui-preview');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(ossWorkflow).toContain('vars.ALIYUN_OSS_BUCKET');
@@ -2598,10 +2968,7 @@ describe('redactUrlForLog', () => {
   });
 });
 
-// These end-to-end installs spawn child processes via execFileSync;
-// the default 5s vitest timeout is too tight on slow CI runners even
-// without Windows' cmd.exe + node.exe startup overhead.
-describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
+describe('Linux/macOS installer end-to-end', () => {
   itOnUnix(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -3624,7 +3991,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
     }
   });
 
-  itOnUnix(
+  itOnUnixWithZip(
     'rejects standalone archives containing path traversal entries',
     () => {
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
@@ -3925,9 +4292,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
   });
 });
 
-// Windows runners are slower at spawning cmd.exe + node.exe, so the
-// default 5s vitest timeout is too tight for these end-to-end installs.
-describe('Windows installer end-to-end', { timeout: 30000 }, () => {
+describe('Windows installer end-to-end', () => {
   itOnWindows(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -3962,20 +4327,127 @@ describe('Windows installer end-to-end', { timeout: 30000 }, () => {
     },
   );
 
+  itOnWindows(
+    '#7118 installs when Windows PowerShell cannot resolve Get-FileHash',
+    ({ skip }) => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const programFiles =
+          process.env.ProgramW6432 || process.env.ProgramFiles;
+        const systemRoot = process.env.SystemRoot;
+        const userProfile = process.env.USERPROFILE;
+        if (!programFiles || !systemRoot || !userProfile) {
+          throw new Error('Windows environment paths are unavailable.');
+        }
+
+        const powerShell7ModuleRoot = path.join(
+          programFiles,
+          'PowerShell',
+          '7',
+          'Modules',
+        );
+        if (!existsSync(powerShell7ModuleRoot)) {
+          skip('PowerShell 7 modules are unavailable on this Windows host.');
+          return;
+        }
+
+        const modulePath = [
+          powerShell7ModuleRoot,
+          path.join(userProfile, 'Documents', 'WindowsPowerShell', 'Modules'),
+          path.join(programFiles, 'WindowsPowerShell', 'Modules'),
+          path.join(
+            systemRoot,
+            'system32',
+            'WindowsPowerShell',
+            'v1.0',
+            'Modules',
+          ),
+        ].join(path.delimiter);
+        const getFileHashState = runWindowsCommand(
+          `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$command = Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue; if ($null -eq $command) { [Console]::Write('absent') } else { [Console]::Write('present') }"`,
+          { PSModulePath: modulePath },
+        )
+          .toString()
+          .trim();
+        expect(['absent', 'present']).toContain(getFileHashState);
+        if (getFileHashState === 'present') {
+          skip(
+            'This Windows host does not reproduce #7118 with PowerShell 7 modules first.',
+          );
+          return;
+        }
+
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        const output = runWindowsInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          { PSModulePath: modulePath },
+        ).toString();
+
+        expect(output).not.toMatch(
+          /Could not calculate SHA-256|SHA-256 calculation failed|Get-FileHash/,
+        );
+        expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
+          true,
+        );
+        expect(
+          existsSync(path.join(installRoot, 'qwen-code', 'node', 'node.exe')),
+        ).toBe(true);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   itOnWindows('rejects a tampered local archive', () => {
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
       const archive = createFakeWindowsStandaloneArchive(tmpDir);
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
       appendFileSync(archive, 'tamper');
 
-      expect(() =>
-        runWindowsInstaller(
-          archive,
-          path.join(tmpDir, 'install'),
-          path.join(tmpDir, 'home'),
-        ),
-      ).toThrow(/Checksum mismatch/);
+      expect(() => runWindowsInstaller(archive, installRoot, home)).toThrow(
+        /Checksum mismatch/,
+      );
+      expectNoStandaloneInstallSideEffects(installRoot, home);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnWindows('reports an underlying checksum calculation error', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = path.join(tmpDir, 'qwen-code-win-x64.zip');
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+      mkdirSync(archive);
+      writeFileSync(
+        path.join(tmpDir, 'SHA256SUMS'),
+        `${'0'.repeat(64)}  ${path.basename(archive)}\n`,
+      );
+
+      const failureMessage = captureFailure(() =>
+        runWindowsInstaller(archive, installRoot, home),
+      );
+      expect(failureMessage).toContain(
+        'ERROR: Could not calculate SHA-256 checksum for archive.',
+      );
+      expect(failureMessage).toMatch(/SHA-256 calculation failed: .+/);
+      expect(failureMessage).not.toContain('Checksum mismatch');
+      expect(failureMessage).not.toContain('Failed to inspect archive');
+      expect(failureMessage).not.toContain(
+        'Failed to extract standalone archive',
+      );
+      expectNoStandaloneInstallSideEffects(installRoot, home);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -4276,6 +4748,10 @@ function ensureMinimalDist({
   }
   if (includeNpmPackageArtifacts) {
     writeFileSync(
+      path.join(distPath, 'export-transcript-document.js'),
+      'window.QwenExportRenderer = true;\n',
+    );
+    writeFileSync(
       path.join(distPath, 'postinstall.js'),
       'console.log("postinstall");\n',
     );
@@ -4332,6 +4808,27 @@ function createFakeNodeArchive(tmpDir, options = {}) {
   execFileSync(
     'tar',
     ['-czf', archive, '-C', tmpDir, path.basename(fakeNodeDir)],
+    {
+      env: { ...process.env, LC_ALL: 'C' },
+      stdio: 'ignore',
+    },
+  );
+  return archive;
+}
+
+function createFakeBunArchive(tmpDir) {
+  const fakeBunDir = path.join(tmpDir, 'bun-linux-x64');
+  mkdirSync(path.join(fakeBunDir, 'bin'), { recursive: true });
+  writeFileSync(
+    path.join(fakeBunDir, 'bin', 'bun'),
+    '#!/usr/bin/env sh\necho 1.3.14\n',
+  );
+  chmodSync(path.join(fakeBunDir, 'bin', 'bun'), 0o755);
+
+  const archive = path.join(tmpDir, 'bun-linux-x64.tar.gz');
+  execFileSync(
+    'tar',
+    ['-czf', archive, '-C', tmpDir, path.basename(fakeBunDir)],
     {
       env: { ...process.env, LC_ALL: 'C' },
       stdio: 'ignore',
@@ -4577,7 +5074,7 @@ function extractZipForTest(archive, destination) {
 function packageFakeStandalone(
   tmpDir,
   nodeArchiveOptions = {},
-  packageOptions = {},
+  { licenseFile, nativeModulesDir } = {},
 ) {
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(outDir, { recursive: true });
@@ -4592,13 +5089,16 @@ function packageFakeStandalone(
     '--version',
     '0.0.0-smoke',
   ];
-  if (packageOptions.licenseFile) {
-    args.push('--license-file', packageOptions.licenseFile);
+  if (licenseFile) {
+    args.push('--license-file', licenseFile);
+  }
+  if (nativeModulesDir) {
+    args.push('--native-modules-dir', nativeModulesDir);
   }
   execFileSync('node', args, { stdio: 'pipe' });
   return path.join(
     outDir,
-    packageOptions.licenseFile
+    licenseFile
       ? 'qwen-code-gov-customer-a-linux-x64-20990101.tar.gz'
       : 'qwen-code-linux-x64.tar.gz',
   );
@@ -4640,6 +5140,33 @@ function writeFakeOfflineLicense(
     ) + '\n',
   );
   return licensePath;
+}
+
+function createFakeClipboardModules(tmpDir, nativePackages) {
+  const modulesDir = path.join(tmpDir, 'clipboard-modules');
+  const clipboardDir = path.join(modulesDir, '@teddyzhu', 'clipboard');
+  mkdirSync(clipboardDir, { recursive: true });
+  writeFileSync(
+    path.join(clipboardDir, 'package.json'),
+    JSON.stringify({ name: '@teddyzhu/clipboard', version: '0.0.5' }),
+  );
+  writeFileSync(path.join(clipboardDir, 'index.js'), 'module.exports = {};\n');
+
+  for (const packageName of nativePackages) {
+    const packageDir = path.join(modulesDir, packageName);
+    const binaryName = packageName.replace(
+      '@teddyzhu/clipboard-',
+      'clipboard.',
+    );
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(
+      path.join(packageDir, 'package.json'),
+      JSON.stringify({ name: packageName, version: '0.0.5' }),
+    );
+    writeFileSync(path.join(packageDir, `${binaryName}.node`), 'native\n');
+  }
+
+  return modulesDir;
 }
 
 function runUnixInstaller(
@@ -4811,6 +5338,7 @@ function runWindowsPowerShellScript(scriptPath, args = [], env = {}) {
 const WINDOWS_COMMAND_ENV_OVERRIDES = [
   'PROCESSOR_ARCHITECTURE',
   'PROCESSOR_ARCHITEW6432',
+  'PSModulePath',
 ];
 
 function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
@@ -4834,6 +5362,45 @@ function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
     command: [...commandPrefix, command].join(' && '),
     env: commandEnv,
   };
+}
+
+function captureFailure(action) {
+  try {
+    action();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error('Expected command to fail.');
+}
+
+function expectNoStandaloneInstallSideEffects(installRoot, home) {
+  const installDir = path.join(installRoot, 'qwen-code');
+  const wrapper = path.join(installRoot, 'bin', 'qwen.cmd');
+  const unexpectedPaths = [
+    installDir,
+    `${installDir}.new`,
+    `${installDir}.old`,
+    wrapper,
+    `${wrapper}.new`,
+    path.join(installDir, 'bin', 'qwen.cmd'),
+    path.join(installDir, 'node', 'node.exe'),
+    path.join(home, '.qwen', 'source.json'),
+  ];
+  for (const unexpectedPath of unexpectedPaths) {
+    expect(existsSync(unexpectedPath), unexpectedPath).toBe(false);
+  }
+}
+
+function readBatchRoutine(script, label) {
+  const normalized = script.replaceAll('\r\n', '\n');
+  const marker = `:${label}\n`;
+  const labelMatch = new RegExp(`(?:^|\\n)${marker}`).exec(normalized);
+  if (!labelMatch) throw new Error(`Batch label not found: ${label}`);
+  const start = labelMatch.index + (labelMatch[0].startsWith('\n') ? 1 : 0);
+  const rest = normalized.slice(start + marker.length);
+  const nextLabel = /\n:[A-Za-z0-9_]+\n/.exec(rest);
+  if (!nextLabel) throw new Error(`Next batch label not found after: ${label}`);
+  return normalized.slice(start, start + marker.length + nextLabel.index);
 }
 
 function createSymlinkStandaloneArchive(tmpDir) {

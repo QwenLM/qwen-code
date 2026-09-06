@@ -6,13 +6,18 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { OpenAILogger } from '@qwen-code/qwen-code-core';
 import {
   cleanupOldFileHistoryBackups,
+  cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
   getCutoffDate,
 } from './cleanup.js';
+
+vi.mock('node:fs/promises', { spy: true });
 
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -61,6 +66,12 @@ describe('getCutoffDate', () => {
     expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - MS_PER_HOUR);
     expect(cutoff.getTime()).toBeLessThanOrEqual(after - MS_PER_HOUR);
     expect(cutoff.getTime()).toBeLessThanOrEqual(after); // NOT in future
+  });
+
+  it('keeps oversized retention values within the valid Date range', () => {
+    const cutoff = getCutoffDate(Number.MAX_VALUE);
+    expect(cutoff.getTime()).toBe(-8_640_000_000_000_000);
+    expect(() => cutoff.toISOString()).not.toThrow();
   });
 });
 
@@ -252,4 +263,230 @@ describe('cleanupOldSubagentTranscripts', () => {
     expect(fs.existsSync(subagentsRoot)).toBe(true);
     expect(fs.readdirSync(subagentsRoot)).toEqual([]);
   });
+});
+
+describe('cleanupOldOpenAILogs', () => {
+  let logDir: string;
+  let cutoff: Date;
+
+  beforeEach(() => {
+    logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-openai-logs-test-'));
+    cutoff = new Date(Date.now() - 7 * MS_PER_DAY);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  function mkLog(name: string, mtime: Date): string {
+    const p = path.join(logDir, name);
+    fs.writeFileSync(p, '{}');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  function openAILogName(
+    timestamp: Date,
+    id = 'a1b2c3d4',
+    suffix?: string,
+  ): string {
+    return `openai-${timestamp.toISOString().replace(/:/g, '-')}-${id}${suffix ? `-${suffix}` : ''}.json`;
+  }
+
+  it('returns zero result when the log dir does not exist', async () => {
+    const r = await cleanupOldOpenAILogs({
+      logDir: path.join(logDir, 'nope'),
+      cutoffDate: cutoff,
+    });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
+  });
+
+  it('removes logs whose filename date is older than the cutoff, even with a fresh mtime', async () => {
+    // Filename date is authoritative when parseable: the mtime may have been
+    // touched long after the log was written.
+    const old = mkLog(
+      openAILogName(new Date(Date.now() - 30 * MS_PER_DAY)),
+      new Date(),
+    );
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0, completed: true });
+    expect(fs.existsSync(old)).toBe(false);
+    // The project-local log dir itself is never removed.
+    expect(fs.existsSync(logDir)).toBe(true);
+  });
+
+  it('keeps logs whose filename date is newer than the cutoff', async () => {
+    const recent = new Date(Date.now() - 1 * MS_PER_DAY);
+    const name = openAILogName(recent, 'b2c3d4e5', 'side-query-session-title');
+    const fresh = mkLog(name, recent);
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it('preserves old openai-prefixed JSON files not emitted by OpenAILogger', async () => {
+    const oldPrefixedFile = mkLog(
+      'openai-not-a-date.json',
+      new Date(Date.now() - 30 * MS_PER_DAY),
+    );
+    const missingId = mkLog(
+      'openai-2026-06-01T10-00-00.000Z.json',
+      new Date(Date.now() - 30 * MS_PER_DAY),
+    );
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
+    expect(fs.existsSync(oldPrefixedFile)).toBe(true);
+    expect(fs.existsSync(missingId)).toBe(true);
+  });
+
+  it('recognizes the current OpenAILogger filename contract', async () => {
+    const logger = new OpenAILogger(logDir);
+    const generated = await logger.logInteraction(
+      { model: 'test-model' },
+      { choices: [] },
+      undefined,
+      'side-query:session-title',
+    );
+
+    const r = await cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: new Date(Date.now() + MS_PER_DAY),
+    });
+    expect(r).toEqual({ removed: 1, errors: 0, completed: true });
+    expect(fs.existsSync(generated)).toBe(false);
+  });
+
+  it('uses mtime to disambiguate files dated exactly on the cutoff day', async () => {
+    const cutoffDay = cutoff.toISOString().slice(0, 10);
+    const olderThanCutoff = mkLog(
+      `openai-${cutoffDay}T00-00-00.000Z-a1b2c3d4.json`,
+      new Date(cutoff.getTime() - MS_PER_HOUR),
+    );
+    const newerThanCutoff = mkLog(
+      `openai-${cutoffDay}T23-59-59.999Z-b2c3d4e5-subagent-Explore-g2tss0.json`,
+      new Date(cutoff.getTime() + MS_PER_HOUR),
+    );
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0, completed: true });
+    expect(fs.existsSync(olderThanCutoff)).toBe(false);
+    expect(fs.existsSync(newerThanCutoff)).toBe(true);
+  });
+
+  it('ignores non-matching files and directories', async () => {
+    const note = mkLog('notes.txt', new Date(Date.now() - 60 * MS_PER_DAY));
+    const otherLog = mkLog(
+      'openai-logs.txt',
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const dirWithMatchingName = path.join(
+      logDir,
+      'openai-2026-06-01T00-00-00.000Z-a1b2c3d4.json',
+    );
+    fs.mkdirSync(dirWithMatchingName);
+
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
+    expect(fs.existsSync(note)).toBe(true);
+    expect(fs.existsSync(otherLog)).toBe(true);
+    expect(fs.existsSync(dirWithMatchingName)).toBe(true);
+  });
+
+  it('returns incomplete without opening the directory when already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: cutoff,
+      signal: controller.signal,
+    });
+
+    expect(r).toEqual({ removed: 0, errors: 0, completed: false });
+  });
+
+  it('checks cancellation for every directory entry', async () => {
+    const old = new Date(Date.now() - 30 * MS_PER_DAY);
+    for (let i = 0; i < 10; i++) {
+      mkLog(`notes-${i}.txt`, old);
+    }
+    for (let i = 0; i < 10; i++) {
+      mkLog(openAILogName(old, i.toString(16).padStart(8, '0')), old);
+    }
+
+    let checks = 0;
+    const signal = {
+      get aborted() {
+        checks++;
+        return checks > 5;
+      },
+    } as AbortSignal;
+
+    const r = await cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: cutoff,
+      signal,
+    });
+
+    expect(r.completed).toBe(false);
+    expect(checks).toBeGreaterThan(5);
+    expect(r.removed).toBeLessThan(10);
+  });
+
+  it('settles a partially populated deletion batch before returning', async () => {
+    const old = new Date(Date.now() - 30 * MS_PER_DAY);
+    for (let i = 0; i < 10; i++) {
+      mkLog(openAILogName(old, i.toString(16).padStart(8, '0')), old);
+    }
+
+    let unlinkStarted = false;
+    let releaseUnlink: (() => void) | undefined;
+    vi.mocked(fsPromises.unlink).mockImplementation(async (filePath) => {
+      unlinkStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseUnlink = resolve;
+      });
+      fs.unlinkSync(filePath);
+    });
+    const signal = {
+      get aborted() {
+        return unlinkStarted;
+      },
+    } as AbortSignal;
+
+    let settled = false;
+    const cleanup = cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: cutoff,
+      signal,
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await vi.waitFor(() => expect(releaseUnlink).toBeTypeOf('function'));
+    await Promise.resolve();
+    try {
+      expect(settled).toBe(false);
+    } finally {
+      releaseUnlink?.();
+    }
+    const r = await cleanup;
+
+    expect(r).toEqual({ removed: 1, errors: 0, completed: false });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects when the log directory cannot be scanned',
+    async () => {
+      fs.chmodSync(logDir, 0o000);
+      try {
+        await expect(
+          cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff }),
+        ).rejects.toMatchObject({ code: 'EACCES' });
+      } finally {
+        fs.chmodSync(logDir, 0o700);
+      }
+    },
+  );
 });

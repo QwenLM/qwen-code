@@ -15,6 +15,7 @@ import {
   clampWakeupSeconds,
 } from '../services/cronScheduler.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 export interface LoopWakeupParams {
   delaySeconds: number;
@@ -83,7 +84,11 @@ class LoopWakeupInvocation extends BaseToolInvocation<
         };
       }
       const { id, scheduledFor, clampedDelaySeconds, wasClamped, replacedId } =
-        scheduler.scheduleWakeup(this.params.delaySeconds, prompt);
+        scheduler.scheduleWakeup(
+          this.params.delaySeconds,
+          prompt,
+          todoWorkChainContext.getStore(),
+        );
       const reason = this.params.reason?.trim();
 
       const llmContent = [

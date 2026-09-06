@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +12,19 @@ import { WorkflowTool } from './workflow.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
+import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import {
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  MAX_WORKFLOW_AGENTS_ENV,
+  MAX_WORKFLOW_CONCURRENCY_ENV,
+  WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+  WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+} from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
+import { ToolErrorType } from '../tool-error.js';
+import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
+import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
+import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
@@ -37,11 +49,593 @@ function configWithRegistry(): {
   return { config, registry };
 }
 
+/**
+ * The scriptPath approval/description surface classifies the path against
+ * the generated-scripts root, so it needs a config with a real `storage`.
+ * The `storage` handle comes back too — the label tests derive their
+ * expected roots from it (same shape as {@link configWithRegistry}).
+ */
+function configWithStorage(): { config: Config; storage: Storage } {
+  const storage = new Storage(path.join(os.tmpdir(), 'workflow-label-test'));
+  return { config: { storage } as unknown as Config, storage };
+}
+
 describe('WorkflowTool', () => {
   it('has the registered name and display name', () => {
     const tool = new WorkflowTool(fakeConfig());
     expect(tool.name).toBe(ToolNames.WORKFLOW);
     expect(tool.displayName).toBe(ToolDisplayNames.WORKFLOW);
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        run_in_background: { default?: boolean; description?: string };
+      };
+    };
+    expect(schema.properties.run_in_background.default).toBe(false);
+    expect(schema.properties.run_in_background.description).toContain(
+      'cooperatively pause/resume',
+    );
+  });
+
+  // The description is what makes the model pick pipeline() over a barrier
+  // and verify a finding before reporting it. A refactor that drops the
+  // policy prose leaves a runtime nobody drives well, and no other test
+  // would notice — so anchor the load-bearing claims.
+  it('description carries both the runtime facts and the orchestration policy', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+    // Every env knob the description names is anchored. The four that the
+    // orchestrator exports are anchored *through the exported constant*, so
+    // a rename on the runtime side fails here too — a hardcoded literal
+    // would only have caught a description-side typo, and the model would
+    // go on telling users to set a variable nothing reads.
+    // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
+    // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
+    for (const anchor of [
+      'min(16, cpus-2)',
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
+      WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+      WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+      'QWEN_CODE_MAX_WORKFLOW_SECONDS',
+      'resumeFromRunId',
+      '/workflows',
+      'node:vm sandbox',
+    ]) {
+      expect(description).toContain(anchor);
+    }
+    // The per-call options this half of the description advertises are
+    // anchored too — a refactor that drops their sentences leaves the
+    // capabilities undiscoverable from the tool surface and no other test
+    // would notice.
+    expect(description).toContain('workingDir');
+    expect(description).toMatch(/no-progress stall watchdog/);
+    // One anchor per policy section — dropping any whole section has to
+    // turn this test red, which is the regression it exists to catch.
+    expect(description).toMatch(/Parallelism on its own is not a reason/);
+    expect(description).toMatch(/only before the orchestration step/);
+    expect(description).toMatch(/Common single-phase shapes/);
+    expect(description).toMatch(/Default to `pipeline\(\)`/);
+    expect(description).toMatch(/A barrier is right only when/);
+    expect(description).toMatch(/refute/);
+    expect(description).toMatch(/against everything already seen/);
+    expect(description).toMatch(/log\(\)` what was dropped/);
+    // Limits the model has to plan around rather than discover from a
+    // mid-run failure — the numbers themselves, not just the knob names.
+    // Anchored *through* the exported constant rather than as a literal:
+    // the description interpolates `DEFAULT_MAX_AGENTS_PER_RUN`, so this
+    // tracks a raised cap automatically, and a regression that pastes the
+    // number back in as prose goes red the next time the constant moves.
+    expect(description).toContain(
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
+    // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
+    // this one is still a hand-synced literal on both sides.
+    expect(description).toMatch(/30-minute wall-clock cap/);
+    expect(description).toMatch(/nests one level only/);
+    expect(description).toMatch(/read `budget\.total`/);
+    // The `/workflows` capability list is the one part of the description
+    // that trails the runtime: #8320 added cooperative pause/resume to the
+    // dialog while this branch was moving the description into a constant,
+    // and the base merge conflicted exactly here. Nothing else asserts the
+    // control set, so dropping one on the next merge would be silent.
+    expect(description).toMatch(/cooperative pause\/resume/);
+    // #8690 asked the text to speak this project's own vocabulary. Without
+    // a location, "runs a saved workflow" leaves the model no way to reach
+    // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
+    // absolute path it cannot construct.
+    expect(description).toContain('.qwen/workflows');
+    // The result surface is part of the runtime the model has to plan
+    // around: without these sentences it has no reason to expect a script
+    // path back, and resumes by re-sending the whole source.
+    expect(description).toMatch(/Every run hands back its runId/);
+    expect(description).toMatch(/read it before diagnosing/);
+  });
+
+  // Both parameter descriptions describe the same persisted file — the one
+  // `resumeFromRunId` tells the model to edit. A change on one side that
+  // leaves the other pointing at the old contract (re-send the script) is
+  // the regression this catches.
+  it('scriptPath and resumeFromRunId describe the persisted inline script', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        scriptPath: { description: string };
+        resumeFromRunId: { description: string };
+      };
+    };
+    expect(schema.properties.scriptPath.description).toContain(
+      'inline/<runId>.js',
+    );
+    expect(schema.properties.resumeFromRunId.description).toMatch(
+      /Pass the `scriptPath` the original run returned/,
+    );
+    expect(schema.properties.resumeFromRunId.description).toMatch(
+      /not the script text/,
+    );
+  });
+
+  // The policy prose above tells the model how to orchestrate *well*; on its
+  // own it reads as encouragement, and the model fans out on tasks nobody
+  // asked to spend a fleet on. This gate is the half that says when not to.
+  it('description gates the tool on an explicit user request', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+
+    // Ordering is the point, not just presence: a gate placed after the
+    // "what a workflow is for" pitch reads as a footnote to it. It has to
+    // come first, so it frames everything below rather than qualifying it.
+    const gate = description.indexOf('**Only on an explicit request**');
+    const pitch = description.indexOf('**What a workflow is for**');
+    expect(gate).toBeGreaterThanOrEqual(0);
+    expect(gate).toBeLessThan(pitch);
+
+    // Each enumerated form is a real qwen trigger. Without the list the gate
+    // is unfalsifiable from the model's side — it cannot tell whether the
+    // request in front of it qualifies.
+    expect(description).toContain(
+      'It counts as requested when any of these holds:',
+    );
+    expect(description).toMatch(/contains the word `workflow`/);
+    expect(description).toMatch(/in their own words/);
+    expect(description).toMatch(/skill or slash command/);
+    expect(description).toMatch(/named a saved workflow/);
+    expect(description).toMatch(/resume or continue an earlier run/);
+
+    // Upstream's marker for this is `ultracode`, which does not exist here:
+    // naming it would enumerate a trigger no qwen user can pull, and the
+    // gate would refuse work that a real trigger should have allowed.
+    expect(description).not.toMatch(/ultracode/i);
+
+    // The load-bearing half of the gate. Without an offer-and-ask path the
+    // model reads "do not call it" as "refuse", and a user who would have
+    // said yes never gets asked. Over-blocking is this change's one real
+    // failure mode, so the escape hatch is anchored.
+    expect(description).toContain(
+      'Do not call this tool unless the user has asked for multi-agent orchestration.',
+    );
+    expect(description).toContain(
+      'Otherwise do not call it, however well the task would parallelize.',
+    );
+    expect(description).toMatch(/let the user decide/);
+    expect(description).toMatch(/skips the ask/);
+
+    // Interpolated, not pasted: the gate justifies itself with the fleet
+    // size, so a raised cap has to move this sentence too.
+    expect(description).toContain(
+      `dispatch up to ${DEFAULT_MAX_AGENTS_PER_RUN} subagents`,
+    );
+  });
+
+  // ── Approval dialog ────────────────────────────────────────────────────
+  //
+  // What the user is asked to approve is arbitrary model-authored JavaScript
+  // that can fan out to the per-run agent cap, provision git worktrees and
+  // spend an uncapped token budget. Before this the entire disclosure was
+  // `Run a workflow script (N chars)`, and one click on "always allow"
+  // persisted a rule matching every future invocation.
+  describe('approval dialog', () => {
+    const SCRIPT_WITH_META = `export const meta = {
+  name: 'audit-deps',
+  description: 'Audit dependencies for CVEs',
+  phases: [
+    { title: 'Scan', detail: 'one agent per manifest' },
+    { title: 'Verify' },
+  ],
+}
+phase('Scan')
+await agent('scan package.json')
+`;
+
+    async function detailsFor(
+      params: Record<string, unknown>,
+      config: Config = fakeConfig(),
+    ) {
+      const tool = new WorkflowTool(config);
+      const invocation = tool.build(params as never);
+      return await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+    }
+
+    it('names the workflow, its purpose and its phases', async () => {
+      const details = await detailsFor({ script: SCRIPT_WITH_META });
+      expect(details.type).toBe('info');
+      const info = details as { title: string; prompt: string };
+      expect(info.title).toBe('Run a dynamic workflow?');
+      expect(info.prompt).toContain('audit-deps');
+      expect(info.prompt).toContain('Audit dependencies for CVEs');
+      expect(info.prompt).toContain('1. Scan');
+      expect(info.prompt).toContain('one agent per manifest');
+      expect(info.prompt).toContain('2. Verify');
+    });
+
+    // The load-bearing failure mode. Reading meta happens on the approval
+    // path now, and `extractAndStripMeta` throws on a malformed literal. A
+    // script with a broken meta block must stay approvable-or-rejectable:
+    // if the dialog throws, the user cannot even say no.
+    it('degrades instead of throwing when meta is malformed', async () => {
+      const details = await detailsFor({
+        script:
+          'export const meta = { name: someIdentifier }\nawait agent("x")',
+      });
+      const info = details as { prompt: string };
+      expect(info.prompt).toContain('declares no meta block');
+      expect(info.prompt).toContain('await agent("x")');
+    });
+
+    it('renders a script that has no meta block at all', async () => {
+      const details = await detailsFor({ script: 'await agent("hello")' });
+      expect((details as { prompt: string }).prompt).toContain(
+        'await agent("hello")',
+      );
+    });
+
+    // Before this change nothing was displayed, so nothing could be spoofed.
+    // A preview without the screen is what would open the hole: the text is
+    // model-authored and reaches a terminal.
+    it('strips escape sequences from everything it displays', async () => {
+      const details = await detailsFor({
+        script: [
+          'export const meta = {',
+          "  name: 'a\\u001b[31mred\\u001b[0m',",
+          "  description: 'plain',",
+          '}',
+          "await agent('x\\u001b[2Jclear')",
+        ].join('\n'),
+      });
+      const { prompt } = details as { prompt: string };
+      expect(prompt).not.toContain('');
+      expect(prompt).toContain('ared');
+    });
+
+    // `stripAnsiAndControl` removes C0 controls and `\n` is one of them, so
+    // the naive call would collapse the excerpt into a single unreadable
+    // line. Sanitizing per line is what keeps the script legible.
+    it('keeps the script excerpt on multiple lines, and bounds it', async () => {
+      const long = Array.from(
+        { length: 400 },
+        (_, i) => `await agent('step ${i}')`,
+      ).join('\n');
+      const { prompt } = (await detailsFor({ script: long })) as {
+        prompt: string;
+      };
+      expect(prompt.split('\n').length).toBeGreaterThan(10);
+      expect(prompt).toContain('more characters)');
+      expect(prompt.length).toBeLessThan(long.length);
+    });
+
+    it('shows args, and survives args that cannot be serialized', async () => {
+      const ok = (await detailsFor({
+        script: 'await agent("x")',
+        args: { target: 'packages/core' },
+      })) as { prompt: string };
+      expect(ok.prompt).toContain('packages/core');
+
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      const bad = (await detailsFor({
+        script: 'await agent("x")',
+        args: circular,
+      })) as { prompt: string };
+      expect(bad.prompt).toContain('not JSON-serializable');
+    });
+
+    // An inline script is fresh model-authored source every time. A blanket
+    // grant would transfer the consent the user gave to the script they read
+    // onto every script the model writes afterwards.
+    it('never lets an inline script be pre-approved', async () => {
+      const details = (await detailsFor({ script: SCRIPT_WITH_META })) as {
+        hideAlwaysAllow?: boolean;
+        permissionRules?: string[];
+      };
+      expect(details.hideAlwaysAllow).toBe(true);
+      // Empty, not absent: `injectPermissionRulesIfMissing` only fills in the
+      // bare-tool-name rule when the tool supplies none, and that rule is
+      // documented as matching every invocation of the tool.
+      expect(details.permissionRules).toEqual([]);
+    });
+
+    it('never pre-approves a persisted inline script path', async () => {
+      const { config, storage } = configWithStorage();
+      const details = (await detailsFor(
+        {
+          scriptPath: storage.getInlineWorkflowScriptPath('wf_1234abcd'),
+          resumeFromRunId: 'wf_1234abcd',
+        },
+        config,
+      )) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
+
+      expect(details.hideAlwaysAllow).toBe(true);
+      expect(details.permissionRules).toEqual([]);
+    });
+
+    it('scopes a saved-workflow grant to the path that was approved', async () => {
+      const details = (await detailsFor(
+        { scriptPath: '/home/u/.qwen/workflows/audit.js' },
+        configWithStorage().config,
+      )) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
+      expect(details.hideAlwaysAllow).toBeFalsy();
+      expect(details.permissionRules).toHaveLength(1);
+
+      // Behavioural, not textual: a rule that reads plausibly but never
+      // matches would make "always allow" silently do nothing, which is a
+      // worse affordance than not offering it. Parse the rule the tool
+      // emitted and check it resolves the same path and only that path.
+      const rule = parseRule(details.permissionRules![0]);
+      const wouldAllow = (toolParams: Record<string, unknown>) =>
+        matchesRule(
+          rule,
+          ToolNames.WORKFLOW,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          toolParams,
+        );
+      expect(
+        wouldAllow({ scriptPath: '/home/u/.qwen/workflows/audit.js' }),
+      ).toBe(true);
+      expect(
+        wouldAllow({ scriptPath: '/home/u/.qwen/workflows/other.js' }),
+      ).toBe(false);
+      expect(wouldAllow({ script: 'await agent("x")' })).toBe(false);
+    });
+
+    // A generated-root script is a throwaway artifact a tool emitted for this
+    // run. Labeling it as a saved workflow would have the user approve — and
+    // maybe pre-approve the path rule — under a wrong identity.
+    it('labels a generated-root scriptPath as a generated script, not a saved workflow', async () => {
+      const { config, storage } = configWithStorage();
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        'fanout-1a2b3c.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run generated workflow script (fanout-1a2b3c.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(
+        `Generated workflow script: ${scriptPath}`,
+      );
+      expect(details.prompt).not.toContain('Saved workflow');
+    });
+
+    it('keeps the saved-workflow label for a saved-root scriptPath', async () => {
+      const { config, storage } = configWithStorage();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deep-research.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run saved workflow (deep-research.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+    });
+
+    // The loader canonicalizes `scriptPath` with realpath, so a `..`-laced
+    // path can load a file far from its raw spelling. Classifying the raw
+    // string would show the opposite identity from what actually loads.
+    it('classifies a ..-laced scriptPath by its normalized location', async () => {
+      const { config, storage } = configWithStorage();
+      // Raw string sits inside the generated root; the `..` segments climb
+      // out of it, so the normalized path is no longer under the root.
+      const scriptPath = [
+        storage.getGeneratedWorkflowsDir(),
+        '..',
+        '..',
+        '..',
+        '..',
+        'workflows',
+        'audit.js',
+      ].join(path.sep);
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run saved workflow (audit.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+    });
+
+    // The loader trusts the whole subtree under the generated root (writers
+    // nest per session), so the label must follow nested scripts too, not
+    // just files sitting directly under the root.
+    it('labels a nested generated-root scriptPath as a generated script', async () => {
+      const { config, storage } = configWithStorage();
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        's-abc',
+        'fanout.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run generated workflow script (fanout.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(
+        `Generated workflow script: ${scriptPath}`,
+      );
+      expect(details.prompt).not.toContain('Saved workflow');
+    });
+
+    // The loader decides loadability with `fs.realpath`, so a scriptPath
+    // whose spelling diverges from its realpath (a symlink crossing roots)
+    // must be labeled by the content that actually loads — classifying the
+    // raw string shows the opposite identity from what runs.
+    it('labels a symlinked scriptPath by the content that loads', async () => {
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-'));
+      const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-rt-'));
+      try {
+        const storage = new Storage(projectDir, runtimeDir);
+        const config = { storage } as unknown as Config;
+        const generatedDir = storage.getGeneratedWorkflowsDir();
+        const savedDir = storage.getProjectWorkflowsDir();
+        await fs.mkdir(generatedDir, { recursive: true });
+        await fs.mkdir(savedDir, { recursive: true });
+
+        // A generated-spelled link whose realpath is a saved workflow.
+        await fs.writeFile(path.join(savedDir, 'deploy.js'), 'return 1;');
+        const generatedSpelling = path.join(generatedDir, 'run.js');
+        await fs.symlink(path.join(savedDir, 'deploy.js'), generatedSpelling);
+
+        // A saved-spelled link whose realpath is a generated script.
+        const nested = path.join(generatedDir, 's-abc');
+        await fs.mkdir(nested, { recursive: true });
+        await fs.writeFile(path.join(nested, 'throwaway.js'), 'return 1;');
+        const savedSpelling = path.join(savedDir, 'toolgen.js');
+        await fs.symlink(path.join(nested, 'throwaway.js'), savedSpelling);
+
+        const savedLoaded = (await detailsFor(
+          { scriptPath: generatedSpelling },
+          config,
+        )) as { prompt: string };
+        expect(savedLoaded.prompt).toContain(
+          `Saved workflow: ${generatedSpelling}`,
+        );
+        expect(savedLoaded.prompt).not.toContain('Generated workflow script');
+
+        const generatedLoaded = (await detailsFor(
+          { scriptPath: savedSpelling },
+          config,
+        )) as { prompt: string };
+        expect(generatedLoaded.prompt).toContain(
+          `Generated workflow script: ${savedSpelling}`,
+        );
+        expect(generatedLoaded.prompt).not.toContain('Saved workflow');
+      } finally {
+        await fs.rm(projectDir, { recursive: true, force: true });
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    // The loader refuses a symlinked generated-scripts root outright, so the
+    // dialog must not claim a generated identity for a path under one — the
+    // content it appears to name will not load as a generated script.
+    it('labels nothing generated through a symlinked generated root', async () => {
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-'));
+      const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-rt-'));
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-ext-'));
+      try {
+        const storage = new Storage(projectDir, runtimeDir);
+        const config = { storage } as unknown as Config;
+        const generatedDir = storage.getGeneratedWorkflowsDir();
+        await fs.mkdir(path.dirname(generatedDir), { recursive: true });
+        await fs.writeFile(path.join(external, 'leak.js'), 'return 1;');
+        await fs.symlink(external, generatedDir, 'dir');
+        const scriptPath = path.join(generatedDir, 'leak.js');
+
+        const details = (await detailsFor({ scriptPath }, config)) as {
+          prompt: string;
+        };
+        expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+        expect(details.prompt).not.toContain('Generated workflow script');
+      } finally {
+        await fs.rm(projectDir, { recursive: true, force: true });
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    });
+
+    // The cost warning used to arrive only after a successful run — i.e.
+    // after the spend it warns about, and never at all on the failure path.
+    it('warns about token cost before the spend, exactly once', async () => {
+      const { config } = configWithRegistry();
+      const first = (await detailsFor(
+        { script: 'await agent("x")' },
+        config,
+      )) as { prompt: string };
+      expect(first.prompt).toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
+
+      // The registry latch flips on read, so the second dialog is quiet and
+      // the post-hoc copy on the result path suppresses itself too.
+      const second = (await detailsFor(
+        { script: 'await agent("y")' },
+        config,
+      )) as { prompt: string };
+      expect(second.prompt).not.toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
+    });
+
+    it('titles the transcript row with the workflow name', () => {
+      const tool = new WorkflowTool(fakeConfig());
+      expect(
+        tool.build({ script: SCRIPT_WITH_META } as never).getDescription(),
+      ).toBe('Run workflow: audit-deps');
+      // Falls back to the character count only when there is no meta to read.
+      expect(
+        tool.build({ script: 'await agent("x")' } as never).getDescription(),
+      ).toContain('chars)');
+    });
+  });
+
+  // A script that never compiled has no run behind it. Reporting it as a
+  // failed workflow sends the model looking for a runId that was never
+  // minted, and reads as "the orchestration broke" when the real problem is
+  // a typo it can fix and re-send.
+  it('reports an uncompilable script as not launched, not as a failure', async () => {
+    const { config } = configWithRegistry();
+    const tool = new WorkflowTool(config);
+    const result = await tool
+      .build({ script: "const x: string = 'a';\nawait agent(x);" } as never)
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    const text = JSON.stringify(result.llmContent);
+    expect(text).toContain('was not launched');
+    expect(text).toContain('plain JavaScript');
+    // No run happened, so there is no run id to hand back.
+    expect(result.workflowRunId).toBeUndefined();
+    expect(text).not.toContain('Workflow failed');
+  });
+
+  // The tool description is not the only model-visible copy of the caps —
+  // the `script` parameter description states them a second time, and a
+  // model reading one tool call sees both. Anchoring only the tool
+  // description lets a maintainer raise a cap, watch the test above go
+  // green again, and stop while `script` still advertises the old number.
+  it('script parameter description states the same caps as the tool description', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: { script: { description: string } };
+    };
+    const scriptDescription = schema.properties.script.description;
+    expect(scriptDescription).toContain(
+      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
+    );
+    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
+    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
+    // Both halves must agree on the agent cap, whatever it is.
+    expect(tool.description).toContain(
+      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
   });
 
   it('rejects build() when script is missing', () => {
@@ -78,7 +672,7 @@ describe('WorkflowTool', () => {
   });
 
   it('build() accepts a scriptPath without inline script', () => {
-    const tool = new WorkflowTool(fakeConfig());
+    const tool = new WorkflowTool(configWithStorage().config);
     const invocation = tool.build({
       scriptPath: '/abs/deep-research.js',
     });
@@ -87,17 +681,350 @@ describe('WorkflowTool', () => {
     expect(invocation.getDescription()).toContain('deep-research.js');
   });
 
-  it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {
-    const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
+  it('rejects background runs outside an interactive completion channel', () => {
+    const headlessRegistry = new WorkflowRunRegistry();
+    headlessRegistry.setCompletionCallback(vi.fn());
+    const headlessConfig = {
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => headlessRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(headlessConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/interactive TUI/i);
+
+    const interactiveRegistry = new WorkflowRunRegistry();
+    const interactiveConfig = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => interactiveRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(interactiveConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/completion channel/i);
+    expect(() =>
+      new WorkflowTool(interactiveConfig).buildSessionOwnedBackground({
+        script: 'return 1',
+      }),
+    ).toThrow(/completion channel/i);
+
+    interactiveRegistry.setCompletionCallback(vi.fn());
+    const acpConfig = {
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => true,
+      getWorkflowRunRegistry: () => interactiveRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(acpConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/interactive TUI/i);
+  });
+
+  it('starts a session-owned background run outside the interactive TUI', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-session-owned-'),
+    );
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+
     try {
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .buildSessionOwnedBackground(
+          {
+            script: `phase('Inspect'); return { status: 'ready' };`,
+          },
+          'review-and-fix',
+        )
+        .execute(new AbortController().signal);
+
+      expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
+      const run = registry.get(result.workflowRunId!);
+      expect(run?.isBackgrounded).toBe(true);
+      expect(run?.workflowName).toBe('review-and-fix');
+      await vi.waitFor(() =>
+        expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
+      );
+      await registry.getHandle(result.workflowRunId!)?.completion;
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not register a background run when the caller is already aborted', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const dispatch = vi.fn(async () => 'unused');
+    const caller = new AbortController();
+    caller.abort();
+
+    const result = await new WorkflowTool(config, { dispatch })
+      .build({ script: 'return 1', run_in_background: true })
+      .execute(caller.signal);
+
+    expect(result).toEqual({
+      llmContent: 'Workflow was cancelled before it could start.',
+      returnDisplay: 'Workflow cancelled.',
+    });
+    expect(registry.list()).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('reports a registry-side cancel during background preflight as cancelled, not failed', async () => {
+    // `sessionTaskCancel` on a run that is still loading aborts the run's
+    // own controller via `cancelStarting`; the caller's signal stays live,
+    // so the catch cannot recognise the outcome from `signal.aborted`.
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+          run_in_background: true,
+        })
+        .execute(caller.signal);
+
+      expect(caller.signal.aborted).toBe(false);
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(registry.isStarting('wf_1234abcd')).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('reports a registry-side cancel during foreground preflight as cancelled, not failed', async () => {
+    // The foreground path is the tool's default mode, and the same
+    // registry-side sources reach it: `sessionTaskCancel` fires
+    // `cancelStarting` on a resume whose terminal entry was evicted from
+    // the registry, and `abortAll` on session dispose. Registering anyway
+    // let the settlement classifier — blind to the run's own controller —
+    // settle the run `completed` for this dispatch-free script.
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+        })
+        .execute(caller.signal);
+
+      expect(caller.signal.aborted).toBe(false);
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(registry.isStarting('wf_1234abcd')).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('does not register when cancellation arrives during background preflight', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        caller.abort();
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+          run_in_background: true,
+        })
+        .execute(caller.signal);
+
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('run_in_background=true returns a live handle without late tool updates', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const tool = new WorkflowTool(config, {
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    const updateOutput = vi.fn();
+    const invocation = tool.build({
+      script: `phase('slow'); return await agent('work');`,
+      run_in_background: true,
+    });
+    (
+      invocation as unknown as { setCallId: (callId: string) => void }
+    ).setCallId('workflow-tool-call');
+    const execution = invocation.execute(
+      new AbortController().signal,
+      updateOutput,
+    );
+
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    const result = await execution;
+    const entry = registry.list()[0]!;
+    expect(entry.status).toBe('running');
+    expect(entry.isBackgrounded).toBe(true);
+    expect(entry.toolUseId).toBe('workflow-tool-call');
+    expect(result.workflowRunId).toBe(entry.runId);
+    expect(result.llmContent).toEqual([
+      {
+        text:
+          `Workflow started in background.\nRun ID: ${entry.runId}\n` +
+          `Status: running\nYou will be notified when it settles. ` +
+          `Use /workflows ${entry.runId} for the live phase tree.`,
+      },
+    ]);
+    expect(result.returnDisplay).toBe(
+      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
+    );
+    expect(updateOutput).not.toHaveBeenCalled();
+
+    resolveDispatch?.('done');
+    await registry.getHandle(entry.runId)!.completion;
+    expect(registry.get(entry.runId)?.status).toBe('completed');
+    expect(updateOutput).not.toHaveBeenCalled();
+  });
+
+  it('run_in_background=false preserves the foreground ToolResult byte-for-byte', async () => {
+    const run = async (runInBackground: false | undefined) => {
       const registry = new WorkflowRunRegistry();
       const config = {
         getWorkflowRunRegistry: () => registry,
-        storage: new Storage(projectDir),
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      const params = {
+        script: `phase('one'); return { answer: 42 };`,
+        resumeFromRunId: 'wf_1234abcd',
+        ...(runInBackground === undefined
+          ? {}
+          : { run_in_background: runInBackground }),
+      };
+      return new WorkflowTool(config, { dispatch: async () => 'unused' })
+        .build(params)
+        .execute(new AbortController().signal);
+    };
+
+    await expect(run(false)).resolves.toEqual(await run(undefined));
+  });
+
+  // A headless run (`qwen --prompt`, CI, a cron job) has no TUI, no approval
+  // bridge, and a closed stdin. `getDefaultPermission()` is 'ask', which the
+  // scheduler resolves against the run's approval mode — but nothing INSIDE
+  // the tool or the runner may reach for interactivity, or the foreground
+  // call would hang forever on a prompt no one can answer. This is the
+  // regression test for that contract; the background half is already
+  // refused explicitly (see the interactive-TUI guard above).
+  it('foreground execute() completes with no interactive session or completion channel', async () => {
+    const registry = new WorkflowRunRegistry();
+    const config = {
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    expect(registry.hasCompletionCallback()).toBe(false);
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async (prompt) => `answered:${prompt}`,
+    })
+      .build({ script: `return await agent('what is it');` })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result.llmContent)).toContain('answered:what is it');
+  });
+
+  it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {
+    const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
+    const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-rt-'));
+    try {
+      const registry = new WorkflowRunRegistry();
+      const storage = new Storage(projectDir, runtimeDir);
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        storage,
       } as unknown as Config;
       // The scriptPath MUST live under a saved-workflow dir (the resolver
       // refuses paths outside it — the #2 path-traversal / symlink guard).
-      const dir = new Storage(projectDir).getProjectWorkflowsDir();
+      const dir = storage.getProjectWorkflowsDir();
       await fs.mkdir(dir, { recursive: true });
       const scriptPath = path.join(dir, 'greet.js');
       await fs.writeFile(scriptPath, 'return await agent("hi");', 'utf8');
@@ -113,8 +1040,10 @@ describe('WorkflowTool', () => {
       const entries = registry.list();
       expect(entries).toHaveLength(1);
       expect(entries[0].scriptPath).toBe(scriptPath);
+      expect(entries[0].workflowName).toBe('greet');
     } finally {
       await fs.rm(projectDir, { recursive: true, force: true });
+      await fs.rm(runtimeDir, { recursive: true, force: true });
     }
   });
 
@@ -226,6 +1155,9 @@ describe('WorkflowTool', () => {
     expect(result.error).toBeDefined();
     expect(result.error!.message).toContain('scripted failure');
     expect(JSON.stringify(result.llmContent)).toContain('Workflow failed');
+    expect(String(result.returnDisplay)).toMatch(
+      /"runId"\s*:\s*"wf_[0-9a-f]+"/,
+    );
     // T4 (PR #4732 R1): assert the machine-readable error type so a
     // refactor removing the field doesn't go uncaught.
     expect(result.error!.type).toBe('execution_failed');
@@ -371,10 +1303,20 @@ describe('WorkflowTool', () => {
       script: 'return { kind: "report", body: "hello" };',
     });
     const result = await invocation.execute(new AbortController().signal);
-    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
-    // The llmText should be the JSON of just the script's return value,
+    const parts = result.llmContent as Array<{ text: string }>;
+    // The first part should be the JSON of just the script's return value,
     // NOT a wrapper with {runId, result, phases, logs}.
-    expect(JSON.parse(llmText)).toEqual({ kind: 'report', body: 'hello' });
+    expect(JSON.parse(parts[0].text)).toEqual({
+      kind: 'report',
+      body: 'hello',
+    });
+    // The run handle is a SECOND part, so the first one still parses as
+    // whatever the script returned. (Downstream the scheduler joins the two
+    // with a newline — see the convertToFunctionResponse tests below.)
+    expect(parts).toHaveLength(2);
+    expect(parts[1].text).toMatch(
+      /^--- workflow run ---\nrunId: wf_[0-9a-f]+\ntokens: 0 spent \(no cap\)$/,
+    );
   });
 
   // FIX-C9 (TST-M2): scripts without an explicit `return` resolve to
@@ -743,5 +1685,402 @@ describe('WorkflowTool', () => {
         process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = originalEnv;
       }
     }
+  });
+  // ── The run handle the model gets back ──────────────────────────────
+  //
+  // A workflow result used to be the script's return value and nothing else:
+  // no run id to name to `/workflows`, no journal to read the per-agent
+  // results from, and no way to resume short of re-sending the source. These
+  // cover the trailer that carries all three — and the property that makes it
+  // safe to add, namely that it never touches the first part.
+  describe('run handle trailer', () => {
+    let runtimeDir: string;
+    let projectRoot: string;
+    let previousRuntimeDir: string | undefined;
+    let previousTokenCap: string | undefined;
+
+    beforeEach(async () => {
+      runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-rt-'));
+      projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-proj-'));
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      previousTokenCap = process.env[MAX_TOKENS_PER_WORKFLOW_ENV];
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      if (previousTokenCap === undefined) {
+        delete process.env[MAX_TOKENS_PER_WORKFLOW_ENV];
+      } else {
+        process.env[MAX_TOKENS_PER_WORKFLOW_ENV] = previousTokenCap;
+      }
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    });
+
+    function storedConfig(): { config: Config; storage: Storage } {
+      const registry = new WorkflowRunRegistry();
+      const storage = new Storage(projectRoot);
+      const config = {
+        storage,
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      return { config, storage };
+    }
+
+    it('names the persisted script, the journal and the resume call', async () => {
+      const { config, storage } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'await agent("one"); return "done";' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('done');
+      const trailer = parts[1].text;
+      const runId = result.scriptPath!.match(/(wf_[0-9a-f]+)\.js$/)![1];
+      expect(trailer).toContain(`runId: ${runId}`);
+      expect(trailer).toContain(
+        `script: ${storage.getInlineWorkflowScriptPath(runId)}`,
+      );
+      expect(trailer).toContain(
+        `journal: ${storage.getWorkflowRunJournalPath(runId)}`,
+      );
+      expect(trailer).toContain(
+        'agents: 1 dispatched · 1 completed · 0 cached · 0 failed · 0 cancelled',
+      );
+      expect(trailer).toContain('tokens: 0 spent (no cap)');
+      expect(trailer).toContain(
+        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "${runId}" })`,
+      );
+      // Named paths are real files, not a format the runtime never wrote.
+      await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
+        'await agent("one"); return "done";',
+      );
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+      expect(trailer).toContain('longest unchanged prefix');
+    });
+
+    it('creates the journal before a dispatch-free result names it', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config)
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+    });
+
+    it('omits the file lines when the config has no storage', async () => {
+      const registry = new WorkflowRunRegistry();
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('done');
+      expect(parts[1].text).toContain('runId: ');
+      expect(parts[1].text).not.toContain('script: ');
+      expect(parts[1].text).not.toContain('journal: ');
+      expect(parts[1].text).not.toContain('resume: ');
+      expect(result.scriptPath).toBeUndefined();
+      expect(result.journalPath).toBeUndefined();
+    });
+
+    // The failure path is where the logs matter: `returnDisplay` carries them
+    // for the user, but the scheduler replaces it with `error.message` for the
+    // model, so without this part the model sees the message alone.
+    it('carries the trailer and the last log lines on the failure path', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .build({ script: 'log("about to fail"); throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('Workflow failed: boom');
+      expect(parts[1].text).toContain('--- workflow run ---');
+      expect(parts[1].text).toContain('script: ');
+      expect(parts[1].text).toContain('logs (last ');
+      expect(parts[1].text).toContain('about to fail');
+      expect(result.error?.message).toContain('--- workflow run ---');
+    });
+
+    it('does not offer to restart a user-cancelled foreground run', async () => {
+      const { config } = storedConfig();
+      const registry = config.getWorkflowRunRegistry()!;
+      let finishDispatch: ((value: string) => void) | undefined;
+      const execution = new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            finishDispatch = resolve;
+          }),
+      })
+        .build({ script: 'return await agent("slow");' })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(registry.list()).toHaveLength(1));
+      const runId = registry.list()[0]!.runId;
+      await vi.waitFor(() =>
+        expect(registry.get(runId)?.dispatches).toHaveLength(1),
+      );
+      registry.cancel(runId, Date.now());
+      finishDispatch?.('late');
+
+      const result = await execution;
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(text).toContain('Workflow cancelled');
+      expect(text).toContain('1 cancelled');
+      expect(text).not.toContain('resume: Workflow(');
+      expect(result.error).toBeDefined();
+    });
+
+    it('does not advise editing a saved workflow to resume one run', async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deploy.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('this reads the saved workflow');
+      expect(trailer).not.toContain('edit that file first');
+    });
+
+    it('does not promise replay when the journal path is unavailable', async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deploy.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+      vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockResolvedValueOnce(
+        false,
+      );
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('no journal was written for this run');
+      expect(trailer).not.toContain('longest unchanged prefix');
+      expect(result.journalPath).toBeUndefined();
+    });
+
+    it('keeps only the bounded tail of failure logs', async () => {
+      const { config } = storedConfig();
+      const logs = Array.from(
+        { length: 25 },
+        (_, index) => `log("progress ${index + 1}");`,
+      ).join('');
+      const result = await new WorkflowTool(config)
+        .build({ script: `${logs}throw new Error("boom");` })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('logs (last 20):');
+      expect(trailer).toContain('progress 25');
+      expect(trailer).toContain('progress 6');
+      expect(trailer).not.toContain('progress 5\n');
+    });
+
+    it('reports disjoint failed dispatch counts', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async (prompt) => {
+          if (prompt === 'bad') throw new Error('failed');
+          return 'fine';
+        },
+      })
+        .build({
+          script:
+            'return await parallel([() => agent("good"), () => agent("bad")]);',
+        })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain(
+        'agents: 2 dispatched · 1 completed · 0 cached · 1 failed · 0 cancelled',
+      );
+    });
+
+    it('reports the configured token cap in spent-over-total order', async () => {
+      process.env[MAX_TOKENS_PER_WORKFLOW_ENV] = '1000';
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config)
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('tokens: 0 / 1000 spent');
+    });
+
+    it('names the script and journal on a background launch', async () => {
+      const { config, storage } = storedConfig();
+      Object.assign(config, { isInteractive: () => true });
+      config.getWorkflowRunRegistry()!.setCompletionCallback(vi.fn());
+      let resolveDispatch: ((value: string) => void) | undefined;
+      const result = await new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            resolveDispatch = resolve;
+          }),
+      })
+        .build({
+          script: 'return await agent("slow");',
+          run_in_background: true,
+        })
+        .execute(new AbortController().signal);
+
+      const runId = result.workflowRunId!;
+      const text = (result.llmContent as Array<{ text: string }>)[0].text;
+      expect(text).toContain(
+        `Script file: ${storage.getInlineWorkflowScriptPath(runId)}`,
+      );
+      expect(text).toContain(
+        `Journal: ${storage.getWorkflowRunJournalPath(runId)}`,
+      );
+      expect(text).toContain(`Use /workflows ${runId}`);
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+
+      resolveDispatch?.('done');
+      await config.getWorkflowRunRegistry!()!.getHandle(runId)!.completion;
+    });
+
+    // The whole point of persisting the script: a resume can edit the file
+    // and re-run without re-sending the source, and the journal still serves
+    // every agent() call whose prompt and opts did not change.
+    it('resumes from the persisted script after the file is edited', async () => {
+      const { config } = storedConfig();
+      const dispatch = vi.fn(async () => 'from the agent');
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'const a = await agent("one"); return a;' })
+        .execute(new AbortController().signal);
+
+      const scriptPath = first.scriptPath!;
+      const runId = scriptPath.match(/(wf_[0-9a-f]+)\.js$/)![1];
+      expect(dispatch).toHaveBeenCalledTimes(1);
+
+      // Only the post-processing changes; the agent() call is byte-identical,
+      // so the journal keys still match.
+      await fs.writeFile(
+        scriptPath,
+        'const a = await agent("one"); return a.toUpperCase();',
+        'utf8',
+      );
+      dispatch.mockClear();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect((second.llmContent as Array<{ text: string }>)[0].text).toBe(
+        'FROM THE AGENT',
+      );
+      expect((second.llmContent as Array<{ text: string }>)[1].text).toContain(
+        '1 cached',
+      );
+    });
+    it('carries the original args in the resume call', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({
+          script: 'return await agent(`one ${args.who}`);',
+          args: { who: 'world' },
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      // A resume without the original args still runs — it just misses every
+      // journal key, because the script bakes args into the agent prompts.
+      expect(trailer).toContain(
+        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "`,
+      );
+      expect(trailer).toContain('args: {"who":"world"}');
+      expect(trailer).not.toContain('too large to inline');
+    });
+
+    it('names args it cannot inline instead of truncating the call', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({
+          script: 'return "done";',
+          args: { blob: 'x'.repeat(400) },
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('resume: Workflow({');
+      expect(trailer).not.toContain('args:');
+      expect(trailer).toContain('too large to inline here');
+    });
+
+    // What the model actually reads. `convertToFunctionResponse` folds every
+    // text part into one `functionResponse.output` joined by newlines (the
+    // #1520 behavior), so the trailer arrives appended to the return value —
+    // not as a part the model can ignore, and not as something that alters
+    // the return value's own bytes.
+    it('reaches the model as the return value with the trailer appended', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'return { kind: "report" };' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      const [response] = convertToFunctionResponse(
+        'Workflow',
+        'call-1',
+        result.llmContent,
+      );
+      const output = response.functionResponse?.response?.['output'];
+      expect(output).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(String(output)).toContain('"kind": "report"');
+      expect(String(output)).toContain('}\n--- workflow run ---\n');
+    });
+
+    it('reaches the model with the failure message followed by the trailer', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .build({ script: 'log("about to fail"); throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(result.error?.message).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(result.error?.message).toMatch(
+        /^Workflow failed: boom\n--- workflow run ---/,
+      );
+    });
   });
 });

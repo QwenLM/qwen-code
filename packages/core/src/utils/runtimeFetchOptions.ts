@@ -4,16 +4,53 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  Agent,
-  ProxyAgent,
-  fetch as undiciFetch,
-  type Dispatcher,
-} from 'undici';
+import type { Dispatcher } from 'undici';
 
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('RUNTIME_FETCH');
+
+type UndiciModule = typeof import('undici');
+
+let undiciModule: UndiciModule | undefined;
+let undiciModulePromise: Promise<UndiciModule> | undefined;
+
+/**
+ * Load undici behind a dynamic import so it stays out of the eager startup
+ * closure (issue #7264). esbuild compiles the CJS undici package into a
+ * default-only dynamic chunk (no named exports), while Node and vitest
+ * expose named exports directly — unwrap only the default-only shape.
+ */
+export async function loadUndici(): Promise<UndiciModule> {
+  undiciModulePromise ??= import('undici').then((mod) => {
+    const keys = Object.keys(mod);
+    if (keys.length === 1 && keys[0] === 'default') {
+      return (mod as unknown as { default: UndiciModule }).default;
+    }
+    return mod;
+  });
+  return undiciModulePromise;
+}
+
+/**
+ * Async entry points that lead to the synchronous dispatcher builders below
+ * (content generator creation, preconnect) must await this before calling
+ * them.
+ */
+export async function preloadRuntimeFetchModule(): Promise<void> {
+  if (undiciModule) return;
+  undiciModule = await loadUndici();
+}
+
+function requireUndici(): UndiciModule {
+  if (!undiciModule) {
+    throw new Error(
+      'undici is not loaded yet; await preloadRuntimeFetchModule() before ' +
+        'building runtime fetch options or dispatchers',
+    );
+  }
+  return undiciModule;
+}
 
 /**
  * JavaScript runtime type
@@ -73,8 +110,8 @@ export type OpenAIRuntimeFetchOptions =
       // Optional fetch override. When a custom dispatcher is being passed,
       // we pin this to the bundled undici's fetch so the dispatcher and
       // fetch share a single undici version — otherwise Node's built-in
-      // fetch (newer undici) rejects a ProxyAgent from the bundled undici
-      // (e.g. v6) with `invalid onError method`.
+      // fetch (newer undici) rejects a dispatcher from the bundled undici
+      // with errors such as `invalid onError method`.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       fetch?: any;
     }
@@ -203,8 +240,8 @@ const NO_DISPATCHER_FALLBACK = {
  * The dispatcher is cached so that preconnect and subsequent SDK requests
  * share the same connection pool, enabling TCP+TLS connection reuse.
  *
- * @param proxyUrl - Proxy URL used to create a cached ProxyAgent
- * @returns A cached undici ProxyAgent dispatcher
+ * @param proxyUrl - Proxy URL used to create a cached proxy dispatcher
+ * @returns A cached undici dispatcher that honors NO_PROXY
  */
 export function getOrCreateSharedDispatcher(
   proxyUrl: string,
@@ -219,22 +256,87 @@ export function getOrCreateSharedDispatcher(
     return cached;
   }
 
-  const dispatcher = new ProxyAgent({
-    uri: proxyUrl,
+  const { EnvHttpProxyAgent } = requireUndici();
+  const dispatcher = new EnvHttpProxyAgent({
+    httpProxy: proxyUrl,
+    httpsProxy: proxyUrl,
     headersTimeout: 0,
     bodyTimeout: 0,
     keepAliveTimeout: 60_000,
-    // For a ProxyAgent the upstream (origin) TLS handshake is governed by
-    // `requestTls`, not `connect`; `proxyTls` covers an HTTPS proxy whose own
-    // certificate is self-signed. Disable verification on both when opted in.
+    // EnvHttpProxyAgent can dispatch either directly or through a proxy.
+    // `connect` covers a direct NO_PROXY connection, `requestTls` covers the
+    // origin through a proxy, and `proxyTls` covers an HTTPS proxy itself.
     ...(insecure
       ? {
+          connect: { rejectUnauthorized: false },
           requestTls: { rejectUnauthorized: false },
           proxyTls: { rejectUnauthorized: false },
         }
       : {}),
   });
 
+  dispatcherCache.set(cacheKey, dispatcher);
+  return dispatcher;
+}
+
+let resolvedProxyUrlForRuntimeFetch: string | undefined;
+
+/**
+ * Records the explicit proxy URL (`--proxy` / `settings.proxy`, resolved by
+ * `Config.getProxy()`) at the moment the config installs the process-wide
+ * proxy dispatcher. Paths without a Config reference — the MCP transport
+ * fetch below — read it back so an explicitly configured proxy is honored
+ * even off the global dispatcher.
+ */
+export function setResolvedProxyUrlForRuntimeFetch(
+  proxyUrl: string | undefined,
+): void {
+  resolvedProxyUrlForRuntimeFetch = proxyUrl || undefined;
+}
+
+/**
+ * Cached dispatcher for the MCP streamable HTTP fetch (#7147/#7195): the MCP
+ * transport pins undici's own fetch with a dedicated dispatcher (Node's
+ * bundled fetch stalls same-origin POSTs behind the transport's standalone
+ * SSE stream), and that dispatcher must still honor proxies:
+ *
+ * - With an explicit `--proxy`/settings proxy (recorded via
+ *   {@link setResolvedProxyUrlForRuntimeFetch}) it reuses the same cached
+ *   proxy-aware dispatcher as the LLM path (`getOrCreateSharedDispatcher`),
+ *   so MCP and LLM traffic share one pool and one timeout policy.
+ * - Otherwise it uses a cached `EnvHttpProxyAgent` with no explicit URL,
+ *   which honors `HTTP(S)_PROXY`/`NO_PROXY` from the environment and
+ *   dispatches directly when none are set — with the same disabled
+ *   header/body timeouts (a standalone SSE stream legitimately idles past
+ *   undici's 300s defaults).
+ */
+export function getOrCreateMcpDispatcher(
+  insecure: boolean = isTlsVerificationDisabled(),
+): Dispatcher {
+  if (resolvedProxyUrlForRuntimeFetch) {
+    return getOrCreateSharedDispatcher(
+      resolvedProxyUrlForRuntimeFetch,
+      insecure,
+    );
+  }
+  const cacheKey = insecure ? '__env_proxy__#insecure' : '__env_proxy__';
+  const cached = dispatcherCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const { EnvHttpProxyAgent } = requireUndici();
+  const dispatcher = new EnvHttpProxyAgent({
+    headersTimeout: 0,
+    bodyTimeout: 0,
+    keepAliveTimeout: 60_000,
+    ...(insecure
+      ? {
+          connect: { rejectUnauthorized: false },
+          requestTls: { rejectUnauthorized: false },
+          proxyTls: { rejectUnauthorized: false },
+        }
+      : {}),
+  });
   dispatcherCache.set(cacheKey, dispatcher);
   return dispatcher;
 }
@@ -246,6 +348,7 @@ export function getOrCreateSharedDispatcher(
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
   proxyFailureCounts.clear();
+  resolvedProxyUrlForRuntimeFetch = undefined;
 }
 
 /**
@@ -642,6 +745,7 @@ function buildFetchOptionsWithDispatcher(
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const insecure = isTlsVerificationDisabled();
+  const { Agent, fetch: undiciFetch } = requireUndici();
   // When no proxy is configured, use a cached plain undici Agent with disabled
   // timeouts (headersTimeout: 0, bodyTimeout: 0). This prevents undici's 300s
   // default bodyTimeout from aborting long-running requests to local LLM
@@ -668,7 +772,7 @@ function buildFetchOptionsWithDispatcher(
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl, insecure);
     // Pin fetch to undici's own implementation so the dispatcher and fetch
     // come from the same undici version. Node's bundled undici may differ in
-    // major version from the project's bundled one (e.g. v8 vs v6), which
+    // major version from the packaged one (e.g. v8 vs v7), which
     // breaks dispatcher handler-interface checks (`invalid onError method`).
     // The no-proxy branch above also pins undiciFetch for consistency.
     return { fetchOptions: { dispatcher }, fetch: undiciFetch };

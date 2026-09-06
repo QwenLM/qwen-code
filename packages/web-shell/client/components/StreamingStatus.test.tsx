@@ -18,7 +18,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 // Keep StreamingStatus active (it renders null when idle) and give the real
 // useStreamingLoadingMetrics an empty transcript so it reports zero tokens.
 const mocks = vi.hoisted(() => ({ streamingState: 'responding' as string }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useStreamingState: () => mocks.streamingState,
   useTranscriptBlocks: () => [],
 }));
@@ -35,7 +35,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(customization: WebShellCustomization = {}): HTMLElement {
+function render(
+  customization: WebShellCustomization = {},
+  props: {
+    showPhrase?: boolean;
+    hasActivePrompt?: boolean;
+    startedAt?: number;
+  } = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -43,7 +50,7 @@ function render(customization: WebShellCustomization = {}): HTMLElement {
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          <StreamingStatus />
+          <StreamingStatus {...props} />
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -88,6 +95,26 @@ describe('StreamingStatus loading phrases', () => {
     expect(container.firstElementChild?.querySelectorAll('span').length).toBe(
       2,
     );
+  });
+
+  it('hides the phrase but keeps the dynamic status when showPhrase is false', () => {
+    pinPhraseSelection();
+    // A resolver that would otherwise supply a phrase must still be suppressed.
+    const container = render(
+      { loadingPhrases: () => ['should not appear'] },
+      {
+        showPhrase: false,
+      },
+    );
+    // The witty phrase (the "废话文学") is gone: no label span.
+    expect(labelText(container)).toBeUndefined();
+    expect(container.textContent).not.toContain('should not appear');
+    // But the dynamic status stays: spinner + meta (elapsed time + cancel hint).
+    const spans = container.firstElementChild?.querySelectorAll('span') ?? [];
+    expect(spans.length).toBe(2);
+    expect(spans[0]?.textContent).not.toBe(''); // spinner frame
+    expect(container.textContent).toContain('esc to cancel'); // meta/cancel hint
+    expect(container.textContent).toMatch(/\ds/); // elapsed time, e.g. "0s"
   });
 
   it('falls back to the built-in defaults when the resolver returns undefined', () => {
@@ -221,5 +248,103 @@ describe('StreamingStatus loading phrases', () => {
     });
     expect(labelText(container)).toBe(getLoadingPhrases('en')[0]);
     expect(warn).toHaveBeenCalled();
+  });
+
+  it('stays visible when hasActivePrompt is true even if streamingState is idle (#9487)', () => {
+    mocks.streamingState = 'idle';
+    try {
+      const container = render({}, { hasActivePrompt: true });
+      // When streamingState is idle the component normally returns null.
+      // With hasActivePrompt, it should render the status element.
+      expect(container.firstElementChild).not.toBeNull();
+    } finally {
+      mocks.streamingState = 'responding';
+    }
+  });
+});
+
+describe('StreamingStatus daemon keep-alive (#9487)', () => {
+  afterEach(() => {
+    mocks.streamingState = 'responding';
+  });
+
+  it('stays visible while idle when the daemon reports an active prompt', () => {
+    mocks.streamingState = 'idle';
+    const container = render({}, { hasActivePrompt: true, showPhrase: false });
+    expect(container.firstElementChild).not.toBeNull();
+    // The hint stays honest: the cancel gates include the daemon signal.
+    expect(container.textContent).toContain('esc to cancel');
+  });
+
+  it('still renders nothing while idle without an active prompt', () => {
+    mocks.streamingState = 'idle';
+    const container = render({}, { hasActivePrompt: false });
+    expect(container.firstElementChild).toBeNull();
+  });
+
+  it('keeps the elapsed clock anchored across a silent gap', () => {
+    vi.useFakeTimers();
+    try {
+      mocks.streamingState = 'responding';
+      const anchor = Date.now() - 10 * 60 * 1000; // turn started 10 min ago
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const tree = (props: {
+        startedAt?: number;
+        hasActivePrompt?: boolean;
+      }) => (
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={{}}>
+            <StreamingStatus showPhrase={false} {...props} />
+          </WebShellCustomizationProvider>
+        </I18nProvider>
+      );
+
+      act(() => root.render(tree({ startedAt: anchor })));
+      mounted.push({ root, container });
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(container.textContent).toContain('10m 1s');
+
+      // Silent gap: streaming settles to idle but the daemon still owns the
+      // prompt, and the host's startedAt memo goes undefined with it.
+      mocks.streamingState = 'idle';
+      act(() => root.render(tree({ hasActivePrompt: true })));
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+
+      // The clock kept counting from the turn anchor instead of resetting.
+      expect(container.textContent).toContain('10m 4s');
+      expect(container.textContent).not.toContain('(0s');
+
+      // Turn settles on the daemon side: the indicator clears.
+      act(() => root.render(tree({ hasActivePrompt: false })));
+      expect(container.firstElementChild).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('advances the spinner frames during an idle keep-alive gap', () => {
+    vi.useFakeTimers();
+    try {
+      mocks.streamingState = 'idle';
+      const container = render(
+        {},
+        { hasActivePrompt: true, showPhrase: false },
+      );
+      const spinner = container.firstElementChild!.querySelector('span')!;
+      const firstFrame = spinner.textContent;
+      expect(firstFrame).not.toBe('');
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      expect(spinner.textContent).not.toBe(firstFrame);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -112,22 +112,39 @@ export const ExtensionActionsView = ({
       const name = extension.name;
       try {
         switch (action) {
-          case 'toggle':
+          case 'toggle': {
+            let activationResult;
             if (enabled) {
-              await manager.disableExtension(name, settingScopeFor(scope));
+              activationResult = await manager.disableExtension(
+                name,
+                settingScopeFor(scope),
+              );
             } else {
-              await manager.enableExtension(name, settingScopeFor(scope));
+              activationResult = await manager.enableExtension(
+                name,
+                settingScopeFor(scope),
+              );
             }
             setEnabled(!enabled);
+            const warnings = activationResult.warnings ?? [];
             onStatus({
-              type: 'success',
-              text: t('"{{name}}" {{state}}.', {
-                name,
-                state: enabled ? t('disabled') : t('enabled'),
-              }),
+              type: warnings.length > 0 ? 'warning' : 'success',
+              text:
+                warnings.length > 0
+                  ? t('"{{name}}" changed with warnings: {{detail}}', {
+                      name,
+                      detail: warnings
+                        .map((warning) => warning.error)
+                        .join('; '),
+                    })
+                  : t('"{{name}}" {{state}}.', {
+                      name,
+                      state: enabled ? t('disabled') : t('enabled'),
+                    }),
             });
             onReload();
             break;
+          }
           case 'favorite': {
             const now = manager.toggleFavorite(name);
             setIsFavorite(now);
@@ -189,18 +206,31 @@ export const ExtensionActionsView = ({
             }
             break;
           }
-          case 'update':
-            await manager.updateExtension(
+          case 'update': {
+            const result = await manager.updateExtension(
               extension,
               ExtensionUpdateState.UPDATE_AVAILABLE,
               () => {},
             );
-            onStatus({
-              type: 'success',
-              text: t('Updated "{{name}}".', { name }),
-            });
+            if (result?.warnings?.length) {
+              onStatus({
+                type: 'warning',
+                text: t('Updated "{{name}}" with warnings: {{warnings}}.', {
+                  name,
+                  warnings: result.warnings
+                    .map((warning) => `${warning.code}: ${warning.error}`)
+                    .join('; '),
+                }),
+              });
+            } else {
+              onStatus({
+                type: 'success',
+                text: t('Updated "{{name}}".', { name }),
+              });
+            }
             onReload();
             break;
+          }
           case 'uninstall':
             setSub('uninstall-confirm');
             break;
@@ -220,45 +250,36 @@ export const ExtensionActionsView = ({
       const name = extension.name;
       setScopeBusy(true);
       try {
-        // Apply enablement first: Global -> User; Project/Local -> workspace
-        // only. Record the scope preference only once enablement succeeds so a
-        // failed enable can't leave the prefs pointing at a scope the extension
-        // isn't actually enabled at.
-        if (newScope === 'user') {
-          await manager.enableExtension(name, SettingScope.User);
-        } else {
-          await manager.disableExtension(name, SettingScope.User);
-          try {
-            await manager.enableExtension(name, SettingScope.Workspace);
-          } catch (enableError) {
-            // The User-scope disable already landed; if the Workspace enable
-            // fails the extension would be disabled everywhere. Roll the User
-            // enable back so it isn't silently dead.
-            try {
-              await manager.enableExtension(name, SettingScope.User);
-            } catch (rollbackError) {
-              // Rollback also failed: the extension is now disabled at every
-              // scope. Surface that explicitly — the bare enable error wouldn't
-              // tell the user the extension is dead and needs manual recovery.
-              throw new Error(
-                t(
-                  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})',
-                  { name, error: getErrorMessage(rollbackError) },
-                ),
-              );
-            }
-            throw enableError;
-          }
+        const result = await manager.setExtensionActivationScope(
+          extension.id,
+          newScope === 'user'
+            ? { scope: 'user' }
+            : { scope: 'workspace', workspacePath: process.cwd() },
+        );
+        let preferenceWarning: string | undefined;
+        try {
+          manager.setExtensionScope(name, newScope);
+        } catch (error) {
+          preferenceWarning = getErrorMessage(error);
         }
-        manager.setExtensionScope(name, newScope);
         setScope(newScope);
         setEnabled(true);
+        const warnings = [
+          ...(result.warnings ?? []).map((warning) => warning.error),
+          ...(preferenceWarning ? [preferenceWarning] : []),
+        ];
         onStatus({
-          type: 'success',
-          text: t('Set "{{name}}" scope to {{scope}}.', {
-            name,
-            scope: t(SCOPE_LABEL[newScope]),
-          }),
+          type: warnings.length > 0 ? 'warning' : 'success',
+          text:
+            warnings.length > 0
+              ? t('Set "{{name}}" scope with warnings: {{detail}}', {
+                  name,
+                  detail: warnings.join('; '),
+                })
+              : t('Set "{{name}}" scope to {{scope}}.', {
+                  name,
+                  scope: t(SCOPE_LABEL[newScope]),
+                }),
         });
         onReload();
       } catch (error) {
@@ -275,10 +296,17 @@ export const ExtensionActionsView = ({
       if (!manager) return;
       setUninstallBusy(true);
       try {
-        await manager.uninstallExtension(ext.name, false);
+        const result = await manager.uninstallExtension(ext.name, false);
+        const warnings = result.warnings ?? [];
         onStatus({
-          type: 'success',
-          text: t('Uninstalled "{{name}}".', { name: ext.name }),
+          type: warnings.length > 0 ? 'warning' : 'success',
+          text:
+            warnings.length > 0
+              ? t('Uninstalled "{{name}}" with warnings: {{detail}}', {
+                  name: ext.name,
+                  detail: warnings.map((warning) => warning.error).join('; '),
+                })
+              : t('Uninstalled "{{name}}".', { name: ext.name }),
         });
         onReload();
       } catch (error) {

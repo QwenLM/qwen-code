@@ -54,6 +54,7 @@ export interface VoiceStreamDeps {
     url: string,
     options: { headers: Record<string, string> },
   ) => SocketLike;
+  abortSignal?: AbortSignal;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -96,6 +97,10 @@ export function openVoiceStream(
       }) as unknown as SocketLike);
 
   return new Promise<VoiceStreamSession>((resolve, reject) => {
+    if (deps.abortSignal?.aborted) {
+      reject(new Error('Voice stream opening was aborted.'));
+      return;
+    }
     const streamUrl = deriveStreamUrl(config.baseUrl);
     const ws = createWebSocket(streamUrl, {
       headers: config.apiKey
@@ -114,6 +119,13 @@ export function openVoiceStream(
     let terminalError: Error | null = null;
     let finishedTranscript: string | null = null;
     let backpressureWarned = false;
+    let onAbort: (() => void) | undefined;
+
+    const removeAbortListener = () => {
+      if (!onAbort) return;
+      deps.abortSignal?.removeEventListener('abort', onAbort);
+      onAbort = undefined;
+    };
 
     const clearFinishTimer = () => {
       if (finishTimer) {
@@ -132,6 +144,7 @@ export function openVoiceStream(
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
+      removeAbortListener();
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       clearConnectTimer();
@@ -154,6 +167,15 @@ export function openVoiceStream(
         }
       }
     };
+
+    if (deps.abortSignal) {
+      onAbort = () => fail(new Error('Voice stream opening was aborted.'));
+      if (deps.abortSignal.aborted) {
+        onAbort();
+        return;
+      }
+      deps.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
 
     connectTimer = setTimeout(() => {
       if (!started) fail(new Error('Voice stream connection timed out.'));
@@ -294,6 +316,7 @@ export function openVoiceStream(
         }
         finishedTranscript = committed.trim();
         settled = true;
+        removeAbortListener();
         clearConnectTimer();
         clearFinishTimer();
         try {
@@ -323,6 +346,7 @@ export function openVoiceStream(
     });
 
     ws.on('close', () => {
+      removeAbortListener();
       clearConnectTimer();
       clearFinishTimer();
       if (settled) return;

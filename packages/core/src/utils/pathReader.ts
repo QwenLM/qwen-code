@@ -84,8 +84,16 @@ export async function readPathFromWorkspace(
     for (const filePath of finalFiles) {
       const relativePathForDisplay = path.relative(absolutePath, filePath);
       allParts.push({ text: `--- ${relativePathForDisplay} ---\n` });
-      const result = await processSingleFileContent(filePath, config);
-      allParts.push(result.llmContent);
+      // `@`-attached reads reference large PDFs (guidance without a failed
+      // read), matching the readManyFiles `@` path.
+      const result = await processSingleFileContent(filePath, config, {
+        largePdfBehavior: 'reference',
+      });
+      if (Array.isArray(result.llmContent)) {
+        allParts.push(...result.llmContent);
+      } else {
+        allParts.push(result.llmContent);
+      }
       allParts.push({ text: '\n' }); // Add a newline for separation
     }
 
@@ -106,7 +114,11 @@ export async function readPathFromWorkspace(
     }
 
     // It's a single file, process it directly.
-    const result = await processSingleFileContent(absolutePath, config);
-    return [result.llmContent];
+    const result = await processSingleFileContent(absolutePath, config, {
+      largePdfBehavior: 'reference',
+    });
+    return Array.isArray(result.llmContent)
+      ? result.llmContent
+      : [result.llmContent];
   }
 }

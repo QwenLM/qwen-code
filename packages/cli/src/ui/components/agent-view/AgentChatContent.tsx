@@ -25,12 +25,13 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
+import { useThoughtExpanded } from '../../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
-import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
+import { RespondingSpinner } from '../RespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
-import { buildThinkingFullTextMap } from '../../utils/historyUtils.js';
+import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -61,6 +62,11 @@ export const AgentChatContent = ({
   const { historyRemountKey, availableTerminalHeight, constrainHeight } =
     uiState;
   const { columns: terminalWidth } = useTerminalSize();
+  // Ctrl+O full-detail, matching MainContent. Thinking blocks in this view
+  // already honored the toggle (HistoryItemDisplay reads the context itself),
+  // but the tool side never received it — so a truncated args row could
+  // advertise `(ctrl+o)` for a key that did nothing here.
+  const { allExpanded: fullDetail } = useThoughtExpanded();
   const contentWidth = terminalWidth - 4;
 
   // Force re-render on message updates and status changes.
@@ -199,8 +205,8 @@ export const AgentChatContent = ({
   const committedItems = allItems.slice(0, splitIndex);
   const pendingItems = allItems.slice(splitIndex);
 
-  const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(allItems),
+  const thoughtHeadIdByItem = useMemo(
+    () => buildThoughtHeadIdMap(allItems),
     [allItems],
   );
 
@@ -238,7 +244,8 @@ export const AgentChatContent = ({
               isPending={false}
               terminalWidth={terminalWidth}
               mainAreaWidth={contentWidth}
-              thinkingFullText={thinkingFullTextByItem.get(item)}
+              thoughtHeadId={thoughtHeadIdByItem.get(item)}
+              fullDetail={fullDetail}
             />
           )),
         ]}
@@ -255,6 +262,7 @@ export const AgentChatContent = ({
           isPending={true}
           terminalWidth={terminalWidth}
           mainAreaWidth={contentWidth}
+          fullDetail={fullDetail}
           availableTerminalHeight={
             constrainHeight ? availableTerminalHeight : undefined
           }
@@ -267,7 +275,7 @@ export const AgentChatContent = ({
       {/* Spinner */}
       {isRunning && (
         <Box marginX={2} marginTop={1}>
-          <GeminiRespondingSpinner />
+          <RespondingSpinner />
         </Box>
       )}
     </Box>

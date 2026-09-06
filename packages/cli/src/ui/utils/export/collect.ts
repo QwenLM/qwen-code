@@ -9,7 +9,7 @@ import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
-import { HistoryReplayer } from '../../../acp-integration/session/HistoryReplayer.js';
+import { HistoryReplayer } from '../../../acp-integration/session/history-replayer.js';
 import { getExplicitToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
   ExportConfig,
@@ -341,7 +341,7 @@ function createExportSessionConfig(config: ExportConfig): Config {
 /**
  * Extract session metadata from ChatRecords.
  */
-async function extractMetadata(
+export async function collectSessionMetadata(
   conversation: {
     sessionId: string;
     startTime: string;
@@ -359,7 +359,9 @@ async function extractMetadata(
   // Get git repository name
   let gitRepo: string | undefined;
   if (cwd) {
-    const { getGitRepoName } = await import('@qwen-code/qwen-code-core');
+    const { getGitRepoName } = await import(
+      '../../../utils/deferred-core-runtime.js'
+    );
     gitRepo = getGitRepoName(cwd);
   }
 
@@ -698,7 +700,7 @@ export async function collectSessionData(
   const messages = exportContext.getMessages();
 
   // Extract metadata from conversation
-  const metadata = await extractMetadata(conversation, config);
+  const metadata = await collectSessionMetadata(conversation, config);
 
   return {
     sessionId: conversation.sessionId,

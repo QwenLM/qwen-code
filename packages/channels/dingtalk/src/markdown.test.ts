@@ -1,58 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
-  convertTables,
   splitChunks,
   extractTitle,
   normalizeDingTalkMarkdown,
 } from './markdown.js';
 
 describe('DingTalk markdown utilities', () => {
-  describe('convertTables', () => {
-    it('converts markdown tables to readable text', () => {
-      const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
-
-      expect(convertTables(input)).toBe('A | B  \n1 | 2');
-    });
-
-    it('passes through non-table pipe text', () => {
-      expect(convertTables('Use foo | bar in text')).toBe(
-        'Use foo | bar in text',
-      );
-    });
-
-    it('preserves text around converted tables', () => {
-      const input = [
-        'before',
-        '| A | B |',
-        '| --- | --- |',
-        '| 1 | 2 |',
-        'after',
-      ].join('\n');
-
-      expect(convertTables(input)).toBe('before\nA | B  \n1 | 2\nafter');
-    });
-
-    it('supports alignment colons in table separators', () => {
-      const input = ['| Left | Right |', '| :--- | ---: |', '| 1 | 2 |'].join(
-        '\n',
-      );
-
-      expect(convertTables(input)).toBe('Left | Right  \n1 | 2');
-    });
-
-    it('does not convert tables inside code fences', () => {
-      const input = [
-        '```',
-        '| A | B |',
-        '| --- | --- |',
-        '| 1 | 2 |',
-        '```',
-      ].join('\n');
-
-      expect(convertTables(input)).toBe(input);
-    });
-  });
-
   describe('splitChunks', () => {
     it('returns single chunk for short text', () => {
       expect(splitChunks('short text')).toEqual(['short text']);
@@ -61,6 +14,15 @@ describe('DingTalk markdown utilities', () => {
     it('returns single chunk for empty text', () => {
       expect(splitChunks('')).toEqual(['']);
     });
+
+    it.each([1, 4, 7])(
+      'rejects code-fence limit %i when it cannot make progress',
+      (chunkLimit) => {
+        expect(() => splitChunks('```\nabc\n```', chunkLimit)).toThrow(
+          RangeError,
+        );
+      },
+    );
 
     it('splits long text into chunks', () => {
       const line = 'a'.repeat(100) + '\n';
@@ -79,6 +41,20 @@ describe('DingTalk markdown utilities', () => {
       expect(chunks.join('')).toBe(text);
       chunks.forEach((chunk) => {
         expect(chunk.length).toBeLessThanOrEqual(3800);
+      });
+    });
+
+    it('does not split surrogate pairs at an odd chunk boundary', () => {
+      const text = '😀'.repeat(2500);
+      const chunks = splitChunks(text, 3799);
+
+      expect(chunks.join('')).toBe(text);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(3799);
+        const last = chunk.charCodeAt(chunk.length - 1);
+        const first = chunk.charCodeAt(0);
+        expect(last < 0xd800 || last > 0xdbff).toBe(true);
+        expect(first < 0xdc00 || first > 0xdfff).toBe(true);
       });
     });
 
@@ -211,10 +187,10 @@ describe('DingTalk markdown utilities', () => {
   });
 
   describe('normalizeDingTalkMarkdown', () => {
-    it('converts markdown tables to readable text while splitting into chunks', () => {
+    it('preserves markdown tables while splitting into chunks', () => {
       const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
       const result = normalizeDingTalkMarkdown(input);
-      expect(result).toEqual(['A | B  \n1 | 2']);
+      expect(result).toEqual([input]);
     });
 
     it('passes through plain text', () => {

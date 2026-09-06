@@ -6,8 +6,13 @@
 
 import type { GenerateContentParameters } from '@google/genai';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import { getErrorStatus, getErrorType } from '../../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorStatus,
+  getErrorType,
+} from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import { getTransportCode } from '../../utils/retryErrorClassification.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import type { ErrorHandler, RequestContext } from './types.js';
 
@@ -57,9 +62,22 @@ export class EnhancedErrorHandler implements ErrorHandler {
 
     // Provide helpful timeout-specific error message
     if (isTimeoutError) {
-      throw new Error(
+      const timeoutError = new Error(
         `${errorMessage}\n\n${this.getTimeoutTroubleshootingTips()}`,
+        { cause: redactedError },
       );
+      const status = getErrorStatus(redactedError);
+      // The OpenAI SDK throws APIConnectionTimeoutError bare — no code,
+      // status, or cause — so the preserved cause alone cannot open the
+      // transport retry gate. Stamp the wrapper with a timeout marker when
+      // nothing more specific survives.
+      const transportCode = getTransportCode(redactedError);
+      throw Object.assign(timeoutError, {
+        ...(status !== undefined ? { status } : {}),
+        ...(status === undefined && transportCode === undefined
+          ? { code: 'ETIMEDOUT' }
+          : {}),
+      });
     }
 
     throw redactedError;
@@ -112,7 +130,7 @@ export class EnhancedErrorHandler implements ErrorHandler {
       return `Request timeout after ${durationSeconds}s. Try reducing input length or increasing timeout in config.`;
     }
 
-    return error instanceof Error ? error.message : String(error);
+    return error instanceof Error ? getErrorMessage(error) : String(error);
   }
 
   private buildDiagnostics(

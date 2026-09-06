@@ -1,0 +1,335 @@
+// @vitest-environment jsdom
+import { act, createContext, type ReactNode } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type { Message } from '../adapters/types';
+import { getTranslator } from '../i18n';
+
+interface Observation {
+  props: Record<string, unknown> & { messages: Message[] };
+  theme: string;
+  language: string;
+  renderMode: string;
+  documentExpanded: boolean;
+  compactMode: boolean;
+  customization: Record<string, unknown>;
+}
+
+const observed = vi.hoisted(() => ({
+  values: [] as Observation[],
+  shouldThrow: false,
+}));
+
+vi.mock('../WebShellContexts', () => {
+  const TodoTimelineContext = createContext(new Map());
+  const TodoDetailContext = createContext(new Map());
+  return {
+    CompactModeContext: createContext(false),
+    TodoDetailContext,
+    TodoTimelineContext,
+    TodoContextsProvider: ({
+      timeline,
+      details,
+      children,
+    }: {
+      timeline?: Map<string, unknown>;
+      details?: Map<string, unknown>;
+      children?: ReactNode;
+    }) => (
+      <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+        <TodoDetailContext.Provider value={details ?? new Map()}>
+          {children}
+        </TodoDetailContext.Provider>
+      </TodoTimelineContext.Provider>
+    ),
+  };
+});
+
+vi.mock('./MessageList', async () => {
+  const React = await import('react');
+  const { CompactModeContext } = await import('../WebShellContexts');
+  const { useWebShellCustomization } = await import('../customization');
+  const { useI18n } = await import('../i18n');
+  const { useTheme } = await import('../themeContext');
+  const { useTranscriptRenderMode } = await import('../transcriptRenderMode');
+  const { useTranscriptDocumentExpanded } = await import(
+    '../transcriptRenderMode'
+  );
+  return {
+    MessageList: (props: Record<string, unknown> & { messages: Message[] }) => {
+      if (observed.shouldThrow) throw new Error('message-list boom');
+      const customization = useWebShellCustomization();
+      observed.values.push({
+        props,
+        theme: useTheme(),
+        language: useI18n().language,
+        renderMode: useTranscriptRenderMode(),
+        documentExpanded: useTranscriptDocumentExpanded(),
+        compactMode: React.useContext(CompactModeContext),
+        customization: customization as Record<string, unknown>,
+      });
+      return React.createElement('div', { 'data-testid': 'message-list' });
+    },
+  };
+});
+
+const { WebShellTranscript } = await import('./WebShellTranscript');
+
+const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+function block(
+  value: Omit<
+    DaemonTranscriptBlock,
+    'clientReceivedAt' | 'createdAt' | 'updatedAt'
+  >,
+): DaemonTranscriptBlock {
+  return {
+    ...value,
+    clientReceivedAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  } as DaemonTranscriptBlock;
+}
+
+function mount(node: ReactNode): {
+  container: HTMLElement;
+  root: Root;
+  render: (next: ReactNode) => void;
+} {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => root.render(node));
+  mounted.push({ root, container });
+  return {
+    container,
+    root,
+    render(next) {
+      act(() => root.render(next));
+    },
+  };
+}
+
+function latestObservation(): Observation {
+  const value = observed.values.at(-1);
+  if (!value) throw new Error('MessageList was not rendered');
+  return value;
+}
+
+afterEach(() => {
+  for (const { root, container } of mounted.splice(0)) {
+    act(() => root.unmount());
+    container.remove();
+  }
+  observed.values.length = 0;
+  observed.shouldThrow = false;
+  vi.restoreAllMocks();
+});
+
+describe('WebShellTranscript contract', () => {
+  it('converts blocks and fixes MessageList at the readonly boundary', () => {
+    const blocks = [
+      block({ id: 'user', kind: 'user', text: 'hello' }),
+      block({ id: 'cancelled', kind: 'prompt_cancelled' }),
+    ];
+    mount(
+      <WebShellTranscript
+        blocks={blocks}
+        language="zh-CN"
+        workspaceCwd="/workspace"
+        virtualScrollThreshold={25}
+      />,
+    );
+
+    const { props } = latestObservation();
+    expect(props.messages).toMatchObject([
+      { id: 'user', role: 'user', content: 'hello' },
+      {
+        id: 'cancelled',
+        role: 'system',
+        content: getTranslator('zh-CN')('request.cancelled'),
+      },
+    ]);
+    expect(props).toMatchObject({
+      pendingApproval: null,
+      isResponding: false,
+      workspaceCwd: '/workspace',
+      virtualScrollThreshold: 25,
+    });
+    for (const callback of [
+      'onShowContextDetail',
+      'onRetryClick',
+      'onBranchSession',
+      'onReviewChanges',
+      'onOpenArtifact',
+      'onOpenScheduledTask',
+      'onTurnOutputOpen',
+    ]) {
+      expect(props).not.toHaveProperty(callback);
+    }
+  });
+
+  it('provides visual customization without enabling interactive mode', () => {
+    const renderToolHeaderExtra = vi.fn();
+    const renderAssistantTurnFooter = vi.fn();
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        theme="light"
+        language="zh"
+        chatMaxWidth={720}
+        compactThinking
+        collapseCompletedTurns={false}
+        markdownTableMode="advanced"
+        composerTagIcons={{ file: '/file.svg' }}
+        renderToolHeaderExtra={renderToolHeaderExtra}
+        renderAssistantTurnFooter={renderAssistantTurnFooter}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation).toMatchObject({
+      theme: 'light',
+      language: 'zh-CN',
+      renderMode: 'readonly',
+      compactMode: false,
+    });
+    expect(observation.customization).toMatchObject({
+      compactThinking: true,
+      collapseCompletedTurns: false,
+      markdownTableMode: 'advanced',
+      composerTagIcons: { file: '/file.svg' },
+      renderToolHeaderExtra,
+      renderAssistantTurnFooter,
+    });
+    const root = document.querySelector<HTMLElement>('[data-web-shell-root]');
+    expect(root?.classList.contains('dark')).toBe(false);
+    expect(root?.lang).toBe('zh-CN');
+    expect(root?.style.getPropertyValue('--chat-content-width')).toBe('720px');
+  });
+
+  it('uses the non-virtualized, expanded document boundary', () => {
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        renderMode="document"
+        collapseCompletedTurns
+        markdownTableMode="advanced"
+        virtualScrollThreshold={1}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation.renderMode).toBe('document');
+    expect(observation.documentExpanded).toBe(true);
+    expect(observation.props.virtualScrollThreshold).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(observation.props.hideSessionTimeline).toBe(true);
+    expect(observation.customization.collapseCompletedTurns).toBe(false);
+    expect(observation.customization.markdownTableMode).toBe('basic');
+    expect(
+      document
+        .querySelector('[data-web-shell-root]')
+        ?.getAttribute('data-transcript-render-mode'),
+    ).toBe('document');
+  });
+
+  it('projects the document-wide expansion state without changing render mode', () => {
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        renderMode="document"
+        documentExpanded={false}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation.renderMode).toBe('document');
+    expect(observation.documentExpanded).toBe(false);
+    expect(
+      document
+        .querySelector('[data-web-shell-root]')
+        ?.getAttribute('data-document-expanded'),
+    ).toBe('false');
+  });
+
+  it('uses safe tool projections only in document mode', () => {
+    const blocks: DaemonTranscriptBlock[] = [
+      {
+        id: 'write-block',
+        kind: 'tool',
+        toolCallId: 'write-call',
+        toolName: 'write_file',
+        title: 'Write file',
+        status: 'completed',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: 'RAW_CONTENT\n',
+        },
+        rawOutput: { audit: 'RAW_RESULT' },
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const view = mount(<WebShellTranscript blocks={blocks} />);
+
+    const readonlyMessage = latestObservation().props.messages[0];
+    const readonlyTool =
+      readonlyMessage?.role === 'tool_group'
+        ? readonlyMessage.tools[0]
+        : undefined;
+    expect(readonlyTool?.args).toEqual({
+      file_path: 'src/generated.ts',
+      content: 'RAW_CONTENT\n',
+    });
+    expect(readonlyTool?.rawOutput).toEqual({ audit: 'RAW_RESULT' });
+
+    view.render(<WebShellTranscript blocks={blocks} renderMode="document" />);
+    const documentMessage = latestObservation().props.messages[0];
+    const documentTool =
+      documentMessage?.role === 'tool_group'
+        ? documentMessage.tools[0]
+        : undefined;
+    expect(documentTool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_CONTENT\n',
+    });
+    expect(documentTool?.rawOutput).toBe('SAFE_RESULT');
+  });
+
+  it('reconverts on language or block changes and supports an empty list', () => {
+    const blocks = [block({ id: 'cancelled', kind: 'prompt_cancelled' })];
+    const view = mount(<WebShellTranscript blocks={blocks} language="en" />);
+    expect(latestObservation().props.messages[0]).toMatchObject({
+      content: getTranslator('en')('request.cancelled'),
+    });
+
+    view.render(<WebShellTranscript blocks={blocks} language="zh-CN" />);
+    expect(latestObservation().props.messages[0]).toMatchObject({
+      content: getTranslator('zh-CN')('request.cancelled'),
+    });
+
+    view.render(<WebShellTranscript blocks={[]} language="zh-CN" />);
+    expect(latestObservation().props.messages).toEqual([]);
+  });
+
+  it('contains failures from the message tree in the public root boundary', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    observed.shouldThrow = true;
+    const { container } = mount(
+      <WebShellTranscript blocks={[]} language="zh-CN" />,
+    );
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      '出了点问题',
+    );
+  });
+});

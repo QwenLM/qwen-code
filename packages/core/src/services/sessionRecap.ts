@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getStartupContextLength,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 
 const debugLogger = createDebugLogger('SESSION_RECAP');
@@ -44,13 +48,13 @@ export async function generateSessionRecap(
   abortSignal: AbortSignal,
 ): Promise<string | null> {
   try {
-    const geminiClient = config.getGeminiClient();
-    if (!geminiClient) {
-      debugLogger.debug('recap skipped: no geminiClient available');
+    const llmClient = config.getLlmClient();
+    if (!llmClient) {
+      debugLogger.debug('recap skipped: no llmClient available');
       return null;
     }
 
-    const fullHistory = geminiClient.getHistoryShallow();
+    const fullHistory = llmClient.getHistoryShallow();
     if (fullHistory.length < 2) {
       debugLogger.debug(
         `recap skipped: history too short (${fullHistory.length} messages)`,
@@ -142,15 +146,22 @@ function extractRecap(raw: string): string {
  */
 function filterToDialog(history: Content[]): Content[] {
   const out: Content[] = [];
-  for (const msg of history) {
+  for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
-    const textParts = (msg.parts ?? []).filter(
-      (part) =>
-        typeof part?.text === 'string' &&
-        part.text.trim() !== '' &&
-        !part.thought &&
-        !part.thoughtSignature,
-    );
+    const textParts: Part[] = [];
+    for (const part of msg.parts ?? []) {
+      if (
+        typeof part?.text !== 'string' ||
+        part.text.trim() === '' ||
+        part.thought ||
+        part.thoughtSignature
+      ) {
+        continue;
+      }
+      const text = stripSystemReminderBlocks(part.text);
+      if (text.trim() === '') continue;
+      textParts.push({ ...part, text });
+    }
     if (textParts.length === 0) continue;
     out.push({ role: msg.role, parts: textParts });
   }

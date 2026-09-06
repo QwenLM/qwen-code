@@ -157,4 +157,50 @@ describe('contextLengthError', () => {
     expect(info.isExceeded).toBe(true);
     expect(info.message).toContain('context_length_exceeded');
   });
+
+  // A timeout phrase vetoes the fragment it appears in, not the whole error.
+  // Provider SDKs routinely attach retry/attempt metadata to an error, so a
+  // sibling field mentioning an earlier timeout must not hide a real overflow.
+  describe('timeout veto scope', () => {
+    const OVERFLOW =
+      "This model's maximum context length is 128000 tokens, however you requested 200000 tokens";
+
+    it('still detects overflow when a sibling field mentions a timeout', () => {
+      const error = Object.assign(new Error(OVERFLOW), {
+        detail: 'previous attempt: request timed out after 60s',
+      });
+
+      const info = getContextLengthExceededInfo(error);
+
+      expect(info.isExceeded).toBe(true);
+      // The token counts must survive too: they are parsed only when the
+      // error is classified as an overflow, so a veto silently lost them.
+      expect(info.actualTokens).toBe(200000);
+      expect(info.limitTokens).toBe(128000);
+    });
+
+    it('still detects overflow when retry metadata is nested deeper', () => {
+      const error = Object.assign(new Error(OVERFLOW), {
+        meta: {
+          attempts: [
+            { note: 'connection timed out while waiting for response' },
+          ],
+        },
+      });
+
+      expect(isContextLengthExceededError(error)).toBe(true);
+    });
+
+    it('does not treat a fragment that is itself a timeout as overflow', () => {
+      // The guard against over-correcting: dropping the veto entirely would
+      // also satisfy the two tests above. Here the timeout phrase and the
+      // context-length phrase are in the SAME fragment, so the veto applies
+      // and the error stays classified as a timeout.
+      expect(
+        isContextLengthExceededError(
+          new Error('request timed out while checking maximum context length'),
+        ),
+      ).toBe(false);
+    });
+  });
 });

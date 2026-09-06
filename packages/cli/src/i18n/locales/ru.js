@@ -25,6 +25,8 @@ export default {
   'Shell mode': 'Режим терминала',
   'YOLO mode': 'Режим YOLO',
   'Auto mode': 'Автоматический режим',
+  'auto_mode.entry_notice':
+    'Автоматический режим включен.\n   LLM-классификатор оценивает каждый вызов инструмента — безопасные действия утверждаются автоматически,\n   рискованные блокируются. Выход: Shift+Tab или /approval-mode default.',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
@@ -60,6 +62,7 @@ export default {
     'Подключение к MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
   '? for shortcuts': '? — горячие клавиши',
+  'Pasting…': 'Вставка…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -86,7 +89,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to toggle compact mode': 'переключить компактный режим',
+  'to expand details': 'развернуть детали',
 
   // ============================================================================
   // Поля системной информации
@@ -251,6 +254,39 @@ export default {
   'Delete {{name}}': 'Удалить {{name}}',
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
+  Transcript: 'Транскрипт',
+  'Read {{count}} file': 'Прочитано файлов: {{count}}',
+  'Read {{count}} files': 'Прочитано файлов: {{count}}',
+  'Reading {{count}} file': 'Чтение файлов: {{count}}',
+  'Reading {{count}} files': 'Чтение файлов: {{count}}',
+  'Edited {{count}} file': 'Изменено файлов: {{count}}',
+  'Edited {{count}} files': 'Изменено файлов: {{count}}',
+  'Editing {{count}} file': 'Изменение файлов: {{count}}',
+  'Editing {{count}} files': 'Изменение файлов: {{count}}',
+  'Wrote {{count}} file': 'Записано файлов: {{count}}',
+  'Wrote {{count}} files': 'Записано файлов: {{count}}',
+  'Writing {{count}} file': 'Запись файлов: {{count}}',
+  'Writing {{count}} files': 'Запись файлов: {{count}}',
+  'Searched {{count}} pattern': 'Найдено шаблонов: {{count}}',
+  'Searched {{count}} patterns': 'Найдено шаблонов: {{count}}',
+  'Searching {{count}} pattern': 'Поиск шаблонов: {{count}}',
+  'Searching {{count}} patterns': 'Поиск шаблонов: {{count}}',
+  'Listed {{count}} directory': 'Показано каталогов: {{count}}',
+  'Listed {{count}} directories': 'Показано каталогов: {{count}}',
+  'Listing {{count}} directory': 'Просмотр каталогов: {{count}}',
+  'Listing {{count}} directories': 'Просмотр каталогов: {{count}}',
+  'Ran {{count}} command': 'Выполнено команд: {{count}}',
+  'Ran {{count}} commands': 'Выполнено команд: {{count}}',
+  'Running {{count}} command': 'Выполнение команд: {{count}}',
+  'Running {{count}} commands': 'Выполнение команд: {{count}}',
+  'Ran {{count}} agent': 'Запущено агентов: {{count}}',
+  'Ran {{count}} agents': 'Запущено агентов: {{count}}',
+  'Running {{count}} agent': 'Запуск агентов: {{count}}',
+  'Running {{count}} agents': 'Запуск агентов: {{count}}',
+  'Used {{count}} tool': 'Использовано инструментов: {{count}}',
+  'Used {{count}} tools': 'Использовано инструментов: {{count}}',
+  'Using {{count}} tool': 'Использование инструментов: {{count}}',
+  'Using {{count}} tools': 'Использование инструментов: {{count}}',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter для выбора, ↑↓ для навигации, Esc для закрытия',
   'Esc to go back': 'Esc для возврата',
@@ -393,6 +429,7 @@ export default {
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
+  'Show Tool Call Arguments': 'Показывать аргументы вызовов инструментов',
   'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
@@ -427,8 +464,10 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Tool Schema Compliance': 'Соответствие Tool Schema',
+  Unset: 'Не задано',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
+  'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
   'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
   Auto: 'Авто',
   Text: 'Текст',
@@ -566,7 +605,7 @@ export default {
     'Пожалуйста, укажите имя удаляемого расширения как позиционный аргумент.',
   'Enables an extension.': 'Включает расширение.',
   'The name of the extension to enable.': 'Имя включаемого расширения.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'Область для включения расширения. Если не задана, будет включено во всех областях.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Расширение "{{name}}" успешно включено для области "{{scope}}".',
@@ -576,7 +615,7 @@ export default {
     'Недопустимая область: {{scope}}. Пожалуйста, используйте одну из {{scopes}}.',
   'Disables an extension.': 'Отключает расширение.',
   'The name of the extension to disable.': 'Имя отключаемого расширения.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'Область для отключения расширения.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Расширение "{{name}}" успешно отключено для области "{{scope}}".',
@@ -772,8 +811,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with original user prompt text.':
-    'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
@@ -968,6 +1007,14 @@ export default {
     'Генерация сводки уже выполняется, дождитесь завершения предыдущего запроса',
   'No conversation found to summarize.':
     'Не найдено диалогов для создания сводки.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Путь сводки уже существует и не является сгенерированной сводкой: {{path}}',
+  'Summary path must be within the project root.':
+    'Путь сводки должен находиться в корне проекта.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Путь сводки указывает на существующий каталог: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Путь сводки заканчивается разделителем, но является существующим файлом: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Не удалось сгенерировать сводку контекста проекта: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1020,6 +1067,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1354,6 +1407,11 @@ export default {
   reviewed: 'проверено',
   'Code Changes:': 'Изменения кода:',
   Performance: 'Производительность',
+  'Generation Metrics': 'Метрики генерации',
+  'Latest Request': 'Последний запрос',
+  'Generation Time': 'Время генерации',
+  'Average TTFT': 'Среднее TTFT',
+  'Session TPS': 'TPS сеанса',
   'Wall Time:': 'Общее время:',
   'Agent Active:': 'Активность агента:',
   'API Time:': 'Время API:',
@@ -1429,8 +1487,18 @@ export default {
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
+  Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен. Вызов агента, ожидающий одобрения инструмента, удерживает запуск в этом состоянии и продолжает учитываться в лимите активного времени, пока одобрение не будет обработано.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить. /clear, /branch и переключение сессий отменяют приостановленные запуски.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Приостановка/возобновление отклонены; состояние рабочего процесса изменилось. Повторите попытку.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Подсказка: используйте `/workflows p <runId>` или «Фоновые задачи» + p для кооперативной приостановки/возобновления; используйте `/workflows <runId>` для подробностей.',
   Completed: 'Завершено',
   Failed: 'Ошибка',
   Stopped: 'Остановлено',
@@ -1659,8 +1727,6 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1871,10 +1937,6 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Нажмите Ctrl+O для показа полного вывода инструментов',
   'Switch to plan mode or exit plan mode':
     'Переключиться в режим плана или выйти из режима плана',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -1935,6 +1997,18 @@ export default {
   'not updatable': 'обновление недоступно',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Получить второе мнение о текущем разговоре от модели-рецензента',
+  'Consulting advisor...': 'Консультация с советником...',
+  'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
+  'No conversation context available for /advisor':
+    'Нет контекста разговора, доступного для /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Фокус слишком длинный (макс. {{max}} символов)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Выполняется другая операция, дождитесь её завершения перед запуском /advisor',
+  'No response received.': 'Ответ не получен.',
+  'No model configured.': 'Модель не настроена.',
   'Manage Arena sessions': 'Управлять сессиями Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',
@@ -2079,4 +2153,164 @@ export default {
   in: 'вх.',
   out: 'вых.',
   'In/Out': 'Вх/Вых',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Проверить обновления Qwen Code и установить при наличии',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Доступно обновление Qwen Code! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Не удалось проверить обновления ({{reason}}). Проверьте сеть или настройки registry.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Проверка обновлений пропущена ({{reason}}) — выполните /update для повторной попытки.',
+  'registry did not respond within {{seconds}}s':
+    'registry не ответил за {{seconds}} с',
+  'registry unreachable': 'registry недоступен',
+  'registry error': 'ошибка registry',
+  'Unable to check for updates: {{reason}}':
+    'Невозможно проверить обновления: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Обновление успешно! Новая версия будет использована при следующем запуске.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
+  'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
+  'Downloading update...': 'Загрузка обновления...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Обновление успешно! Перезапустите Qwen Code, чтобы использовать новую версию. Переключение поставщиков моделей до перезапуска может работать некорректно.',
+  'Automatic update failed. Please try updating manually.':
+    'Автоматическое обновление не удалось. Попробуйте обновить вручную.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Автоматическое обновление не удалось: {{error}}. Повторно запустите установщик, чтобы обновить вручную.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Запущено из локального клона Git. Обновите с помощью "git pull".',
+  'Running via npx, update not applicable.':
+    'Запущено через npx, обновление неприменимо.',
+  'Running via pnpx, update not applicable.':
+    'Запущено через pnpx, обновление неприменимо.',
+  'Running via bunx, update not applicable.':
+    'Запущено через bunx, обновление неприменимо.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Установлено через Homebrew. Обновите с помощью "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Установлено локально. Обновите через package.json вашего проекта.',
+  'Update requires sudo. Please run:':
+    'Для обновления требуется sudo. Выполните:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Обнаружена автономная установка. Выполняется попытка автоматического обновления...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Обнаружена автономная установка. Повторно запустите автономный установщик для обновления:',
+  'Run the following to update:': 'Выполните следующую команду для обновления:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Требуется ручное обновление. Переустановите Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'В этом сеансе используется пользовательский образ песочницы {{image}}. Обновите образ и перезапустите Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Обновите Qwen Code на хосте, затем перезапустите песочницу.',
+  'The update will be installed after you exit this session.':
+    'Обновление будет установлено после выхода из этого сеанса.',
+  'Run /update to install the update on the host.':
+    'Запустите /update, чтобы установить обновление на хосте.',
+  'Run /update to install the update.':
+    'Запустите /update, чтобы установить обновление.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Управление автоматическими навыками проекта с учетом недавнего использования.',
+  'Show project auto-skill lifecycle status.':
+    'Показать состояние жизненного цикла автоматических навыков проекта.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Запустить обслуживание жизненного цикла автоматических навыков проекта.',
+  'Restore an archived project auto-skill.':
+    'Восстановить архивированный автоматический навык проекта.',
+  'Auto-skill curator': 'Куратор автоматических навыков',
+  'Last run: {{time}}': 'Последний запуск: {{time}}',
+  'Active: {{count}}': 'Активные: {{count}}',
+  'Stale: {{count}}': 'Устаревшие: {{count}}',
+  'Archived: {{count}}': 'Архивированные: {{count}}',
+  'Stale skills:': 'Устаревшие навыки:',
+  'Pinned skills:': 'Закрепленные навыки:',
+  'Archived skills:': 'Архивированные навыки:',
+  'Dry run complete.': 'Пробный запуск завершен.',
+  'Curator run complete.': 'Запуск куратора завершен.',
+  'Checked: {{count}}': 'Проверено: {{count}}',
+  'First observed: {{count}}': 'Обнаружено впервые: {{count}}',
+  'Marked stale: {{count}}': 'Отмечено как устаревшие: {{count}}',
+  'Reactivated: {{count}}': 'Повторно активировано: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Пропущено конфликтов архивирования: {{count}}',
+  'Archive candidates:': 'Кандидаты на архивирование:',
+  'Skipped archive collisions:': 'Пропущенные конфликты архивирования:',
+  'Skipped rename errors: {{count}}':
+    'Пропущено ошибок переименования: {{count}}',
+  'Skipped rename errors:': 'Пропущенные ошибки переименования:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Будет архивировано',
+  Archived: 'Архивировано',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Не удалось прочитать состояние куратора автоматических навыков: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Использование: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Не удалось запустить куратор автоматических навыков: {{message}}',
+  'Usage: /curator restore <directory>':
+    'Использование: /curator restore <каталог>',
+  'Restored auto-skill: {{name}}':
+    'Автоматический навык восстановлен: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Не удалось восстановить автоматический навык: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Исключить автоматический навык из автоматического обслуживания.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Вернуть закрепленный автоматический навык в автоматическое обслуживание.',
+  'Usage: /curator pin <directory>': 'Использование: /curator pin <каталог>',
+  'Usage: /curator unpin <directory>':
+    'Использование: /curator unpin <каталог>',
+  'Pinned auto-skill: {{name}}': 'Автоматический навык закреплен: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Автоматический навык откреплен: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Не удалось изменить закрепление автоматического навыка: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Изменения куратора автоматических навыков отключены в безопасном режиме.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Kept model as {{model}}': 'Оставлена модель {{model}}',
 };

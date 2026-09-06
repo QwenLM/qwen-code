@@ -7,7 +7,7 @@
 import {
   CompressionStatus,
   type ChatCompressionInfo,
-  type GeminiClient,
+  type LlmClient,
 } from '@qwen-code/qwen-code-core';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { compressFastCommand } from './compressFastCommand.js';
@@ -23,10 +23,10 @@ describe('compressFastCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -65,6 +65,79 @@ describe('compressFastCommand', () => {
     expect(mockTryCompressChatFast).toHaveBeenCalledWith();
   });
 
+  it('should reject trailing text in ACP mode', async () => {
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/compress-fast continue investigating',
+        name: 'compress-fast',
+        args: 'continue investigating',
+      },
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as LlmClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'The /compress-fast command does not accept arguments.',
+    });
+    expect(mockTryCompressChatFast).not.toHaveBeenCalled();
+  });
+
+  it('should accept whitespace-only arguments in ACP mode', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/compress-fast   ',
+        name: 'compress-fast',
+        args: '   ',
+      },
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as LlmClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+    expect(result?.type).toBe('stream_messages');
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+
+    expect(messages).toEqual([
+      {
+        messageType: 'info',
+        content: 'Compressing context (fast)...',
+      },
+      {
+        messageType: 'info',
+        content: 'Context compressed (200 -> 100).',
+      },
+    ]);
+    expect(mockTryCompressChatFast).toHaveBeenCalledWith();
+  });
+
   it('should display compression result on success (interactive)', async () => {
     mockTryCompressChatFast.mockResolvedValue({
       originalTokenCount: 200,
@@ -82,6 +155,7 @@ describe('compressFastCommand', () => {
           originalTokenCount: 200,
           newTokenCount: 100,
           compressionStatus: CompressionStatus.COMPRESSED,
+          compressionKind: 'fast',
         },
       },
       expect.any(Number),
@@ -105,6 +179,67 @@ describe('compressFastCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  // Issue #9309: the fast-compression banner mixes an API-reported baseline
+  // with a locally adjusted count, so the UI item must carry per-side
+  // provenance for the renderer to mark estimated numbers.
+  it('should pass token-count provenance to the compression item (interactive)', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    await compressFastCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          compressionKind: 'fast',
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        },
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should mark estimated counts in the non-interactive message', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as LlmClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Context compressed (200 -> ~100).',
+    });
   });
 
   it('should handle errors gracefully', async () => {
@@ -131,10 +266,10 @@ describe('compressFastCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -159,10 +294,10 @@ describe('compressFastCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });

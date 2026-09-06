@@ -34,10 +34,13 @@ export async function handleUninstall(args: UninstallArgs) {
         isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
     });
     await extensionManager.refreshCache();
-    await extensionManager.uninstallExtension(args.name, false);
+    const result = await extensionManager.uninstallExtension(args.name, false);
     writeStdoutLine(
       t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
     );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
     process.exit(1);

@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
+import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
+import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
+import { useScopedSessions } from '../../hooks/useScopedSessions';
 
 interface DeleteSessionDialogProps {
   onDeleted: (sessionIds: string[]) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
+  workspaceCwd?: string;
 }
 
 const LIST_ID = 'delete-session-list';
@@ -19,6 +22,7 @@ export function DeleteSessionDialog({
   onDeleted,
   onError,
   onClose,
+  workspaceCwd,
 }: DeleteSessionDialogProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -28,7 +32,10 @@ export function DeleteSessionDialog({
     error: sessionsError,
     deleteSession,
     deleteSessions,
-  } = useSessions({ autoLoad: true });
+  } = useScopedSessions(workspaceCwd, {
+    autoLoad: true,
+    maxAgeMs: 1_000,
+  });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
   // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
@@ -55,7 +62,8 @@ export function DeleteSessionDialog({
             const q = filterQuery.toLowerCase();
             return (
               (s.displayName || '').toLowerCase().includes(q) ||
-              s.sessionId.toLowerCase().includes(q)
+              s.sessionId.toLowerCase().includes(q) ||
+              sessionMatchesGitQuery(s, q)
             );
           })
         : sessions,

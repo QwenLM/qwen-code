@@ -5,36 +5,48 @@ type ComposerConnectionStatus =
   | 'disconnected'
   | 'error';
 
+export type ComposerPlaceholderState = 'idle' | 'processing';
+
 export function shouldDisableComposerInput({
-  catchingUp,
   pendingApproval,
   isPreparingPrompt,
 }: {
-  catchingUp: boolean;
   pendingApproval: boolean;
   isPreparingPrompt: boolean;
 }): boolean {
-  return Boolean(catchingUp || pendingApproval || isPreparingPrompt);
+  return Boolean(pendingApproval || isPreparingPrompt);
 }
 
-export function getComposerPlaceholderKey({
-  catchingUp,
+export function getComposerPlaceholderState({
   isPreparingPrompt,
   isStreaming,
 }: {
-  catchingUp: boolean;
   isPreparingPrompt: boolean;
   isStreaming: boolean;
-}): 'common.loading' | 'editor.processing' | 'editor.placeholder' {
-  if (catchingUp) return 'common.loading';
-  if (isPreparingPrompt || isStreaming) return 'editor.processing';
-  return 'editor.placeholder';
+}): ComposerPlaceholderState {
+  if (isPreparingPrompt || isStreaming) return 'processing';
+  return 'idle';
+}
+
+export function getComposerPlaceholderKey(input: {
+  isPreparingPrompt: boolean;
+  isStreaming: boolean;
+}): 'editor.processing' | 'editor.placeholder' {
+  switch (getComposerPlaceholderState(input)) {
+    case 'processing':
+      return 'editor.processing';
+    case 'idle':
+      return 'editor.placeholder';
+  }
 }
 
 export function shouldBlockComposerSubmit({
   connectionStatus,
+  hasSession,
 }: {
   connectionStatus: ComposerConnectionStatus;
+  hasSession: boolean;
 }): boolean {
-  return connectionStatus === 'disconnected' || connectionStatus === 'error';
+  if (connectionStatus === 'error') return true;
+  return connectionStatus === 'disconnected' && !hasSession;
 }

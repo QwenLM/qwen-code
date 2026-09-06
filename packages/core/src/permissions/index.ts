@@ -12,8 +12,13 @@ export { extractShellOperations } from './shell-semantics.js';
 export type { ShellOperation } from './shell-semantics.js';
 export {
   applyAutoModeDecision,
+  decorateAutoModeFallbackConfirmation,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
+  getAutoModeActionFingerprint,
+  prepareAutoModeFallback,
   formatClassifierBlockMessage,
+  formatClassifierUnavailableFallbackMessage,
   type AutoModeUnavailableReason,
   getAutoModePermissionDeniedReason,
   type AutoModeDecision,

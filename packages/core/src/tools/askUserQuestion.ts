@@ -19,27 +19,12 @@ import {
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { CAP_ESCALATION_LABELS } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 import { InputFormat } from '../output/types.js';
+import { parseAnswerQuestionIndex } from '../permissions/trusted-user-answers.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
-
-function parseAnswerQuestionIndex(
-  key: string,
-  questionCount: number,
-): number | undefined {
-  const index = Number(key);
-  if (
-    !Number.isSafeInteger(index) ||
-    index < 0 ||
-    index >= questionCount ||
-    String(index) !== key
-  ) {
-    return undefined;
-  }
-  return index;
-}
 
 export interface QuestionOption {
   label: string;
@@ -173,20 +158,60 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * Whether a host is present that can put the questions in front of the
+   * user *and* answer them. ACP hosts (VSCode extension, Zed, stream-json
+   * clients) run in non-interactive mode but still collect answers through
+   * the confirmation channel.
+   *
+   * The modality half is `resolveInteractionMode()`. The responder half is
+   * what that helper cannot know: a stream-json session only has something
+   * to answer a confirmation round once the SDK control system is up. In
+   * stream-json *direct* mode the first stdin frame is a plain user message,
+   * so `Session.handleFirstMessage()` leaves the control system off, no
+   * `PermissionController` is built and `onToolCallsUpdate` is never wired
+   * (`nonInteractiveCli.ts`, gated on `options.controlService`). Claiming a
+   * host there parks the call in `awaiting_approval` forever: the scheduler's
+   * non-interactive auto-deny carries `getInputFormat() !== STREAM_JSON` as a
+   * required conjunct, so it does not fire either.
+   */
+  private canCollectAnswers(): boolean {
+    if (resolveInteractionMode(this._config) === 'headless') {
+      return false;
+    }
+    return (
+      this._config.isInteractive() ||
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() !== InputFormat.STREAM_JSON ||
+      this._config.getSdkMode()
+    );
+  }
+
+  /**
    * ask_user_question always requires user confirmation so the user can
    * provide answers. In non-interactive mode without ACP support, we skip
    * confirmation (and subsequently skip execution).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const isAcpMode =
-      this._config.getExperimentalZedIntegration() ||
-      this._config.getInputFormat() === InputFormat.STREAM_JSON;
-
-    if (!this._config.isInteractive() && !isAcpMode) {
+    if (!this.canCollectAnswers()) {
       // Non-interactive + no ACP: skip entirely
       return 'allow';
     }
     return 'ask';
+  }
+
+  /**
+   * The confirmation dialog IS this tool: the answers are collected through
+   * `onConfirm`, so an approval that skips the dialog does not "allow" the
+   * tool, it silently answers "declined" on the user's behalf. Permission
+   * rules and automatic approval modes must therefore never satisfy it —
+   * a bare `ask_user_question` allow rule (a skill's `allowedTools` grant,
+   * `permissions.allow`, an "always allow" answer) would otherwise override
+   * the 'ask' default at L4 and the scheduler would run the tool with no
+   * dialog ever shown. Headless runs stay as they were: nothing can prompt
+   * there, and `execute()` reports that instead.
+   */
+  override requiresUserInteraction(): boolean {
+    return this.canCollectAnswers();
   }
 
   override async getConfirmationDetails(
@@ -223,14 +248,8 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Check if we're in a mode that supports user interaction
-      // ACP mode (VSCode extension, etc.) uses non-interactive mode but can still collect user input
-      const isAcpMode =
-        this._config.getExperimentalZedIntegration() ||
-        this._config.getInputFormat() === InputFormat.STREAM_JSON;
-
       // In non-interactive mode without ACP support, we cannot collect user input
-      if (!this._config.isInteractive() && !isAcpMode) {
+      if (!this.canCollectAnswers()) {
         const errorMessage =
           'Cannot ask user questions in non-interactive mode without ACP support. Please run in interactive mode or enable ACP mode to use this tool.';
         return {
@@ -260,9 +279,6 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         })
         .join('\n');
 
-      // ── Plan gate metadata side effects ──────────────────────────
-      this.applyPlanGateMetadata();
-
       const messageBody =
         answersContent.length > 0
           ? answersContent
@@ -287,62 +303,6 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         llmContent: errorLlmContent,
         returnDisplay: `Error processing answers: ${errorMessage}`,
       };
-    }
-  }
-
-  /**
-   * Updates Plan Approval Gate state based on the metadata.source field
-   * and the user's answer. Only acts on recognized gate metadata sources.
-   */
-  private applyPlanGateMetadata(): void {
-    const source = this.params.metadata?.source;
-    if (!source) return;
-
-    const gateState = this._config.getPlanGateState();
-    if (!gateState) return;
-
-    if (source === 'plan_gate_cap') {
-      // Cap escalation: only honor when a cap escalation actually
-      // occurred (prevents model from fabricating this metadata).
-      if (!gateState.capEscalationPending) {
-        debugLogger.warn(
-          '[applyPlanGateMetadata] plan_gate_cap ignored: no cap escalation pending',
-        );
-        return;
-      }
-
-      // The first answer determines the next gate mode.
-      // Match against the canonical labels from CAP_ESCALATION_LABELS.
-      const firstAnswer = Object.values(this.userAnswers)[0] ?? '';
-
-      if (firstAnswer === CAP_ESCALATION_LABELS.CONTINUE) {
-        gateState.gateMode = 'uncapped';
-      } else if (firstAnswer === CAP_ESCALATION_LABELS.APPROVE) {
-        gateState.gateMode = 'user_override';
-      } else {
-        // Free-text / Other: user takes manual control
-        gateState.gateMode = 'user_takeover';
-      }
-      gateState.capEscalationPending = false;
-    } else if (source === 'plan_gate_needs_user') {
-      // Only honor when the gate actually returned needs_user
-      // (prevents model from fabricating this metadata).
-      if (!gateState.needsUserPending) {
-        debugLogger.warn(
-          '[applyPlanGateMetadata] plan_gate_needs_user ignored: no needs_user pending',
-        );
-        return;
-      }
-      // User answered a gate-suggested question. Only reset the
-      // review count when the gate actually asked for user input
-      // (gateMode must still be active, not already overridden).
-      if (
-        gateState.gateMode === 'capped' ||
-        gateState.gateMode === 'uncapped'
-      ) {
-        gateState.reviewCount = 0;
-      }
-      gateState.needsUserPending = false;
     }
   }
 }
@@ -399,9 +359,12 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         return `Question ${i + 1}: "header" must be a non-empty string.`;
       }
 
-      if (question.header.length > 12) {
-        return `Question ${i + 1}: "header" must be 12 characters or less.`;
-      }
+      // The schema advertises "max 12 chars" so the model keeps headers short
+      // enough for the chip/tab layout, but we deliberately do NOT hard-reject
+      // longer headers here: bouncing a slightly over-length label (e.g.
+      // "Target config", 13 chars) back to the model as a tool error is far
+      // worse UX than simply showing it. The TUI truncates over-length headers
+      // in the compact tab/chip contexts (see AskUserQuestionDialog).
 
       if (!Array.isArray(question.options)) {
         return `Question ${i + 1}: "options" must be an array.`;

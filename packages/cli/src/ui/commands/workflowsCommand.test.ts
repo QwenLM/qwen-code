@@ -8,7 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { workflowsCommand } from './workflowsCommand.js';
+import { workflowsCommand, snapshotToTask } from './workflowsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
@@ -25,15 +25,21 @@ function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     outputFile: '',
     outputOffset: 0,
     notified: false,
+    isBackgrounded: true,
     abortController: new AbortController(),
     currentPhase: null,
+    currentPhaseVisitId: null,
     phases: [],
+    phaseVisits: [],
+    dispatches: [],
     agentsDispatched: 0,
     agentsCompleted: 0,
     recentLogs: [],
+    events: [],
     tokensSpent: 0,
     tokenBudgetTotal: null,
     perPhaseTokens: new Map<string | null, number>(),
+    pendingApprovals: [],
     script: '',
     ...overrides,
   };
@@ -43,16 +49,22 @@ describe('workflowsCommand', () => {
   let context: CommandContext;
   let listMock: ReturnType<typeof vi.fn>;
   let getMock: ReturnType<typeof vi.fn>;
+  let pauseMock: ReturnType<typeof vi.fn>;
+  let resumeMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     listMock = vi.fn().mockReturnValue([] as WorkflowTask[]);
     getMock = vi.fn().mockReturnValue(undefined);
+    pauseMock = vi.fn().mockReturnValue(true);
+    resumeMock = vi.fn().mockReturnValue(true);
     context = createMockCommandContext({
       services: {
         config: {
           getWorkflowRunRegistry: () => ({
             list: listMock,
             get: getMock,
+            pause: pauseMock,
+            resume: resumeMock,
           }),
         },
       },
@@ -69,7 +81,7 @@ describe('workflowsCommand', () => {
     });
   });
 
-  it('lists active + recent buckets with running first', async () => {
+  it('lists active + recent buckets with active runs first', async () => {
     listMock.mockReturnValue([
       entry({
         runId: 'wf_done',
@@ -88,7 +100,7 @@ describe('workflowsCommand', () => {
     ]);
     const result = await workflowsCommand.action!(context, '');
     if (!result || result.type !== 'message') throw new Error('no result');
-    expect(result.content).toContain('Workflow runs (2 total · 1 running)');
+    expect(result.content).toContain('Workflow runs (2 total · 1 active)');
     const activeIdx = result.content.indexOf('Active');
     const recentIdx = result.content.indexOf('Recent');
     // Active section comes before Recent in the output.
@@ -99,6 +111,56 @@ describe('workflowsCommand', () => {
     expect(result.content).toContain('1/2 agents');
     expect(result.content).toContain('wf_done');
     expect(result.content).toContain('capitals');
+  });
+
+  it('treats pausing and paused workflows as active and explains cooperative controls', async () => {
+    listMock.mockReturnValue([
+      entry({ runId: 'wf_pausing', status: 'pausing', startTime: 2 }),
+      entry({ runId: 'wf_paused', status: 'paused', startTime: 1 }),
+      entry({
+        runId: 'wf_done',
+        status: 'completed',
+        startTime: 3,
+        endTime: 4,
+      }),
+    ]);
+
+    const result = await workflowsCommand.action!(context, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+
+    expect(result.content).toContain('Workflow runs (3 total · 2 active)');
+    expect(result.content.indexOf('wf_pausing')).toBeLessThan(
+      result.content.indexOf('Recent'),
+    );
+    expect(result.content.indexOf('wf_paused')).toBeLessThan(
+      result.content.indexOf('Recent'),
+    );
+    // Oldest startTime first inside the Active bucket — the entries
+    // above are registered in exactly the inverse order, so a dropped
+    // or flipped sort would still keep both rows before 'Recent'.
+    expect(result.content.indexOf('wf_paused')).toBeLessThan(
+      result.content.indexOf('wf_pausing'),
+    );
+    expect(result.content).toContain('Background tasks');
+    expect(result.content).toContain('Background tasks + p');
+    expect(result.content).toContain('cooperative');
+  });
+
+  it('omits the Active section header when there are zero active runs', async () => {
+    listMock.mockReturnValue([
+      entry({
+        runId: 'wf_done',
+        status: 'completed',
+        endTime: 1_700_000_010_000,
+      }),
+    ]);
+
+    const result = await workflowsCommand.action!(context, '');
+
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('Workflow runs (1 total · 0 active)');
+    expect(result.content).not.toContain('Active');
+    expect(result.content).toContain('Recent');
   });
 
   it('omits the interactive tip in non_interactive / acp modes', async () => {
@@ -115,6 +177,194 @@ describe('workflowsCommand', () => {
     if (!result || result.type !== 'message') throw new Error('no result');
     expect(result.content).not.toMatch(/Tip:/);
   });
+
+  it('pauses a live running workflow with p <runId>', async () => {
+    getMock.mockReturnValue(entry({ runId: 'wf_running', status: 'running' }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_running');
+
+    expect(pauseMock).toHaveBeenCalledWith('wf_running');
+    expect(resumeMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('Cooperative pause requested');
+  });
+
+  it('reports the terminal status for a retained terminal foreground run', async () => {
+    // The terminal gate runs before the foreground gate: a completed
+    // foreground run gets the same wording as a snapshot-only hit,
+    // never the foreground wording (which implies backgrounding would
+    // help — impossible once settled).
+    getMock.mockReturnValue(
+      entry({
+        runId: 'wf_fore_done',
+        status: 'completed',
+        isBackgrounded: false,
+        endTime: 1_700_000_010_000,
+      }),
+    );
+
+    const result = await workflowsCommand.action!(context, 'p wf_fore_done');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Workflow wf_fore_done is completed and cannot be paused or resumed.',
+    });
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+  });
+
+  it('explains that foreground workflows cannot be paused', async () => {
+    getMock.mockReturnValue(
+      entry({
+        runId: 'wf_foreground',
+        status: 'running',
+        isBackgrounded: false,
+      }),
+    );
+
+    const result = await workflowsCommand.action!(context, 'p wf_foreground');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Foreground workflow runs cannot be paused or resumed; only background runs support cooperative pause.',
+    });
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+  });
+
+  it('resumes a live paused workflow with p <runId>', async () => {
+    getMock.mockReturnValue(entry({ runId: 'wf_paused', status: 'paused' }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_paused');
+
+    expect(resumeMock).toHaveBeenCalledWith('wf_paused');
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('Resume requested');
+  });
+
+  it.each([
+    ['running', 'paused', 'pause'],
+    ['paused', 'resumed', 'resume'],
+  ] as const)(
+    'reports a state race when a %s workflow cannot be %s',
+    async (status, operation, registryOperation) => {
+      const operationMock =
+        registryOperation === 'pause' ? pauseMock : resumeMock;
+      operationMock.mockReturnValue(false);
+      getMock.mockReturnValue(
+        entry({ runId: 'wf_racing', status, isBackgrounded: true }),
+      );
+
+      const result = await workflowsCommand.action!(context, 'p wf_racing');
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: `Workflow wf_racing could not be ${operation} because its state changed.`,
+      });
+    },
+  );
+
+  it.each([
+    ['pausing', 'still pausing', 'warning'],
+    ['completed', 'cannot be paused or resumed', 'error'],
+  ] as const)(
+    'rejects p for a %s workflow',
+    async (status, message, messageType) => {
+      getMock.mockReturnValue(entry({ runId: 'wf_target', status }));
+
+      const result = await workflowsCommand.action!(context, 'p wf_target');
+
+      expect(pauseMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ type: 'message', messageType });
+      if (!result || result.type !== 'message') throw new Error('no result');
+      expect(result.content).toContain(message);
+    },
+  );
+
+  it('rejects p for targets unknown to both registry and snapshots', async () => {
+    const unknown = await workflowsCommand.action!(context, 'p wf_missing');
+    const malformed = await workflowsCommand.action!(context, 'p');
+    // The >2-token shape must hit the same usage guard — a loosened
+    // `!== 2` check would silently act on the first runId and ignore
+    // the trailing argument.
+    const trailing = await workflowsCommand.action!(context, 'p wf_x extra');
+
+    expect(unknown).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: 'Unknown live workflow runId: wf_missing',
+    });
+    expect(malformed).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: 'Usage: /workflows p <runId>',
+    });
+    expect(trailing).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: 'Usage: /workflows p <runId>',
+    });
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+  });
+
+  it('proceeds past the usage guard for a well-formed p <runId> command', async () => {
+    getMock.mockReturnValue(entry({ runId: 'wf_guard', status: 'running' }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_guard');
+
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).not.toContain('Usage:');
+    expect(pauseMock).toHaveBeenCalledWith('wf_guard');
+  });
+
+  it.each(['non_interactive', 'acp'] as const)(
+    'does not expose pause control in %s mode',
+    async (executionMode) => {
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getWorkflowRunRegistry: () => ({
+              list: listMock,
+              get: getMock,
+              pause: pauseMock,
+              resume: resumeMock,
+            }),
+          },
+        },
+        executionMode,
+      } as unknown as Parameters<typeof createMockCommandContext>[0]);
+      getMock.mockReturnValue(
+        entry({ runId: 'wf_running', status: 'running' }),
+      );
+
+      const result = await workflowsCommand.action!(ctx, 'p wf_running');
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Workflow pause controls are available only in the interactive TUI.',
+      });
+      expect(pauseMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('detail view: known runId returns full per-field dump', async () => {
     const detail = entry({
@@ -333,7 +583,7 @@ describe('workflowsCommand', () => {
       ]);
       const result = await workflowsCommand.action!(ctx, '');
       if (!result || result.type !== 'message') throw new Error('no result');
-      expect(result.content).toContain('Workflow runs (1 total · 0 running)');
+      expect(result.content).toContain('Workflow runs (1 total · 0 active)');
       expect(result.content).toContain('Recent');
       expect(result.content).toContain('wf_persisted');
       expect(result.content).toContain('oldrun');
@@ -354,7 +604,7 @@ describe('workflowsCommand', () => {
       const result = await workflowsCommand.action!(ctx, '');
       if (!result || result.type !== 'message') throw new Error('no result');
       // Exactly one entry total; the live entry's meta wins, disk is dropped.
-      expect(result.content).toContain('Workflow runs (1 total · 0 running)');
+      expect(result.content).toContain('Workflow runs (1 total · 0 active)');
       expect(result.content).toContain('live-name');
       expect(result.content).not.toContain('disk-name');
       expect(result.content.match(/wf_dup/g)?.length).toBe(1);
@@ -393,5 +643,59 @@ describe('workflowsCommand', () => {
         content: 'Unknown workflow runId: wf_ghost',
       });
     });
+
+    it('p falls back to a persisted snapshot and reports the terminal status', async () => {
+      // The listing merges snapshots into Recent and the detail view
+      // resolves them, so /workflows p for a snapshot-only runId must
+      // give the same terminal wording a still-retained run gets —
+      // not contradict the listing with "Unknown live workflow runId".
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        { runId: 'wf_old', status: 'completed' },
+      ]);
+      const result = await workflowsCommand.action!(ctx, 'p wf_old');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Workflow wf_old is completed and cannot be paused or resumed.',
+      });
+    });
+
+    it('p still reports unknown for a runId absent from registry and snapshots', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([{ runId: 'wf_other' }]);
+      const result = await workflowsCommand.action!(ctx, 'p wf_ghost');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: 'Unknown live workflow runId: wf_ghost',
+      });
+    });
+  });
+});
+
+describe('snapshotToTask', () => {
+  it('preserves persisted lineage fields across the restart boundary', () => {
+    const task = snapshotToTask({
+      runId: 'wf_lineage',
+      sourceRunId: 'wf_origin',
+      startMode: 'retry',
+      meta: null,
+      status: 'completed',
+      script: '',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_700_000_000_000,
+      endTime: 1_700_000_005_000,
+    });
+
+    expect(task.sourceRunId).toBe('wf_origin');
+    expect(task.startMode).toBe('retry');
   });
 });

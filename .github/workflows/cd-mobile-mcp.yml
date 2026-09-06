@@ -8,6 +8,7 @@ on:
       version:
         description: 'Version to publish (without v prefix, e.g. 0.1.0)'
         required: true
+        default: '0.1.5'
       dry_run:
         description: 'Dry run (build only, no publish)'
         required: false
@@ -21,6 +22,7 @@ jobs:
       name: 'production-release'
     permissions:
       contents: 'read'
+      id-token: 'write'
     steps:
       - uses: 'actions/checkout@v4'
 
@@ -31,6 +33,9 @@ jobs:
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
+
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
 
       - name: 'Determine version'
         id: 'version'
@@ -56,11 +61,14 @@ jobs:
 
       - name: 'Test'
         working-directory: 'packages/mobile-mcp'
-        run: 'npx playwright test test/coord-norm.test.ts'
+        run: >-
+          npx playwright test
+          test/coord-norm.test.ts
+          test/mobile-ui-dump.test.ts
+          test/payload-filter.test.ts
+          test/server-payload-filter.test.ts
 
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'
-        run: 'npm publish --access public'
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+        run: 'npm publish --provenance --access public'
