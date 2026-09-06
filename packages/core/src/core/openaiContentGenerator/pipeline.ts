@@ -379,6 +379,7 @@ export class ContentGenerationPipeline {
         const parentSignal = request.config?.abortSignal;
         const perRequestAc = createChildAbortController(parentSignal);
         let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        let requestId: string | null = null;
         try {
           // Stage 1: Create OpenAI stream. Wrapped in try so a network /
           // DNS / proxy error during the SDK call still cleans up the
@@ -401,7 +402,7 @@ export class ContentGenerationPipeline {
             const {
               data,
               response: httpResponse,
-              request_id,
+              request_id: responseRequestId,
             } = await (
               createPromise as unknown as {
                 withResponse(): Promise<{
@@ -412,6 +413,7 @@ export class ContentGenerationPipeline {
               }
             ).withResponse();
             stream = data;
+            requestId = responseRequestId;
 
             // Validate content-type: a non-SSE content-type on a streaming
             // request means the upstream (gateway/proxy) returned something
@@ -442,7 +444,7 @@ export class ContentGenerationPipeline {
                 contentType,
                 httpResponse.status,
                 bodyPrefix,
-                request_id,
+                responseRequestId,
               );
             }
           } else {
@@ -484,6 +486,7 @@ export class ContentGenerationPipeline {
           request,
           userPromptId,
           telemetryAttempt,
+          requestId,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -511,6 +514,7 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
     telemetryAttempt: GenAiAttemptHandle | undefined,
+    requestId: string | null,
   ): AsyncGenerator<GenerateContentResponse> {
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
@@ -560,7 +564,9 @@ export class ContentGenerationPipeline {
           const errorContent =
             chunk.choices?.[0]?.delta?.content?.trim() ||
             'Unknown stream error';
-          throw new StreamContentError(errorContent);
+          throw new StreamContentError(
+            `${errorContent} [request_id=${requestId ?? 'missing'}, response_id=${chunk.id || 'missing'}]`,
+          );
         }
 
         const response = OpenAIContentConverter.convertOpenAIChunkToLlm(

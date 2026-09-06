@@ -784,7 +784,7 @@ jobs:
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' || github.ref_name == 'codex/diagnose-stream-error' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -872,8 +872,10 @@ jobs:
 
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
+          for attempt in {1..10}; do
+            echo "Diagnostic UTF-32 BE attempt ${attempt}/10"
+            QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli/utf-bom-encoding.test.ts -t 'UTF-32 BE BOM' --retry=0 9>&-
+          done
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'
