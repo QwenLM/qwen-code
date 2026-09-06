@@ -270,12 +270,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one).',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates and still refuses; an empty value is rejected as operator error.',
       })
       .option('token', {
         type: 'string',
         description:
-          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var; a non-loopback bind with neither generates an ephemeral token at startup.',
+          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var; a non-loopback bind with neither generates an ephemeral token at startup, while loopback keeps the trusted tokenless mode unless --require-auth is set.',
       })
       .option('max-sessions', {
         type: 'number',

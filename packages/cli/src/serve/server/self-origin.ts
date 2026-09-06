@@ -29,8 +29,16 @@ export function installRemoteSelfOriginMiddleware(
       req.socket instanceof TLSSocket && req.socket.encrypted
         ? 'https'
         : 'http';
-    // Compare direct transport and the canonical authority; never forwarded headers.
-    if (origin !== `${scheme}://${host}`) {
+    // Browsers serialize Origin with a lowercase host and omit the
+    // scheme-default port, while an intermediary may case-preserve Host or
+    // keep an explicit default port. Normalize Host the same way before
+    // comparing; never forwarded headers.
+    let authority = host.toLowerCase();
+    if (scheme === 'http' && authority.endsWith(':80'))
+      authority = authority.slice(0, -3);
+    else if (scheme === 'https' && authority.endsWith(':443'))
+      authority = authority.slice(0, -4);
+    if (origin !== `${scheme}://${authority}`) {
       next();
       return;
     }

@@ -5,9 +5,11 @@
  */
 import express from 'express';
 import request from 'supertest';
+import { createServer } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import { installRemoteSelfOriginMiddleware } from './self-origin.js';
 import { bearerAuth, denyBrowserOriginCors } from '../auth.js';
+import { tagListener } from '../local-control/listener-identity.js';
 
 describe('remote same-origin authentication', () => {
   function app(bind = '0.0.0.0', token: string | undefined = 'secret') {
@@ -97,5 +99,70 @@ describe('remote same-origin authentication', () => {
           .set('Authorization', 'Bearer secret')
       ).status,
     ).toBe(403);
+  });
+});
+
+describe('remote same-origin Host normalization', () => {
+  function app() {
+    const result = express();
+    installRemoteSelfOriginMiddleware(result, '0.0.0.0', 'secret');
+    result.use(denyBrowserOriginCors);
+    result.use(bearerAuth('secret'));
+    result.post('/probe', (_req, res) => res.sendStatus(204));
+    return result;
+  }
+  it('accepts a case-preserved Host from an intermediary', async () => {
+    const authed = await request(app())
+      .post('/probe')
+      .set('Host', 'QwenBox.Local:4170')
+      .set('Origin', 'http://qwenbox.local:4170')
+      .set('Authorization', 'Bearer secret');
+    expect(authed.status).toBe(204);
+    const unauthed = await request(app())
+      .post('/probe')
+      .set('Host', 'Qwenbox.Local:4170')
+      .set('Origin', 'http://qwenbox.local:4170');
+    expect(unauthed.status).toBe(401);
+  });
+  it('accepts an explicit default port on Host', async () => {
+    const response = await request(app())
+      .post('/probe')
+      .set('Host', '192.168.1.2:80')
+      .set('Origin', 'http://192.168.1.2')
+      .set('Authorization', 'Bearer secret');
+    expect(response.status).toBe(204);
+  });
+  it('keeps the wall for a default-port Origin mismatch', async () => {
+    const response = await request(app())
+      .post('/probe')
+      .set('Host', '192.168.1.2:80')
+      .set('Origin', 'http://192.168.1.2:80')
+      .set('Authorization', 'Bearer secret');
+    expect(response.status).toBe(403);
+  });
+  it('excludes Local Control listeners from the exception', async () => {
+    const handler = express();
+    installRemoteSelfOriginMiddleware(handler, '0.0.0.0', 'secret');
+    handler.use(denyBrowserOriginCors);
+    handler.post('/probe', (_req, res) => res.sendStatus(204));
+    const server = createServer(handler);
+    tagListener(server, {
+      kind: 'local-control',
+      authority: '192.168.1.2:4170',
+      origin: 'http://192.168.1.2:4170',
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const response = await request(server)
+        .post('/probe')
+        .set('Host', '192.168.1.2:4170')
+        .set('Origin', 'http://192.168.1.2:4170')
+        .set('Authorization', 'Bearer secret');
+      expect(response.status).toBe(403);
+    } finally {
+      server.close();
+    }
   });
 });

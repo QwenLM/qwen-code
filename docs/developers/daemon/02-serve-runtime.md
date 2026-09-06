@@ -143,7 +143,7 @@ See [`17-configuration.md`](./17-configuration.md) for the merged reference.
 ## Caveats and known limits
 
 - Direct `createServeApp` without `deps.fsFactory` or `deps.bridge` defaults to `trusted: false`; agent-side ACP `writeTextFile` rejects as `untrusted_workspace`. The warning is printed once.
-- The runtime app runs `allowOriginCors` over the mutable allowlist; unmatched `Origin` values get the 403 deny envelope (the unconditional `denyBrowserOriginCors` wall survives only in the bootstrap app). The **loopback** Web Shell works because another middleware strips matching loopback same-origin values first — non-loopback binds require `--allow-origin` for the shell's XHRs.
+- The runtime app runs `allowOriginCors` over the mutable allowlist; unmatched `Origin` values get the 403 deny envelope (the unconditional `denyBrowserOriginCors` wall survives only in the bootstrap app). The **loopback** Web Shell works because another middleware strips matching loopback same-origin values first; on a non-loopback bind the shell's same-origin XHRs are bearer-authenticated and their `Origin` stripped ahead of the wall, so they need no `--allow-origin`. WebSocket upgrades and a TLS-front-proxy `https` origin still require an allowlist entry.
 - Body-parser ordering: routes using `mutate({ strict: true })` return 401 only after `express.json()`. The worst case is `--max-connections × express.json({limit: '10mb'})`, up to about 2.5 GB of transient memory on a saturated loopback listener; this tradeoff is intentional.
 - Multiple daemons in one process must use per-handle `childEnvOverrides`; mutating `process.env` races because `defaultSpawnChannelFactory` snapshots env at spawn time.
 

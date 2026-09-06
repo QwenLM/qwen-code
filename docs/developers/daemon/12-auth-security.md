@@ -28,11 +28,14 @@ In `run-qwen-serve.ts`:
 
 ```ts
 // A non-loopback bind with neither --token nor QWEN_SERVER_TOKEN first
-// generates an ephemeral 256-bit bearer (printed once at startup, rotated
-// per process). The refusals below therefore fire only when a token source
-// was supplied but is explicitly empty/whitespace, or when the requested
-// hostname resolves off-loopback (localhost pinned to a non-loopback
-// address never generates).
+// generates an ephemeral 128-bit base64url bearer (16 random bytes, 22
+// URL-safe characters; printed once at startup, rotated per process). The
+// first refusal below therefore fires only when a token source was supplied
+// but is explicitly empty/whitespace, or when the requested hostname resolves
+// off-loopback (localhost pinned to a non-loopback address never generates).
+// Generation is loopback-suppressed, so the second refusal is a loopback-only
+// fail-fast: on a non-loopback bind the generated token already satisfies
+// --require-auth.
 if (!isLoopbackBind(opts.hostname) && !token) {
   throw new Error('Refusing to bind <host>:<port> without a bearer token. ...');
 }
@@ -70,11 +73,13 @@ daemon bind beyond loopback in the open.
 
 ```mermaid
 flowchart LR
-    REQ[Request] --> SO["strip same-origin Origin<br/>(Web Shell support)"]
+    REQ[Request] --> H["pre-auth /health<br/>(loopback, unless --require-auth)"]
+    H --> LOG["access-log middleware<br/>(DaemonLogger)"]
+    LOG --> TID["inbound trace-id capture"]
+    TID --> SO["same-origin Origin strip<br/>+ credential check"]
     SO --> AO["allowOriginCors<br/>(mutable allowlist: --allow-origin<br/>patterns + Local Control LAN origin)"]
     AO --> HA["hostAllowlist"]
-    HA --> LOG["access-log middleware<br/>(DaemonLogger)"]
-    LOG --> WH{"Channel webhook?"}
+    HA --> WH{"Channel webhook?"}
     WH -->|yes| WS["x-qwen-webhook-secret<br/>+ webhook rate/body limits"]
     WH -->|no| BA["bearerAuth"]
     BA --> RL["rate-limit middleware<br/>(when enabled)"]
@@ -86,12 +91,32 @@ flowchart LR
 
 `mutationGate` is a per-route middleware factory (`createMutationGate` returns
 `mutate()`); routes call `mutate()` or `mutate({strict: true})` at registration
-time. It is not a global `app.use()` middleware. Access logging is registered
-before `bearerAuth` so 401 rejects are still logged. Normal API rate limiting
+time. It is not a global `app.use()` middleware. Access logging and inbound
+trace-id capture are registered ahead of the origin wall and the same-origin
+credential check, so those 403/401 short-circuits are logged like every other
+reject and the log line still joins the caller's trace id; both also precede
+`bearerAuth`, so 401 rejects are still logged. Pre-auth `/health` stays above
+the access log so liveness probes do not fill it. Normal API rate limiting
 runs after `bearerAuth` and before `express.json()`, so only authenticated
 requests count and large bodies are rejected before parsing when a limit is
 exceeded. Channel webhook ingress branches before bearer auth and applies its
 own shared-secret check, mutation-tier rate check, and 1 MiB parser.
+
+The same-origin node is two middlewares in `server/self-origin.ts`: the
+loopback-only `Origin` strip (installed first, ahead of the pre-auth health
+routes) and `installRemoteSelfOriginMiddleware`, which runs immediately before
+`allowOriginCors` on a non-loopback primary listener with a configured token.
+The remote one matches a canonical `Origin` against the direct socket scheme
+plus the normalized `Host` authority — forwarded headers are never consulted —
+and bearer-authenticates the match before deleting `Origin`, so the built-in Web
+Shell's same-origin HTTP mutations need no `--allow-origin`. Its pre-auth
+predicate (`web-shell-preauth.ts`) exempts the shell entry points (`/`, `//`,
+`/assets*`, `/mcp-app-sandbox`, exact `/session/:id` document navigations) from
+the credential check because browser module-script fetches carry `Origin`
+without `Authorization`. WebSocket upgrades and TLS-front-proxy `https` origins
+are not covered: the upgrade gate keeps its own CSWSH policy (loopback origin,
+`--allow-origin` entry, or the Local Control listener's own origin), and a
+proxy's `https` origin can never match the plain socket's scheme.
 
 ### `bearerAuth`
 
@@ -115,7 +140,7 @@ Non-loopback binds bypass the primary gate (operator chose the surface area; bea
 
 Reject any request with an `Origin` header. CLI/SDK never set Origin; only browsers do. Returns deterministic `403 { error: 'Request denied by CORS policy' }` rather than the 500 HTML the `cors` package's error-callback would produce. The runtime app no longer installs this wall — it runs `allowOriginCors` over the mutable allowlist (below); the deny behavior survives there as the unmatched-origin branch. The wall remains in the bootstrap app (run-qwen-serve.ts) that serves requests before the runtime starts.
 
-Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the canonical loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`) or the exact bound loopback address. Scheme-matched port-less origins are accepted only for their default port (`http` on 80, `https` on 443). On non-loopback binds the shell's XHRs carry an unmatched `Origin` and need `--allow-origin` for the daemon origin.
+Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the canonical loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`) or the exact bound loopback address. Scheme-matched port-less origins are accepted only for their default port (`http` on 80, `https` on 443). On non-loopback binds a second middleware (`installRemoteSelfOriginMiddleware`, in the same file) covers the shell's XHRs instead: it bearer-authenticates a request whose canonical `Origin` equals the direct socket scheme plus the normalized `Host` authority — forwarded headers are never trusted — and strips that `Origin` before the wall, so those requests need no `--allow-origin` entry. Cross-origin and `null` origins remain rejected, and the WebSocket upgrade routes plus a TLS-front-proxy `https` origin still require one (see [Middleware chain](#middleware-chain-http-request-order)).
 
 ### `allowOriginCors` (runtime app, always installed)
 

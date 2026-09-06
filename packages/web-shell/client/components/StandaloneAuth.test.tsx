@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { StandaloneAuth } from './StandaloneAuth';
 import { getDaemonToken } from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
+import type { WebShellTheme } from '../themeContext';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -20,13 +21,18 @@ afterEach(() => {
   vi.useRealTimers();
   sessionStorage.clear();
 });
-async function mount(initialToken?: string, language?: WebShellLanguage) {
+async function mount(
+  initialToken?: string,
+  language?: WebShellLanguage,
+  theme?: WebShellTheme,
+) {
   await act(async () =>
     root.render(
       <StandaloneAuth
         baseUrl="http://daemon.test"
         initialToken={initialToken}
         language={language}
+        theme={theme}
       >
         {(token) => <p>Connected {token}</p>}
       </StandaloneAuth>,
@@ -169,9 +175,12 @@ it('waits out a cold start advertised by Retry-After', async () => {
 });
 it('reports a permanent startup failure and stops probing', async () => {
   vi.useFakeTimers();
-  const fetch = vi
-    .fn()
-    .mockResolvedValue(stubResponse({ status: 503, body: { error: 'boom' } }));
+  const fetch = vi.fn().mockResolvedValue(
+    stubResponse({
+      status: 503,
+      body: { code: 'daemon_runtime_failed', error: 'boom' },
+    }),
+  );
   vi.stubGlobal('fetch', fetch);
   await mount();
   expect(container.textContent).toContain('Daemon failed to start. boom');
@@ -204,4 +213,106 @@ it('renders the zh-CN copy for an invalid token', async () => {
   expect(container.textContent).toContain('连接到 Qwen Code');
   expect(container.textContent).toContain('令牌无效或已过期');
   expect(container.textContent).not.toContain('Invalid or expired');
+});
+
+it('probes the daemon capabilities endpoint', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+});
+
+it('auto-retries a generic 5xx and then mounts', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 500 }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is not ready. Retrying…');
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('honors Retry-After on rate limiting without claiming a cold start', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 429, retryAfter: '1' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is not ready. Retrying…');
+  expect(container.textContent).not.toContain('Daemon is starting…');
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('parses an HTTP-date Retry-After', async () => {
+  vi.useFakeTimers();
+  const when = new Date(Date.now() + 1_000).toUTCString();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: when }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting…');
+  await act(async () => {
+    vi.advanceTimersByTime(1_500);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('treats a bare 503 without the failure code as transient', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, body: { code: 'x' } }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('clears a rejected stored credential instead of pre-filling it', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount('stale-token');
+  expect(container.querySelector('input[type="password"]')?.value).toBe('');
+  expect(container.textContent).toContain('Invalid or expired');
+});
+
+it('scopes and themes the gate root like the app root', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount();
+  const gate = container.querySelector('[data-web-shell-gate]');
+  expect(gate).not.toBeNull();
+  expect(gate?.hasAttribute('data-web-shell-root')).toBe(true);
+  expect(gate?.hasAttribute('data-web-shell-shadcn')).toBe(true);
+  expect(gate?.classList.contains('dark')).toBe(true);
+});
+
+it('applies the light palette when requested', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(undefined, 'en', 'light');
+  const gate = container.querySelector('[data-web-shell-gate]');
+  expect(gate?.classList.contains('dark')).toBe(false);
 });

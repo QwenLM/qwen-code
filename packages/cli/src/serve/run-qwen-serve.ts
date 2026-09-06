@@ -3324,6 +3324,17 @@ async function runQwenServeImpl(
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
+  // An empty --hostname (an unset variable in an alias or compose file) makes
+  // Node bind every interface; treat it as operator error rather than an
+  // intentional wildcard, so a config mistake can never silently produce a
+  // remote-listening daemon.
+  if (!optsIn.hostname.trim()) {
+    throw new Error(
+      'Invalid --hostname: empty value binds every interface. Pass an ' +
+        'explicit address (e.g. --hostname 0.0.0.0) or omit the flag.',
+    );
+  }
+
   const bindHostname =
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
@@ -9460,7 +9471,17 @@ async function runQwenServeImpl(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
       );
-      if (!isLoopbackBind(opts.hostname) && token) {
+      // A DNS name that resolves to loopback (hosts file, dev.localhost) binds
+      // loopback only, so its QR would be undialable from anywhere else —
+      // suppress the quickstart on the address the socket actually bound,
+      // not just on the requested hostname string.
+      const boundAddress =
+        typeof addr === 'object' && addr ? addr.address : opts.hostname;
+      if (
+        !isLoopbackBind(opts.hostname) &&
+        !isLoopbackAddress(boundAddress) &&
+        token
+      ) {
         void printRemoteQuickstart({
           bind: opts.hostname,
           port: actualPort,

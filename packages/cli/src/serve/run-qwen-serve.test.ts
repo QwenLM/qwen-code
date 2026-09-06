@@ -790,6 +790,13 @@ const mockTotalMemBytes = vi.hoisted(() => ({
 const mockNetworkInterfaces = vi.hoisted(() => ({
   value: undefined as NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined,
 }));
+const mockRemoteQuickstart = vi.hoisted(() => ({
+  print: vi.fn(),
+}));
+
+vi.mock('./remote-quickstart.js', () => ({
+  printRemoteQuickstart: mockRemoteQuickstart.print,
+}));
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -12599,6 +12606,71 @@ describe('runQwenServe channel worker supervisor', () => {
       ).rejects.toThrow(/token/i);
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses an empty --hostname as operator error', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        }),
+      ).rejects.toThrow(/empty value binds every interface/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('prints the quickstart with the resolved listener arguments', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe({
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        serveWebShell: false,
+      });
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.port).toBe(
+        (started.server.address() as { port: number }).port,
+      );
+      expect(arg.tls).toBe(false);
+      expect(arg.generated).toBe(true);
+      expect(arg.token).toBe(started.resolvedToken);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('suppresses the quickstart when a DNS name binds loopback only', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    // The trailing-dot root form of localhost resolves to 127.0.0.1 through
+    // every mainstream resolver while staying outside the loopback literal
+    // table, so the socket binds loopback and the quickstart must stay
+    // quiet (its QR would be undialable from anywhere else).
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: 'localhost.',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).not.toHaveBeenCalled();
+    } finally {
+      await started?.close();
     }
   });
 

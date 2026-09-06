@@ -1993,9 +1993,6 @@ export function createServeApp(
   // disable. Re-registering middleware at that point is not an option:
   // Express fixes middleware order when the app is built.
   const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
-  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
-  app.use(allowOriginCors(originAllowlist));
-  app.use(hostAllowlist(opts.hostname, getPort));
   const credentials = new CredentialStore(opts.token);
   const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
@@ -2020,6 +2017,10 @@ export function createServeApp(
     healthRoutes.register(app);
   }
 
+  // Access logging and trace-id capture sit ahead of the origin wall and the
+  // same-origin credential check so their 403/401 short-circuits are recorded
+  // like every other reject; the pre-auth health routes stay above them so
+  // liveness probes do not fill the access log.
   installAccessLogMiddleware(app, daemonLog);
 
   // Capture the caller trace id BEFORE authenticate / rate limiter / body
@@ -2027,6 +2028,10 @@ export function createServeApp(
   // middleware ever runs, and the access log still needs the captured id
   // to join their log lines (and 404s) with the caller's trace.
   app.use(daemonInboundTraceIdCaptureMiddleware);
+
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
+  app.use(allowOriginCors(originAllowlist));
+  app.use(hostAllowlist(opts.hostname, getPort));
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an

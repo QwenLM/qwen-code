@@ -3,7 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NetworkInterfaceInfo } from 'node:os';
 import {
   printRemoteQuickstart,
@@ -234,7 +234,7 @@ it('prints the QR fallback when no candidate address exists', async () => {
   });
   expect(mocks.generate).not.toHaveBeenCalled();
   expect(mocks.line).toHaveBeenCalledWith(
-    'QR unavailable; open an address above and enter the bearer token.',
+    'QR unavailable; enter the bearer token at the daemon address.',
   );
 });
 
@@ -242,14 +242,118 @@ it('survives a throwing stdout writer', async () => {
   mocks.line.mockImplementation(() => {
     throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
   });
-  await expect(
-    printRemoteQuickstart({
-      bind: '192.168.1.2',
+  try {
+    await expect(
+      printRemoteQuickstart({
+        bind: '192.168.1.2',
+        port: 4170,
+        tls: false,
+        token: 'secret',
+        generated: true,
+        web: true,
+      }),
+    ).resolves.toBeUndefined();
+  } finally {
+    // mockImplementation survives clearAllMocks; restore the no-op or every
+    // later print in this file would be swallowed by the outer catch.
+    mocks.line.mockImplementation(() => undefined);
+  }
+});
+
+const lanInterfaces = {
+  lo0: [iface('127.0.0.1', 'IPv4', true), iface('::1', 'IPv6', true)],
+  en0: [iface('192.168.1.7', 'IPv4'), iface('fd12:3456::1', 'IPv6')],
+};
+
+describe('wildcard enumeration and QR candidate', () => {
+  afterEach(() => stubIsTTY(undefined));
+
+  it('treats inet_aton abbreviations as IPv4 wildcards', () => {
+    const expected = remoteQuickstartAddresses(
+      '0.0.0.0',
+      4170,
+      false,
+      lanInterfaces,
+    );
+    for (const abbreviated of ['0', '0.0', '0.0.0']) {
+      expect(
+        remoteQuickstartAddresses(abbreviated, 4170, false, lanInterfaces),
+      ).toEqual(expected);
+    }
+    expect(expected).toEqual([
+      { label: 'Local', url: 'http://127.0.0.1:4170' },
+      { label: 'Network (en0)', url: 'http://192.168.1.7:4170' },
+    ]);
+  });
+
+  it('drops scoped ULA addresses on dual-stack wildcards', () => {
+    expect(
+      remoteQuickstartAddresses('::', 4170, false, {
+        en0: [iface('fd12::1%en0', 'IPv6'), iface('fd12::2', 'IPv6')],
+      }),
+    ).toEqual([
+      { label: 'Local', url: 'http://127.0.0.1:4170' },
+      { label: 'Network (en0)', url: 'http://[fd12::2]:4170' },
+    ]);
+  });
+
+  it('QRs the routable private address, not a link-local one', async () => {
+    mocks.generate.mockImplementationOnce(
+      (_url: string, _options: unknown, callback: (code: string) => void) =>
+        callback('QR\n'),
+    );
+    await printRemoteQuickstart({
+      bind: '0.0.0.0',
       port: 4170,
       tls: false,
-      token: 'secret',
+      token: 'generated-token-000000',
       generated: true,
       web: true,
-    }),
-  ).resolves.toBeUndefined();
+      interfaces: {
+        en0: [iface('169.254.9.9', 'IPv4'), iface('192.168.1.7', 'IPv4')],
+      },
+    });
+    expect(mocks.generate).toHaveBeenCalledWith(
+      'http://192.168.1.7:4170/#token=generated-token-000000',
+      { small: true },
+      expect.any(Function),
+    );
+  });
+
+  it('falls back to a link-local address when nothing else exists', async () => {
+    mocks.generate.mockImplementationOnce(
+      (_url: string, _options: unknown, callback: (code: string) => void) =>
+        callback('QR\n'),
+    );
+    await printRemoteQuickstart({
+      bind: '0.0.0.0',
+      port: 4170,
+      tls: false,
+      token: 'generated-token-000000',
+      generated: true,
+      web: true,
+      interfaces: { en0: [iface('169.254.9.9', 'IPv4')] },
+    });
+    expect(mocks.generate).toHaveBeenCalledWith(
+      'http://169.254.9.9:4170/#token=generated-token-000000',
+      { small: true },
+      expect.any(Function),
+    );
+  });
+
+  it('says so when no QR candidate exists', async () => {
+    await printRemoteQuickstart({
+      bind: 'fe80::1%en0',
+      port: 4170,
+      tls: false,
+      token: 'generated-token-000000',
+      generated: true,
+      web: true,
+      interfaces: lanInterfaces,
+    });
+    expect(mocks.generate).not.toHaveBeenCalled();
+    expect(mocks.line).toHaveBeenCalledWith(
+      'QR unavailable; enter the bearer token at the daemon address.',
+    );
+  });
 });

@@ -300,3 +300,23 @@ describe('removeDaemonTokenFromUrl', () => {
     expect(next.searchParams.has('token')).toBe(false);
   });
 });
+
+describe('persistDaemonToken', () => {
+  it('keeps the token in memory when session storage throws', async () => {
+    vi.resetModules();
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => {
+        throw new Error('storage blocked');
+      },
+      setItem: () => {
+        throw new Error('storage blocked');
+      },
+      removeItem: () => {
+        throw new Error('storage blocked');
+      },
+    });
+    const mod = await import('./daemon');
+    mod.persistDaemonToken('mem-only');
+    expect(mod.getDaemonToken()).toBe('mem-only');
+  });
+});

@@ -478,6 +478,13 @@ describe('CLI entry import boundary', () => {
     expect(selfOriginSource).not.toMatch(
       /from ['"]\.\.\/web-shell-static\.js['"]/,
     );
+    // The dependency-light leaf itself must stay free of the heavy module,
+    // or the transitive edge reopens one hop down.
+    const preauthSource = readFileSync(
+      'src/serve/web-shell-preauth.ts',
+      'utf8',
+    );
+    expect(preauthSource).not.toMatch(/from ['"]\.\/web-shell-static\.js['"]/);
   });
 
   it('keeps request helpers from value-importing the ACP compatibility shim', () => {

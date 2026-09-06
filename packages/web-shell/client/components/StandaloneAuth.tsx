@@ -81,25 +81,16 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
   },
 };
 
-/** `Retry-After` in milliseconds, or undefined when it is absent or unusable. */
+/** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */
 function retryAfterMs(response: Response): number | undefined {
   const raw = response.headers.get('Retry-After');
   if (!raw) return undefined;
   const seconds = Number.parseInt(raw, 10);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return Math.max(seconds, 1) * 1000;
-}
-
-/** A permanently failed startup reports its reason as `{ error }` JSON. */
-async function startupError(response: Response): Promise<string | undefined> {
-  try {
-    const body = (await response.json()) as { error?: unknown };
-    return typeof body?.error === 'string' && body.error
-      ? body.error
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return Math.max(seconds, 1) * 1000;
+  const date = Date.parse(raw);
+  if (!Number.isFinite(date)) return undefined;
+  return Math.max(date - Date.now(), 1000);
 }
 
 export function StandaloneAuth({
@@ -128,6 +119,9 @@ export function StandaloneAuth({
   // and aborts its predecessor on cleanup.
   const [attempt, setAttempt] = useState(0);
   const candidateRef = useRef(initialToken ?? '');
+  // Remember the credential the gate started with so a 401 against it can be
+  // told apart from a 401 against something the operator just typed.
+  const initialCandidateRef = useRef(initialToken ?? '');
   const controllerRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Read through a ref so a language change re-labels the gate without
@@ -162,6 +156,10 @@ export function StandaloneAuth({
         } else if (response.status === 401) {
           setBusy(false);
           setNeedsToken(true);
+          // A rejected stored/fragment credential must not stay pre-filled in
+          // the masked input: recovery replaces the value, not appends to it.
+          if (candidate && candidate === initialCandidateRef.current)
+            setToken('');
           setStatus(
             candidate
               ? copyRef.current.invalidToken
@@ -172,15 +170,20 @@ export function StandaloneAuth({
           setNeedsToken(false);
           setStatus(copyRef.current.policyBlocked);
         } else {
-          const retryAfter = retryAfterMs(response);
-          if (retryAfter !== undefined) {
-            // Cold start in progress: the daemon says when to come back.
-            retryIn(retryAfter, copyRef.current.starting);
-          } else if (response.status === 503) {
-            // 503 without Retry-After means the runtime failed for good.
-            // Report it and stop; only a manual retry probes again.
-            const detail = await startupError(response);
-            if (controllerRef.current !== controller) return;
+          // The daemon discriminates permanent startup failure by body.code,
+          // not by the absence of Retry-After: front proxies and the rate
+          // limiter also emit bare 503/429, which are transient here.
+          const body: unknown = await response.json().catch(() => undefined);
+          if (controllerRef.current !== controller) return;
+          const code =
+            typeof body === 'object' && body !== null
+              ? (body as { code?: unknown }).code
+              : undefined;
+          if (code === 'daemon_runtime_failed') {
+            const detail =
+              typeof (body as { error?: unknown }).error === 'string'
+                ? (body as { error: string }).error
+                : undefined;
             setBusy(false);
             setStatus(
               detail
@@ -188,7 +191,13 @@ export function StandaloneAuth({
                 : copyRef.current.startFailed,
             );
           } else {
-            retryIn(RETRY_DELAY_MS, copyRef.current.notReady);
+            const retryAfter = retryAfterMs(response);
+            retryIn(
+              retryAfter ?? RETRY_DELAY_MS,
+              response.status === 503
+                ? copyRef.current.starting
+                : copyRef.current.notReady,
+            );
           }
         }
       } catch {
@@ -220,6 +229,7 @@ export function StandaloneAuth({
       // the same scope and theme palette the app root uses (App.tsx).
       data-web-shell-root
       data-web-shell-shadcn
+      data-web-shell-gate
       className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
         theme === WebShellThemeId.Light
           ? AppStyles.themeLight

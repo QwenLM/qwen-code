@@ -16,14 +16,35 @@ import { writeStdoutLineSafe } from '../utils/stdioHelpers.js';
 /**
  * Bind literals that answer on every interface, compared after trimming and
  * lowercasing: `::ffff:0.0.0.0` is a working IPv4-mapped wildcard an operator
- * can copy from `ss`/`netstat`, and casing must not decide whether the LAN
- * addresses get enumerated.
+ * can copy from `ss`/`netstat`, `0`/`0.0`/`0.0.0` are the inet_aton
+ * abbreviations Node also binds as `0.0.0.0`, and casing must not decide
+ * whether the LAN addresses get enumerated. An empty value never reaches here:
+ * the serve entry point refuses it as operator error.
  */
-const WILDCARD_BINDS = new Set(['0.0.0.0', '::', '[::]', '::ffff:0.0.0.0', '']);
+const WILDCARD_BINDS = new Set([
+  '0.0.0.0',
+  '0',
+  '0.0',
+  '0.0.0',
+  '::',
+  '[::]',
+  '::ffff:0.0.0.0',
+]);
 
 /** RFC 4291 unique-local addresses (fc00::/7) — the IPv6 private space. */
 function isUlaIpv6(address: string): boolean {
   return /^(?:fc|fd)/iu.test(address);
+}
+
+/** RFC 3927 link-local IPv4 — admitted by isLanIpv4 but rarely dialable. */
+function isLinkLocalIpv4(address: string): boolean {
+  return address.startsWith('169.254.');
+}
+
+interface QuickstartAddress {
+  label: string;
+  url: string;
+  address: string;
 }
 
 export function remoteQuickstartAddresses(
@@ -32,6 +53,17 @@ export function remoteQuickstartAddresses(
   tls: boolean,
   interfaces = networkInterfaces(),
 ): Array<{ label: string; url: string }> {
+  return remoteQuickstartEntries(bind, port, tls, interfaces).map(
+    ({ label, url }) => ({ label, url }),
+  );
+}
+
+function remoteQuickstartEntries(
+  bind: string,
+  port: number,
+  tls: boolean,
+  interfaces: ReturnType<typeof networkInterfaces>,
+): QuickstartAddress[] {
   const scheme = tls ? 'https' : 'http';
   const url = (host: string) =>
     `${scheme}://${formatHostForAuthority(host)}:${port}`;
@@ -41,29 +73,31 @@ export function remoteQuickstartAddresses(
     // the interface loop below drops the same class; the plain "listening on"
     // line still prints, so the quickstart just stays quiet about it.
     if (canonical.includes('%')) return [];
-    return [{ label: 'Address', url: url(bind) }];
+    return [{ label: 'Address', url: url(bind), address: bind }];
   }
   const ipv4Wildcard =
-    canonical === '0.0.0.0' || canonical === '::ffff:0.0.0.0';
-  const addresses = [
-    {
-      label: 'Local',
-      url: url(
-        !ipv4Wildcard && hostAssignsIpv6Loopback(interfaces)
-          ? '::1'
-          : '127.0.0.1',
-      ),
-    },
+    canonical === '0.0.0.0' ||
+    canonical === '0' ||
+    canonical === '0.0' ||
+    canonical === '0.0.0' ||
+    canonical === '::ffff:0.0.0.0';
+  const localAddress =
+    !ipv4Wildcard && hostAssignsIpv6Loopback(interfaces) ? '::1' : '127.0.0.1';
+  const addresses: QuickstartAddress[] = [
+    { label: 'Local', url: url(localAddress), address: localAddress },
   ];
-  // Advertise the same private-LAN population Local Control uses: software
-  // interfaces (VPN, container bridges, VM adapters) and routable public
-  // addresses never become a printed URL or a QR, so the scan-from-phone
-  // affordance cannot point at an address the phone cannot dial — or at the
-  // public internet over plain HTTP.
+  // Advertise Local Control's private IPv4 population (RFC 1918 plus RFC 3927
+  // link-local) and, on dual-stack wildcard binds, fc00::/7 ULAs of physical
+  // interfaces. Software interfaces (VPN, container bridges, VM adapters) and
+  // routable public addresses never become a printed URL or a QR, so the
+  // scan-from-phone affordance cannot point at an address the phone cannot
+  // dial — or at the public internet over plain HTTP. The name-based software
+  // filter is a heuristic (see #9158), not a guarantee.
   for (const candidate of listLanCandidates(interfaces)) {
     addresses.push({
       label: `Network (${candidate.interfaceName})`,
       url: url(candidate.address),
+      address: candidate.address,
     });
   }
   if (!ipv4Wildcard) {
@@ -75,7 +109,11 @@ export function remoteQuickstartAddresses(
         // Scoped link-local IPv6 URLs are not supported by browsers, and
         // globally routable IPv6 is out of scope for a LAN quickstart.
         if (entry.address.includes('%') || !isUlaIpv6(entry.address)) continue;
-        addresses.push({ label: `Network (${name})`, url: url(entry.address) });
+        addresses.push({
+          label: `Network (${name})`,
+          url: url(entry.address),
+          address: entry.address,
+        });
       }
     }
   }
@@ -89,14 +127,16 @@ export async function printRemoteQuickstart(input: {
   token: string;
   generated: boolean;
   web: boolean;
+  interfaces?: ReturnType<typeof networkInterfaces>;
 }): Promise<void> {
   // An informational block whose reader going away (`qwen serve | head`) must
   // never take the already-listening daemon down with it.
   try {
-    const addresses = remoteQuickstartAddresses(
+    const addresses = remoteQuickstartEntries(
       input.bind,
       input.port,
       input.tls,
+      input.interfaces ?? networkInterfaces(),
     );
     for (const address of addresses)
       writeStdoutLineSafe(`${address.label}: ${address.url}`);
@@ -110,10 +150,16 @@ export async function printRemoteQuickstart(input: {
         'HTTP is unencrypted. Use the existing TLS options for encrypted remote access.',
       );
     if (!input.web) return;
-    const candidate = addresses.find((address) => address.label !== 'Local');
+    // Prefer a routable private address for the QR: link-local entries are
+    // admitted by the LAN filter but rarely dialable from a phone.
+    const candidate =
+      addresses.find(
+        (address) =>
+          address.label !== 'Local' && !isLinkLocalIpv4(address.address),
+      ) ?? addresses.find((address) => address.label !== 'Local');
     if (!candidate) {
       writeStdoutLineSafe(
-        'QR unavailable; open an address above and enter the bearer token.',
+        'QR unavailable; enter the bearer token at the daemon address.',
       );
       return;
     }
@@ -121,7 +167,8 @@ export async function printRemoteQuickstart(input: {
     // ephemeral one this process generated (it has no other delivery channel)
     // or the operator is at an interactive terminal; a stable operator token
     // must not be re-published into captured stdout (container/systemd logs)
-    // on every restart.
+    // on every restart. A pty-allocated container counts as interactive, so
+    // its logs remain secret-bearing by design.
     if (!input.generated && !process.stdout.isTTY) return;
     try {
       const { default: qrcode } = (await import('qrcode-terminal')) as {
@@ -141,7 +188,7 @@ export async function printRemoteQuickstart(input: {
       );
     } catch {
       writeStdoutLineSafe(
-        'QR unavailable; open an address above and enter the bearer token.',
+        'QR unavailable; enter the bearer token at the daemon address.',
       );
     }
   } catch {
