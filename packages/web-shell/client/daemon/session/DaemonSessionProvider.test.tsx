@@ -39,11 +39,14 @@ import {
   useDaemonTranscriptHistory,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
+  useDaemonTurnNavigationState,
+  useDaemonTurnNavigationStore,
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
   type DaemonSessionActions,
   type DaemonSessionNotice,
+  type DaemonTurnNavigationSnapshot,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
 import {
@@ -113,6 +116,19 @@ interface MockSession {
     nextCursor?: string;
     partial?: true;
     replayError?: string;
+  }>;
+  getTurnIndexPage: (opts: unknown) => Promise<{
+    v: 1;
+    sessionId: string;
+    snapshot: string;
+    totalTurns: number;
+    start: number;
+    turns: Array<{
+      ordinal: number;
+      turnId: string;
+      kind: 'prompt';
+      label: string;
+    }>;
   }>;
   replaySnapshot: {
     compactedReplay: DaemonEvent[];
@@ -593,6 +609,442 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection).toEqual({ status: 'idle' });
     expect(blocks).toEqual([]);
+  });
+
+  it('loads headless turn metadata only when the capability is present', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const getTurnIndexPage = vi.fn(async () => ({
+      v: 1 as const,
+      sessionId: 'session-navigation',
+      snapshot: 'snapshot-1',
+      totalTurns: 300,
+      start: 299,
+      turns: [
+        {
+          ordinal: 299,
+          turnId: 'turn-299',
+          kind: 'prompt' as const,
+          label: 'Newest turn',
+        },
+      ],
+    }));
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-navigation',
+        getTurnIndexPage,
+      }),
+    );
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+
+    function Harness() {
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+    });
+
+    expect(getTurnIndexPage).toHaveBeenCalledWith({ limit: 200 });
+    expect(navigation).toMatchObject({
+      sessionId: 'session-navigation',
+      totalTurns: 300,
+      effectiveTurnCount: 300,
+    });
+  });
+
+  it('does not read turn metadata from a legacy daemon', async () => {
+    const getTurnIndexPage = vi.fn();
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-legacy', getTurnIndexPage }),
+    );
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+
+    function Harness() {
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    expect(navigation).toMatchObject({
+      sessionId: 'session-legacy',
+      mode: 'legacy',
+      fallbackReason: 'unsupported',
+    });
+    expect(getTurnIndexPage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the session connected when initial turn metadata fails', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-navigation',
+        getTurnIndexPage: vi.fn(async () => {
+          throw new Error('metadata unavailable');
+        }),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('degraded'));
+    });
+
+    expect(connection?.status).toBe('connected');
+    expect(navigation?.error).toMatchObject({
+      operation: 'index',
+      message: 'metadata unavailable',
+      retryable: true,
+    });
+  });
+
+  it('adds an exact provisional turn after prompt admission', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-navigation',
+        getTurnIndexPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-navigation',
+          snapshot: 'snapshot-1',
+          totalTurns: 0,
+          start: 0,
+          turns: [],
+        })),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      await requireActions(actions).submitPrompt('A precise prompt');
+    });
+
+    expect(navigation?.provisionalTurns).toMatchObject([
+      {
+        provisionalId: 'live:prompt-1',
+        promptId: 'prompt-1',
+        label: 'A precise prompt',
+      },
+    ]);
+  });
+
+  it('skips malformed persisted events while locating a healthy historical turn', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const malformedEvent = {
+      v: 1,
+      id: { toString: null, valueOf: null },
+      type: 'session_update',
+      data: { update: { sessionUpdate: 'plan', entries: [] } },
+    } as unknown as DaemonEvent;
+    sdkMocks.sessions.push(
+      createMockSession({
+        getTurnIndexPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          snapshot: 'snapshot-1',
+          totalTurns: 1,
+          start: 0,
+          turns: [
+            {
+              ordinal: 0,
+              turnId: 'turn-0',
+              kind: 'prompt' as const,
+              label: 'Healthy prompt',
+            },
+          ],
+        })),
+        getTranscriptPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          hasMore: false,
+          targetRecordId: 'turn-0',
+          events: [
+            malformedEvent,
+            {
+              v: 1,
+              id: 2,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'Healthy prompt' },
+                  _meta: { qwenTranscript: { sourceRecordIds: ['turn-0'] } },
+                },
+              },
+            } as DaemonEvent,
+          ],
+        })),
+      }),
+    );
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    let liveBlocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      navigationStore = useDaemonTurnNavigationStore();
+      navigation = useDaemonTurnNavigationState();
+      liveBlocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      await expect(navigationStore!.locateOrdinal(0)).resolves.toMatchObject({
+        turnId: 'turn-0',
+        view: 'historical',
+      });
+    });
+    expect(navigation?.error).toBeUndefined();
+    expect(
+      [...navigation!.historicalPages.values()].flatMap((page) => page.blocks),
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'user', text: 'Healthy prompt' }),
+    );
+    expect(liveBlocks).toEqual([]);
+  });
+
+  it('remembers a removed prompt broadcast that precedes its admission response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const removal = createDeferred<void>();
+    const removalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      submitPrompt: vi.fn(() => accepted.promise),
+      async *events(opts = {}) {
+        await removal.promise;
+        yield {
+          v: 1,
+          id: 1,
+          type: 'pending_prompt_completed',
+          originatorClientId: 'client-1',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'removed-prompt',
+            state: 'removed',
+          },
+        } as DaemonEvent;
+        removalDelivered.resolve();
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      navigation = useDaemonTurnNavigationState();
+      navigationStore = useDaemonTurnNavigationStore();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let submission: Promise<{ promptId: string }> | undefined;
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      submission = requireActions(actions).submitPrompt('Never executed', {
+        optimisticUserMessage: false,
+      });
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledOnce(),
+      );
+      removal.resolve();
+      await removalDelivered.promise;
+    });
+    await act(async () => {
+      accepted.resolve({ promptId: 'removed-prompt', lastEventId: 0 });
+      await submission;
+      await navigationStore!.refreshHead();
+    });
+    expect(navigation?.provisionalTurns).toEqual([]);
+    expect(navigation?.effectiveTurnCount).toBe(navigation?.totalTurns);
+  });
+
+  it('associates an admitted prompt with the exact optimistic user block', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    sdkMocks.sessions.push(createMockSession());
+    let actions: DaemonSessionActions | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      actions = useDaemonActions();
+      navigation = useDaemonTurnNavigationState();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      await requireActions(actions).submitPrompt('Exact optimistic prompt', {
+        optimisticUserMessage: true,
+      });
+    });
+    const optimistic = blocks.find(
+      (block) =>
+        block.kind === 'user' && block.text === 'Exact optimistic prompt',
+    );
+    expect(optimistic).toBeDefined();
+    expect(navigation?.provisionalTurns).toMatchObject([
+      { promptId: 'prompt-1', blockId: optimistic!.id },
+    ]);
+  });
+
+  it('materializes an anchored turn outside the live transcript', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const liveOverlapEvent = {
+      v: 1,
+      id: 2,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'Live prompt' },
+          _meta: {
+            qwenTranscript: { sourceRecordIds: ['live-turn'] },
+          },
+        },
+      },
+    } as DaemonEvent;
+    const session = createMockSession({
+      sessionId: 'session-navigation',
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [liveOverlapEvent],
+      },
+      getTurnIndexPage: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-navigation',
+        snapshot: 'snapshot-1',
+        totalTurns: 1,
+        start: 0,
+        turns: [
+          {
+            ordinal: 0,
+            turnId: 'turn-0',
+            kind: 'prompt' as const,
+            label: 'Historical prompt',
+          },
+        ],
+      })),
+      getTranscriptPage: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-navigation',
+        events: [
+          {
+            v: 1,
+            id: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'Historical prompt' },
+                _meta: {
+                  qwenTranscript: { sourceRecordIds: ['turn-0'] },
+                },
+              },
+            },
+          },
+          liveOverlapEvent,
+        ],
+        hasMore: false,
+        targetRecordId: 'turn-0',
+        hasOlder: false,
+      })),
+    });
+    sdkMocks.sessions.push(session);
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+
+    function Harness() {
+      navigationStore = useDaemonTurnNavigationStore();
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+    });
+
+    let location: Awaited<
+      ReturnType<
+        ReturnType<typeof useDaemonTurnNavigationStore>['locateOrdinal']
+      >
+    >;
+    await act(async () => {
+      location = await navigationStore!.locateOrdinal(0);
+    });
+
+    expect(location!).toMatchObject({
+      turnId: 'turn-0',
+      view: 'historical',
+    });
+    expect(navigation?.historicalPages.size).toBe(1);
+    expect(navigation?.historicalRanges).toHaveLength(1);
+    const historicalPage = [...navigation!.historicalPages.values()][0];
+    expect([...historicalPage!.recordIds]).toEqual(['turn-0']);
+    expect(navigation?.historicalRanges[0]?.newer).toEqual({ kind: 'live' });
+    expect(session.getTranscriptPage).toHaveBeenCalledWith({
+      atRecordId: 'turn-0',
+      snapshot: 'snapshot-1',
+      limit: 200,
+    });
   });
 
   it('does not rerender streaming state consumers for equivalent transcript updates', async () => {
@@ -17911,6 +18363,16 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
           replayError?: string;
         };
       }),
+    getTurnIndexPage:
+      opts.getTurnIndexPage ??
+      vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: opts.sessionId ?? 'session-1',
+        snapshot: 'snapshot-1',
+        totalTurns: 0,
+        start: 0,
+        turns: [],
+      })),
     replaySnapshot: opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
