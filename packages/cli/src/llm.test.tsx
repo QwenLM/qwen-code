@@ -3405,7 +3405,6 @@ describe('startInteractiveUI', () => {
 
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
-    deferKittyProtocolExitFallback: vi.fn(),
     disableKittyProtocol: vi.fn(),
     popKittyProtocolFlags: vi.fn(),
     pushKittyProtocolFlags: vi.fn(),
@@ -3779,60 +3778,23 @@ describe('startInteractiveUI', () => {
     );
   });
 
-  // Regression for #6776: the kitty keyboard flags are tracked per screen
-  // (main vs alternate). The protocol is enabled on the main screen before
-  // render, so the pop must be written after Ink unmounts — i.e. after the
-  // alternate screen (when enabled) has been left — or the main screen's
-  // flags survive the exit and the shell receives kitty escape codes.
-  it('disables the Kitty keyboard protocol only after Ink has unmounted', async () => {
-    const unmount = vi.fn();
-    const { render } = await import('ink');
-    vi.mocked(render).mockReturnValue({ unmount } as never);
-    const { disableKittyProtocol } = await import(
-      './ui/utils/kittyProtocolDetector.js'
-    );
-
-    await startInteractiveUI(
-      mockConfig,
-      mockSettings,
-      mockStartupWarnings,
-      mockWorkspaceRoot,
-      {
-        authError: null,
-        themeError: null,
-        shouldOpenAuthDialog: false,
-        memoryFileCount: 0,
-      },
-    );
-
-    const { registerCleanup } = await import('./utils/cleanup.js');
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0]?.[0] as
-      | (() => Promise<void> | void)
-      | undefined;
-    expect(cleanupFn).toBeTypeOf('function');
-    await cleanupFn?.();
-
-    expect(unmount).toHaveBeenCalledTimes(1);
-    expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
-    expect(
-      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
-    ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
-  });
-
-  // Regression for #7779: the kitty keyboard flags are pushed once per screen
-  // buffer (main at startup, alternate after Ink enters the alternate screen).
-  // Each push must be popped while its screen buffer is still current: the
-  // alternate-screen pop BEFORE Ink unmounts (before `ESC[?1049l`), the
-  // main-screen pop after. Popping only once, while the alternate screen is
-  // current, balances just the alternate push and leaves the main screen's
-  // flags active after exit — the user's shell then receives kitty-encoded
-  // keys (e.g. "9;5u" on Ctrl-C).
-  it('pops the alternate-screen kitty flags before unmount and defers the exit fallback behind Ink', async () => {
+  // Regression for #6776 and #7779: the kitty keyboard flags are pushed once
+  // per screen buffer — on the main screen before render, on the alternate
+  // screen right after Ink enters it. Each push must be popped while its
+  // screen buffer is still current: the alternate-screen pop BEFORE Ink
+  // unmounts (i.e. before `ESC[?1049l` leaves the alternate screen), the
+  // main-screen pop only AFTER Ink has unmounted. Popping only once, while
+  // the alternate screen is current, balances just the alternate push and
+  // leaves the surviving screen's flags active after exit — the user's
+  // shell then receives kitty escape codes (e.g. "9;5u" on Ctrl-C). (The
+  // byte-order proof for the crash paths — where Ink's signal-exit
+  // teardown, not this cleanup chain, writes the leave — lives in
+  // kittyProtocolDetector.test.ts.)
+  it("pops each screen buffer's kitty flags around Ink unmount and disables only after", async () => {
     const unmount = vi.fn();
     const { render } = await import('ink');
     vi.mocked(render).mockReturnValue({ unmount } as never);
     const {
-      deferKittyProtocolExitFallback,
       disableKittyProtocol,
       popKittyProtocolFlags,
       pushKittyProtocolFlags,
@@ -3851,17 +3813,11 @@ describe('startInteractiveUI', () => {
       },
     );
 
-    // VP startup: re-push onto the alternate screen and re-arm the
-    // process-'exit' fallback behind Ink's render-time signal-exit
-    // subscription, so even crash paths pop on the main screen after Ink
-    // left the alternate screen.
+    // VP startup: the alternate-screen push must land after Ink's render()
+    // entered the alternate screen, so it balances that buffer's stack.
     expect(pushKittyProtocolFlags).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(pushKittyProtocolFlags).mock.invocationCallOrder[0],
-    ).toBeGreaterThan(vi.mocked(render).mock.invocationCallOrder[0]);
-    expect(deferKittyProtocolExitFallback).toHaveBeenCalledTimes(1);
-    expect(
-      vi.mocked(deferKittyProtocolExitFallback).mock.invocationCallOrder[0],
     ).toBeGreaterThan(vi.mocked(render).mock.invocationCallOrder[0]);
 
     const { registerCleanup } = await import('./utils/cleanup.js');

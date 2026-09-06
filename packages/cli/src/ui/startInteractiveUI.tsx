@@ -42,7 +42,6 @@ import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
 import {
-  deferKittyProtocolExitFallback,
   disableKittyProtocol,
   popKittyProtocolFlags,
   pushKittyProtocolFlags,
@@ -323,14 +322,12 @@ export async function startInteractiveUI(
     // The push is ordered after Ink's enter-alternate-screen write; teardown
     // pops it again before Ink leaves the alternate screen (see the cleanup
     // registration below) so each screen buffer's flag stack stays balanced
-    // (#7779).
+    // (#7779). Crash paths that skip the cleanup chain are covered without
+    // any listener-ordering assumptions: the detector's 'exit' fallback is
+    // buffer-aware and anchors its pops to the `ESC[?1049l` write itself via
+    // its stdout hook, because native 'exit' listeners always run before
+    // Ink's signal-exit teardown on every exit route.
     pushKittyProtocolFlags();
-    // Re-arm the detector's process-'exit' fallback behind Ink's own
-    // signal-exit teardown, which render() subscribed above: 'exit' listeners
-    // run in registration order, so the fallback's pop now lands after Ink
-    // restored the terminal and left the alternate screen — on the main
-    // screen — even on crash paths that skip the cleanup chain (#7779).
-    deferKittyProtocolExitFallback();
   }
   // Records the moment Ink's `render()` call has returned, which is
   // synchronous and happens before React reconciliation actually pushes
