@@ -55,7 +55,13 @@ export function registerSkillHooks(
     if (!matchers) continue;
 
     for (const matcher of matchers) {
-      const matcherPattern = matcher.matcher || '';
+      // An omitted or blank matcher means "match all", inheriting the
+      // documented registry-side semantics (hookPlanner: "no matcher means
+      // match all"; docs: `""` or `"*"` matches all events of that type).
+      // Normalizing to '' instead would store `^$`, which matches nothing:
+      // the hook registers, is counted, and can never fire — a silent
+      // fail-open for a frontmatter gate.
+      const matcherPattern = matcher.matcher?.trim() || '*';
 
       for (const hook of matcher.hooks) {
         // Only register command and HTTP hooks (skip function hooks)

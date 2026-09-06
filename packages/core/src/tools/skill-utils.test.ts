@@ -212,6 +212,79 @@ describe('applySkillHooks', () => {
     expect(applySkillHooks(noHookSystem, gatedSkill())).toBe(0);
     expect(applySkillHooks(noSessionId, gatedSkill())).toBe(0);
   });
+
+  function promptHookSkill(): SkillConfig {
+    return {
+      ...gatedSkill(),
+      hooks: {
+        PreToolUse: gatedSkill().hooks!.PreToolUse,
+        UserPromptSubmit: [
+          {
+            hooks: [{ type: HookType.Command, command: 'submit-guard.sh' }],
+          },
+        ],
+        UserPromptExpansion: [
+          {
+            matcher: 'gated-skill',
+            hooks: [{ type: HookType.Command, command: 'expand-guard.sh' }],
+          },
+        ],
+      },
+    };
+  }
+
+  it('registers prompt-lifecycle events by default (model Skill-tool path)', () => {
+    const { config, addSessionHook } = mockHookSystem();
+
+    expect(applySkillHooks(config, promptHookSkill())).toBe(3);
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.UserPromptSubmit,
+      expect.any(String),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.UserPromptExpansion,
+      expect.any(String),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('excludePromptLifecycleEvents skips UserPromptSubmit/UserPromptExpansion but keeps tool gates', () => {
+    // The slash-command startup option (PR #11153 R1-1): registering
+    // prompt-lifecycle hooks from inside a /<skill-name> action lets the
+    // skill's own hook fire on — and block — the submission carrying its
+    // body. Only the tool-lifecycle gate may register there.
+    const { config, addSessionHook } = mockHookSystem();
+
+    expect(
+      applySkillHooks(config, promptHookSkill(), {
+        excludePromptLifecycleEvents: true,
+      }),
+    ).toBe(1);
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.PreToolUse,
+      'Shell',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('excludePromptLifecycleEvents is a plain pass-through for skills without prompt hooks', () => {
+    const { config, addSessionHook } = mockHookSystem();
+
+    expect(
+      applySkillHooks(config, gatedSkill(), {
+        excludePromptLifecycleEvents: true,
+      }),
+    ).toBe(1);
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('canApplySkillSideEffects', () => {

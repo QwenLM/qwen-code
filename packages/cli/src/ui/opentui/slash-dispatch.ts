@@ -97,9 +97,14 @@ export async function loadInteractiveCommands(
           },
           services: { config, settings: settings ?? null, logger: null },
         } as unknown as Parameters<typeof cmd.action>[0];
+        // Snapshot BEFORE the action runs (parity with
+        // slashCommandProcessor.ts): command actions can install session
+        // hooks as a side effect, and a hook installed by this action must
+        // not fire on — or block — the submission that carried it.
+        const hadUserPromptExpansionHooks = hasUserPromptExpansionHooks(config);
         const result = await cmd.action(minimalContext, args);
         if (!result || result.type !== 'submit_prompt') return null;
-        const output = hasUserPromptExpansionHooks(config)
+        const output = hadUserPromptExpansionHooks
           ? await config
               .getHookSystem()
               ?.fireUserPromptExpansionEvent(

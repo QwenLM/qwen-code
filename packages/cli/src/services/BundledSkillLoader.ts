@@ -101,15 +101,22 @@ export class BundledSkillLoader implements ICommandLoader {
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
           // Apply the skill's session side effects before its body is
           // submitted: auto-approve its declared allowedTools and register
-          // its frontmatter hooks. Both mirror the Skill-tool path
-          // (packages/core/src/tools/skill.ts applySideEffects) so a
+          // its frontmatter tool-lifecycle hooks, mirroring the Skill-tool
+          // path (packages/core/src/tools/skill.ts applySideEffects) so a
           // PreToolUse gate declared in SKILL.md also fires when the user
           // starts the skill via /<skill-name> instead of the model (#11067).
+          // Prompt-lifecycle events (UserPromptSubmit / UserPromptExpansion)
+          // are deliberately excluded — see ApplySkillHooksOptions: this
+          // action runs inside the dispatch of the submission carrying the
+          // skill's own body, and a hook registered here could block that
+          // very submission.
           applySkillAllowedTools(
             this.config?.getPermissionManager(),
             skill.allowedTools,
           );
-          applySkillHooks(this.config, skill);
+          applySkillHooks(this.config, skill, {
+            excludePromptLifecycleEvents: true,
+          });
 
           // Resolve template variables in skill body
           let body = skill.body;

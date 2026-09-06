@@ -568,9 +568,11 @@ describe('SkillCommandLoader', () => {
 
   describe('frontmatter hooks registration via /<skill-name> (#11067)', () => {
     let mockAddSessionHook: ReturnType<typeof vi.fn>;
+    let registeredEvents: Set<string>;
 
     function installHookSystem(): void {
       mockAddSessionHook = vi.fn();
+      registeredEvents = new Set<string>();
       const byEvent = new Map<
         string,
         Array<{ matcher: string; skillRoot?: string; config: unknown }>
@@ -587,6 +589,7 @@ describe('SkillCommandLoader', () => {
             hook: unknown,
             options?: { skillRoot?: string },
           ) => {
+            registeredEvents.add(event);
             const list = byEvent.get(event) ?? [];
             list.push({ matcher, skillRoot: options?.skillRoot, config: hook });
             byEvent.set(event, list);
@@ -625,7 +628,7 @@ describe('SkillCommandLoader', () => {
               hooks: [
                 {
                   type: HookType.Command,
-                  command: '$QWEN_SKILL/scripts/audit.sh',
+                  command: '$QWEN_SKILL_ROOT/scripts/audit.sh',
                 },
               ],
             },
@@ -645,7 +648,7 @@ describe('SkillCommandLoader', () => {
       return command;
     }
 
-    it('registers every frontmatter hook event when the user starts the skill — not just when the model does', async () => {
+    it('registers every frontmatter tool-lifecycle hook event when the user starts the skill — not just when the model does', async () => {
       installHookSystem();
       const command = await loadGatedSkillCommand();
 
@@ -675,13 +678,85 @@ describe('SkillCommandLoader', () => {
         'Shell',
         expect.objectContaining({
           type: HookType.Command,
-          command: '$QWEN_SKILL/scripts/audit.sh',
+          command: '$QWEN_SKILL_ROOT/scripts/audit.sh',
+          env: { QWEN_SKILL_ROOT: '/test/project/.qwen/skills/my-skill' },
         }),
         {
           skillRoot: '/test/project/.qwen/skills/my-skill',
           trustGated: true,
         },
       );
+    });
+
+    it('excludes prompt-lifecycle hooks so a skill cannot intercept its own submission (PR #11153 R1-1)', async () => {
+      // The /<skill-name> action runs inside the dispatch of the very
+      // submission that carries the skill body. Registering the skill's
+      // own UserPromptSubmit / UserPromptExpansion hooks here would let
+      // them fire on — and block — that submission (the UserPromptSubmit
+      // arm re-fires downstream in client.ts, which consults
+      // hasHooksForEvent only after the action registered it), for the
+      // rest of the session since session hooks are never unregistered.
+      // Only tool-lifecycle hooks — the PreToolUse gate #11067 is about —
+      // may register on the slash path; prompt-lifecycle events stay on
+      // the model Skill-tool path (see ApplySkillHooksOptions).
+      installHookSystem();
+      const skill = makeSkill({
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/my-skill/SKILL.md',
+        skillRoot: '/test/project/.qwen/skills/my-skill',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: HookType.Command, command: 'gate.sh' }],
+            },
+          ],
+          // No matcher: the exact form whose UserPromptSubmit arm fires
+          // regardless of matcher (the handler has no matcher target).
+          UserPromptSubmit: [
+            {
+              hooks: [{ type: HookType.Command, command: 'submit-guard.sh' }],
+            },
+          ],
+          // Matcher equal to the skill's own command name: the form whose
+          // UserPromptExpansion arm self-fires in the dispatchers.
+          UserPromptExpansion: [
+            {
+              matcher: 'my-skill',
+              hooks: [{ type: HookType.Command, command: 'expand-guard.sh' }],
+            },
+          ],
+        },
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+
+      const result = await command.action?.(
+        { invocation: { raw: '/my-skill', args: '' } } as CommandContext,
+        '',
+      );
+
+      // The skill body still reaches the model — no self-interception.
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+      // The PreToolUse gate still registers: #11067's actual fix is intact.
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Shell',
+        expect.anything(),
+        { skillRoot: '/test/project/.qwen/skills/my-skill', trustGated: true },
+      );
+      // Neither prompt-lifecycle event registered, so the downstream
+      // hasHooksForEvent gates stay closed for them on this submission.
+      expect(registeredEvents).toContain(HookEventName.PreToolUse);
+      expect(registeredEvents).not.toContain(HookEventName.UserPromptSubmit);
+      expect(registeredEvents).not.toContain(HookEventName.UserPromptExpansion);
     });
 
     it('does not double-register across repeated invocations', async () => {

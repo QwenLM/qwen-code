@@ -1620,6 +1620,46 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it("does not fire UserPromptExpansion hooks installed by the command action itself on that action's own submission (PR #11153 R1-1)", async () => {
+      // The dispatcher snapshots hasUserPromptExpansionHooks BEFORE
+      // running the action: command actions can install session hooks as
+      // a side effect (skill frontmatter hooks), and a hook installed by
+      // an action must not fire on — or block — the submission carrying
+      // it. The action below simulates the R1-1 shape by flipping the
+      // live predicate mid-dispatch. The preceding file-command tests are
+      // the companion: a hook configured before the dispatch still fires.
+      mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
+      const selfHookCommand = createTestCommand({
+        name: 'selfhook',
+        description: 'Installs a session hook inside its own action',
+        action: async () => {
+          // Mid-dispatch "installation": from here on the live predicate
+          // would return true.
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          return {
+            type: 'submit_prompt',
+            content: [{ text: 'The skill body being submitted.' }],
+          };
+        },
+      });
+
+      const result = setupProcessorHook([selfHookCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/selfhook');
+      });
+
+      // The submission survives: not blocked by its own just-installed
+      // hook, and the expansion event never fired for it.
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: 'The skill body being submitted.' }],
+      });
+      expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    });
+
     it('classifies a hidden invocation as model-sent when it submits a prompt', async () => {
       const command = createTestCommand({
         name: 'status',

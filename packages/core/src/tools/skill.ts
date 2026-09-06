@@ -517,9 +517,14 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       return;
     }
     // Shared with the slash-command startup path (SkillCommandLoader /
-    // BundledSkillLoader): both must register the same session hooks so a
-    // PreToolUse gate can't be bypassed by starting the skill as
-    // `/<skill-name>` instead of via the model (#11067).
+    // BundledSkillLoader): every path must register the same session hooks
+    // so a PreToolUse gate can't be bypassed by starting the skill as
+    // `/<skill-name>` instead of via the model (#11067). The one exception
+    // is the prompt-lifecycle events, which the slash-command callers
+    // exclude (see `ApplySkillHooksOptions`): registering them mid-dispatch
+    // would let a skill's own hook block the submission carrying its body.
+    // This model-side path keeps full registration — the body arrives as a
+    // tool result here, never as a prompt, so there is no collision.
     const hookCount = applySkillHooks(this.config, skill);
     if (hookCount > 0) {
       debugLogger.info(
@@ -528,8 +533,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     } else {
       // Zero is the expected outcome of every re-invocation: the hooks are
       // already registered and `registerSkillHooks` dedups them (it logs
-      // each skip at debug level), or there is no hook system / session id
-      // yet (SDK-mode callers). Not a warning — a steady-state WARN
+      // each skip at debug level), or there is no live hook system — hooks
+      // disabled via settings, `initialize({ skipHooks: true })`, or
+      // `initialize()` not yet run. Not a warning — a steady-state WARN
       // claiming "no hooks registered" over hooks that are firing sends
       // whoever reads the log after a phantom failure.
       debugLogger.debug(

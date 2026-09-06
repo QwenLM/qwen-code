@@ -360,6 +360,86 @@ describe('BundledSkillLoader', () => {
       );
     });
 
+    it('excludes prompt-lifecycle hooks so a bundled skill cannot intercept its own submission (PR #11153 R1-1)', async () => {
+      const mockAddSessionHook = vi.fn();
+      const registeredEvents = new Set<string>();
+      const byEvent = new Map<
+        string,
+        Array<{ matcher: string; skillRoot?: string; config: unknown }>
+      >();
+      (mockConfig.getHookSystem as ReturnType<typeof vi.fn>).mockReturnValue({
+        getSessionHooksManager: () => ({
+          addSessionHook: mockAddSessionHook.mockImplementation(
+            (
+              _sessionId: string,
+              event: string,
+              matcher: string,
+              hook: unknown,
+              options?: { skillRoot?: string },
+            ) => {
+              registeredEvents.add(event);
+              const list = byEvent.get(event) ?? [];
+              list.push({
+                matcher,
+                skillRoot: options?.skillRoot,
+                config: hook,
+              });
+              byEvent.set(event, list);
+            },
+          ),
+          getHooksForEvent: vi.fn(
+            (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+          ),
+        }),
+      });
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-1');
+
+      const skill = makeSkill({
+        skillRoot: '/bundled/review',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+                },
+              ],
+            },
+          ],
+          UserPromptSubmit: [
+            {
+              hooks: [{ type: HookType.Command, command: 'submit-guard.sh' }],
+            },
+          ],
+          UserPromptExpansion: [
+            {
+              matcher: 'review',
+              hooks: [{ type: HookType.Command, command: 'expand-guard.sh' }],
+            },
+          ],
+        },
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      const result = await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      // The skill body still reaches the model — no self-interception.
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+      // The PreToolUse gate still registers; the prompt-lifecycle events
+      // do not (see ApplySkillHooksOptions.excludePromptLifecycleEvents).
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(registeredEvents).toContain(HookEventName.PreToolUse);
+      expect(registeredEvents).not.toContain(HookEventName.UserPromptSubmit);
+      expect(registeredEvents).not.toContain(HookEventName.UserPromptExpansion);
+    });
+
     it('does not double-register across repeated invocations', async () => {
       const mockAddSessionHook = vi.fn();
       const byEvent = new Map<

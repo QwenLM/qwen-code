@@ -162,6 +162,59 @@ describe('registerSkillHooks', () => {
     expect(hooks[0].matcher).toBe('^(Write|Edit)$');
   });
 
+  it('should treat an omitted or blank matcher as match-all, not match-nothing', () => {
+    // PR #11153 R1-13: an omitted matcher is legal frontmatter and reads
+    // as "gate every tool call". Storing '' would compile to /^$/, which
+    // matches nothing — the hook registers, is counted, and never fires.
+    // '*' inherits the documented registry-side "match all" semantics and
+    // is accepted by SessionHooksManager.matchesPattern.
+    const makeMatcherlessSkill = (matcher?: string): SkillConfig => ({
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            ...(matcher === undefined ? {} : { matcher }),
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo "gate everything"',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    for (const matcher of [undefined, '', '   ']) {
+      sessionHooksManager = new SessionHooksManager();
+      const count = registerSkillHooks(
+        sessionHooksManager,
+        sessionId,
+        makeMatcherlessSkill(matcher),
+      );
+      expect(count).toBe(1);
+
+      const stored = sessionHooksManager.getHooksForEvent(
+        sessionId,
+        HookEventName.PreToolUse,
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0].matcher).toBe('*');
+      expect(
+        sessionHooksManager.getMatchingHooks(
+          sessionId,
+          HookEventName.PreToolUse,
+          'run_shell_command',
+        ),
+      ).toHaveLength(1);
+    }
+  });
+
   it('should register multiple hooks for same event and matcher', () => {
     const skill: SkillConfig = {
       name: 'test-skill',

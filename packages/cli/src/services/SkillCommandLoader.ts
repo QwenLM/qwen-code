@@ -157,18 +157,27 @@ export class SkillCommandLoader implements ICommandLoader {
             }
             // Apply the skill's session side effects before its body is
             // submitted: auto-approve its declared allowedTools AND register
-            // its frontmatter hooks. Both must mirror the Skill-tool path
-            // (packages/core/src/tools/skill.ts applySideEffects) — a
+            // its frontmatter tool-lifecycle hooks, mirroring the Skill-tool
+            // path (packages/core/src/tools/skill.ts applySideEffects) — a
             // PreToolUse gate declared in SKILL.md is a safety boundary, and
             // skipping its registration just because the user rather than
             // the model started the skill made the gate fail open (#11067).
+            // Prompt-lifecycle events (UserPromptSubmit /
+            // UserPromptExpansion) are deliberately excluded: this action
+            // runs inside the dispatch of the submission that carries the
+            // skill's own body, and a hook registered here would fire on —
+            // and could block — that very submission. The model Skill-tool
+            // path keeps full registration (no collision there: the body
+            // arrives as a tool result).
             if (this.config && canApplySkillSideEffects(skill, this.config)) {
               applySkillAllowedTools(
                 this.config.getPermissionManager(),
                 skill.allowedTools,
                 { trustGated: skill.level === 'project' },
               );
-              applySkillHooks(this.config, skill);
+              applySkillHooks(this.config, skill, {
+                excludePromptLifecycleEvents: true,
+              });
             } else if (skill.allowedTools?.length || skill.hooks) {
               debugLogger.warn(
                 `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
