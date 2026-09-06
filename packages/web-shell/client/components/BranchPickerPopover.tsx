@@ -10,20 +10,24 @@ import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonGitBranchesResult,
   DaemonGitBranchInfo,
+  DaemonGitRemoteInfo,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   ArrowDownToLineIcon,
+  ArrowLeftIcon,
   ArrowUpFromLineIcon,
   CheckIcon,
   ChevronRightIcon,
   GitBranchIcon,
   GitCommitIcon,
+  GlobeIcon,
   Loader2Icon,
   PlusIcon,
   SearchIcon,
   StarIcon,
   TagIcon,
+  Trash2Icon,
   FileDiffIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -72,6 +76,29 @@ function pullErrorMessage(err: unknown): string {
   const message = daemonErrorBody(err)?.['message'];
   if (typeof message === 'string' && message.trim() !== '') return message;
   return err instanceof Error ? err.message : String(err);
+}
+
+// Display-side counterpart of the core add-predicate's invisible-character
+// rejection: a `.git/config` the user did not author (downloaded zip, cloned
+// repo) can carry C1/Default_Ignorable characters (zero-width marks,
+// separators, bidi marks and embeddings, soft hyphen, variation selectors)
+// in remote names and URLs, and those are rendered verbatim here — the same
+// spoofing surface gitDirect's INVALID_REF_CHARS policy covers for displayed
+// branch names, extended to the full ignorable set for this HTML surface.
+// Keep in lockstep with core git-remotes.ts's INVISIBLE_CHARS.
+// Strip for RENDERING only; mutation requests must carry the raw name (git
+// knows the remote by its exact configured name), and filteredRemotes must
+// match these same stripped values so search finds what the row displays.
+// The class must stay on one line so the eslint-disable applies
+// (gitDirect.ts precedent). It intentionally matches combining marks
+// (CGJ, Mongolian FVS, variation selectors) as individual code points —
+// stripping them is the point, not matching a whole grapheme.
+// prettier-ignore
+// eslint-disable-next-line no-control-regex, no-misleading-character-class
+const DISPLAY_INVISIBLE_CHARS = /[\x00-\x1f\x7f-\x9f\u00ad\u034f\u061c\u180b-\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufe00-\ufe0f]/g;
+
+function sanitizeRemoteDisplay(value: string): string {
+  return value.replace(DISPLAY_INVISIBLE_CHARS, '');
 }
 
 interface BranchPickerPopoverProps {
@@ -364,9 +391,20 @@ export function BranchPickerPopover({
     remote: true,
     tags: true,
   });
+  const [view, setView] = useState<'branches' | 'remotes'>('branches');
+  const [remotes, setRemotes] = useState<DaemonGitRemoteInfo[] | null>(null);
+  const [remotesLoading, setRemotesLoading] = useState(false);
+  const [remotesError, setRemotesError] = useState<string | null>(null);
+  const [remoteName, setRemoteName] = useState('');
+  const [remoteUrl, setRemoteUrl] = useState('');
+  // The two-click remove confirm: holds the armed remote's name, or null.
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const requestIdRef = useRef(0);
+  // Separate from requestIdRef: handleRemoteRemove calls fetchBranches,
+  // which would otherwise invalidate the remotes request it is paired with.
+  const remotesRequestIdRef = useRef(0);
   // Wall-clock time the current listing was received; lets a status the
   // daemon computed later trigger a listing re-fetch (see the effect below).
   const [listingFetchedAt, setListingFetchedAt] = useState<number>();
@@ -429,10 +467,12 @@ export function BranchPickerPopover({
     void fetchStatus();
   }, [fetchBranches, fetchStatus]);
 
-  // A status fetched for a previous workspace must not seed the next one.
+  // A status or remotes list fetched for a previous workspace must not
+  // seed the next one.
   useEffect(() => {
     setLiveStatus(undefined);
     statusRequestIdRef.current++;
+    remotesRequestIdRef.current++;
   }, [ws, gitCwd]);
 
   const effectiveStatus = useMemo(
@@ -449,6 +489,12 @@ export function BranchPickerPopover({
       setCheckoutRefMode(false);
       setNewBranchName('');
       setCheckoutRefValue('');
+      setView('branches');
+      setRemotes(null);
+      setRemotesError(null);
+      setRemoteName('');
+      setRemoteUrl('');
+      setConfirmRemove(null);
       if (!stickyWarningRef.current) setStatusMsg(null);
       setPullBlocked(false);
       setConfirmDiscard(false);
@@ -667,6 +713,141 @@ export function BranchPickerPopover({
     ],
   );
 
+  const fetchRemotes = useCallback(async () => {
+    const requestId = ++remotesRequestIdRef.current;
+    setRemotesLoading(true);
+    setRemotesError(null);
+    try {
+      const result = await ws.workspaceGitRemotes(gitCwd);
+      if (requestId !== remotesRequestIdRef.current) return;
+      setRemotes(result.remotes);
+    } catch (err) {
+      if (requestId !== remotesRequestIdRef.current) return;
+      setRemotesError(sanitizeRemoteDisplay(pullErrorMessage(err)));
+    } finally {
+      if (requestId === remotesRequestIdRef.current) {
+        setRemotesLoading(false);
+      }
+    }
+  }, [ws, gitCwd]);
+
+  const openRemotes = useCallback(() => {
+    // Only a standing pull-resolution panel competes with the remotes view;
+    // an unrelated sticky warning (a kept stash entry) must survive the
+    // round trip, per stickyWarningRef's contract.
+    if (pullBlocked) clearPullPanel();
+    setNewBranchMode(false);
+    setCheckoutRefMode(false);
+    setConfirmRemove(null);
+    // The query that found the "Manage Remotes…" action row must not carry
+    // over as the remotes filter (typing "remote" to find the action would
+    // otherwise open a panel filtered to nothing).
+    setSearch('');
+    setView('remotes');
+    void fetchRemotes();
+  }, [pullBlocked, clearPullPanel, fetchRemotes]);
+
+  const closeRemotes = useCallback(() => {
+    setView('branches');
+    setConfirmRemove(null);
+    setSearch('');
+  }, []);
+
+  const handleRemoteAdd = useCallback(async () => {
+    if (busyAction) return;
+    const name = remoteName.trim();
+    const url = remoteUrl.trim();
+    // UX-only guard against the obvious cases; the daemon remains the
+    // authority on full name/URL validation and answers 400 with its own
+    // message, which lands in the status bar below.
+    if (!name || !url || name.startsWith('-') || url.startsWith('-')) {
+      showStatus(t('branchPicker.remotes.invalidInput'), 'error');
+      return;
+    }
+    const requestId = remotesRequestIdRef.current;
+    setConfirmRemove(null);
+    setBusyAction('remoteAdd');
+    try {
+      const result = await ws.workspaceGitRemoteAdd(name, url, gitCwd);
+      if (requestId !== remotesRequestIdRef.current) return;
+      setRemotes(result.remotes);
+      setRemoteName('');
+      setRemoteUrl('');
+      showStatus(
+        t('branchPicker.remotes.added', {
+          name: sanitizeRemoteDisplay(name),
+        }),
+        'success',
+      );
+    } catch (err) {
+      if (requestId !== remotesRequestIdRef.current) return;
+      // git echoes config-sourced names in its errors; the footer renders
+      // verbatim, so sanitize at this display boundary too.
+      showStatus(sanitizeRemoteDisplay(pullErrorMessage(err)), 'error');
+      // A refused add can mean the list is stale (409 already-exists for a
+      // remote the panel does not show); re-read so the panel converges.
+      void fetchRemotes();
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    ws,
+    busyAction,
+    gitCwd,
+    remoteName,
+    remoteUrl,
+    fetchRemotes,
+    showStatus,
+    t,
+  ]);
+
+  const handleRemoteRemove = useCallback(
+    async (name: string) => {
+      if (busyAction) return;
+      const requestId = remotesRequestIdRef.current;
+      setConfirmRemove(null);
+      setBusyAction('remoteRemove');
+      try {
+        const result = await ws.workspaceGitRemoteRemove(name, gitCwd);
+        if (requestId !== remotesRequestIdRef.current) return;
+        setRemotes(result.remotes);
+        showStatus(
+          t('branchPicker.remotes.removed', {
+            name: sanitizeRemoteDisplay(name),
+          }),
+          'success',
+        );
+        // Removal deletes refs/remotes/<name>/* and the tracking config of
+        // any branch that pointed at it, so both the branch listing and the
+        // chip's upstream state are stale now.
+        await fetchBranches(true);
+        void fetchStatus();
+        onBranchChanged?.();
+      } catch (err) {
+        if (requestId !== remotesRequestIdRef.current) return;
+        showStatus(sanitizeRemoteDisplay(pullErrorMessage(err)), 'error');
+        // A refused remove usually means the list is stale (git answered
+        // "No such remote" for a row still on screen — a terminal removed
+        // it first); re-read so the panel converges instead of offering the
+        // same doomed click forever.
+        void fetchRemotes();
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      ws,
+      busyAction,
+      gitCwd,
+      fetchBranches,
+      fetchStatus,
+      fetchRemotes,
+      onBranchChanged,
+      showStatus,
+      t,
+    ],
+  );
+
   const q = search.toLowerCase().trim();
 
   const filterBranches = useCallback(
@@ -711,6 +892,20 @@ export function BranchPickerPopover({
     return groups;
   }, [filteredRemote]);
 
+  const filteredRemotes = useMemo(() => {
+    if (!remotes) return [];
+    if (!q) return remotes;
+    // Match the values the row actually renders (sanitized), not the raw
+    // config strings — otherwise a remote whose name/URL carries invisible
+    // characters displays as "origin" yet cannot be found by typing it.
+    return remotes.filter(
+      (r) =>
+        sanitizeRemoteDisplay(r.name).toLowerCase().includes(q) ||
+        sanitizeRemoteDisplay(r.fetchUrl).toLowerCase().includes(q) ||
+        sanitizeRemoteDisplay(r.pushUrl).toLowerCase().includes(q),
+    );
+  }, [remotes, q]);
+
   const hints = useMemo(
     () => deriveActionHints(t, data, effectiveStatus),
     [t, data, effectiveStatus],
@@ -723,7 +918,8 @@ export function BranchPickerPopover({
     t('branchPicker.action.commit').toLowerCase().includes(q) ||
     t('branchPicker.action.newBranch').toLowerCase().includes(q) ||
     t('branchPicker.action.checkoutRef').toLowerCase().includes(q) ||
-    t('branchPicker.action.viewChanges').toLowerCase().includes(q);
+    t('branchPicker.action.viewChanges').toLowerCase().includes(q) ||
+    t('branchPicker.action.manageRemotes').toLowerCase().includes(q);
 
   useEffect(() => {
     if (!actionsVisible) {
@@ -772,264 +968,315 @@ export function BranchPickerPopover({
         </div>
 
         <div className={styles.list}>
-          {loading && (
-            <div className={styles.loading}>{t('branchPicker.loading')}</div>
-          )}
-          {error && <div className={styles.empty}>{error}</div>}
-
-          {!loading && !error && data && (
+          {view === 'remotes' ? (
+            <RemotesView
+              remotes={filteredRemotes}
+              totalCount={remotes?.length ?? 0}
+              loading={remotesLoading}
+              error={remotesError}
+              busyAction={busyAction}
+              confirmRemove={confirmRemove}
+              onConfirmRemove={setConfirmRemove}
+              onRemove={(name) => void handleRemoteRemove(name)}
+              name={remoteName}
+              url={remoteUrl}
+              onNameChange={setRemoteName}
+              onUrlChange={setRemoteUrl}
+              onAdd={() => void handleRemoteAdd()}
+              onBack={closeRemotes}
+            />
+          ) : (
             <>
-              {actionsVisible && (
+              {loading && (
+                <div className={styles.loading}>
+                  {t('branchPicker.loading')}
+                </div>
+              )}
+              {error && <div className={styles.empty}>{error}</div>}
+
+              {!loading && !error && data && (
                 <>
-                  <button
-                    type="button"
-                    className={`${styles.actionItem} ${hints.pull?.tone === 'muted' ? styles.actionItemMuted : ''}`}
-                    disabled={!!busyAction || hints.pullDisabled}
-                    onClick={() => void handlePull()}
-                    data-testid="branch-picker-pull"
-                  >
-                    {busyAction === 'pull' ? (
-                      <Loader2Icon
-                        size={14}
-                        className={`${styles.actionIcon} ${styles.spin}`}
-                      />
-                    ) : (
-                      <ArrowDownToLineIcon
-                        size={14}
-                        className={styles.actionIcon}
-                      />
-                    )}
-                    <span className={styles.actionLabel}>
-                      {t('branchPicker.action.pull')}
-                    </span>
-                    <ActionHintLabel hint={hints.pull} />
-                  </button>
-                  {onOpenCommit && (
-                    <button
-                      type="button"
-                      className={`${styles.actionItem} ${hints.commit?.tone === 'muted' ? styles.actionItemMuted : ''}`}
-                      disabled={!!busyAction}
-                      onClick={() => {
-                        onOpenCommit();
-                        onOpenChange(false);
-                      }}
-                      data-testid="branch-picker-commit"
-                    >
-                      <GitCommitIcon size={14} className={styles.actionIcon} />
-                      <span className={styles.actionLabel}>
-                        {t('branchPicker.action.commit')}
-                      </span>
-                      <ActionHintLabel hint={hints.commit} />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className={`${styles.actionItem} ${hints.push?.tone === 'muted' ? styles.actionItemMuted : ''}`}
-                    disabled={!!busyAction || hints.pushDisabled}
-                    onClick={() => void handlePush()}
-                    data-testid="branch-picker-push"
-                  >
-                    {busyAction === 'push' ? (
-                      <Loader2Icon
-                        size={14}
-                        className={`${styles.actionIcon} ${styles.spin}`}
-                      />
-                    ) : (
-                      <ArrowUpFromLineIcon
-                        size={14}
-                        className={styles.actionIcon}
-                      />
-                    )}
-                    <span className={styles.actionLabel}>
-                      {t('branchPicker.action.push')}
-                    </span>
-                    <ActionHintLabel hint={hints.push} />
-                  </button>
-                  {onOpenDiff && (
-                    <button
-                      type="button"
-                      className={styles.actionItem}
-                      onClick={() => {
-                        onOpenDiff();
-                        onOpenChange(false);
-                      }}
-                    >
-                      <FileDiffIcon size={14} className={styles.actionIcon} />
-                      <span className={styles.actionLabel}>
-                        {t('branchPicker.action.viewChanges')}
-                      </span>
-                    </button>
-                  )}
+                  {actionsVisible && (
+                    <>
+                      <button
+                        type="button"
+                        className={`${styles.actionItem} ${hints.pull?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                        disabled={!!busyAction || hints.pullDisabled}
+                        onClick={() => void handlePull()}
+                        data-testid="branch-picker-pull"
+                      >
+                        {busyAction === 'pull' ? (
+                          <Loader2Icon
+                            size={14}
+                            className={`${styles.actionIcon} ${styles.spin}`}
+                          />
+                        ) : (
+                          <ArrowDownToLineIcon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                        )}
+                        <span className={styles.actionLabel}>
+                          {t('branchPicker.action.pull')}
+                        </span>
+                        <ActionHintLabel hint={hints.pull} />
+                      </button>
+                      {onOpenCommit && (
+                        <button
+                          type="button"
+                          className={`${styles.actionItem} ${hints.commit?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                          disabled={!!busyAction}
+                          onClick={() => {
+                            onOpenCommit();
+                            onOpenChange(false);
+                          }}
+                          data-testid="branch-picker-commit"
+                        >
+                          <GitCommitIcon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                          <span className={styles.actionLabel}>
+                            {t('branchPicker.action.commit')}
+                          </span>
+                          <ActionHintLabel hint={hints.commit} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className={`${styles.actionItem} ${hints.push?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                        disabled={!!busyAction || hints.pushDisabled}
+                        onClick={() => void handlePush()}
+                        data-testid="branch-picker-push"
+                      >
+                        {busyAction === 'push' ? (
+                          <Loader2Icon
+                            size={14}
+                            className={`${styles.actionIcon} ${styles.spin}`}
+                          />
+                        ) : (
+                          <ArrowUpFromLineIcon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                        )}
+                        <span className={styles.actionLabel}>
+                          {t('branchPicker.action.push')}
+                        </span>
+                        <ActionHintLabel hint={hints.push} />
+                      </button>
+                      {onOpenDiff && (
+                        <button
+                          type="button"
+                          className={styles.actionItem}
+                          onClick={() => {
+                            onOpenDiff();
+                            onOpenChange(false);
+                          }}
+                        >
+                          <FileDiffIcon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                          <span className={styles.actionLabel}>
+                            {t('branchPicker.action.viewChanges')}
+                          </span>
+                        </button>
+                      )}
 
-                  <div className={styles.separator} />
+                      <div className={styles.separator} />
 
-                  <button
-                    type="button"
-                    className={styles.actionItem}
-                    onClick={() => {
-                      setNewBranchMode(!newBranchMode);
-                      setCheckoutRefMode(false);
-                    }}
-                  >
-                    <PlusIcon size={14} className={styles.actionIcon} />
-                    <span className={styles.actionLabel}>
-                      {t('branchPicker.action.newBranch')}
-                    </span>
-                  </button>
-                  {newBranchMode && (
-                    <div className={styles.inlineInput}>
-                      <input
-                        className={`${styles.inlineInputField} ${
-                          newBranchName && !validateBranchName(newBranchName)
-                            ? styles.inlineInputFieldInvalid
-                            : ''
-                        }`}
-                        placeholder={t('branchPicker.newBranchPlaceholder')}
-                        value={newBranchName}
-                        onChange={(e) => setNewBranchName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void handleNewBranch();
-                          if (e.key === 'Escape') setNewBranchMode(false);
+                      <button
+                        type="button"
+                        className={styles.actionItem}
+                        onClick={() => {
+                          setNewBranchMode(!newBranchMode);
+                          setCheckoutRefMode(false);
                         }}
-                        autoFocus
-                      />
-                    </div>
-                  )}
+                      >
+                        <PlusIcon size={14} className={styles.actionIcon} />
+                        <span className={styles.actionLabel}>
+                          {t('branchPicker.action.newBranch')}
+                        </span>
+                      </button>
+                      {newBranchMode && (
+                        <div className={styles.inlineInput}>
+                          <input
+                            className={`${styles.inlineInputField} ${
+                              newBranchName &&
+                              !validateBranchName(newBranchName)
+                                ? styles.inlineInputFieldInvalid
+                                : ''
+                            }`}
+                            placeholder={t('branchPicker.newBranchPlaceholder')}
+                            value={newBranchName}
+                            onChange={(e) => setNewBranchName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void handleNewBranch();
+                              if (e.key === 'Escape') setNewBranchMode(false);
+                            }}
+                            autoFocus
+                          />
+                        </div>
+                      )}
 
-                  <button
-                    type="button"
-                    className={styles.actionItem}
-                    onClick={() => {
-                      setCheckoutRefMode(!checkoutRefMode);
-                      setNewBranchMode(false);
-                    }}
-                  >
-                    <TagIcon size={14} className={styles.actionIcon} />
-                    <span className={styles.actionLabel}>
-                      {t('branchPicker.action.checkoutRef')}
-                    </span>
-                  </button>
-                  {checkoutRefMode && (
-                    <div className={styles.inlineInput}>
-                      <input
-                        className={styles.inlineInputField}
-                        placeholder={t('branchPicker.checkoutRefPlaceholder')}
-                        value={checkoutRefValue}
-                        onChange={(e) => setCheckoutRefValue(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void handleCheckoutRef();
-                          if (e.key === 'Escape') setCheckoutRefMode(false);
+                      <button
+                        type="button"
+                        className={styles.actionItem}
+                        onClick={() => {
+                          setCheckoutRefMode(!checkoutRefMode);
+                          setNewBranchMode(false);
                         }}
-                        autoFocus
-                      />
-                    </div>
+                      >
+                        <TagIcon size={14} className={styles.actionIcon} />
+                        <span className={styles.actionLabel}>
+                          {t('branchPicker.action.checkoutRef')}
+                        </span>
+                      </button>
+                      {checkoutRefMode && (
+                        <div className={styles.inlineInput}>
+                          <input
+                            className={styles.inlineInputField}
+                            placeholder={t(
+                              'branchPicker.checkoutRefPlaceholder',
+                            )}
+                            value={checkoutRefValue}
+                            onChange={(e) =>
+                              setCheckoutRefValue(e.target.value)
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void handleCheckoutRef();
+                              if (e.key === 'Escape') setCheckoutRefMode(false);
+                            }}
+                            autoFocus
+                          />
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        className={styles.actionItem}
+                        disabled={!!busyAction}
+                        onClick={openRemotes}
+                        data-testid="branch-picker-manage-remotes"
+                      >
+                        <GlobeIcon size={14} className={styles.actionIcon} />
+                        <span className={styles.actionLabel}>
+                          {t('branchPicker.action.manageRemotes')}
+                        </span>
+                      </button>
+
+                      <div className={styles.separator} />
+                    </>
                   )}
 
-                  <div className={styles.separator} />
+                  {filteredRecent.length > 0 && (
+                    <BranchSection
+                      label={t('branchPicker.section.recent')}
+                      sectionKey="recent"
+                      collapsed={collapsed.recent}
+                      onToggle={toggleSection}
+                    >
+                      {filteredRecent.map((name) => (
+                        <BranchItem
+                          key={name}
+                          name={name}
+                          isHead={name === data.head && !data.detached}
+                          onClick={() => void handleCheckout(name)}
+                        />
+                      ))}
+                    </BranchSection>
+                  )}
+
+                  <BranchSection
+                    label={t('branchPicker.section.local')}
+                    sectionKey="local"
+                    collapsed={collapsed.local}
+                    onToggle={toggleSection}
+                  >
+                    {filteredLocal.length === 0 ? (
+                      <div className={styles.empty}>
+                        {t('branchPicker.noBranches')}
+                      </div>
+                    ) : (
+                      filteredLocal.map((b) => (
+                        <BranchItem
+                          key={b.name}
+                          name={b.name}
+                          isHead={b.isHead}
+                          ahead={b.ahead}
+                          behind={b.behind}
+                          upstream={b.upstream}
+                          onClick={() => void handleCheckout(b.name)}
+                        />
+                      ))
+                    )}
+                  </BranchSection>
+
+                  <BranchSection
+                    label={t('branchPicker.section.remote')}
+                    sectionKey="remote"
+                    collapsed={collapsed.remote}
+                    onToggle={toggleSection}
+                  >
+                    {filteredRemote.length === 0 ? (
+                      <div className={styles.empty}>
+                        {t('branchPicker.noBranches')}
+                      </div>
+                    ) : (
+                      Array.from(remoteGroups.entries()).map(
+                        ([remote, branches]) => (
+                          <div key={remote}>
+                            <div className={styles.remoteGroupLabel}>
+                              {remote}
+                            </div>
+                            {branches.map((b) => {
+                              const slash = b.name.indexOf('/');
+                              const localName =
+                                slash > 0 ? b.name.slice(slash + 1) : b.name;
+                              return (
+                                <BranchItem
+                                  key={b.name}
+                                  name={localName}
+                                  isHead={false}
+                                  onClick={() => void handleCheckout(b.name)}
+                                />
+                              );
+                            })}
+                          </div>
+                        ),
+                      )
+                    )}
+                  </BranchSection>
+
+                  <BranchSection
+                    label={t('branchPicker.section.tags')}
+                    sectionKey="tags"
+                    collapsed={collapsed.tags}
+                    onToggle={toggleSection}
+                  >
+                    {filteredTags.length === 0 ? (
+                      <div className={styles.empty}>
+                        {t('branchPicker.noTags')}
+                      </div>
+                    ) : (
+                      filteredTags.map((tg) => (
+                        <button
+                          key={tg.name}
+                          type="button"
+                          className={styles.item}
+                          onClick={() =>
+                            void handleCheckout(`refs/tags/${tg.name}`)
+                          }
+                        >
+                          <TagIcon size={13} className={styles.itemIcon} />
+                          <span className={styles.itemName}>{tg.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </BranchSection>
                 </>
               )}
-
-              {filteredRecent.length > 0 && (
-                <BranchSection
-                  label={t('branchPicker.section.recent')}
-                  sectionKey="recent"
-                  collapsed={collapsed.recent}
-                  onToggle={toggleSection}
-                >
-                  {filteredRecent.map((name) => (
-                    <BranchItem
-                      key={name}
-                      name={name}
-                      isHead={name === data.head && !data.detached}
-                      onClick={() => void handleCheckout(name)}
-                    />
-                  ))}
-                </BranchSection>
-              )}
-
-              <BranchSection
-                label={t('branchPicker.section.local')}
-                sectionKey="local"
-                collapsed={collapsed.local}
-                onToggle={toggleSection}
-              >
-                {filteredLocal.length === 0 ? (
-                  <div className={styles.empty}>
-                    {t('branchPicker.noBranches')}
-                  </div>
-                ) : (
-                  filteredLocal.map((b) => (
-                    <BranchItem
-                      key={b.name}
-                      name={b.name}
-                      isHead={b.isHead}
-                      ahead={b.ahead}
-                      behind={b.behind}
-                      upstream={b.upstream}
-                      onClick={() => void handleCheckout(b.name)}
-                    />
-                  ))
-                )}
-              </BranchSection>
-
-              <BranchSection
-                label={t('branchPicker.section.remote')}
-                sectionKey="remote"
-                collapsed={collapsed.remote}
-                onToggle={toggleSection}
-              >
-                {filteredRemote.length === 0 ? (
-                  <div className={styles.empty}>
-                    {t('branchPicker.noBranches')}
-                  </div>
-                ) : (
-                  Array.from(remoteGroups.entries()).map(
-                    ([remote, branches]) => (
-                      <div key={remote}>
-                        <div className={styles.remoteGroupLabel}>{remote}</div>
-                        {branches.map((b) => {
-                          const slash = b.name.indexOf('/');
-                          const localName =
-                            slash > 0 ? b.name.slice(slash + 1) : b.name;
-                          return (
-                            <BranchItem
-                              key={b.name}
-                              name={localName}
-                              isHead={false}
-                              onClick={() => void handleCheckout(b.name)}
-                            />
-                          );
-                        })}
-                      </div>
-                    ),
-                  )
-                )}
-              </BranchSection>
-
-              <BranchSection
-                label={t('branchPicker.section.tags')}
-                sectionKey="tags"
-                collapsed={collapsed.tags}
-                onToggle={toggleSection}
-              >
-                {filteredTags.length === 0 ? (
-                  <div className={styles.empty}>{t('branchPicker.noTags')}</div>
-                ) : (
-                  filteredTags.map((tg) => (
-                    <button
-                      key={tg.name}
-                      type="button"
-                      className={styles.item}
-                      onClick={() =>
-                        void handleCheckout(`refs/tags/${tg.name}`)
-                      }
-                    >
-                      <TagIcon size={13} className={styles.itemIcon} />
-                      <span className={styles.itemName}>{tg.name}</span>
-                    </button>
-                  ))
-                )}
-              </BranchSection>
             </>
           )}
         </div>
@@ -1212,5 +1459,161 @@ function BranchItem({
         {isHead && <CheckIcon size={12} />}
       </span>
     </button>
+  );
+}
+
+function RemotesView({
+  remotes,
+  totalCount,
+  loading,
+  error,
+  busyAction,
+  confirmRemove,
+  onConfirmRemove,
+  onRemove,
+  name,
+  url,
+  onNameChange,
+  onUrlChange,
+  onAdd,
+  onBack,
+}: {
+  remotes: DaemonGitRemoteInfo[];
+  /** Pre-search count, so a filtered-to-empty list does not claim the
+   * repository has no remotes at all. */
+  totalCount: number;
+  loading: boolean;
+  error: string | null;
+  busyAction: string | null;
+  confirmRemove: string | null;
+  onConfirmRemove: (name: string) => void;
+  onRemove: (name: string) => void;
+  name: string;
+  url: string;
+  onNameChange: (value: string) => void;
+  onUrlChange: (value: string) => void;
+  onAdd: () => void;
+  onBack: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <>
+      <div className={styles.remotesHeader}>
+        <button
+          type="button"
+          className={styles.backButton}
+          onClick={onBack}
+          aria-label={t('branchPicker.remotes.back')}
+          data-testid="remotes-back"
+        >
+          <ArrowLeftIcon size={14} />
+        </button>
+        <span className={styles.remotesTitle}>
+          {t('branchPicker.remotes.title')}
+        </span>
+      </div>
+      {loading && (
+        <div className={styles.loading}>
+          {t('branchPicker.remotes.loading')}
+        </div>
+      )}
+      {error && <div className={styles.empty}>{error}</div>}
+      {!loading && !error && (
+        <>
+          {remotes.length === 0 ? (
+            <div className={styles.empty}>
+              {totalCount === 0
+                ? t('branchPicker.remotes.empty')
+                : t('branchPicker.remotes.noMatches')}
+            </div>
+          ) : (
+            remotes.map((r) => (
+              <div key={r.name} className={styles.remoteRow}>
+                <GlobeIcon size={13} className={styles.itemIcon} />
+                <span className={styles.remoteName}>
+                  {sanitizeRemoteDisplay(r.name)}
+                </span>
+                <span
+                  className={styles.remoteUrl}
+                  title={
+                    r.pushUrl !== r.fetchUrl
+                      ? `fetch: ${sanitizeRemoteDisplay(r.fetchUrl)}\npush: ${sanitizeRemoteDisplay(r.pushUrl)}`
+                      : sanitizeRemoteDisplay(r.fetchUrl)
+                  }
+                >
+                  {sanitizeRemoteDisplay(r.fetchUrl)}
+                </span>
+                <button
+                  type="button"
+                  className={`${styles.remoteRemove} ${
+                    confirmRemove === r.name ? styles.remoteRemoveConfirm : ''
+                  }`}
+                  disabled={!!busyAction}
+                  onClick={() =>
+                    confirmRemove === r.name
+                      ? onRemove(r.name)
+                      : onConfirmRemove(r.name)
+                  }
+                  aria-label={
+                    confirmRemove === r.name
+                      ? t('branchPicker.remotes.removeConfirm')
+                      : t('branchPicker.remotes.remove', {
+                          name: sanitizeRemoteDisplay(r.name),
+                        })
+                  }
+                  data-testid={`remote-remove-${r.name}`}
+                >
+                  {confirmRemove === r.name ? (
+                    t('branchPicker.remotes.removeConfirm')
+                  ) : (
+                    <Trash2Icon size={13} />
+                  )}
+                </button>
+              </div>
+            ))
+          )}
+          <div className={styles.addRemoteForm}>
+            <input
+              className={styles.inlineInputField}
+              placeholder={t('branchPicker.remotes.namePlaceholder')}
+              value={name}
+              onChange={(e) => onNameChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && name.trim() && url.trim()) onAdd();
+              }}
+              spellCheck={false}
+              autoComplete="off"
+              data-testid="remote-add-name"
+            />
+            <input
+              className={styles.inlineInputField}
+              placeholder={t('branchPicker.remotes.urlPlaceholder')}
+              value={url}
+              onChange={(e) => onUrlChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && name.trim() && url.trim()) onAdd();
+              }}
+              spellCheck={false}
+              autoComplete="off"
+              data-testid="remote-add-url"
+            />
+            <button
+              type="button"
+              className={styles.addRemoteButton}
+              disabled={!!busyAction || !name.trim() || !url.trim()}
+              onClick={onAdd}
+              data-testid="remote-add-submit"
+            >
+              {busyAction === 'remoteAdd' ? (
+                <Loader2Icon size={13} className={styles.spin} />
+              ) : (
+                <PlusIcon size={13} />
+              )}
+              {t('branchPicker.remotes.add')}
+            </button>
+          </div>
+        </>
+      )}
+    </>
   );
 }

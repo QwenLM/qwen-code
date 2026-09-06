@@ -48,7 +48,7 @@ function redactGitMessage(detail: string, cwd: string): string {
   return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
 }
 
-function sendGitError(
+export function sendGitError(
   res: Response,
   err: unknown,
   route: string,
@@ -75,6 +75,18 @@ function sendGitError(
     /invalid reference/i.test(message)
   ) {
     res.status(404).json({ error: 'not_a_git_repository', message });
+    return;
+  }
+  // Remote-specific shapes ahead of everything that matches a substring:
+  // git echoes the user-chosen remote name in both messages, so a remote
+  // named e.g. `dirty-cache` would otherwise be claimed by the dirty-tree
+  // branch below (wrong code, and for `no such remote` a wrong status too).
+  if (/remote .* already exists/i.test(message)) {
+    res.status(409).json({ error: 'remote_already_exists', message });
+    return;
+  }
+  if (/no such remote/i.test(message)) {
+    res.status(404).json({ error: 'no_such_remote', message });
     return;
   }
   if (/dirty|uncommitted|would be overwritten/i.test(message)) {

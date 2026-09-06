@@ -109,7 +109,7 @@ export function gitEnv(
   return env;
 }
 
-function runGit(
+export function runGit(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,

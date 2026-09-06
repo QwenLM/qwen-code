@@ -35,6 +35,9 @@ const {
   workspaceGitCheckout,
   workspaceGitPush,
   workspaceGit,
+  workspaceGitRemotes,
+  workspaceGitRemoteAdd,
+  workspaceGitRemoteRemove,
   workspaceClient,
 } = vi.hoisted(() => {
   const workspaceGitBranches = vi.fn();
@@ -43,6 +46,9 @@ const {
   const workspaceGitCheckout = vi.fn();
   const workspaceGitPush = vi.fn();
   const workspaceGit = vi.fn();
+  const workspaceGitRemotes = vi.fn();
+  const workspaceGitRemoteAdd = vi.fn();
+  const workspaceGitRemoteRemove = vi.fn();
   // A stable client so the popover's memoized workspace handle (and thus its
   // fetch effect) stays referentially stable across renders.
   const workspaceClient = {
@@ -53,6 +59,9 @@ const {
       workspaceGitCreateBranch,
       workspaceGitPush,
       workspaceGitPull,
+      workspaceGitRemotes,
+      workspaceGitRemoteAdd,
+      workspaceGitRemoteRemove,
     }),
   };
   return {
@@ -62,6 +71,9 @@ const {
     workspaceGitCheckout,
     workspaceGitPush,
     workspaceGit,
+    workspaceGitRemotes,
+    workspaceGitRemoteAdd,
+    workspaceGitRemoteRemove,
     workspaceClient,
   };
 });
@@ -144,6 +156,7 @@ function mount(
     onOpenDiff: () => void;
     onOpenCommit: () => void;
     onOpenChange: (open: boolean) => void;
+    onBranchChanged: () => void;
     open: boolean;
     onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
     status: DaemonWorkspaceGitStatus;
@@ -158,6 +171,7 @@ function mount(
           workspaceCwd="/repo"
           status={overrides.status}
           onStatusRefreshed={overrides.onStatusRefreshed}
+          onBranchChanged={overrides.onBranchChanged}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
         >
@@ -166,6 +180,21 @@ function mount(
       </I18nProvider>,
     );
   });
+}
+
+function defaultRemotesResult() {
+  return {
+    v: 1,
+    workspaceCwd: '/repo',
+    available: true,
+    remotes: [
+      {
+        name: 'origin',
+        fetchUrl: 'https://example.com/o/r.git',
+        pushUrl: 'https://example.com/o/r.git',
+      },
+    ],
+  };
 }
 
 function clickButton(label: string): void {
@@ -187,20 +216,29 @@ afterEach(() => {
   workspaceGitCheckout.mockResolvedValue(undefined);
   workspaceGitPush.mockReset();
   workspaceGitPush.mockResolvedValue({ success: true, output: '' });
+  workspaceGitRemotes.mockReset();
+  workspaceGitRemotes.mockResolvedValue(defaultRemotesResult());
+  workspaceGitRemoteAdd.mockReset();
+  workspaceGitRemoteRemove.mockReset();
   // Default: the popover's own status fetch yields nothing, so hints derive
   // from the caller's `status` prop alone unless a test resolves it.
   workspaceGit.mockRejectedValue(new Error('no status'));
 });
 workspaceGit.mockRejectedValue(new Error('no status'));
+// Seeded at module scope too: `afterEach` only runs after a test, so the
+// first test in the file (or any `-t` filtered run starting inside the
+// remotes block) would otherwise face a bare `vi.fn()` resolving undefined.
+workspaceGitRemotes.mockResolvedValue(defaultRemotesResult());
 
 function mountWithBranches(
   branchesResult: DaemonGitBranchesResult = BRANCHES,
+  overrides: Parameters<typeof mount>[0] = {},
 ): void {
   workspaceGitBranches.mockResolvedValue(branchesResult);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  mount({});
+  mount(overrides);
 }
 
 describe('BranchPickerPopover actions', () => {
@@ -1648,5 +1686,454 @@ describe('listingContradictsStatus', () => {
     expect(listingContradictsStatus(gone, status({ hasUpstream: false }))).toBe(
       false,
     );
+  });
+});
+
+describe('BranchPickerPopover remotes view', () => {
+  function setInput(testId: string, value: string): void {
+    const input = document.body.querySelector<HTMLInputElement>(
+      `input[data-testid="${testId}"]`,
+    );
+    expect(input).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(input, value);
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function clickTestId(testId: string): void {
+    const el = document.body.querySelector(`[data-testid="${testId}"]`);
+    expect(el).toBeTruthy();
+    act(() => {
+      el?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  }
+
+  async function openRemotesView(
+    overrides: Parameters<typeof mount>[0] = {},
+  ): Promise<void> {
+    mountWithBranches(BRANCHES, overrides);
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+  }
+
+  it('opens the remotes panel and lists remotes with URLs', async () => {
+    await openRemotesView();
+
+    expect(workspaceGitRemotes).toHaveBeenCalledTimes(1);
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('origin');
+    expect(content?.textContent).toContain('https://example.com/o/r.git');
+    // The branches listing is swapped out while the panel is up.
+    expect(content?.textContent).not.toContain('Update Project');
+  });
+
+  it('adds a remote and renders the list the daemon returned', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+        },
+        {
+          name: 'fork',
+          fetchUrl: 'https://example.com/f/r.git',
+          pushUrl: 'https://example.com/f/r.git',
+        },
+      ],
+    });
+    await openRemotesView();
+
+    setInput('remote-add-name', ' fork ');
+    setInput('remote-add-url', ' https://example.com/f/r.git ');
+    clickTestId('remote-add-submit');
+    await flush();
+
+    expect(workspaceGitRemoteAdd).toHaveBeenCalledWith(
+      'fork',
+      'https://example.com/f/r.git',
+      undefined,
+    );
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('fork');
+    expect(footerText()).toContain('Added remote fork');
+    // The add form cleared for the next entry.
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.value,
+    ).toBe('');
+  });
+
+  it('surfaces a daemon add failure in the footer and keeps the list', async () => {
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_already_exists',
+          message: 'error: remote origin already exists.',
+        },
+        'POST /workspaces/:workspace/git/remote: remote_already_exists',
+      ),
+    );
+    await openRemotesView();
+
+    setInput('remote-add-name', 'origin');
+    setInput('remote-add-url', 'https://example.com/other.git');
+    clickTestId('remote-add-submit');
+    await flush();
+
+    expect(footerText()).toContain('remote origin already exists');
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('origin');
+    expect(content?.textContent).not.toContain('other.git');
+  });
+
+  it('rejects dash-prefixed input locally without calling the daemon', async () => {
+    await openRemotesView();
+
+    setInput('remote-add-name', '-x');
+    setInput('remote-add-url', 'https://example.com/o/r.git');
+    // The submit button stays enabled for non-empty input; the guard fires
+    // on click.
+    clickTestId('remote-add-submit');
+    await flush();
+
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    expect(footerText()).toContain('Enter a remote name and URL');
+  });
+
+  it('removes a remote only after the two-click confirm', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    const onBranchChanged = vi.fn();
+    await openRemotesView({ onBranchChanged });
+    const branchesCallsBefore = workspaceGitBranches.mock.calls.length;
+    const statusCallsBefore = workspaceGit.mock.calls.length;
+
+    clickTestId('remote-remove-origin');
+    // First click only arms the confirm; nothing is sent yet.
+    expect(workspaceGitRemoteRemove).not.toHaveBeenCalled();
+    expect(onBranchChanged).not.toHaveBeenCalled();
+
+    clickTestId('remote-remove-origin');
+    await flush();
+
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith('origin', undefined);
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('No remotes configured');
+    expect(footerText()).toContain('Removed remote origin');
+    // Removal invalidates the branch listing's remote groups and the chip's
+    // tracking state, so both refresh. Counted before/after: the on-open
+    // fetches already recorded a call each, so a bare toHaveBeenCalled()
+    // would pass even with the post-remove refresh deleted.
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(
+      branchesCallsBefore,
+    );
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCallsBefore);
+    expect(onBranchChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a remove failure in the footer', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    const remotesCallsBefore = workspaceGitRemotes.mock.calls.length;
+
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+
+    expect(footerText()).toContain('No such remote');
+    // A refused remove means the displayed list is stale (git says the
+    // remote is gone); the panel must re-read instead of keeping the row.
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(
+      remotesCallsBefore,
+    );
+  });
+
+  it('returns to the branches view via the back button', async () => {
+    await openRemotesView();
+
+    clickTestId('remotes-back');
+    await flush();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('Update Project');
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+  });
+
+  it('filters remotes by the search box', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+        },
+        {
+          name: 'upstream',
+          fetchUrl: 'git@example.com:u/r.git',
+          pushUrl: 'git@example.com:u/r.git',
+        },
+      ],
+    });
+    await openRemotesView();
+
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search for branches and actions"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'upstream');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('upstream');
+    expect(content?.textContent).not.toContain('origin');
+  });
+
+  it('renders the load failure and hides the add form', async () => {
+    workspaceGitRemotes.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        {
+          error: 'not_a_git_repository',
+          message: 'fatal: not a git repository',
+        },
+        'GET /workspaces/:workspace/git/remotes: not_a_git_repository',
+      ),
+    );
+    await openRemotesView();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('not a git repository');
+    // A failed read must not masquerade as an empty configuration.
+    expect(content?.textContent).not.toContain('No remotes configured');
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeNull();
+  });
+
+  it('distinguishes a filtered-to-empty list from no remotes at all', async () => {
+    await openRemotesView();
+
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search for branches and actions"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'zzz-no-match');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('No remotes match the search');
+    expect(content?.textContent).not.toContain('No remotes configured');
+  });
+
+  it('keeps a sticky stash warning across a remotes round trip', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    // Navigating into the remotes view and back must not destroy the only
+    // record that the user's changes sit in a stash entry.
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remotes-back');
+    await flush();
+
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+  });
+
+  it('disarms a pending remove confirm when the popover reopens', async () => {
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    // The reopen lands on the branches view (this click only exists there),
+    // and re-entering the panel must not carry the armed confirm over.
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+
+    const removeBtn = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    );
+    expect(removeBtn).toBeTruthy();
+    expect(removeBtn?.textContent).not.toContain('Confirm');
+  });
+
+  it('strips bidi/zero-width characters from the display but removes by the raw name', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'or\u202eigin',
+          fetchUrl: 'https://example.com/\u202eevil\u2029x',
+          pushUrl: 'https://example.com/\u202eevil\u2029x',
+        },
+        {
+          // RLM (U+200F): a bidi mark outside the \u202a-\u202e range —
+          // the Default_Ignorable extension of the sanitizer's class.
+          name: 'upstre\u200fam',
+          fetchUrl: 'https://example.com/u/r.git',
+          pushUrl: 'https://example.com/u/r.git',
+        },
+      ],
+    });
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+
+    const row = document.body.querySelector(
+      '[data-testid="remote-remove-or\u202eigin"]',
+    )?.parentElement;
+    // The rendered text carries the stripped form, not the raw override or
+    // the paragraph separator (a CSS segment break).
+    expect(row?.textContent).toContain('origin');
+    expect(row?.textContent).not.toContain('\u202e');
+    expect(row?.textContent).not.toContain('\u2029');
+    expect(row?.textContent).toContain('https://example.com/evilx');
+
+    // The RLM-bearing name renders stripped too.
+    const rlmRow = document.body.querySelector(
+      '[data-testid="remote-remove-upstre\u200fam"]',
+    )?.parentElement;
+    expect(rlmRow?.textContent).toContain('upstream');
+    expect(rlmRow?.textContent).not.toContain('\u200f');
+
+    // The search filter matches what the row renders, so typing the
+    // displayed name still finds it — for both character classes.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search for branches and actions"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'upstream');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    expect(
+      document.body.querySelector(
+        '[data-testid="remote-remove-upstre\u200fam"]',
+      ),
+    ).toBeTruthy();
+    act(() => {
+      nativeSetter?.call(search, 'origin');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-or\u202eigin"]'),
+    ).toBeTruthy();
+    act(() => {
+      nativeSetter?.call(search, '');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Removal still targets the raw configured name.
+    clickTestId('remote-remove-or\u202eigin');
+    clickTestId('remote-remove-or\u202eigin');
+    await flush();
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'or\u202eigin',
+      undefined,
+    );
+    // The footer renders the success message verbatim too, so it carries
+    // the stripped name, not the raw override.
+    expect(footerText()).toContain('Removed remote origin');
+    expect(footerText()).not.toContain('\u202e');
+  });
+
+  it('does not carry the action-finding query into the remotes filter', async () => {
+    mountWithBranches();
+    await flush();
+
+    // Typing "remotes" is the natural way to find the action row; entering
+    // the panel must not keep it as the list filter.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search for branches and actions"]',
+    );
+    expect(search).toBeTruthy();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      nativeSetter?.call(search, 'remotes');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(search?.value).toBe('');
   });
 });
