@@ -3547,7 +3547,7 @@ jobs:
           has_vitest_config() {
             # Mirror vitest's own resolution: it accepts vitest.config AND
             # vite.config in six extensions. A narrower probe skips runnable
-            # packages (packages/webui's only config is vite.config.ts).
+            # packages (some packages only have vite.config.ts).
             local n e
             for n in vitest.config vite.config; do
               for e in ts mts cts js mjs cjs; do

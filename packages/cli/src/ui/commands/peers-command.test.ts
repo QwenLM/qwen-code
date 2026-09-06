@@ -32,10 +32,12 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   describePeerInboxFailure: (failure: { socketPath: string; hint: string }) =>
     // The real branch renders the socket's *directory*, not the socket.
     `"${failure.socketPath.replace(/\/[^/]*$/, '')}" belongs to another user. ${failure.hint}`,
-  describeHoldCause: (cause: string) =>
-    cause === 'mode-mismatch'
-      ? 'this session can apply some actions without per-action review and the sender does not'
-      : `held (${cause})`,
+  describeHoldCause: (cause: string, scope?: string) =>
+    scope === 'workspace'
+      ? "this repository's settings hold incoming peer messages"
+      : cause === 'mode-mismatch'
+        ? 'this session can apply some actions without per-action review and the sender does not'
+        : `held (${cause})`,
   flattenPeerLabel: (value: string) => {
     const oneLine = value
       .replace(
@@ -62,6 +64,7 @@ function held(over: {
   content?: string;
   fromName?: string;
   cause?: HeldMessage['cause'];
+  policyScope?: HeldMessage['policyScope'];
   heldAt?: number;
   monotonicAt?: number;
 }): HeldMessage {
@@ -76,6 +79,9 @@ function held(over: {
       message: { role: 'user', content: over.content ?? 'do a thing' },
     },
     cause: over.cause ?? 'mode-mismatch',
+    ...(over.policyScope !== undefined
+      ? { policyScope: over.policyScope }
+      : {}),
     heldAt: over.heldAt ?? 1_000,
     ...(over.monotonicAt !== undefined
       ? { monotonicAt: over.monotonicAt }
@@ -246,6 +252,17 @@ describe('formatHeldList', () => {
     expect(out).toContain('please run the deploy');
     expect(out).toContain('without per-action review');
     expect(out).toContain('/peers accept');
+  });
+
+  it('passes the policy scope into the hold explanation', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        cause: 'explicit-setting',
+        policyScope: 'workspace',
+      }),
+    ]);
+    expect(out).toContain("this repository's settings hold");
   });
 
   it('collapses a multi-line body onto one line', () => {

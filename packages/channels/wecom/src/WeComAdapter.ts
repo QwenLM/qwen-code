@@ -441,6 +441,9 @@ export class WeComChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      ...(isSyntheticMediaText(body, text)
+        ? { syntheticText: true as const }
+        : {}),
       messageId: rawMessageId ?? messageId,
       isGroup,
       // WeCom only delivers group callbacks when the intelligent robot is
@@ -451,6 +454,7 @@ export class WeComChannel extends ChannelBase {
       referencedText: extractQuoteText(quote),
     };
     let attachments: Attachment[] = [];
+    const hasInboundMedia = collectInboundMediaRefs(body).length > 0;
     const attachmentRouteKey = this.attachmentRouteKey(
       senderId,
       chatId,
@@ -459,6 +463,9 @@ export class WeComChannel extends ChannelBase {
     let processStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) {
+        if (rawMessageId && this.wasMessagePrefixRejected(envelope)) {
+          this.seenMessages.set(rawMessageId, Date.now());
+        }
         process.stderr.write(
           `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
         );
@@ -480,6 +487,13 @@ export class WeComChannel extends ChannelBase {
         }
         if (attachments.length) {
           envelope.attachments = attachments;
+        }
+        if (
+          envelope.syntheticText &&
+          attachments.length === 0 &&
+          hasInboundMedia
+        ) {
+          envelope.text = '(User sent media but download failed)';
         }
         if (!envelope.text && attachments.length) {
           envelope.text = attachments.some((a) => a.type === 'image')
@@ -1343,6 +1357,23 @@ function extractQuoteText(
 ): string | undefined {
   if (!quote) return undefined;
   return extractText(quote) || undefined;
+}
+
+function isSyntheticMediaText(
+  body: Record<string, unknown>,
+  text: string,
+): boolean {
+  const msgType = getString(body, 'msgtype');
+  if (msgType === 'image' || msgType === 'video' || msgType === 'file') {
+    return true;
+  }
+  if (msgType === 'voice') {
+    // A transcript is the user's own words, so it stays gated on the
+    // configured prefix; a voice note without one carries only the
+    // `(voice)` placeholder.
+    return !getString(getRecord(body, 'voice'), 'content');
+  }
+  return msgType === 'mixed' && text.length === 0;
 }
 
 interface InboundMediaRef {

@@ -842,6 +842,10 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),
+    Storage.getUserWorkflowsDir(),
+    // Workflow run artifacts: resume journals, run snapshots, and persisted
+    // inline scripts named by workflow results and notifications.
+    config.storage.getWorkflowRunsDir(),
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
@@ -4572,12 +4576,48 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Single choke point for pinning the runtime root of an operation to a
+   * settings object and a cwd. Every caller in this class goes through here
+   * rather than calling `runWithAcpRuntimeOutputDir` directly, so the routing
+   * is composed in exactly one place. Which settings to pin with is still the
+   * caller's decision at this level: callers that already hold deliberately
+   * scoped settings (workspace MCP discovery, live-session scope checks,
+   * session creation) pass them in. Per-request session-management handlers
+   * (list, delete, rename, transcript page, transcript turn index, settled
+   * turn status, and the non-live branch of loadUpdates) must not make that
+   * decision themselves — they use `runWithPinnedRuntimeBaseDirForRequest`
+   * below. Session load and
+   * resume resolve the request's settings at the call site deliberately,
+   * under profiler instrumentation, because they adopt those settings for
+   * the session afterwards.
+   */
   private runWithPinnedRuntimeBaseDir<T>(
     settings: LoadedSettings,
     cwd: string,
     operation: () => T,
   ): T {
     return runWithAcpRuntimeOutputDir(settings, cwd, operation);
+  }
+
+  /**
+   * Per-request form of `runWithPinnedRuntimeBaseDir` for handlers that act
+   * on a caller-supplied cwd. It resolves the settings for THAT cwd itself,
+   * so the "which settings pin this operation" decision is made here, once,
+   * and a handler cannot reach the pin with the process-wide `this.settings`
+   * cache — the bug class fixed in #10095 (three handlers composed the
+   * routing by hand and pinned another workspace's runtime root). The
+   * operation receives the resolved settings for handlers that also need
+   * them inside the pinned scope.
+   */
+  private runWithPinnedRuntimeBaseDirForRequest<T>(
+    cwd: string,
+    operation: (settings: LoadedSettings) => T,
+  ): T {
+    const settings = loadSettingsCached(cwd);
+    return this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+      operation(settings),
+    );
   }
 
   /**
@@ -5798,8 +5838,7 @@ class QwenAgent implements Agent {
     // a multi-workspace daemon it may hold another workspace's
     // advanced.runtimeOutputDir and this listing would scan the wrong runtime
     // root (returning an empty/foreign list for this cwd).
-    const settings = loadSettingsCached(cwd);
-    const result = await runWithAcpRuntimeOutputDir(settings, cwd, () => {
+    const result = await this.runWithPinnedRuntimeBaseDirForRequest(cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: numericCursor,
@@ -8989,8 +9028,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          const readTranscriptPage = async (settings: LoadedSettings) => {
             if (rawDirection === 'backward') {
               await this.sessions
                 .get(sessionId)
@@ -9054,7 +9092,11 @@ class QwenAgent implements Agent {
                 ? { hasOlder: page.hasOlder }
                 : {}),
             } as Record<string, unknown>;
-          });
+          };
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            readTranscriptPage,
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
@@ -9159,8 +9201,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          const readTurnIndexPage = async () => {
             if (rawSnapshot === undefined) {
               await this.sessions
                 .get(sessionId)
@@ -9178,7 +9219,11 @@ class QwenAgent implements Agent {
                 ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
               },
             )) as unknown as Record<string, unknown>;
-          });
+          };
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            readTurnIndexPage,
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
@@ -11852,7 +11897,8 @@ class QwenAgent implements Agent {
               : task.status === 'completed' ||
                 task.status === 'failed' ||
                 task.status === 'cancelled';
-          if (!canStart || !task.script) {
+          const savedScriptPath = task.scriptPath;
+          if (!canStart || (!task.script && !savedScriptPath)) {
             return { changed: false, status: task.status };
           }
           const attempt = await tryWithWorkflowTaskMutation(
@@ -11867,13 +11913,33 @@ class QwenAgent implements Agent {
                   `The workflow tool is unavailable; cannot ${action} this run.`,
                 );
               }
+              let readableScriptPath: string | undefined;
+              if (savedScriptPath) {
+                try {
+                  await resolveSavedWorkflowScript(
+                    { scriptPath: savedScriptPath },
+                    config,
+                  );
+                  readableScriptPath = savedScriptPath;
+                } catch {
+                  readableScriptPath = undefined;
+                }
+              }
+              if (!readableScriptPath && !task.script) {
+                return { changed: false, status: task.status };
+              }
               const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-                script: task.script,
+                ...(readableScriptPath
+                  ? { scriptPath: readableScriptPath }
+                  : { script: task.script }),
                 args: task.args,
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
               const result = (await workflowTool
-                .buildSessionOwnedBackground(startParams, task.workflowName)
+                .buildSessionOwnedBackground(
+                  startParams,
+                  readableScriptPath ? task.workflowName : undefined,
+                )
                 .execute(new AbortController().signal)) as WorkflowToolResult;
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId
@@ -12038,8 +12104,7 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const settings = loadSettingsCached(cwd);
-        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+        const readSettledTurnResult = async () => {
           try {
             await session.getConfig().getChatRecordingService()?.flush();
           } catch {
@@ -12112,7 +12177,11 @@ class QwenAgent implements Agent {
             }
             throw error;
           }
-        });
+        };
+        return await this.runWithPinnedRuntimeBaseDirForRequest(
+          cwd,
+          readSettledTurnResult,
+        );
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
@@ -12330,8 +12399,7 @@ class QwenAgent implements Agent {
         // destructive lookup at the wrong runtime root — silently returning
         // success:false for a session that exists, or deleting a stale
         // same-id copy under the wrong root.
-        const success = await runWithAcpRuntimeOutputDir(
-          loadSettingsCached(cwd),
+        const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async () => {
             const sessionService = new SessionService(cwd);
@@ -12381,8 +12449,7 @@ class QwenAgent implements Agent {
           return { success: ok };
         }
         // Per-request settings for the same reason as deleteSession above.
-        const success = await runWithAcpRuntimeOutputDir(
-          loadSettingsCached(cwd),
+        const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async () => {
             const sessionService = new SessionService(cwd);
@@ -12613,9 +12680,7 @@ class QwenAgent implements Agent {
             : await loadAuthoritative();
           replayConfig = config;
         } else {
-          const settings = loadSettingsCached(cwd);
-          sessionData = await this.runWithPinnedRuntimeBaseDir(
-            settings,
+          sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
             async () => {
               const sessionService = new SessionService(cwd);
@@ -13944,7 +14009,7 @@ class QwenAgent implements Agent {
     if (!provisionalWorkspace) {
       startNonInteractiveOpenAILogHousekeeping(config, settings);
     }
-    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    // ACP sessions served to browser clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
     if (!provisionalWorkspace) {

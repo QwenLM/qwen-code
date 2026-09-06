@@ -244,6 +244,7 @@ import {
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
 import { workspaceLabel } from './utils/workspace';
+import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -7407,9 +7408,47 @@ export function App({
   };
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
-    async (workspaceCwd?: string, notifyOnError = false) => {
+    async (
+      workspaceCwd?: string,
+      notifyOnError = false,
+      forNewSession = false,
+    ) => {
       const request = ++loadedSkillsRequestRef.current;
       try {
+        if (
+          forNewSession &&
+          workspaceCwd &&
+          workspace.client &&
+          workspace.capabilities?.features?.includes(
+            'workspace_skills_config_runtime',
+          )
+        ) {
+          const target = workspace.client.workspaceByCwd(workspaceCwd);
+          const status = await target.workspaceConfigSkills();
+          if (request !== loadedSkillsRequestRef.current) return;
+          setLoadedSkills(availableSkillInfos(status));
+          setLoadedSkillsReady(true);
+          void target
+            .ensureRuntime()
+            .then(async (runtime) => {
+              const runtimeStatus = await loadReadyWorkspaceSkills(
+                target,
+                runtime,
+                () => request !== loadedSkillsRequestRef.current,
+              );
+              if (!runtimeStatus) return;
+              setLoadedSkills(availableSkillInfos(runtimeStatus));
+            })
+            .catch((error: unknown) => {
+              if (notifyOnError) {
+                pushToast(
+                  'error',
+                  formatError(error, 'Failed to refresh composer skills'),
+                );
+              }
+            });
+          return status;
+        }
         const status =
           workspaceCwd && workspace.client
             ? await workspace.client
@@ -7430,7 +7469,12 @@ export function App({
         return false;
       }
     },
-    [pushToast, workspace.client, workspaceActions],
+    [
+      pushToast,
+      workspace.capabilities?.features,
+      workspace.client,
+      workspaceActions,
+    ],
   );
   useEffect(() => {
     if (!connected) return;
@@ -7441,7 +7485,11 @@ export function App({
       setLoadedSkillsFallback(undefined);
       return;
     }
-    void reloadLoadedSkills(connection.workspaceCwd);
+    void reloadLoadedSkills(
+      connection.workspaceCwd,
+      false,
+      connectionSkillSnapshotRef.current.sessionId === undefined,
+    );
   }, [
     connected,
     connection.workspaceCwd,
@@ -7507,43 +7555,45 @@ export function App({
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     let cancelled = false;
-    void reloadLoadedSkills(workspaceCwd, true).then((status) => {
-      if (cancelled || !status) return;
-      markHandled();
-      if (!sessionId) {
-        pendingSkillTogglesByContextRef.current.delete(contextKey);
-        return;
-      }
-      const availableWorkspaceSkillNames = new Set(
-        status.skills
-          .filter((skill) => skill.status === 'ok')
-          .map((skill) => skill.name.toLowerCase()),
-      );
-      const pendingForSession = pendingToggles.filter(
-        (toggle) =>
-          !toggle.enabled ||
-          availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
-      );
-      if (pendingForSession.length === 0) {
-        pendingSkillTogglesByContextRef.current.delete(contextKey);
-        setLoadedSkillsFallback(undefined);
-        return;
-      }
-      pendingSkillTogglesByContextRef.current.set(
-        contextKey,
-        pendingForSession,
-      );
-      const currentSnapshot = connectionSkillSnapshotRef.current;
-      if (
-        currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
-      ) {
-        pendingSkillTogglesByContextRef.current.delete(contextKey);
-        setLoadedSkillsFallback(undefined);
-        return;
-      }
-      setLoadedSkillsFallback({ sessionId, workspaceCwd });
-    });
+    void reloadLoadedSkills(workspaceCwd, true, sessionId === undefined).then(
+      (status) => {
+        if (cancelled || !status) return;
+        markHandled();
+        if (!sessionId) {
+          pendingSkillTogglesByContextRef.current.delete(contextKey);
+          return;
+        }
+        const availableWorkspaceSkillNames = new Set(
+          status.skills
+            .filter((skill) => skill.status === 'ok')
+            .map((skill) => skill.name.toLowerCase()),
+        );
+        const pendingForSession = pendingToggles.filter(
+          (toggle) =>
+            !toggle.enabled ||
+            availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
+        );
+        if (pendingForSession.length === 0) {
+          pendingSkillTogglesByContextRef.current.delete(contextKey);
+          setLoadedSkillsFallback(undefined);
+          return;
+        }
+        pendingSkillTogglesByContextRef.current.set(
+          contextKey,
+          pendingForSession,
+        );
+        const currentSnapshot = connectionSkillSnapshotRef.current;
+        if (
+          currentSnapshot.sessionId === sessionId &&
+          sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
+        ) {
+          pendingSkillTogglesByContextRef.current.delete(contextKey);
+          setLoadedSkillsFallback(undefined);
+          return;
+        }
+        setLoadedSkillsFallback({ sessionId, workspaceCwd });
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -11686,7 +11736,7 @@ export function App({
         await Promise.all([
           clearPromise,
           nextContext?.kind === 'workspace'
-            ? reloadLoadedSkills(targetWorkspaceCwd)
+            ? reloadLoadedSkills(targetWorkspaceCwd, false, true)
             : Promise.resolve(undefined),
         ]);
         // Clear after successful clearSession — if it rejects, the old

@@ -69,6 +69,7 @@ import {
   AppContainer,
   countActiveScheduledTasks,
   dedupeNewestFirst,
+  buildSpeculativeToolDisplays,
   getSpeculativeToolResult,
   getNextRenderMode,
   getScheduledTasksStartupWarning,
@@ -102,7 +103,7 @@ import type {
   PeerReceipt,
 } from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
-import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
 import {
@@ -634,6 +635,33 @@ describe('AppContainer State Management', () => {
         text: 'done',
         status: ToolCallStatus.Success,
       });
+    });
+
+    it('carries the functionCall args onto the display object', () => {
+      // The fourth builder of IndividualToolCallDisplay. Without the args the
+      // setting half-applies: an accepted speculation falls back to the
+      // compact summary while live and resumed turns of the same shape show
+      // their arguments.
+      const args = { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' };
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'replace', args } }],
+        [{ functionResponse: { response: { output: 'done' } } }],
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0]!.args).toEqual(args);
+      expect(tools[0]!.name).toBe('replace');
+      expect(tools[0]!.status).toBe(ToolCallStatus.Success);
+    });
+
+    it('falls back to an empty args object when the call carries none', () => {
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'ls' } }],
+        [],
+      );
+      // formatInlineToolArgs skips empty objects, so this renders no args row.
+      expect(tools[0]!.args).toEqual({});
+      expect(tools[0]!.description).toBe('ls');
     });
   });
 
@@ -1433,6 +1461,43 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
+    it('keeps input inactive until config initialization completes', async () => {
+      // Pins the wiring hop itself: AppContainer feeding its own
+      // isConfigInitialized into isInputActive. The predicate has unit tests
+      // and Composer covers isInputActive:false, but nothing asserted that this
+      // call site passes that particular boolean — any other in-scope boolean
+      // type-checks and reopens the `Chat not initialized` race with the suite
+      // still green.
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // First synchronous render: initialization has not flipped yet.
+      expect(capturedUIState.isConfigInitialized).toBe(false);
+      expect(capturedUIState.isInputActive).toBe(false);
+
+      await flushConfigInitialization();
+
+      expect(capturedUIState.isInputActive).toBe(true);
+    });
+
     it('keeps non-TTY output on the Static path', () => {
       Object.defineProperty(process.stdout, 'isTTY', {
         value: false,
@@ -1780,6 +1845,7 @@ describe('AppContainer State Management', () => {
     it('keeps input active while compression is processing', () => {
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
           hasPendingCompression: true,
@@ -1789,8 +1855,21 @@ describe('AppContainer State Management', () => {
 
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps input inactive until chat initialization completes', () => {
+      expect(
+        isInputActiveForState({
+          isConfigInitialized: false,
+          initError: null,
+          isProcessing: false,
           hasPendingCompression: false,
           streamingState: StreamingState.Idle,
         }),
@@ -7766,6 +7845,9 @@ describe('AppContainer State Management', () => {
               crossSessionInbound,
             },
           },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: () => ({ settings: {} }),
         }) as unknown as LoadedSettings;
 
       const { rerender } = render(
@@ -7783,6 +7865,54 @@ describe('AppContainer State Management', () => {
         <AppContainer
           config={mockConfig}
           settings={settingsWith('refuse')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when policy ownership changes without changing its value', () => {
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (owner: 'user' | 'workspace') =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound: 'hold',
+            },
+          },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: (scope: SettingScope) => ({
+            settings:
+              (owner === 'user' && scope === SettingScope.User) ||
+              (owner === 'workspace' && scope === SettingScope.Workspace)
+                ? { agents: { crossSessionInbound: 'hold' } }
+                : {},
+          }),
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('user')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('workspace')}
           version="1.0.0"
           initializationResult={mockInitResult}
         />,
@@ -8135,6 +8265,27 @@ describe('AppContainer State Management', () => {
         peer.emitHeld([heldMessage('a'), heldMessage('c')]);
       });
       expect(noticeCount()).toBe(2);
+    });
+
+    it('passes the policy scope into a held-message announcement', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            cause: 'explicit-setting',
+            policyScope: 'workspace',
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain("this repository's settings hold");
     });
 
     it("identifies a held message from the session's own process", () => {
