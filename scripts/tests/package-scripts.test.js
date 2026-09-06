@@ -30,6 +30,8 @@ function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
+
 describe('package scripts', () => {
   it('does not couple Node REPL to Qwen release versions', () => {
     const versionScript = readFileSync(
@@ -494,6 +496,9 @@ describe('package scripts', () => {
 
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
+    const workspaceTestScript = readWorkflow(
+      '.github/scripts/run-release-workspace-tests.sh',
+    );
     const buildJob = getWorkflowJob(workflow, 'quality_build');
     const workspaceTestJob = getWorkflowJob(workflow, 'workspace_tests');
     const buildStep = getWorkflowStep(buildJob, 'Build Project');
@@ -527,11 +532,15 @@ describe('package scripts', () => {
     expect(buildJob.indexOf(verifyPackageStep)).toBeGreaterThan(
       buildJob.indexOf(uploadStep),
     );
-    expect(verifyPackageStep).toContain('npm run bundle');
-    expect(verifyPackageStep).toContain('dist/review-sources.sha256');
-    expect(verifyPackageStep).toContain('npm run prepare:package');
-    expect(workspaceTestStep).toContain('npm run test:release:workspaces');
-    expect(workspaceTestStep).not.toContain('npm run test:ci');
+    expect(verifyPackageStep).toContain('run-release-step.sh verify-package');
+    expect(releaseStepScript).toContain('npm run bundle');
+    expect(releaseStepScript).toContain('dist/review-sources.sha256');
+    expect(releaseStepScript).toContain('npm run prepare:package');
+    expect(workspaceTestStep).toContain(
+      '.github/scripts/run-release-workspace-tests.sh',
+    );
+    expect(workspaceTestScript).toContain('npm run test:release:workspaces');
+    expect(workspaceTestScript).not.toContain('npm run test:ci');
     expect(scriptsTestStep).toContain('npm run test:scripts');
     for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {
       for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
@@ -573,7 +582,7 @@ describe('package scripts', () => {
     for (const jobName of ['integration_none', 'integration_docker']) {
       const integrationJob = getWorkflowJob(workflow, jobName);
       const buildStep = getWorkflowStep(integrationJob, 'Build Bundle');
-      expect(buildStep).toContain('npm run build\n          npm run bundle');
+      expect(buildStep).toContain('npm run build && npm run bundle');
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
@@ -581,10 +590,13 @@ describe('package scripts', () => {
       'CI_BOT_PAT',
     );
     const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
-    const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
-    const commitStep = getWorkflowStep(
+    const releaseBranchStep = getWorkflowStep(
       publishJob,
-      'Commit and Conditionally Push package versions',
+      'Prepare release branch',
+    );
+    const pushReleaseBranchStep = getWorkflowStep(
+      publishJob,
+      'Conditionally push release branch',
     );
     const buildStep = getWorkflowStep(
       publishJob,
@@ -592,79 +604,54 @@ describe('package scripts', () => {
     );
 
     expect(checkoutStep).toContain('persist-credentials: false');
-    expect(gitConfigStep).toContain('git config core.hooksPath .husky');
-    expect(publishJob.indexOf(gitConfigStep)).toBeLessThan(
-      publishJob.indexOf(commitStep),
+    expect(releaseBranchStep).not.toContain('CI_BOT_PAT');
+    expect(pushReleaseBranchStep).toContain(
+      "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",
     );
-    expect(commitStep).toContain("CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'");
-    expect(commitStep).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
-    expect(commitStep).toContain('gh auth setup-git');
-    const exportTokenIdx = commitStep.indexOf(
+    expect(releaseStepScript).toContain('git config core.hooksPath .husky');
+    expect(releaseStepScript).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
+    expect(releaseStepScript).toContain('gh auth setup-git');
+    const exportTokenIdx = releaseStepScript.indexOf(
       'export GH_TOKEN="${CI_BOT_PAT}"',
     );
-    const setupGitIdx = commitStep.indexOf('gh auth setup-git', exportTokenIdx);
+    const setupGitIdx = releaseStepScript.indexOf(
+      'gh auth setup-git',
+      exportTokenIdx,
+    );
     expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
     expect(setupGitIdx).toBeLessThan(
-      commitStep.indexOf('git push --force --set-upstream'),
+      releaseStepScript.indexOf('git push --force --set-upstream'),
     );
-    expect(buildStep).toContain('npm run build\n          npm run bundle');
+    expect(buildStep).toContain('run-release-step.sh build-package');
   });
 
   it('skips npm packages whose release version is already published', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const publishJob = getWorkflowJob(workflow, 'publish');
-
-    for (const stepName of [
-      'Publish @qwen-code/external-context-mem0',
-      'Publish @qwen-code/audio-capture',
-      'Publish @qwen-code/qwen-code',
-      'Publish @qwen-code/channel-base',
-      'Publish remaining channel packages',
-    ]) {
-      const publishStep = getWorkflowStep(publishJob, stepName);
-      expect(publishStep).toContain(
-        "RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'",
-      );
-      expect(publishStep).toContain(
-        'PACKAGE_NAME="$(node -p "require(\'./package.json\').name")"',
-      );
-      expect(publishStep).toContain('PUBLISH_ARGS+=(--dry-run)');
-      expect(publishStep).toContain(
-        'npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version',
-      );
-      expect(publishStep).toContain('already published; skipping');
-      expect(publishStep).toContain('exit 0');
-      expect(publishStep).toContain(
-        'npm publish --provenance "${PUBLISH_ARGS[@]}"',
-      );
-    }
-
-    // The channel loop must wrap each iteration in a subshell so that
-    // `exit 0` skips only the current channel, not the entire step.
-    const channelStep = getWorkflowStep(
-      publishJob,
-      'Publish remaining channel packages',
+    const publishStep = getWorkflowStep(publishJob, 'Publish npm packages');
+    expect(publishStep).toContain(
+      "RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'",
     );
-    expect(channelStep).toContain('(\n');
-    expect(channelStep).toContain(')');
-    // A fully-skipped publish must be visible, not silently green.
-    expect(channelStep).toContain(
+    expect(releaseStepScript).toContain(
+      'package_name="$(node -p "require(\'./package.json\').name")"',
+    );
+    expect(releaseStepScript).toContain('publish_args+=(--dry-run)');
+    expect(releaseStepScript).toContain(
+      'npm view "${package_name}@${RELEASE_VERSION}" version',
+    );
+    expect(releaseStepScript).toContain('already published; skipping');
+    expect(releaseStepScript).toContain('exit 0');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+    expect(releaseStepScript).toContain(
       'Every channel package was already published; nothing shipped',
     );
   });
 
   it('meets npm trusted publishing requirements', () => {
     for (const [workflowPath, jobName, publishStepName] of [
-      [
-        '.github/workflows/release.yml',
-        'publish',
-        'Publish @qwen-code/external-context-mem0',
-      ],
-      [
-        '.github/workflows/release.yml',
-        'publish',
-        'Publish @qwen-code/audio-capture',
-      ],
+      ['.github/workflows/release.yml', 'publish', 'Publish npm packages'],
       [
         '.github/workflows/release-sdk.yml',
         'release-sdk',
@@ -685,9 +672,13 @@ describe('package scripts', () => {
       const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
       const installStep = getWorkflowStep(publishJob, 'Install npm 11');
       const publishStep = getWorkflowStep(publishJob, publishStepName);
+      const publishImplementation =
+        workflowPath === '.github/workflows/release.yml'
+          ? releaseStepScript
+          : publishStep;
       expect(installStep).toContain('npm install --global npm@11.19.0');
       expect(publishJob).toContain("id-token: 'write'");
-      expect(publishStep).toContain('--provenance');
+      expect(publishImplementation).toContain('--provenance');
       expect(publishJob).toContain("name: 'production-release'");
       expect(publishJob.indexOf(installStep)).toBeLessThan(
         publishJob.indexOf(publishStep),

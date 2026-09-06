@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -33,6 +34,19 @@ const hasGnuRealpath =
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const releaseYaml = parse(workflow);
+const releaseStepScriptPath = '.github/scripts/run-release-step.sh';
+const releaseStepScriptAbsolutePath = join(
+  process.cwd(),
+  releaseStepScriptPath,
+);
+const releaseStepScript = readFileSync(releaseStepScriptPath, 'utf8');
+const workspaceTestScriptPath =
+  '.github/scripts/run-release-workspace-tests.sh';
+const workspaceTestScript = readFileSync(workspaceTestScriptPath, 'utf8');
+const dockerIntegrationScript = readFileSync(
+  '.github/scripts/run-release-docker-integration.sh',
+  'utf8',
+);
 const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
@@ -175,37 +189,13 @@ describe('CUA release workflow', () => {
 // ownership ladder all ship green under substring pins, and each of those
 // mutants reopens the incident class this step exists for.
 const canonicalWipe = `set -uo pipefail
-# Release jobs do not need cross-job workspace reuse: remove every
-# persisted entry, including planted .git config/hooks/attributes,
-# before actions/checkout runs with release credentials. The full
-# wipe — rather than keeping and scrubbing .git like serve-ab.yml —
-# is deliberate: these checkouts run with CI_BOT_PAT and the npm
-# OIDC id-token, so no pre-existing repo state may survive into
-# them; the accepted cost is fetching a fresh ref each run.
-#
-# Guards ported from serve-ab.yml's wipe (#9220, #9265): under a
-# mangled env even \`/home\` or an empty string reached the rm. A
-# wipe pointed at the wrong path is far worse than a skipped wipe,
-# so canonicalize, strip trailing slashes, denylist the known
-# roots, and require the target to sit inside the runner workspace
-# before any rm.
-#
-# Validate the geometry BEFORE touching anything: the chown/chmod
-# ladder and the wipe must never follow a runner workspace a previous
-# pool job — which may have run contributor code — replaced with a
-# symlink, so refuse one outright; and no ownership/permission change
-# may run on a path the containment below has not accepted.
+# Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
 while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
 if [ -L "$RWS" ]; then
   echo "::error::refusing to wipe: runner workspace is a symlink: \${RWS}"
   exit 1
 fi
-# \`-L\` only sees the LEAF: the kernel resolves intermediate
-# components too, so compare the symlink-blind lexical form
-# against the full canonicalization — any difference means some
-# component was a symlink re-rooting the whole chain below
-# (heal, allow-list, wipe) at the link's target.
 RWS_LEX="$(realpath -m -s -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${RUNNER_WORKSPACE}"; exit 1; }
 RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${RUNNER_WORKSPACE}"; exit 1; }
 if [ "$RWS" != "$RWS_LEX" ]; then
@@ -219,29 +209,15 @@ case "$RWS" in
 esac
 WS="\${GITHUB_WORKSPACE:?}"
 while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
-# Heal a workspace a previous job replaced with a symlink (or any
-# non-directory) BEFORE canonicalizing it: afterwards the path
-# resolves to the link's target, the containment below refuses it,
-# and every later job on this runner would die here permanently on
-# corruption that is itself inside the runner workspace and safe
-# to unlink.
+# Heal only a corrupt leaf whose canonical parent remains contained.
 if [ -L "$WS" ] || [ ! -d "$WS" ]; then
-  # Judge the PARENT, canonicalized: the kernel resolves
-  # intermediate components too, so a raw containment match is not
-  # enough. Never resolve $WS itself — that would resolve through
-  # the very link being removed.
   HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")" 2>/dev/null)" || { echo "::error::refusing to heal: realpath unavailable, cannot canonicalize the parent of \${WS}"; exit 1; }
   case "$HEAL_PARENT" in
     "$RWS"|"$RWS"/*) ;;
     *) echo "::error::refusing to heal workspace outside the runner workspace: \${WS} (parent: \${HEAL_PARENT}, runner workspace: \${RWS})"; exit 1 ;;
   esac
   if [ -L "$WS" ]; then
-    # The link target is bytes a PREVIOUS job chose — on this pool
-    # that job may have run contributor code — and the runner
-    # parses \`::\` at the start of any stdout line as a workflow
-    # command: keep untrusted bytes off the command line itself,
-    # strip the line breaks that could start a new one, and cap
-    # the length.
+    # Keep attacker-controlled link text out of workflow commands.
     heal_target="$(readlink -- "$WS" 2>/dev/null || printf '%s' '<unreadable>')"
     heal_target="$(printf '%s' "$heal_target" | tr -d '\\r\\n' | cut -c1-200)"
     echo "::warning::healing workspace \${WS}: it was a symlink"
@@ -249,15 +225,10 @@ if [ -L "$WS" ] || [ ! -d "$WS" ]; then
   else
     echo "::warning::healing workspace \${WS}: it was not a directory"
   fi
-  # \`rm -f\` on the RAW path removes the link itself and never
-  # follows it. Both legs fail closed: a swallowed failure here
-  # would leave the wipe running against a corrupt path.
+  # Remove the raw link path; never resolve its target.
   rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove \${WS}"; exit 1; }
   mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate \${WS}"; exit 1; }
 fi
-# Heal only guarantees the LEAF is real; a symlinked component
-# between the runner workspace and the leaf re-roots the
-# containment below the same way, so apply the same comparison.
 WS_LEX="$(realpath -m -s -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${GITHUB_WORKSPACE}"; exit 1; }
 WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${GITHUB_WORKSPACE}"; exit 1; }
 if [ "$WS" != "$WS_LEX" ]; then
@@ -268,51 +239,27 @@ while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
 case "$WS" in
   ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': \${WS}"; exit 1 ;;
 esac
+# Deny known roots, then allow only runner-workspace descendants.
 case "$WS" in
   /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: \${WS}"; exit 1 ;;
 esac
-# A denylist can only enumerate known roots — the allowlist closes
-# every other one (/tmp, /opt, ...): only a directory inside the
-# runner workspace may be wiped.
 case "$WS" in
   "$RWS"/*) ;;
   *) echo "::error::refusing to wipe workspace outside the runner workspace: \${WS} (runner workspace: \${RWS})"; exit 1 ;;
 esac
-# Geometry validated — only now may ownership/permissions change.
-# Shared ECS runners can retain root-owned files from an earlier
-# containerized job; restore them so the wipe and checkout succeed.
+# Path geometry is validated before ownership changes.
 RUNNER_UID="$(id -u)"
 RUNNER_GID="$(id -g)"
 if [ "$RUNNER_UID" != "0" ]; then
   chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
 fi
-# The validation above guarantees $GITHUB_WORKSPACE is a real directory
-# inside the runner workspace (a symlinked leaf was healed, a symlinked
-# runner workspace refused), so the recursive chmod cannot escape it.
 chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-# Later steps must not read pool-persistent Git, npm, Docker, or
-# gh state. A fresh directory avoids an unbounded scrub denylist
-# and stale lock files before checkout runs.
-#
-# The pool-wide RUNNER_TOOL_CACHE stays untouched ON PURPOSE:
-# lanes in three other pool workflows (qwen-autofix.yml's
-# issue-autofix/build-cli/review-address, serve-ab.yml's ab,
-# repo-hygiene.yml's dedup lane) resolve Node from it through
-# un-gated setup-node, while the pool-routed release jobs never
-# read the tool cache — their pool path is PATH Node via
-# .github/actions/self-hosted-node. Purging \`_tool/node\` here
-# would strip Node out from under the next such job on this
-# member, and nodejs.org may be unreachable through the pool's
-# egress proxy.
+# Isolate Git, npm, Docker, and gh state inherited across pool jobs.
 release_state="$(mktemp -d "\${RUNNER_TEMP:?}/release-state.XXXXXX")" || exit 1
 : > "\${release_state}/gitconfig" || exit 1
 : > "\${release_state}/npmrc" || exit 1
 mkdir "\${release_state}/docker" || exit 1
-# gh reads $HOME/.config/gh across pool jobs: a prior job could
-# plant a config.yml with http_unix_socket there and capture the
-# token a later \`gh\` call sends — qwen-autofix.yml isolates
-# GH_CONFIG_DIR the same way.
 mkdir "\${release_state}/gh" || exit 1
 {
   echo 'GIT_CONFIG_COUNT=0'
@@ -338,8 +285,8 @@ describe('release workflow', () => {
 
   it('cleans every shared ECS workspace before checkout', () => {
     const checkoutJobs = Object.entries(releaseYaml.jobs).filter(([, job]) =>
-      (job.steps ?? []).some((step) =>
-        String(step.uses ?? '').includes('actions/checkout'),
+      (job.steps ?? []).some(
+        (step) => step.name === 'Restore workspace ownership',
       ),
     );
 
@@ -398,6 +345,195 @@ describe('release workflow', () => {
     }
   });
 
+  it('loads extracted runners from the workflow commit for old release refs', () => {
+    for (const jobId of [
+      'prepare',
+      'quality_build',
+      'workspace_tests',
+      'integration_docker',
+      'publish',
+      'notify_failure',
+    ]) {
+      const steps = releaseYaml.jobs[jobId].steps;
+      const targetCheckoutIndex = steps.findIndex(
+        (step) => step.name === 'Checkout',
+      );
+      const scriptCheckoutIndex = steps.findIndex(
+        (step) => step.name === 'Checkout release workflow scripts',
+      );
+      const scriptCheckout = steps[scriptCheckoutIndex];
+
+      expect(scriptCheckout.with, jobId).toEqual({
+        ref: '${{ github.workflow_sha }}',
+        'fetch-depth': 1,
+        'persist-credentials': false,
+        'sparse-checkout':
+          '/.github/scripts\n/scripts/assert-release-version.mjs',
+        'sparse-checkout-cone-mode': false,
+        path: '.release-workflow',
+      });
+      if (jobId !== 'notify_failure') {
+        expect(scriptCheckoutIndex, jobId).toBeGreaterThan(targetCheckoutIndex);
+      }
+      for (const [index, step] of steps.entries()) {
+        if (String(step.run ?? '').includes('.release-workflow/')) {
+          expect(index, `${jobId}:${step.name}`).toBeGreaterThan(
+            scriptCheckoutIndex,
+          );
+        }
+      }
+    }
+  });
+
+  it('re-pins trusted runners before credential-bearing release steps', () => {
+    for (const [jobId, stepName] of [
+      ['prepare', 'Get the version'],
+      ['publish', 'Conditionally push release branch'],
+      ['publish', 'Publish npm packages'],
+      ['publish', 'Auto-label internal CI PRs for release notes exclusion'],
+      ['publish', 'Create GitHub Release and Tag'],
+      ['publish', 'Trigger ECS runner qwen update'],
+    ]) {
+      const steps = releaseYaml.jobs[jobId].steps;
+      const protectedStepIndex = steps.findIndex(
+        (step) => step.name === stepName,
+      );
+      const checkoutIndex = steps.findLastIndex(
+        (step, index) =>
+          index < protectedStepIndex &&
+          step.name === 'Checkout release workflow scripts',
+      );
+      const resetIndex = steps.findLastIndex(
+        (step, index) =>
+          index < checkoutIndex &&
+          step.name === 'Reset release workflow scripts',
+      );
+
+      expect(resetIndex, `${jobId}:${stepName}`).toBe(checkoutIndex - 1);
+      expect(
+        steps
+          .slice(checkoutIndex + 1, protectedStepIndex)
+          .some((step) => /\bnpm\b/.test(String(step.run ?? ''))),
+        `${jobId}:${stepName}`,
+      ).toBe(false);
+    }
+  });
+
+  it('keeps the workflow focused on orchestration', () => {
+    expect(workflow.split('\n').length).toBeLessThan(800);
+    for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.name === 'Restore workspace ownership' || !step.run) continue;
+        expect(
+          String(step.run).split('\n').length,
+          `${jobId}:${step.name}`,
+        ).toBeLessThanOrEqual(12);
+      }
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'executes release flag classification from the extracted script',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-flags-'));
+      const output = join(directory, 'output');
+      writeFileSync(output, '');
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'set-flags'],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              CREATE_NIGHTLY_RELEASE: 'false',
+              CREATE_PREVIEW_RELEASE: 'false',
+              CRON: '0 21 * * *',
+              DRY_RUN_INPUT: 'true',
+              GITHUB_OUTPUT: output,
+            },
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(readFileSync(output, 'utf8')).toBe(
+          'is_nightly=true\nis_preview=false\nis_dry_run=true\n',
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'continues publishing after already-published packages',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-publish-'));
+      const bin = join(directory, 'bin');
+      const publishLog = join(directory, 'published');
+      const channels = [
+        'dingtalk',
+        'dws',
+        'feishu',
+        'github',
+        'qqbot',
+        'telegram',
+        'wecom',
+        'weixin',
+      ];
+      mkdirSync(bin);
+      for (const path of [
+        'dist',
+        'packages/channels/base',
+        ...channels.map((channel) => `packages/channels/${channel}`),
+      ]) {
+        mkdirSync(join(directory, path), { recursive: true });
+      }
+      writeFileSync(join(bin, 'node'), '#!/bin/sh\nbasename "$PWD"\n', {
+        mode: 0o755,
+      });
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\n' +
+          'if [ "$1" = view ]; then\n' +
+          '  case "$PWD" in */channels/base) exit 1 ;; */channels/*) exit 0 ;; *) exit 1 ;; esac\n' +
+          'fi\n' +
+          'if [ "$1" = publish ]; then printf "%s\\n" "$PWD" >> "$PUBLISH_LOG"; fi\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'publish-packages'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              IS_DRY_RUN: 'false',
+              NPM_TAG: 'latest',
+              PUBLISH_AUDIO_CAPTURE: 'false',
+              PUBLISH_EXTERNAL_CONTEXT_MEM0: 'false',
+              PUBLISH_LOG: publishLog,
+              RELEASE_VERSION: '1.2.3',
+            },
+          },
+        );
+        expect(result.status).toBe(0);
+        const canonicalDirectory = realpathSync(directory);
+        expect(readFileSync(publishLog, 'utf8').trim().split('\n')).toEqual([
+          join(canonicalDirectory, 'dist'),
+          join(canonicalDirectory, 'packages/channels/base'),
+        ]);
+        expect(result.stdout).toContain(
+          'Every channel package was already published; nothing shipped',
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('pins validation and publishing to the commit resolved by prepare', () => {
     expect(releaseYaml.jobs.prepare.outputs.release_sha).toBe(
       '${{ steps.source.outputs.release_sha }}',
@@ -405,7 +541,8 @@ describe('release workflow', () => {
     const sourceStep = releaseYaml.jobs.prepare.steps.find(
       (step) => step.id === 'source',
     );
-    expect(sourceStep.run).toContain('git rev-parse HEAD');
+    expect(sourceStep.run).toContain('run-release-step.sh resolve-commit');
+    expect(releaseStepScript).toContain('git rev-parse HEAD');
 
     for (const id of [
       'quality_static',
@@ -493,17 +630,18 @@ describe('release workflow', () => {
     const pack = releaseYaml.jobs.quality_build.steps.find(
       (step) => step.name === 'Pack Build Outputs',
     );
-    expect(pack.run).toContain('packages/web-templates/src/generated');
+    expect(pack.run).toContain('run-release-step.sh pack-build');
+    expect(releaseStepScript).toContain('packages/web-templates/src/generated');
     // npm ci leaves nested dependency dist dirs under workspace
     // node_modules; the find must prune them so only real build outputs
     // travel in release-quality-build.
-    expect(pack.run).toContain('-type d -name node_modules -prune');
+    expect(releaseStepScript).toContain('-type d -name node_modules -prune');
     // Log what is packed and fail closed on a silent under-pack: a dropped
     // `-o` in the find turns the two -prune clauses into one conjunction
     // that matches nothing, and tar would then ship only the two hardcoded
     // paths while the symptom lands in downstream consumers.
-    expect(pack.run).toContain('printf');
-    expect(pack.run).toContain('${#build_paths[@]} -gt 2');
+    expect(releaseStepScript).toContain('printf');
+    expect(releaseStepScript).toContain('${#build_paths[@]} -gt 2');
   });
 
   it('keeps the dist producer ahead of the pack step', () => {
@@ -518,12 +656,9 @@ describe('release workflow', () => {
     expect(producer).toBeGreaterThanOrEqual(0);
     expect(pack).toBeGreaterThan(producer);
     expect(workflow).toContain(
-      '# This step also materializes the repo-root `dist` that Pack Build',
+      '# This materializes the repo-root dist packed below.',
     );
-    const packStep = releaseYaml.jobs.quality_build.steps.find(
-      (step) => step.name === 'Pack Build Outputs',
-    );
-    expect(packStep.run).toContain(
+    expect(releaseStepScript).toContain(
       "build_paths=('dist' 'packages/web-templates/src/generated')",
     );
   });
@@ -537,10 +672,15 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
-    expect(testStep.run).toContain(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
+    expect(testStep.run).toBe(
+      '.release-workflow/.github/scripts/run-release-workspace-tests.sh "${{ matrix.shard }}"',
     );
-    expect(testStep.run).toContain('::warning title=Workspace tests exited');
+    expect(workspaceTestScript).toContain(
+      'npm run test:release:workspaces -- --shard="${shard}/3" --passWithNoTests "${retry_arg[@]}"',
+    );
+    expect(workspaceTestScript).toContain(
+      '::warning title=Workspace tests exited',
+    );
     // Every release schedule retries, stable included: running the stable
     // lane with no retry let one flaky test out of ~30k red a release whose
     // other gates were all green. The default is pinned here so a silent
@@ -548,14 +688,10 @@ describe('release workflow', () => {
     expect(testStep.env.VITEST_RETRY).toBe(
       "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}",
     );
-    // `shell: 'bash'` is this step's only source of `-o pipefail` — the
-    // workflow has no `defaults:` block — so it is what makes the guard live
-    // rather than dead code. Drop it and GitHub falls back to `bash -e {0}`,
-    // where `npm … | tee` reports tee's status 0, the `||` handler never
-    // fires, and a shard with genuinely failing tests exits 0 into the
-    // release. The probe harness below passes `-o pipefail` itself, so no
-    // behavioural row would notice the line being cleaned up as redundant.
+    // Keep the workflow invocation explicit and the script independently
+    // fail-closed, so direct local execution and Actions use the same shell.
     expect(testStep.shell).toBe('bash');
+    expect(workspaceTestScript).toContain('set -eo pipefail');
     // Vitest colours its summaries from the mere presence of CI, and a
     // coloured summary sits escape bytes between a label and its value, so
     // every anchored pattern in the guard matches nothing: the pass-through
@@ -584,11 +720,6 @@ describe('release workflow', () => {
     // way off is the operator sentinel, and it must omit the flag rather
     // than zero it — --retry=0 would switch off a workspace's own retry
     // (packages/sdk-typescript) on this lane alone.
-    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
-      (step) => step.name === 'Run Workspace Tests',
-    );
-    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
-
     for (const [retry, expected] of [
       ['2', '--retry=2'],
       ['', null],
@@ -604,7 +735,7 @@ describe('release workflow', () => {
 
         const result = spawnSync(
           'bash',
-          ['-e', '-o', 'pipefail', '-c', script],
+          ['-e', '-o', 'pipefail', workspaceTestScriptPath, '1'],
           {
             env: {
               ...process.env,
@@ -706,10 +837,6 @@ describe('release workflow', () => {
     // (suffix-less class, no class at all) and the shapes that defeat the
     // count (an extra error the timeouts do not account for, a summary the
     // run never reached, words a test merely printed).
-    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
-      (step) => step.name === 'Run Workspace Tests',
-    );
-    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
     const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
     const tally = ' Tests  10614 passed (10614)';
     const passedThrough =
@@ -898,7 +1025,7 @@ describe('release workflow', () => {
 
         const result = spawnSync(
           'bash',
-          ['-e', '-o', 'pipefail', '-c', script],
+          ['-e', '-o', 'pipefail', workspaceTestScriptPath, '1'],
           {
             env: {
               ...process.env,
@@ -1568,37 +1695,44 @@ describe('release workflow', () => {
     );
 
     expect(setupStep.if).toBe("${{ runner.environment != 'self-hosted' }}");
-    expect(testStep.run).toContain(
+    expect(testStep.run).toBe(
+      '.release-workflow/.github/scripts/run-release-docker-integration.sh',
+    );
+    expect(dockerIntegrationScript).toContain(
       'docker-sandbox-build-release-${sandbox_revision}.lock',
     );
-    expect(testStep.run).toContain('flock --wait 1800 8');
-    expect(testStep.run).toContain(
+    expect(dockerIntegrationScript).toContain('flock --wait 1800 8');
+    expect(dockerIntegrationScript).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
     );
-    expect(testStep.run).toContain('-release-${sandbox_revision}');
-    expect(testStep.run).toContain('--no-prune -i "$sandbox_image"');
-    expect(testStep.run).toContain(
+    expect(dockerIntegrationScript).toContain('-release-${sandbox_revision}');
+    expect(dockerIntegrationScript).toContain('--no-prune -i "$sandbox_image"');
+    expect(dockerIntegrationScript).toContain(
       'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
     );
-    expect(testStep.run).toContain('flock --shared --wait 1800 9');
+    expect(dockerIntegrationScript).toContain('flock --shared --wait 1800 9');
     // The daemon lock stays shared for the whole step: upgrading it to
     // exclusive to build an image starves the build behind the test phase of
     // any run already on the host (run 33637097713). Builds serialize on a
     // separate host mutex that no test phase holds.
-    expect(testStep.run).toContain(
+    expect(dockerIntegrationScript).toContain(
       'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
     );
-    expect(testStep.run).toContain('flock --wait 1800 7');
-    expect(testStep.run).not.toContain('acquire_daemon_write_lock');
-    expect(testStep.run).not.toContain('flock --unlock 9');
-    expect(testStep.run).not.toContain('flock --nonblock 9');
+    expect(dockerIntegrationScript).toContain('flock --wait 1800 7');
+    expect(dockerIntegrationScript).not.toContain('acquire_daemon_write_lock');
+    expect(dockerIntegrationScript).not.toContain('flock --unlock 9');
+    expect(dockerIntegrationScript).not.toContain('flock --nonblock 9');
     // A flock lives on the open file description: a descendant inheriting
     // the descriptor past the job would keep the lock on the host.
-    expect(testStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
-    expect(testStep.run).toContain('exec 7>&-');
-    expect(testStep.run).toContain('exec 8>&-');
-    expect(testStep.run).toContain('integration-tests cli 9>&-');
-    expect(testStep.run).toContain('integration-tests interactive 9>&-');
+    expect(dockerIntegrationScript).toContain(
+      '-i "$sandbox_image" 7>&- 8>&- 9>&-',
+    );
+    expect(dockerIntegrationScript).toContain('exec 7>&-');
+    expect(dockerIntegrationScript).toContain('exec 8>&-');
+    expect(dockerIntegrationScript).toContain('integration-tests cli 9>&-');
+    expect(dockerIntegrationScript).toContain(
+      'integration-tests interactive 9>&-',
+    );
   });
 
   it('digest-pins every sandbox base image', () => {
@@ -1690,27 +1824,23 @@ describe('release workflow', () => {
   });
 
   it('stages every integration package manifest after versioning', () => {
-    expect(workflow).toContain(
+    expect(releaseStepScript).toContain(
       'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
   });
 
   it('publishes the Mem0 Extension only after trusted publishing bootstrap', () => {
     const publishSteps = releaseYaml.jobs.publish.steps;
-    const mem0Step = publishSteps.find(
-      (step) => step.name === 'Publish @qwen-code/external-context-mem0',
+    const publishStep = publishSteps.find(
+      (step) => step.name === 'Publish npm packages',
     );
-    const audioStepIndex = publishSteps.findIndex(
-      (step) => step.name === 'Publish @qwen-code/audio-capture',
-    );
-
-    expect(mem0Step.if).toContain(
+    expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toContain(
       "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
     );
-    expect(mem0Step['working-directory']).toBe(
-      'integrations/external-context-mem0',
-    );
-    expect(publishSteps.indexOf(mem0Step)).toBeLessThan(audioStepIndex);
+    expect(releaseStepScript).toContain('integrations/external-context-mem0');
+    expect(
+      releaseStepScript.indexOf('integrations/external-context-mem0'),
+    ).toBeLessThan(releaseStepScript.indexOf('packages/audio-capture'));
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
@@ -1725,8 +1855,8 @@ describe('release workflow', () => {
         "              needs.prepare.outputs.is_dry_run == 'false' &&\n" +
         "              needs.prepare.outputs.npm_tag == 'latest' }}",
     );
-    expect(workflow).toContain("-f 'event_type=npm-published'");
-    expect(workflow).toContain(
+    expect(releaseStepScript).toContain("-f 'event_type=npm-published'");
+    expect(releaseStepScript).toContain(
       '-f "client_payload[version]=${RELEASE_VERSION}"',
     );
   });
@@ -1741,7 +1871,7 @@ describe('release workflow', () => {
     // The ordering — bundle, then the stamp gate, then packaging — not the
     // gate's prose or indentation: rewording the comment above the check must
     // not fail a test whose subject is the guard itself.
-    expect(workflow).toMatch(
+    expect(releaseStepScript).toMatch(
       /npm run bundle[\s\S]*?test -f dist\/review-sources\.sha256[\s\S]*?npm run prepare:package/,
     );
   });
@@ -1755,8 +1885,8 @@ describe('release workflow', () => {
     // dispatch input) promises no branch is created, and no other test
     // pins this guard — a force push outside it would turn a dry run into
     // a destructive overwrite of the remote branch.
-    expect(workflow).toMatch(
-      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags\n {10}else\n {12}echo "Dry run enabled\. Skipping push\."/,
+    expect(releaseStepScript).toMatch(
+      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
   });
 
@@ -1779,17 +1909,21 @@ describe('release workflow', () => {
     );
   });
 
-  it('refuses the force push when the checked-out ref predates the guard', () => {
-    // The guard runs scripts/get-release-version.js from the checked-out
-    // ref — the operator-controlled dispatch input `ref` — and a pre-PR
-    // ref's entry point ignores --assert-unreleased, prints version JSON,
-    // and exits 0 (probed against the merge base), so GUARD_STATUS=0
-    // would read as "unreleased verified" while the guard never ran. Pin
-    // the capability check that fails closed instead: inside the dry-run
-    // guard, ahead of the guard invocation, refusing with a plain
-    // failure so the run notifies instead of force-pushing unverified.
-    expect(workflow).toMatch(
-      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?if ! grep -q "assert-unreleased" scripts\/get-release-version\.js; then\n {14}echo "::error::Checked-out ref predates the push-time guard; refusing force push\."\n {14}exit 1\n {12}fi[\s\S]*?for attempt in 1 2 3; do\n {14}GUARD_STATUS=0\n {14}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?/,
+  it('uses the workflow-pinned guard for old release refs', () => {
+    expect(releaseStepScript).toContain(
+      'node .release-workflow/scripts/assert-release-version.mjs --assert-unreleased="${RELEASE_VERSION}"',
+    );
+    expect(releaseStepScript).not.toContain(
+      'node scripts/get-release-version.js --assert-unreleased=',
+    );
+    expect(releaseStepScript).toContain(
+      'node .release-workflow/.github/scripts/classify-release-notes.mjs',
+    );
+    expect(releaseStepScript).toContain(
+      'node .release-workflow/.github/scripts/cap-release-notes.mjs',
+    );
+    expect(releaseStepScript).not.toMatch(
+      /node \.github\/scripts\/(?:classify|cap)-release/,
     );
   });
 
@@ -1816,9 +1950,39 @@ describe('release workflow', () => {
     // GUARD_STATUS is reset each attempt and only exit 2 (a probe
     // failure) retries — exit 0 and exit 3 stay decisive on the first
     // attempt.
-    expect(workflow).toMatch(
-      /name: 'Commit and Conditionally Push package versions'\n {8}id: 'push_release_branch'\n {8}env:\n[\s\S]*?GITHUB_TOKEN: '\$\{\{ github\.token \}\}'[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?for attempt in 1 2 3; do\n {14}GUARD_STATUS=0\n {14}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
+    const releaseBranchStep = releaseYaml.jobs.publish.steps.find(
+      (step) => step.id === 'release_branch',
     );
+    const pushReleaseBranchStep = releaseYaml.jobs.publish.steps.find(
+      (step) => step.id === 'push_release_branch',
+    );
+    expect(releaseBranchStep.env.CI_BOT_PAT).toBeUndefined();
+    expect(releaseBranchStep.env.GITHUB_TOKEN).toBeUndefined();
+    expect(pushReleaseBranchStep.env.GITHUB_TOKEN).toBe('${{ github.token }}');
+    expect(pushReleaseBranchStep.env.BRANCH_NAME).toBe(
+      '${{ steps.release_branch.outputs.BRANCH_NAME }}',
+    );
+    expect(pushReleaseBranchStep.env.CI_BOT_PAT).toBe(
+      '${{ secrets.CI_BOT_PAT }}',
+    );
+    expect(pushReleaseBranchStep.env.RELEASE_VERSION).toBe(
+      '${{ needs.prepare.outputs.release_version }}',
+    );
+    expect(pushReleaseBranchStep.run).toContain('push-release-branch');
+    const guard = releaseStepScript.indexOf(
+      'node .release-workflow/scripts/assert-release-version.mjs --assert-unreleased="${RELEASE_VERSION}" || guard_status=$?',
+    );
+    expect(guard).toBeGreaterThan(
+      releaseStepScript.indexOf('if [[ "${IS_DRY_RUN}" == "false" ]]'),
+    );
+    expect(releaseStepScript.indexOf('for attempt in 1 2 3; do')).toBeLessThan(
+      guard,
+    );
+    expect(
+      releaseStepScript.indexOf(
+        'git push --force --set-upstream origin "${release_branch_name}" --follow-tags',
+      ),
+    ).toBeGreaterThan(guard);
   });
 
   it('keeps a decisive version refusal out of the release-failed notification', () => {
@@ -1831,8 +1995,8 @@ describe('release workflow', () => {
     // publish failure still notify — including through the propagation
     // branch pinned verbatim below: without it a probe failure falls
     // through to the force push unverified.
-    expect(workflow).toMatch(
-      /node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?[\s\S]*?if \[\[ "\$\{GUARD_STATUS\}" -eq 3 \]\]; then\n {14}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {14}exit 1\n {12}fi\n {12}if \[\[ "\$\{GUARD_STATUS\}" -ne 0 \]\]; then\n {14}exit "\$\{GUARD_STATUS\}"\n {12}fi/,
+    expect(releaseStepScript).toMatch(
+      /node \.release-workflow\/scripts\/assert-release-version\.mjs --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| guard_status=\$\?[\s\S]*?if \[\[ "\$\{guard_status\}" -eq 3 \]\]; then\n {8}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {8}exit 1\n {6}fi\n {6}if \[\[ "\$\{guard_status\}" -ne 0 \]\]; then\n {8}exit "\$\{guard_status\}"\n {6}fi/,
     );
     expect(workflow).toContain(
       "version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'",
@@ -1849,7 +2013,7 @@ describe('release workflow', () => {
     // here instead of letting a refusal exit 0 at push time.
     const result = spawnSync(
       process.execPath,
-      ['scripts/get-release-version.js', '--assert-unreleased='],
+      ['scripts/assert-release-version.mjs', '--assert-unreleased='],
       { encoding: 'utf8' },
     );
     expect(result.status).toBe(2);
@@ -1876,7 +2040,7 @@ describe('release workflow', () => {
       });
       const result = spawnSync(
         process.execPath,
-        ['scripts/get-release-version.js', '--assert-unreleased=1.2.3'],
+        ['scripts/assert-release-version.mjs', '--assert-unreleased=1.2.3'],
         {
           encoding: 'utf8',
           env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}` },
@@ -1896,7 +2060,9 @@ describe('release workflow', () => {
         '        env:\n' +
         "          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'",
     );
-    expect(workflow).toContain('echo "::error::npm-published dispatch failed;');
+    expect(releaseStepScript).toContain(
+      'echo "::error::npm-published dispatch failed;',
+    );
   });
 });
 
@@ -1973,7 +2139,8 @@ describe('release lane runner routing', () => {
       (step) => step.id === 'vars',
     );
     for (const cron of crons) {
-      expect(vars.run).toContain(`"\${CRON}" == "${cron}"`);
+      expect(vars.run).toContain('run-release-step.sh set-flags');
+      expect(releaseStepScript).toContain(`"\${CRON}" == "${cron}"`);
     }
   });
 
@@ -1993,7 +2160,9 @@ describe('release lane runner routing', () => {
       const job = releaseYaml.jobs[name];
       expect(job.env.RUNNER_ENVIRONMENT, name).toBeUndefined();
       const testSteps = job.steps.filter((step) =>
-        /(?:vitest|test:integration)/.test(String(step.run ?? '')),
+        /(?:vitest|test:integration|run-release-docker-integration)/.test(
+          String(step.run ?? ''),
+        ),
       );
       expect(testSteps, name).toHaveLength(expectedSteps);
       for (const step of testSteps) {
