@@ -60,7 +60,7 @@
 - #11202 (`deliveryId` on structured external input): step 5's `consumedMessageIds`.
 - #11204 (typed resident continuation): step 6's dispatcher branch.
 
-All three are merged into `codex/multi-agent-mesh-foundation` in the order #11200 → #11204 → #11202. The expected final conflict was resolved by keeping both contracts: structured `AgentExternalInput` delivery and typed continuation outcomes. The source PRs remain open as drafts for their review history; #11206 is the implementation and delivery PR.
+All three are merged into `codex/multi-agent-mesh-foundation` in the order #11200 → #11204 → #11202. The expected final conflict was resolved by keeping both contracts: structured `AgentExternalInput` delivery and typed continuation outcomes. GitHub records the draft PRs as merged because this branch was their base; their review history remains available, and #11206 is the only implementation and delivery PR.
 
 ## 5. Test harness on a build-less box (observed)
 

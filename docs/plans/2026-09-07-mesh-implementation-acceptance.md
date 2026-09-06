@@ -1,7 +1,7 @@
 # Mesh implementation — step-by-step acceptance criteria
 
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) §5.2 (ten steps, as numbered on the `codex/multi-agent-mesh-foundation` branch) and [`2026-09-07-mesh-review-round2-handoff.md`](./2026-09-07-mesh-review-round2-handoff.md).
-> Delivery shape: **one implementation and delivery PR** (#11206). Runtime changes #11200 / #11202 / #11204 are merged into its branch and stay open as drafts only so their review history remains available.
+> Delivery shape: **one implementation and delivery PR** (#11206). Runtime changes #11200 / #11202 / #11204 are merged into its branch. Because that branch was their PR base, GitHub records them as merged draft references; their review history remains available and none is merged separately to `main`.
 > Nothing in this file was executed by its author. "Evidence" means what the implementer reports, with observed values, in the PR description or a `docs/verification/mesh/` package.
 
 ## 0. Corrections to the round-2 hand-off
@@ -87,7 +87,7 @@ One more decision that predates all of these: the relationship between this subs
 ## 4. Working in one PR
 
 - #11206 is the only implementation PR and the only PR that merges to `main`. Each numbered step is committed directly to `codex/multi-agent-mesh-foundation` and pushed for #11206's whole-branch CI gate.
-- Runtime preparation was merged in the order #11200 → #11204 → #11202. The expected final conflict keeps both contracts: structured external input and typed continuation outcomes. Those source PRs remain open as drafts and are not merged separately to `main`.
+- Runtime preparation was merged in the order #11200 → #11204 → #11202. The expected final conflict keeps both contracts: structured external input and typed continuation outcomes. GitHub automatically records those draft PRs as merged because their base is this branch; no PR was merged separately to `main` or manually closed.
 - Merge `main` into the mesh branch when it falls behind; never rebase (repo policy, and the force-push bot).
 - Keep the design doc and this file current in the same commit as the code that changes them.
 
