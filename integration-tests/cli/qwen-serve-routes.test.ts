@@ -310,7 +310,21 @@ describe('qwen serve — CORS browser-origin denial', () => {
 
 describe('qwen serve — capabilities envelope', () => {
   it('advertises all baseline capabilities', async () => {
-    const caps = await client.capabilities();
+    // The daemon builds the runtime app asynchronously after listen and
+    // answers /capabilities with a bootstrap envelope until it mounts.
+    // Only the runtime envelope carries `workspaces` — and the
+    // trust-gated extension tags asserted below — so wait out the
+    // bootstrap window instead of asserting the transient feature set.
+    let caps = await client.capabilities();
+    await expect
+      .poll(
+        async () => {
+          caps = await client.capabilities();
+          return caps.workspaces !== undefined;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true);
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
