@@ -3236,10 +3236,10 @@ export function App({
   );
   const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
     if (sidebarOptions.enabled) return [];
-    return ordinaryWorkspaces
+    return workspaces
       .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
       .map((entry) => entry.cwd);
-  }, [ordinaryWorkspaces, sidebarOptions.enabled]);
+  }, [sidebarOptions.enabled, workspaces]);
   useWorkspaceSessionLiveState(workspace.client, {
     enabled: Boolean(
       sidebarlessLiveStateWorkspaceCwds.length > 0 &&
@@ -16982,7 +16982,7 @@ export function App({
                         }}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
-                        manageLiveState={!sidebarOptions.enabled}
+                        manageLiveState={false}
                       />
                     )}
                     </ShadowDomBoundary>

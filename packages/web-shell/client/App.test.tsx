@@ -10033,17 +10033,24 @@ describe('App conversation indicator keep-alive (#9487)', () => {
           primary: true,
           trusted: true,
         },
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
       ],
     };
 
     const { rerender } = renderApp({ sidebar: false });
     await flush();
 
-    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenCalledWith(
       mockWorkspace.client,
       {
         enabled: true,
-        workspaceCwds: ['/tmp/project'],
+        workspaceCwds: ['/tmp/project', '/tmp/live'],
         groupWorkspaceCwds: [],
       },
     );
@@ -26323,6 +26330,7 @@ describe('App session callbacks', () => {
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+    expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
   });
 
   it('forces the compact session drawer from the external shell ref', async () => {

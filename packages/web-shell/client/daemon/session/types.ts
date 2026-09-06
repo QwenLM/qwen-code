@@ -407,10 +407,16 @@ export interface SubmitPromptResult {
   removedAfterAbort?: true;
 }
 
+export interface DaemonActivePromptState {
+  active: boolean | undefined;
+  workspaceCwd: string | undefined;
+  sessionId: string | undefined;
+}
+
 export interface DaemonSessionActions {
   /**
    * Publish the daemon's authoritative "this session has a prompt in flight"
-   * state for the connected session, or `undefined` when it cannot be known
+   * state for the identified session, or `undefined` when it cannot be known
    * (a daemon without `workspace_session_live_state`, or a workspace nothing
    * polls live state for).
    *
@@ -421,7 +427,10 @@ export interface DaemonSessionActions {
    * suppressed; a `true` -> `false` transition settles the turn as a backstop
    * for terminal events that never arrive.
    */
-  setDaemonActivePrompt(active: boolean | undefined): void;
+  setDaemonActivePrompt(
+    active: boolean | undefined,
+    owner?: Pick<DaemonActivePromptState, 'workspaceCwd' | 'sessionId'>,
+  ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns

@@ -11036,7 +11036,10 @@ describe('DaemonSessionProvider', () => {
       expect(promptStatus).not.toBe('idle');
 
       await act(async () => {
-        actions?.setDaemonActivePrompt(true);
+        actions?.setDaemonActivePrompt(true, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-resync-active',
+        });
         await flushPromises();
       });
 
@@ -11098,7 +11101,10 @@ describe('DaemonSessionProvider', () => {
       expect(promptStatus).toBe('streaming');
 
       await act(async () => {
-        actions?.setDaemonActivePrompt(true);
+        actions?.setDaemonActivePrompt(true, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-restored-backstop',
+        });
         actions?.setDaemonActivePrompt(false);
         await flushPromises();
       });
@@ -11180,7 +11186,10 @@ describe('DaemonSessionProvider', () => {
       expect(promptStatus).not.toBe('idle');
 
       await act(async () => {
-        actions?.setDaemonActivePrompt(true);
+        actions?.setDaemonActivePrompt(true, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-replay-reload',
+        });
         await flushPromises();
       });
 
@@ -11287,11 +11296,9 @@ describe('DaemonSessionProvider', () => {
     it('keeps daemon authority across a switch to another running turn', async () => {
       vi.useFakeTimers();
       try {
-        // The host bridge publishes per-session live values and only
-        // re-publishes on change. Switching between two sessions that are
-        // both running keeps the published value `true`, so the provider must
-        // carry its authority across the switch instead of resetting it
-        // (#9487).
+        // The host bridge republishes the same live value with the target
+        // owner. The provider must retain that target-scoped authority while
+        // the new session is still attaching (#9487).
         const gapA = createDeferred<void>();
         const gapB = createDeferred<void>();
         sdkMocks.sessions.push(
@@ -11306,12 +11313,16 @@ describe('DaemonSessionProvider', () => {
         });
         expect(promptStatus).not.toBe('idle');
         await act(async () => {
-          actions?.setDaemonActivePrompt(true);
+          actions?.setDaemonActivePrompt(true, {
+            workspaceCwd: '/mock-workspace',
+            sessionId: 'session-a',
+          });
           await flushPromises();
         });
 
-        // Session B is running too, so the bridge's published value does not
-        // change across the switch and nothing re-publishes.
+        // Session B is running too. Its `true` can arrive before the load
+        // finishes, so the signal must carry B's identity instead of reading
+        // the still-transitioning Provider ref.
         sdkMocks.sessions.push(
           createObservedSparseTurnSession(gapB, 'session-b'),
         );
@@ -11321,6 +11332,10 @@ describe('DaemonSessionProvider', () => {
         });
         if (!switched) throw new Error('Session switch was not started');
         await act(async () => {
+          actions?.setDaemonActivePrompt(true, {
+            workspaceCwd: '/mock-workspace',
+            sessionId: 'session-b',
+          });
           await switched;
           await flushPromises();
           await vi.advanceTimersByTimeAsync(20);
@@ -11384,7 +11399,38 @@ describe('DaemonSessionProvider', () => {
       }
     });
 
-    it('does not restore a prompt after live state settled during load', async () => {
+    it('does not consume stale idle authority for a newly loaded session', async () => {
+      const sessionA = createMockSession({ sessionId: 'session-a' });
+      const sessionB = createMockSession({
+        sessionId: 'session-b',
+        hasActivePrompt: true,
+      });
+      sdkMocks.sessions.push(sessionA);
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await flushPromises();
+        actions?.setDaemonActivePrompt(true, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-a',
+        });
+        actions?.setDaemonActivePrompt(false, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-a',
+        });
+      });
+
+      sdkMocks.sessions.push(sessionB);
+      await act(async () => {
+        await requireActions(actions).loadSession('session-b');
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+      expect(streamingState).not.toBe('idle');
+    });
+
+    it('settles authority that starts before the session finishes loading', async () => {
       const pendingLoad = createDeferred<MockSession>();
       const streamEnd = createDeferred<void>();
       const reattached = createDeferred<void>();
@@ -11407,8 +11453,10 @@ describe('DaemonSessionProvider', () => {
       if (!switched) throw new Error('Session switch was not started');
       await act(async () => {
         await flushPromises();
-        actions?.setDaemonActivePrompt(true);
-        actions?.setDaemonActivePrompt(false);
+        actions?.setDaemonActivePrompt(true, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-b',
+        });
         pendingLoad.resolve(
           createMockSession({
             sessionId: 'session-b',
@@ -11439,11 +11487,25 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
 
+      expect(promptStatus).not.toBe('idle');
+      expect(streamingState).not.toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(false, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-b',
+        });
+        await flushPromises();
+      });
+
       expect(promptStatus).toBe('idle');
       expect(streamingState).toBe('idle');
 
       await act(async () => {
-        actions?.setDaemonActivePrompt(undefined);
+        actions?.setDaemonActivePrompt(undefined, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: 'session-b',
+        });
         streamEnd.resolve();
         await reattached.promise;
         await flushPromises();

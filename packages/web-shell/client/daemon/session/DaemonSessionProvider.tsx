@@ -124,6 +124,7 @@ import {
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
+  DaemonActivePromptState,
   DaemonConnectionState,
   DaemonPromptStatus,
   DaemonSessionActions,
@@ -1067,9 +1068,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   >(undefined);
   // Daemon-authoritative "a prompt is in flight" state for the connected
   // session, pushed in by the host from the workspace live-state poll via
-  // `actions.setDaemonActivePrompt`. `undefined` = unknown; the silence
-  // heuristics below then behave exactly as they did before (#9487).
-  const daemonActivePromptRef = useRef<boolean | undefined>(undefined);
+  // `actions.setDaemonActivePrompt`. The owner lets a signal published during
+  // session loading wait for that exact session without leaking to another.
+  const daemonActivePromptRef = useRef<DaemonActivePromptState | undefined>(
+    undefined,
+  );
   const heartbeatSupportedRef = useRef(false);
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
@@ -1521,6 +1524,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let standaloneCreateAttempted = false;
       let productContextFailure = false;
       let hasCurrentSessionActivePrompt = () => false;
+      const getDaemonActivePrompt = (
+        target: { workspaceCwd?: string; sessionId?: string } | undefined,
+      ): boolean | undefined => {
+        const state = daemonActivePromptRef.current;
+        return state?.sessionId !== undefined &&
+          target !== undefined &&
+          state?.workspaceCwd === target.workspaceCwd &&
+          state.sessionId === target.sessionId
+          ? state.active
+          : undefined;
+      };
       // The one gate every non-terminal path asks before settling the pane to
       // idle. A settle is safe only when no prompt this browser is tracking is
       // still running AND the daemon is not reporting the turn in flight;
@@ -1528,9 +1542,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       // reads as "turn finished" (#9487). Terminal events (turn_complete,
       // turn_error, prompt.cancelled) and lifecycle transitions do not ask —
       // they settle unconditionally, which is what makes them terminal.
-      const maySettleToIdle = () => {
+      const maySettleToIdle = (
+        target = session ?? sessionRef.current ?? connectionRef.current,
+      ) => {
         if (hasCurrentSessionActivePrompt()) return false;
-        if (daemonActivePromptRef.current === true) {
+        if (getDaemonActivePrompt(target) === true) {
           // The counterpart to the settle breadcrumb in the action layer:
           // "the pane has said working for 40 minutes" is otherwise
           // indistinguishable from a genuinely long silent tool call.
@@ -2197,13 +2213,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-              // Do not reset daemonActivePromptRef here: the host bridge only
-              // re-publishes when the live value changes, so switching between
-              // two sessions with the same value (e.g. both running) would
-              // leave the entered session without daemon authority — the
-              // exact mid-turn indicator loss this PR removes. The value is
-              // per-session, so carrying it across the switch is correct for
-              // the session being entered (#9487).
+              // Do not reset daemonActivePromptRef here: the bridge may have
+              // already published authority for the target while it was
+              // loading. Owner matching below prevents the previous session's
+              // value from leaking into the new one (#9487).
               needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
@@ -2215,7 +2228,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // reset has not already flattened, so an observer pane whose
                 // ring-evicted reload carries a replay snapshot would lose the
                 // indicator for the rest of the turn (#9487).
-                if (maySettleToIdle()) setPromptStatus('idle');
+                if (maySettleToIdle(nextSession)) setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 needsStoreReset = true;
               } else {
@@ -2274,7 +2287,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // controller/promise to put in `activePromptsRef`. Keep that restored
           // live state separately so `session.replay_complete` (history caught
           // up) does not get mistaken for `turn_complete` (prompt finished).
-          if (daemonActivePromptRef.current === false) {
+          const daemonActivePrompt = getDaemonActivePrompt(activeSession);
+          if (daemonActivePrompt === false) {
             settledRestoredActivePromptSessionsRef.current.add(activeSession);
           }
           const restoredActivePromptSettled =
@@ -2310,7 +2324,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // and would reset a running turn to idle. Keep whatever the
                 // stream already established while the daemon still reports
                 // the prompt in flight (#9487).
-                daemonActivePromptRef.current === true && current !== 'idle'
+                daemonActivePrompt === true && current !== 'idle'
                 ? current
                 : 'idle',
           );

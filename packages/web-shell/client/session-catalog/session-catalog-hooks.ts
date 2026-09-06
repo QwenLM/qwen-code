@@ -295,8 +295,8 @@ export function useDaemonActivePromptBridge(
   // settles. A genuine loss of live-state coverage still does.
   const daemonActivePrompt = authoritative ? hasActivePrompt : undefined;
   useEffect(() => {
-    setDaemonActivePrompt(daemonActivePrompt);
-  }, [daemonActivePrompt, setDaemonActivePrompt]);
+    setDaemonActivePrompt(daemonActivePrompt, { workspaceCwd, sessionId });
+  }, [daemonActivePrompt, sessionId, setDaemonActivePrompt, workspaceCwd]);
   return hasActivePrompt;
 }
 

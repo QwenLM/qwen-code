@@ -420,8 +420,8 @@ describe('useSessionActivePromptState (#9487)', () => {
     const client = mocks.workspace.client as DaemonClient;
     const store = getSessionCatalogStore(client);
 
-    function BridgeProbe() {
-      const active = useDaemonActivePromptBridge(client, '/work', 'sess-1');
+    function BridgeProbe({ sessionId = 'sess-1' }: { sessionId?: string }) {
+      const active = useDaemonActivePromptBridge(client, '/work', sessionId);
       return <span>{String(active)}</span>;
     }
 
@@ -429,7 +429,10 @@ describe('useSessionActivePromptState (#9487)', () => {
       root.render(<BridgeProbe />);
       for (let i = 0; i < 8; i += 1) await Promise.resolve();
     });
-    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(undefined);
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(undefined, {
+      workspaceCwd: '/work',
+      sessionId: 'sess-1',
+    });
 
     act(() => {
       store.applyLiveState('/work', [
@@ -443,13 +446,46 @@ describe('useSessionActivePromptState (#9487)', () => {
       ]);
     });
     expect(container.textContent).toBe('true');
-    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(true);
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(true, {
+      workspaceCwd: '/work',
+      sessionId: 'sess-1',
+    });
+
+    act(() => {
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sess-1',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+        {
+          sessionId: 'sess-2',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+      ]);
+    });
+    await act(async () => {
+      root.render(<BridgeProbe sessionId="sess-2" />);
+      await Promise.resolve();
+    });
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(true, {
+      workspaceCwd: '/work',
+      sessionId: 'sess-2',
+    });
 
     act(() => {
       store.applyLiveState('/work', []);
     });
     expect(container.textContent).toBe('false');
-    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(false);
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(false, {
+      workspaceCwd: '/work',
+      sessionId: 'sess-2',
+    });
   });
 
   it('never lets the bounded fallback page settle a turn', async () => {

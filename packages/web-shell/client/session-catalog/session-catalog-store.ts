@@ -245,26 +245,31 @@ export class SessionCatalogStore {
         this.liveStateWorkspaceUsers.set(workspaceCwd, remaining);
       else {
         this.liveStateWorkspaceUsers.delete(workspaceCwd);
-        this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
-        this.liveStatePendingActivity.delete(workspaceCwd);
-        this.liveStateFailureStreaks.delete(workspaceCwd);
-        this.clearLiveSessions(workspaceCwd);
-        for (const entry of this.entries.values()) {
-          if (entry.query.workspaceCwd !== workspaceCwd) continue;
-          this.resetPollSchedule(entry);
-          if (entry.waiters.length > 0) {
-            entry.desiredRevision += 1;
-            if (entry.queuedJob?.staged) this.removeQueuedJob(entry);
-            this.ensureScheduled(entry, PRIORITY.interactive, false);
-          } else if (
-            entry.subscribers.size > 0 &&
-            (entry.invalidated ||
-              (hasAutoLoadSubscriber(entry) &&
-                (entry.snapshot.page === undefined || entry.snapshot.stale)))
-          ) {
-            this.requestBackground(entry, 'initial');
+        // React releases the old view before retaining its same-commit
+        // replacement. Let that handoff keep the authoritative snapshot.
+        queueMicrotask(() => {
+          if (this.liveStateWorkspaceUsers.has(workspaceCwd)) return;
+          this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
+          this.liveStatePendingActivity.delete(workspaceCwd);
+          this.liveStateFailureStreaks.delete(workspaceCwd);
+          this.clearLiveSessions(workspaceCwd);
+          for (const entry of this.entries.values()) {
+            if (entry.query.workspaceCwd !== workspaceCwd) continue;
+            this.resetPollSchedule(entry);
+            if (entry.waiters.length > 0) {
+              entry.desiredRevision += 1;
+              if (entry.queuedJob?.staged) this.removeQueuedJob(entry);
+              this.ensureScheduled(entry, PRIORITY.interactive, false);
+            } else if (
+              entry.subscribers.size > 0 &&
+              (entry.invalidated ||
+                (hasAutoLoadSubscriber(entry) &&
+                  (entry.snapshot.page === undefined || entry.snapshot.stale)))
+            ) {
+              this.requestBackground(entry, 'initial');
+            }
           }
-        }
+        });
       }
     };
   }

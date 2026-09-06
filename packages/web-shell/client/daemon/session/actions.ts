@@ -74,6 +74,7 @@ import {
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
+  DaemonActivePromptState,
   DaemonConnectionState,
   DaemonNoticeOperation,
   DaemonPromptFile,
@@ -186,13 +187,13 @@ export interface CreateDaemonSessionActionsArgs {
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   /**
-   * Daemon-authoritative "a prompt is in flight" state for the connected
-   * session, published by the host through `setDaemonActivePrompt`.
+   * Daemon-authoritative "a prompt is in flight" state and its owner,
+   * published by the host through `setDaemonActivePrompt`.
    * `undefined` means no authority is available (a daemon without
    * `workspace_session_live_state`, or a host that never wires it) and the
    * silence-based heuristics stay in charge.
    */
-  daemonActivePromptRef: RefBox<boolean | undefined>;
+  daemonActivePromptRef: RefBox<DaemonActivePromptState | undefined>;
   /**
    * Settle the current session's restored-prompt snapshot (the `hasActivePrompt`
    * flag `/load` returned). A restored prompt has no terminal handling in this
@@ -405,7 +406,6 @@ export function createDaemonSessionActions({
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
-  let daemonActivePromptSessionId = sessionRef.current?.sessionId;
 
   function publishStandaloneWorkingDirectoryError(
     sessionId: string,
@@ -887,12 +887,16 @@ export function createDaemonSessionActions({
   }
 
   return {
-    setDaemonActivePrompt(active) {
+    setDaemonActivePrompt(
+      active,
+      owner = {
+        workspaceCwd: sessionRef.current?.workspaceCwd,
+        sessionId: sessionRef.current?.sessionId,
+      },
+    ) {
       const previous = daemonActivePromptRef.current;
-      const previousSessionId = daemonActivePromptSessionId;
-      const backstopSessionId = sessionRef.current?.sessionId;
-      daemonActivePromptRef.current = active;
-      daemonActivePromptSessionId = backstopSessionId;
+      daemonActivePromptRef.current = { active, ...owner };
+      const backstopSession = sessionRef.current;
       // Losing `true` is the settle signal — whether the daemon reported the
       // turn finished, or the authority itself went unknown because its
       // channel stopped answering. Either way nothing vouches for the turn any
@@ -903,8 +907,13 @@ export function createDaemonSessionActions({
       // still running is revived by its next event, as it was before this
       // signal existed.
       if (
-        previousSessionId !== backstopSessionId ||
-        previous !== true ||
+        previous === undefined ||
+        previous.workspaceCwd !== owner.workspaceCwd ||
+        previous.sessionId !== owner.sessionId ||
+        previous.active !== true ||
+        backstopSession === undefined ||
+        backstopSession.workspaceCwd !== owner.workspaceCwd ||
+        backstopSession.sessionId !== owner.sessionId ||
         active === true
       ) {
         return;
@@ -919,8 +928,10 @@ export function createDaemonSessionActions({
       // the event stream is its only settle path, which is exactly the failure
       // this backstop covers — so settle it here rather than deferring to it.
       if (
-        backstopSessionId !== undefined &&
-        hasLocallySubmittedPrompt(activePromptsRef.current, backstopSessionId)
+        hasLocallySubmittedPrompt(
+          activePromptsRef.current,
+          backstopSession.sessionId,
+        )
       ) {
         return;
       }
@@ -944,7 +955,7 @@ export function createDaemonSessionActions({
       // never delivered one.
       console.debug(
         '[DaemonSessionActions] settled turn from daemon prompt state (sessionId=%s, daemonActivePrompt=%s)',
-        backstopSessionId,
+        backstopSession.sessionId,
         String(active),
       );
       setPromptStatus('idle');

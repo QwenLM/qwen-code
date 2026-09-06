@@ -16,6 +16,7 @@ import {
 } from './actions';
 import type {
   ActivePrompt,
+  DaemonActivePromptState,
   DaemonConnectionState,
   DaemonProductSessionContext,
   PendingSessionLoad,
@@ -300,15 +301,22 @@ describe('resolveSessionRestoreTimeouts', () => {
 describe('createDaemonSessionActions', () => {
   describe('setDaemonActivePrompt (#9487)', () => {
     it('settles the prompt state when the daemon reports the turn finished', () => {
-      const daemonActivePromptRef: { current: boolean | undefined } = {
+      const daemonActivePromptRef: {
+        current: DaemonActivePromptState | undefined;
+      } = {
         current: undefined,
       };
       const { actions, setPromptStatus } = createActionsHarness({
         daemonActivePromptRef,
+        session: createMockSession('session-1'),
       });
 
       actions.setDaemonActivePrompt(true);
-      expect(daemonActivePromptRef.current).toBe(true);
+      expect(daemonActivePromptRef.current).toEqual({
+        active: true,
+        workspaceCwd: '/workspace',
+        sessionId: 'session-1',
+      });
       expect(setPromptStatus).not.toHaveBeenCalled();
 
       actions.setDaemonActivePrompt(false);
@@ -320,7 +328,9 @@ describe('createDaemonSessionActions', () => {
       // snapshot is dropped, and the bridge publishes `undefined`. Nothing
       // vouches for the turn any more, so the pane must be released instead of
       // holding a running turn for the life of the tab.
-      const { actions, setPromptStatus } = createActionsHarness();
+      const { actions, setPromptStatus } = createActionsHarness({
+        session: createMockSession('session-1'),
+      });
 
       actions.setDaemonActivePrompt(true);
       actions.setDaemonActivePrompt(undefined);
@@ -332,7 +342,9 @@ describe('createDaemonSessionActions', () => {
       // arriving after turn_complete must not flash the indicator back on.
       // Only losing `true` is a signal; gaining it, or never having had it,
       // is not.
-      const { actions, setPromptStatus } = createActionsHarness();
+      const { actions, setPromptStatus } = createActionsHarness({
+        session: createMockSession('session-1'),
+      });
 
       actions.setDaemonActivePrompt(false);
       actions.setDaemonActivePrompt(true);
@@ -410,6 +422,7 @@ describe('createDaemonSessionActions', () => {
       };
       const { actions, setPromptStatus, store } = createActionsHarness({
         passiveAssistantDoneTimerRef,
+        session: createMockSession('session-1'),
       });
 
       actions.setDaemonActivePrompt(true);
@@ -426,6 +439,7 @@ describe('createDaemonSessionActions', () => {
       const { actions, setPromptStatus, store } = createActionsHarness({
         getSnapshot: () => ({ activeAssistantBlockId: 'block-1' }),
         passiveAssistantDoneTimerRef,
+        session: createMockSession('session-1'),
       });
 
       actions.setDaemonActivePrompt(true);
@@ -4252,7 +4266,9 @@ function createActionsHarness(
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
-    daemonActivePromptRef?: { current: boolean | undefined };
+    daemonActivePromptRef?: {
+      current: DaemonActivePromptState | undefined;
+    };
     flushTranscript?: ReturnType<typeof vi.fn>;
     getSnapshot?: () => { activeAssistantBlockId: string | undefined };
     hasSessionActivePrompt?: () => boolean;
