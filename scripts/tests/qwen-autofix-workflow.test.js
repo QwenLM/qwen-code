@@ -10138,12 +10138,34 @@ exit 1
     // revert every footer to the requested model — and every planted-path
     // shape the hardening exists for must degrade to the fallback with
     // exit 0, never abort the PAT-bearing step under -eo pipefail.
-    const block =
-      pushAndReportScript.match(
-        /MODEL_DISPLAY="\$\{MODEL:-default\}"\n[\s\S]*?CLI_DISPLAY="\$\{AGENT_CLI_VERSION:\+[^\n]*\n/,
-      )?.[0] ?? '';
+    // The extractor stays anchored on the default assignment immediately
+    // followed by a newline; an unanchored lazy span could silently degrade
+    // to block === '' (guarded below, and by the identity assertion).
+    const blockRe =
+      /MODEL_DISPLAY="\$\{MODEL:-default\}"\n[\s\S]*?CLI_DISPLAY="\$\{AGENT_CLI_VERSION:\+[^\n]*\n/;
+    const block = pushAndReportScript.match(blockRe)?.[0] ?? '';
     expect(block).toContain('agent-model');
     expect(block.trimEnd().endsWith('`}"')).toBe(true);
+    // One replay covers all THREE copies: the two workflow copies sit ten
+    // spaces deep in the YAML and carry a shorter comment, but their CODE
+    // lines must equal the replayed canonical block's, in the same order.
+    // Without this a hand-edit of one duplicate — the default assignment
+    // moved below the preference — leaves every toContain pin green and
+    // this replay (extracted from the untouched script) green too, while
+    // that copy's footer silently reverts to the requested model. Comments
+    // are filtered, order is preserved, and an empty/failed match can never
+    // equal the non-empty canonical code.
+    const codeLines = (src) =>
+      (src.match(blockRe)?.[0] ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l !== '' && !l.startsWith('#'))
+        .join('\n');
+    const canonicalCode = codeLines(pushAndReportScript);
+    expect(canonicalCode).toContain('agent-model');
+    for (const step of [publishPrStep, reviewAddressReportStep]) {
+      expect(codeLines(step)).toBe(canonicalCode);
+    }
     const render = (setup, model = 'configured-model') =>
       withRunnerDir((dir) => {
         setup(dir);
@@ -21362,28 +21384,41 @@ exit 0
   it('flattens and caps a newline-bearing, oversized init model so the sentinel stays two lines', () => {
     // The writer's invariant — "newlines are flattened so the sentinel file
     // stays two lines" — is what keeps the read sites' sed -n '1p'/'2p' from
-    // rendering a model fragment as the CLI version. Without the flattening
-    // a model 'foo\nbar' writes THREE lines and the footer loses the real
-    // version; without the caps a huge value rides into the comment.
-    withRunnerDir((dir) => {
+    // rendering a model fragment as the CLI version. TWO fixtures, because
+    // one cannot pin both halves: a newline discriminates the flattening
+    // only INSIDE the cap (past it, slice(0, 200) of the unflattened value
+    // equals the flattened-and-capped one), and the cap discriminates only
+    // when the value EXCEEDS it.
+    const runInit = (dir, init) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeWorkdirStub(dir, [
-        `process.stdout.write(${JSON.stringify(
-          qwenInitLine({
-            model: `${'x'.repeat(250)}\nsecond-line`,
-            version: '0.22.0\nzap',
-          }),
-        )});`,
+        `process.stdout.write(${JSON.stringify(qwenInitLine(init))});`,
         "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
         'process.exit(0);',
       ]);
-
       expect(runAddressReview(dir, stub).status).toBe(0);
-      // Exactly two lines: each field's flattened first line, the model at
-      // the writer's 200-char cap.
-      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
-        `${'x'.repeat(200)}\n0.22.0\n`,
-      );
+      return readFileSync(join(dir, 'agent-model'), 'utf8');
+    };
+    // Flattening: both newlines sit inside their caps (model index 10 < 200,
+    // version index 6 < 80). Dropping either .split('\n')[0] writes a
+    // THREE-line sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: 'first-line\nsecond-line',
+          version: '0.22.0\nzap',
+        }),
+      ).toBe('first-line\n0.22.0\n');
+    });
+    // Caps: both values exceed theirs. Dropping either .slice() rides the
+    // oversized value into the sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: `${'x'.repeat(250)}\nsecond-line`,
+          version: 'v'.repeat(100),
+        }),
+      ).toBe(`${'x'.repeat(200)}\n${'v'.repeat(80)}\n`);
     });
   });
 
