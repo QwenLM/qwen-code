@@ -18,6 +18,20 @@
 /** Author id used for messages a person wrote. Never a valid agent id. */
 export const HUMAN_AUTHOR_ID = 'user';
 
+export const MESH_SCHEMA_VERSION = 1;
+
+export interface MeshWorkspaceState {
+  schemaVersion: typeof MESH_SCHEMA_VERSION;
+  workspaceId: string;
+  hostSessionId?: string;
+  nextRunSequence: number;
+}
+
+export interface MeshAgentsFile {
+  schemaVersion: typeof MESH_SCHEMA_VERSION;
+  agents: MeshAgent[];
+}
+
 /**
  * A durable agent identity, scoped to one workspace.
  *
@@ -69,11 +83,10 @@ export interface MeshAgent {
    */
   backgroundAgentId?: string;
   /**
-   * Session owning that background agent. Revival is scoped to a parent
-   * session, so the mesh keeps one hidden host session per workspace and
-   * records it here; losing it would strand the agent's memory.
+   * Runtime carrying this identity. V1 also keeps the local
+   * `backgroundAgentId`; later runtime adapters bind through this generic id.
    */
-  hostSessionId?: string;
+  runtimeId?: string;
 }
 
 /**
@@ -98,20 +111,49 @@ export type ThreadStatus =
  */
 export interface ThreadMessage {
   id: string;
+  sequence: number;
+  authorKind: 'human' | 'agent' | 'system';
   /** {@link HUMAN_AUTHOR_ID} or the id of the agent that posted. */
   from: string;
+  authorNameSnapshot: string;
+  sourceRunId?: string;
+  triggerKind?: string;
   text: string;
   /** Agent ids resolved from `@name` tokens at post time, in order. */
   mentions: string[];
+  outcomes: MessageOutcome[];
   at: number;
+  /** Idempotency key for a cross-thread outbox event. */
+  originEventId?: string;
+}
+
+export type MessageOutcomeKind = 'dispatch' | 'coalesce' | 'skip';
+
+export interface MessageOutcome {
+  targetAgentId?: string;
+  targetAgentName?: string;
+  kind: MessageOutcomeKind;
+  reason?: string;
+  runId?: string;
+  into?: 'queued' | 'running';
 }
 
 export type ThreadRunStatus =
   | 'queued'
   | 'running'
+  | 'finishing'
+  | 'cancelling'
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+export type RunCloseKind = 'waiting' | 'blocked' | 'review' | 'unclosed';
+
+export interface RunUsageRound {
+  attempt: number;
+  round: number;
+  tokens: number;
+}
 
 /**
  * One agent turn against one thread.
@@ -132,6 +174,19 @@ export interface ThreadRun {
    * thread — both coalesce rather than booking a second run.
    */
   triggerMessageIds: string[];
+  acceptedMessageIds: string[];
+  consumedMessageIds: string[];
+  contextThroughSequence?: number;
+  definitionVersion?: string;
+  transcriptStartOffset?: number;
+  transcriptEndOffset?: number;
+  closeKind?: RunCloseKind;
+  closeAcknowledgedAtSequence?: number;
+  finalMessageId?: string;
+  usageByRound: RunUsageRound[];
+  failureStage?: string;
+  /** Workspace-wide FIFO key. */
+  queueSequence: number;
   /**
    * How many times this run has been started. A run revived after a stall or a
    * daemon restart is on attempt 2; a second failure is terminal.
@@ -153,6 +208,7 @@ export interface ThreadRun {
  * repo means it is never committed, pulled, or reviewed as if it were code.
  */
 export interface Thread {
+  schemaVersion: typeof MESH_SCHEMA_VERSION;
   id: string;
   title: string;
   body: string;
@@ -171,6 +227,9 @@ export interface Thread {
   rootThreadId: string;
   messages: ThreadMessage[];
   runs: ThreadRun[];
+  nextMessageSequence: number;
+  deliveryByAgent: Record<string, AgentDelivery>;
+  outbox: ThreadEvent[];
   /**
    * Agent-triggered deliveries on this thread since its last human post. A
    * delivery into a running agent counts too; otherwise two live agents could
@@ -179,12 +238,28 @@ export interface Thread {
    */
   autoTurnsUsed: number;
   /**
-   * Tokens spent by runs on this thread tree, accumulated from each run's
-   * usage delta. Unlike the turn counter this is NOT reset by a human post:
-   * turns measure how long a conversation has run unattended, tokens measure
-   * money already spent.
+   * Derived cache of tokens spent by this thread's runs. Admission calculates
+   * the tree total from every run instead of trusting this field. Unlike the
+   * turn counter it is not reset by a human post.
    */
   tokensUsed: number;
+}
+
+export interface AgentDelivery {
+  committedThroughSequence: number;
+}
+
+export type ThreadEventKind = 'parent_report' | 'notification';
+export type ThreadEventStatus = 'pending' | 'acknowledged';
+
+export interface ThreadEvent {
+  id: string;
+  kind: ThreadEventKind;
+  causedByRunId?: string;
+  payload: Record<string, unknown>;
+  status: ThreadEventStatus;
+  attempts: number;
+  createdAt: number;
 }
 
 /** Default cap on runs waiting for one agent across all threads. */

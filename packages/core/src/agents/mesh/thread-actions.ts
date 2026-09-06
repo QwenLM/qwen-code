@@ -4,27 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @fileoverview The transactional heart of the mesh: posting to a thread and
- * booking the runs that post implies.
- *
- * Appending the message and deciding who it wakes happen under one thread
- * lock. Splitting them would let two concurrent posts each observe "no queued
- * run for Alice" and book two — the same duplicate-dispatch race the Agent
- * Team lifecycle audit found in leader assignment (#10207).
- *
- * What this module does NOT do is start anything. It returns the bookings and
- * leaves waking a session to the daemon, so the rules stay testable without a
- * daemon and a tool call inside an agent turn cannot block on session I/O.
- */
-
 import {
   generateMessageId,
   generateRunId,
-  readTokenBudgetThread,
-  readMeshAgents,
-  readThread,
-  updateThread,
+  withMeshStoreTransaction,
+  type MeshStoreTransaction,
 } from './mesh-store.js';
 import { parseMentions } from './mentions.js';
 import {
@@ -36,23 +20,23 @@ import {
 import {
   HUMAN_AUTHOR_ID,
   type MeshAgent,
+  type MessageOutcome,
+  type RunUsageRound,
   type Thread,
   type ThreadMessage,
   type ThreadRun,
 } from './types.js';
 
 export interface PostMessageInput {
-  /** {@link HUMAN_AUTHOR_ID} or the posting agent's id. */
   from: string;
   text: string;
+  originEventId?: string;
 }
 
-/** One target's outcome, kept for the caller to act on and for the UI. */
 export interface TargetOutcome {
   agentId?: string;
   agentName?: string;
   decision: DispatchDecision;
-  /** Present when the decision created or extended a run. */
   runId?: string;
 }
 
@@ -60,223 +44,281 @@ export interface PostMessageResult {
   thread: Thread;
   message: ThreadMessage;
   outcomes: TargetOutcome[];
-  /** `@tokens` that matched no agent — surfaced so a typo is visible. */
   unknownMentions: string[];
-  /** Runs newly booked by this post, for the dispatcher to start. */
   dispatched: ThreadRun[];
 }
 
-/**
- * Counts the runs already waiting for an agent on OTHER threads.
- *
- * Best effort by construction: it reads sibling threads without holding their
- * locks, so a run booked elsewhere in the same instant is not counted. Losing
- * that race admits one run past the queue limit, which is why the limit is a
- * backlog bound rather than a safety property — a stricter reading would need
- * a workspace-wide lock on every post. The dispatcher is the second line of
- * defence, and it is the one that must never start a second body for an agent
- * that already has one.
- */
+export interface PostMessageOptions {
+  agents?: readonly MeshAgent[];
+  limits?: BudgetLimits;
+  now?: number;
+}
+
 export function countQueuedElsewhere(
   threads: readonly Thread[],
   agentId: string,
 ): number {
-  let count = 0;
-  for (const thread of threads) {
-    for (const run of thread.runs) {
-      if (run.agentId === agentId && run.status === 'queued') {
-        count += 1;
-      }
-    }
-  }
-  return count;
+  return threads.reduce(
+    (count, thread) =>
+      count +
+      thread.runs.filter(
+        (run) => run.agentId === agentId && run.status === 'queued',
+      ).length,
+    0,
+  );
 }
 
-/**
- * Appends a post and books the runs it implies.
- *
- * @param otherThreads Threads other than this one, for the concurrency count.
- *   The caller supplies them so this stays a pure-ish function over a
- *   snapshot the caller controls.
- */
-export async function postMessage(
-  projectRoot: string,
+function storeOutcome(outcome: TargetOutcome): MessageOutcome {
+  const decision = outcome.decision;
+  return {
+    ...(outcome.agentId ? { targetAgentId: outcome.agentId } : {}),
+    ...(outcome.agentName ? { targetAgentName: outcome.agentName } : {}),
+    kind: decision.kind,
+    ...(decision.kind === 'skip' ? { reason: decision.reason } : {}),
+    ...(decision.kind === 'coalesce' ? { into: decision.into } : {}),
+    ...(outcome.runId ? { runId: outcome.runId } : {}),
+  };
+}
+
+function restoreOutcome(outcome: MessageOutcome): TargetOutcome {
+  let decision: DispatchDecision;
+  if (outcome.kind === 'dispatch') {
+    decision = { kind: 'dispatch' };
+  } else if (outcome.kind === 'coalesce') {
+    if (!outcome.runId || !outcome.into) {
+      throw new Error('Malformed persisted coalesce outcome.');
+    }
+    decision = {
+      kind: 'coalesce',
+      runId: outcome.runId,
+      into: outcome.into,
+    };
+  } else {
+    if (!outcome.reason) throw new Error('Malformed persisted skip outcome.');
+    decision = {
+      kind: 'skip',
+      reason: outcome.reason as Extract<
+        DispatchDecision,
+        { kind: 'skip' }
+      >['reason'],
+    };
+  }
+  return {
+    ...(outcome.targetAgentId ? { agentId: outcome.targetAgentId } : {}),
+    ...(outcome.targetAgentName ? { agentName: outcome.targetAgentName } : {}),
+    decision,
+    ...(outcome.runId ? { runId: outcome.runId } : {}),
+  };
+}
+
+export async function postMessageInTransaction(
+  transaction: MeshStoreTransaction,
   threadId: string,
   input: PostMessageInput,
-  options: {
-    agents?: readonly MeshAgent[];
-    /** Threads other than this one, for the queue count. */
-    otherThreads?: readonly Thread[];
-    limits?: BudgetLimits;
-    now?: number;
-  } = {},
+  options: PostMessageOptions = {},
 ): Promise<PostMessageResult> {
-  const agents = options.agents ?? (await readMeshAgents(projectRoot));
-  const otherThreads = options.otherThreads ?? [];
-  const now = options.now ?? Date.now();
+  const current = await transaction.readThread(threadId);
+  if (!current) throw new Error(`No thread with id "${threadId}".`);
 
+  if (input.originEventId) {
+    const persisted = current.messages.find(
+      (message) => message.originEventId === input.originEventId,
+    );
+    if (persisted) {
+      const outcomes = persisted.outcomes.map(restoreOutcome);
+      return {
+        thread: current,
+        message: persisted,
+        outcomes,
+        unknownMentions: outcomes
+          .filter((outcome) =>
+            outcome.decision.kind === 'skip'
+              ? outcome.decision.reason === 'agent_unknown'
+              : false,
+          )
+          .flatMap((outcome) => (outcome.agentName ? [outcome.agentName] : [])),
+        dispatched: [],
+      };
+    }
+  }
+
+  const agents = options.agents ?? (await transaction.readAgents());
+  const { threads, unreadable } = await transaction.listThreads();
+  if (unreadable.length > 0) {
+    throw new Error(
+      `Cannot admit a message while thread records are unreadable: ${unreadable.join(', ')}.`,
+    );
+  }
+  const root = threads.find((thread) => thread.id === current.rootThreadId);
+  if (!root || root.rootThreadId !== root.id) {
+    throw new Error(
+      `No valid root thread with id "${current.rootThreadId}" for "${current.id}".`,
+    );
+  }
+  const treeTokens = threads
+    .filter((thread) => thread.rootThreadId === root.id)
+    .reduce(
+      (total, thread) =>
+        total +
+        thread.runs.reduce(
+          (runTotal, run) =>
+            runTotal +
+            run.usageByRound.reduce(
+              (usageTotal, usage) => usageTotal + usage.tokens,
+              0,
+            ),
+          0,
+        ),
+      0,
+    );
   const parsed = parseMentions(input.text, agents);
-
+  const now = options.now ?? Date.now();
   const message: ThreadMessage = {
     id: generateMessageId(),
+    sequence: current.nextMessageSequence,
+    authorKind: input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent',
     from: input.from,
+    authorNameSnapshot:
+      input.from === HUMAN_AUTHOR_ID
+        ? HUMAN_AUTHOR_ID
+        : (agents.find((agent) => agent.id === input.from)?.name ?? input.from),
     text: input.text,
     mentions: parsed.ids,
+    outcomes: [],
     at: now,
+    ...(input.originEventId ? { originEventId: input.originEventId } : {}),
   };
-
-  const outcomes: TargetOutcome[] = [];
+  const outcomes: TargetOutcome[] = parsed.unknown.map((agentName) => ({
+    agentName,
+    decision: { kind: 'skip', reason: 'agent_unknown' },
+  }));
   const dispatched: ThreadRun[] = [];
-
-  // Only token spend lives on the root. Read it before taking the child lock
-  // to avoid lock inversion; a root post uses the locked record below.
-  const existing = await readThread(projectRoot, threadId);
-  if (!existing) throw new Error(`No thread with id "${threadId}".`);
-  const budgetRecord = await readTokenBudgetThread(projectRoot, existing);
-  const budgetSnapshot = {
-    autoTurnsUsed: 0,
-    tokensUsed: budgetRecord.tokensUsed,
+  let autoTurnsUsed =
+    input.from === HUMAN_AUTHOR_ID ? 0 : current.autoTurnsUsed;
+  let next: Thread = {
+    ...current,
+    messages: [...current.messages, message],
+    nextMessageSequence: current.nextMessageSequence + 1,
+    autoTurnsUsed,
   };
 
-  const thread = await updateThread(projectRoot, threadId, (current) => {
-    outcomes.length = 0;
-    dispatched.length = 0;
+  const hasExplicitMention = parsed.ids.length > 0 || parsed.unknown.length > 0;
+  const targetIds = resolveTargets(next, message, hasExplicitMention);
+  if (targetIds.length === 0 && !hasExplicitMention) {
+    outcomes.push({ decision: { kind: 'skip', reason: 'no_target' } });
+  }
 
-    // A human post is the signal that the conversation is wanted, so it
-    // clears the turn counter. Tokens are never cleared — see Thread.tokensUsed.
-    const autoTurnsUsed =
-      input.from === HUMAN_AUTHOR_ID ? 0 : current.autoTurnsUsed;
+  for (const agentId of targetIds) {
+    const target = agents.find((candidate) => candidate.id === agentId);
+    const decision = decideDispatch({
+      thread: next,
+      message,
+      target,
+      budget: { autoTurnsUsed, tokensUsed: treeTokens },
+      agentQueuedElsewhere: countQueuedElsewhere(
+        threads.filter((thread) => thread.id !== current.id),
+        agentId,
+      ),
+      ...(options.limits ? { limits: options.limits } : {}),
+    });
 
-    let next: Thread = {
-      ...current,
-      messages: [...current.messages, message],
-      autoTurnsUsed,
-    };
-
-    budgetSnapshot.autoTurnsUsed = next.autoTurnsUsed;
-    budgetSnapshot.tokensUsed =
-      current.rootThreadId === current.id
-        ? current.tokensUsed
-        : budgetRecord.tokensUsed;
-
-    for (const name of parsed.unknown) {
+    if (decision.kind === 'coalesce') {
+      const chargeTurn =
+        input.from !== HUMAN_AUTHOR_ID && decision.into === 'running';
+      if (chargeTurn) autoTurnsUsed += 1;
+      next = {
+        ...next,
+        runs: next.runs.map((run) =>
+          run.id === decision.runId
+            ? {
+                ...run,
+                triggerMessageIds: [...run.triggerMessageIds, message.id],
+              }
+            : run,
+        ),
+        autoTurnsUsed,
+        status:
+          next.status === 'open' ||
+          (input.from === HUMAN_AUTHOR_ID &&
+            (next.status === 'blocked' || next.status === 'in_review'))
+            ? 'in_progress'
+            : next.status,
+      };
       outcomes.push({
-        agentName: name,
-        decision: { kind: 'skip', reason: 'agent_unknown' },
+        agentId,
+        agentName: target?.name,
+        decision,
+        runId: decision.runId,
       });
+      continue;
     }
 
-    const hasExplicitMention =
-      parsed.ids.length > 0 || parsed.unknown.length > 0;
-    const targetIds = resolveTargets(next, message, hasExplicitMention);
-    if (targetIds.length === 0 && !hasExplicitMention) {
-      outcomes.push({ decision: { kind: 'skip', reason: 'no_target' } });
-    }
-
-    for (const agentId of targetIds) {
-      const target = agents.find((candidate) => candidate.id === agentId);
-      const decision = decideDispatch({
-        thread: next,
-        message,
-        target,
-        budget: {
-          autoTurnsUsed: budgetSnapshot.autoTurnsUsed,
-          tokensUsed: budgetSnapshot.tokensUsed,
-        },
-        agentQueuedElsewhere: countQueuedElsewhere(otherThreads, agentId),
-        ...(options.limits ? { limits: options.limits } : {}),
+    if (decision.kind === 'dispatch') {
+      const run: ThreadRun = {
+        id: generateRunId(),
+        agentId,
+        status: 'queued',
+        triggerMessageIds: [message.id],
+        acceptedMessageIds: [],
+        consumedMessageIds: [],
+        usageByRound: [],
+        queueSequence: await transaction.allocateRunSequence(),
+        queuedAt: now,
+        attempts: 0,
+      };
+      if (input.from !== HUMAN_AUTHOR_ID) autoTurnsUsed += 1;
+      next = {
+        ...next,
+        runs: [...next.runs, run],
+        autoTurnsUsed,
+        status:
+          next.status === 'open' ||
+          (input.from === HUMAN_AUTHOR_ID &&
+            (next.status === 'blocked' || next.status === 'in_review'))
+            ? 'in_progress'
+            : next.status,
+      };
+      dispatched.push(run);
+      outcomes.push({
+        agentId,
+        agentName: target?.name,
+        decision,
+        runId: run.id,
       });
-
-      if (decision.kind === 'coalesce') {
-        const chargeTurn =
-          input.from !== HUMAN_AUTHOR_ID && decision.into === 'running';
-        next = {
-          ...next,
-          runs: next.runs.map((run) =>
-            run.id === decision.runId
-              ? {
-                  ...run,
-                  triggerMessageIds: [...run.triggerMessageIds, message.id],
-                }
-              : run,
-          ),
-          autoTurnsUsed: next.autoTurnsUsed + (chargeTurn ? 1 : 0),
-          status:
-            next.status === 'open' ||
-            (input.from === HUMAN_AUTHOR_ID &&
-              (next.status === 'blocked' || next.status === 'in_review'))
-              ? 'in_progress'
-              : next.status,
-        };
-        if (chargeTurn) budgetSnapshot.autoTurnsUsed += 1;
-        outcomes.push({
-          agentId,
-          agentName: target?.name,
-          decision,
-          runId: decision.runId,
-        });
-        continue;
-      }
-
-      if (decision.kind === 'dispatch') {
-        const run: ThreadRun = {
-          id: generateRunId(),
-          agentId,
-          status: 'queued',
-          triggerMessageIds: [message.id],
-          queuedAt: now,
-          attempts: 0,
-        };
-        // Booked, not finished: charging at booking time makes the budget a
-        // cap on attempts rather than on successes, so a pair of agents that
-        // keep failing still runs out.
-        if (input.from !== HUMAN_AUTHOR_ID) {
-          budgetSnapshot.autoTurnsUsed += 1;
-        }
-        next = {
-          ...next,
-          runs: [...next.runs, run],
-          autoTurnsUsed:
-            input.from === HUMAN_AUTHOR_ID
-              ? next.autoTurnsUsed
-              : next.autoTurnsUsed + 1,
-          status:
-            next.status === 'open' ||
-            (input.from === HUMAN_AUTHOR_ID &&
-              (next.status === 'blocked' || next.status === 'in_review'))
-              ? 'in_progress'
-              : next.status,
-        };
-        dispatched.push(run);
-        outcomes.push({
-          agentId,
-          agentName: target?.name,
-          decision,
-          runId: run.id,
-        });
-        continue;
-      }
-
-      outcomes.push({ agentId, agentName: target?.name, decision });
+      continue;
     }
 
-    return next;
-  });
+    outcomes.push({ agentId, agentName: target?.name, decision });
+  }
 
+  const storedMessage = { ...message, outcomes: outcomes.map(storeOutcome) };
+  next = {
+    ...next,
+    messages: next.messages.map((candidate) =>
+      candidate.id === message.id ? storedMessage : candidate,
+    ),
+  };
+  const thread = await transaction.writeThread(next);
   return {
     thread,
-    message,
+    message: storedMessage,
     outcomes,
     unknownMentions: parsed.unknown,
     dispatched,
   };
 }
 
-/**
- * Marks a booked run as started, binds it to the session doing the work, and
- * counts the attempt. A revived run passes through here again, so `attempts`
- * is what makes the second failure terminal.
- */
+export async function postMessage(
+  projectRoot: string,
+  threadId: string,
+  input: PostMessageInput,
+  options: PostMessageOptions = {},
+): Promise<PostMessageResult> {
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    postMessageInTransaction(transaction, threadId, input, options),
+  );
+}
+
 export async function startRun(
   projectRoot: string,
   threadId: string,
@@ -284,26 +326,26 @@ export async function startRun(
   sessionId: string,
   now = Date.now(),
 ): Promise<Thread> {
-  return updateThread(projectRoot, threadId, (thread) => ({
-    ...thread,
-    runs: thread.runs.map((run) =>
-      run.id === runId && run.status === 'queued'
-        ? {
-            ...run,
-            status: 'running',
-            sessionId,
-            startedAt: now,
-            attempts: run.attempts + 1,
-          }
-        : run,
-    ),
-  }));
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) throw new Error(`No thread with id "${threadId}".`);
+    return transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((run) =>
+        run.id === runId && run.status === 'queued'
+          ? {
+              ...run,
+              status: 'running',
+              sessionId,
+              startedAt: now,
+              attempts: run.attempts + 1,
+            }
+          : run,
+      ),
+    });
+  });
 }
 
-/**
- * Records a terminal outcome. A run that already reached a terminal state is
- * left alone so a late completion cannot overwrite a cancellation.
- */
 export async function finishRun(
   projectRoot: string,
   threadId: string,
@@ -311,17 +353,54 @@ export async function finishRun(
   outcome: { status: 'completed' | 'failed' | 'cancelled'; error?: string },
   now = Date.now(),
 ): Promise<Thread> {
-  return updateThread(projectRoot, threadId, (thread) => ({
-    ...thread,
-    runs: thread.runs.map((run) =>
-      run.id === runId && (run.status === 'queued' || run.status === 'running')
-        ? {
-            ...run,
-            status: outcome.status,
-            endedAt: now,
-            ...(outcome.error ? { error: outcome.error } : {}),
-          }
-        : run,
-    ),
-  }));
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) throw new Error(`No thread with id "${threadId}".`);
+    return transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((run) =>
+        run.id === runId &&
+        (run.status === 'queued' ||
+          run.status === 'running' ||
+          run.status === 'finishing' ||
+          run.status === 'cancelling')
+          ? {
+              ...run,
+              status: outcome.status,
+              endedAt: now,
+              ...(outcome.error ? { error: outcome.error } : {}),
+            }
+          : run,
+      ),
+    });
+  });
+}
+
+export async function upsertRunUsage(
+  projectRoot: string,
+  threadId: string,
+  runId: string,
+  usage: RunUsageRound,
+): Promise<Thread> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) throw new Error(`No thread with id "${threadId}".`);
+    let found = false;
+    const runs = thread.runs.map((run) => {
+      if (run.id !== runId) return run;
+      found = true;
+      const usageByRound = run.usageByRound.filter(
+        (entry) =>
+          entry.attempt !== usage.attempt || entry.round !== usage.round,
+      );
+      usageByRound.push(usage);
+      usageByRound.sort((a, b) => a.attempt - b.attempt || a.round - b.round);
+      return { ...run, usageByRound };
+    });
+    if (!found) throw new Error(`No run with id "${runId}".`);
+    return transaction.writeThread({
+      ...thread,
+      runs,
+    });
+  });
 }

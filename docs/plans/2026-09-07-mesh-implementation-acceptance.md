@@ -36,8 +36,13 @@ is not complete until #11206 CI passes after the child PR merges.
 ### Step 3 — Versioned storage protocol
 
 Lands: `schemaVersion` on every file; fail-closed on unknown version; migration under the workspace lock with the old file retained until the new one validates; the workspace mutation lock; lock-issued `queueSequence` and message `sequence`; `runs[].usageByRound` on the run record; outbox for parent reports and notifications only; deletion refusal for non-terminal runs, descendants, and unacknowledged outbox events.
-Gate: (a) writing a file with `schemaVersion + 1` makes every read throw, never return empty state; (b) a crash injected between "write source" and "acknowledge" replays exactly once, proven by a test that kills the apply mid-way and re-runs reconciliation; (c) two processes posting concurrently receive strictly increasing `queueSequence`, tested with two `child_process` workers, not two promises; (d) token gate at admission equals the sum of `usageByRound` across the tree, tested with a tree of depth 3 where the root file carries a deliberately stale `tokensUsed`.
+Gate: (a) writing a file with `schemaVersion + 1` makes every read throw, never return empty state; (b) a crash injected between "write source" and "acknowledge" replays exactly once, proven by an apply that writes the target and throws before reconciliation is re-run; (c) two `child_process` workers allocating concurrently receive unique `queueSequence` values and each observes a strictly increasing series, not two promises in one process; (d) token gate at admission equals the sum of `usageByRound` across the tree, tested with a tree of depth 3 where the root file carries a deliberately stale `tokensUsed`.
 Evidence: the four tests named, plus the migration test with a hand-written v1 fixture.
+
+Supporting local observation: `mesh-store.test.ts`, `workspace-lock.test.ts`,
+`thread-actions.test.ts`, `dispatch-policy.test.ts`, and `mentions.test.ts` pass
+59 tests. This is not the step gate until the child merges and the resulting
+#11206 whole-branch CI is green.
 
 ### Step 4 — Hidden host session, keepalive, launcher
 
@@ -83,9 +88,11 @@ Evidence: the channel transcript.
 
 ## 3. Product decisions the implementer must not make
 
-Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), persona drift policy (§9.4), and runtime as a first-class concept (§9.12). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, definition read at revive only, and a local background-agent binding only.
+Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), and persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, and definition read at revive only.
 
-The relationship to the Agent Board (#9402) also remains the owner's call. Until it is decided, §7.1's conservative default keeps separate stores and distinct names, imports nothing from `board-*.ts` in step 3, and records a convergence path that depends on §9.12. MCP names likewise fail closed until the owner approves a policy that can preserve the read-only ceiling.
+The owner settled three step-3 inputs: v1 denies every MCP tool; the v1 schema declares the full §3 shape in one migration; and runtime is a first-class concept, represented by generic `runtimeId` beside the local `backgroundAgentId`. Step 4 keeps the launcher surface minimal and supplies the local implementation first.
+
+The relationship to the Agent Board (#9402) also remains the owner's call. §7.1's conservative v1 default keeps separate stores and distinct names and imports nothing from `board-*.ts` in step 3. The settled first-class runtime shape makes a later foreign-runtime adapter possible without deciding whether #9402 becomes its seed. MCP names fail closed unless a future policy can prove an individual tool preserves the read-only ceiling.
 
 ## 4. Working through stacked step PRs
 
@@ -105,5 +112,5 @@ Ordered by how much damage a miss does. Each item names the step where it is pro
 4. **No silent path.** Every admission result is persisted on the message and rendered; a quiescent thread with nothing runnable becomes `blocked`, never idle `in_progress`. Round 2 found more defects of this class than any other.
 5. **Runtime hot paths change in isolated child PRs.** `agent-core.ts`, `background-tasks.ts`, `background-agent-resume.ts`, `agent-headless.ts`, `agent.ts` are shared with Agent Team and every subagent. Keep each such change minimal, pair it with its own tests, and merge it into the foundation without creating another PR to `main`.
 6. **Trust labels are not boundaries.** Until §9.9 is decided, no prompt heading is called "trusted" and no code treats one as a policy input. Provenance is derived from the ambient run, never from model or HTTP input.
-7. **Product decisions stay open until decided.** §9.4, §9.5, §9.9, §9.10, §9.11, §9.12 and the #9402 relationship; the conservative defaults in §3 above apply meanwhile.
+7. **Product decisions stay open until decided.** §9.4, §9.5, §9.9, §9.10, §9.11 and the #9402 relationship; the conservative defaults in §3 above apply meanwhile. Runtime shape, schema batching, and v1 MCP denial are settled in §3.
 8. **Read the CI of #11206 after every numbered step.** Local and source-branch tests are supporting evidence; only the whole delivery branch is the gate.
