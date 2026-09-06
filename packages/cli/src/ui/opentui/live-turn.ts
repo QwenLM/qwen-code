@@ -349,7 +349,11 @@ export function useOpenTuiLiveTurn(
 
   const popQueue = useCallback((): string | null => {
     if (queueRef.current.length === 0) return null;
-    return drainQueue().join('\n');
+    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
+    // blank line, not a single newline. ink's peer/slash queue filters have no
+    // counterpart here — this queue only ever holds plain composer text
+    // (slash commands defer in the shell instead of queueing).
+    return drainQueue().join('\n\n');
   }, [drainQueue]);
 
   useEffect(() => () => abortRef.current?.abort(), []);

@@ -288,6 +288,6 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     });
 
     expect(result.current.queueLength).toBe(0);
-    expect(popped).toBe('steer me\nthen @b.ts\nqueued after');
+    expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
   });
 });

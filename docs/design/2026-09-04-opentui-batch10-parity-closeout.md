@@ -194,7 +194,7 @@ per-item height distribution itself stays open as transcript-region work.
 U-6/G-1 (landed — Decision 8), U-7/G-2 (landed — Decision 11),
 U-9 (landed — Decision 10), G-3 (landed —
 Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (landed
-— Decision 12), U-11 (queue separator decision), U-13 (landed — Decision 5).
+— Decision 12), U-11 (landed — Decision 13), U-13 (landed — Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
 
 ## Decision 8 — U-6/G-1: the auth auto-open trigger
@@ -340,6 +340,32 @@ ported).
 Coverage: `live-session.test.ts` gains two tests — per-message recording
 shape `([[{text:'first'}],'first'], [[{text:'second'}],'second'])` on a
 two-message hop, and zero recording on the restored (aborted read) hop.
+
+## Decision 13 — U-11: the queue pop separator, and the filters that cannot apply
+
+The re-scoped item (both sides pop the whole queue; the "ink cancels
+individually" premise was stale) left two deltas. The separator: ink joins
+popped queue texts with a blank line everywhere it aggregates —
+`aggregateUserMessages` (modelText and submittedPrompt alike) and
+`getQueuedMessagesText` — which also matches the model-side steering join
+(`resolveSteeredPromptParts` pushes `{text:'\n\n'}` between segments). That
+is authoritative: OpenTUI's `popQueue` now joins with `\n\n` (was `\n`),
+matching the Esc-restore-into-composer shape.
+
+The filters: ink's `popAllMessages` keeps peer entries queued (a
+peer-authored envelope re-submitted from the composer buffer would lose its
+attribution through UserQuery preprocessing) and the mid-turn `drainQueue`
+excludes slash commands (they chain as their own submissions). Neither can
+apply here: OpenTUI's queue is plain text fed only by the composer's
+plain-text submits — slash commands defer in the shell's
+`deferredCommandsRef` and never reach the live queue
+(`opentui-app-shell.tsx` `onSubmit`), and peer messaging has no OpenTUI
+queue. Nothing to exclude; the divergence is structural absence, not a gap.
+The one-per-chained-turn end-of-turn resubmit stays as adjudicated in the
+re-scope: every text eventually replays, nothing is dropped.
+
+Coverage: the existing `live-turn.test.ts` Esc-restore test pins the new
+separator (restored batch + queued text, joined with blank lines).
 
 ## Coverage boundary
 
