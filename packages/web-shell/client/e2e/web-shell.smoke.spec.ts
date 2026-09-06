@@ -1848,6 +1848,19 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     await expect
       .poll(async () => (await attachments.boundingBox())?.height ?? 0)
       .toBeLessThanOrEqual(136);
+
+    // The chip-deletion key semantics in useComposerCore assume the images
+    // strip renders above the attachments strip; jsdom cannot observe CSS
+    // ordering, so pin the rendered visual order here where layout is real.
+    const imagesStrip = page.locator('[data-web-shell-composer-images]');
+    await expect
+      .poll(async () => {
+        const imagesBox = await imagesStrip.boundingBox();
+        const attachmentsBox = await attachments.boundingBox();
+        if (!imagesBox || !attachmentsBox) return null;
+        return imagesBox.y <= attachmentsBox.y;
+      })
+      .toBe(true);
     await expect
       .poll(() =>
         attachments.evaluate(

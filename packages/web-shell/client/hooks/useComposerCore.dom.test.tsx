@@ -2240,6 +2240,20 @@ describe('useComposerCore attachment chip deletion keys', () => {
       expect(latest!.pastedFiles).toHaveLength(expected.files);
     });
   }
+
+  function pressChipKey(key: string, init?: KeyboardEventInit) {
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key,
+          code: key,
+          bubbles: true,
+          ...init,
+        }),
+      );
+    });
+  }
   it('removes the last pasted image with Backspace when the composer has no text or tags', async () => {
     // Regression for issue #10794: Backspace used to return false when no
     // removable @-tag existed, so image-only composers ignored the key.
@@ -2251,12 +2265,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait(files, { images: 2, files: 0 });
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
-    });
+    pressChipKey('Backspace');
 
     expect(latest!.pastedImages).toHaveLength(1);
     // data is stored base64-encoded: 'png' identifies the *first* image,
@@ -2273,12 +2282,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait(files, { images: 2, files: 0 });
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
-      );
-    });
+    pressChipKey('Delete');
 
     expect(latest!.pastedImages).toHaveLength(1);
     // data is stored base64-encoded: 'png2' identifies the *second* image,
@@ -2298,10 +2302,8 @@ describe('useComposerCore attachment chip deletion keys', () => {
     act(() => {
       latest!.setText('abc');
       view.dispatch({ selection: { anchor: 0 } });
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
-      );
     });
+    pressChipKey('Delete');
 
     expect(view.state.doc.toString()).toBe('bc');
     expect(latest!.pastedImages).toHaveLength(1);
@@ -2316,10 +2318,8 @@ describe('useComposerCore attachment chip deletion keys', () => {
     act(() => {
       latest!.setText('abc');
       view.dispatch({ selection: { anchor: 0 } });
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
     });
+    pressChipKey('Backspace');
 
     expect(view.state.doc.toString()).toBe('abc');
     expect(latest!.pastedImages).toHaveLength(1);
@@ -2333,23 +2333,8 @@ describe('useComposerCore attachment chip deletion keys', () => {
     const file = new File(['png'], 'photo.png', { type: 'image/png' });
 
     await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Backspace',
-          bubbles: true,
-          repeat: true,
-        }),
-      );
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Backspace',
-          bubbles: true,
-          repeat: true,
-        }),
-      );
-    });
+    pressChipKey('Backspace', { repeat: true });
+    pressChipKey('Backspace', { repeat: true });
 
     expect(latest!.pastedImages).toHaveLength(1);
   });
@@ -2361,12 +2346,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
     await ingestAttachmentsAndWait([file], { images: 0, files: 1 });
     expect(latest!.pastedFiles).toHaveLength(1);
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
-    });
+    pressChipKey('Backspace');
 
     expect(latest!.pastedFiles).toHaveLength(0);
   });
@@ -2381,12 +2361,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait(files, { images: 1, files: 1 });
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
-    });
+    pressChipKey('Backspace');
 
     expect(latest!.pastedFiles).toHaveLength(0);
     expect(latest!.pastedImages).toHaveLength(1);
@@ -2402,12 +2377,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait(files, { images: 1, files: 1 });
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
-      );
-    });
+    pressChipKey('Delete');
 
     expect(latest!.pastedImages).toHaveLength(0);
     expect(latest!.pastedFiles).toMatchObject([{ name: 'notes.log' }]);
@@ -2425,12 +2395,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
     });
     expect(latest!.composerTags).toHaveLength(1);
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
-    });
+    pressChipKey('Backspace');
 
     expect(latest!.composerTags).toHaveLength(0);
     expect(latest!.pastedImages).toHaveLength(1);
@@ -2449,12 +2414,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
     });
     expect(latest!.composerTags).toHaveLength(1);
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
-    });
+    pressChipKey('Backspace');
 
     expect(latest!.composerTags).toHaveLength(1);
     expect(latest!.pastedImages).toHaveLength(0);
@@ -2472,12 +2432,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
     });
     expect(latest!.composerTags).toHaveLength(1);
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
-      );
-    });
+    pressChipKey('Delete');
 
     expect(latest!.composerTags).toHaveLength(0);
     expect(latest!.pastedImages).toHaveLength(1);
@@ -2494,12 +2449,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait(files, { images: 0, files: 2 });
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
-      );
-    });
+    pressChipKey('Backspace');
 
     expect(latest!.pastedFiles).toMatchObject([{ name: 'a.log' }]);
   });
@@ -2516,13 +2466,53 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait(files, { images: 0, files: 2 });
 
-    const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
-      );
-    });
+    pressChipKey('Delete');
 
     expect(latest!.pastedFiles).toMatchObject([{ name: 'b.log' }]);
+  });
+
+  it('keeps a non-removable composer tag and falls through to the pasted attachment with Delete', async () => {
+    // Delete twin of the pinned-tag test: Delete scans composerTags with its
+    // own predicate, so only *removable* tags may block the fallback here too.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'pinned', value: 'pinned', removable: false }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    pressChipKey('Delete');
+
+    expect(latest!.composerTags).toHaveLength(1);
+    expect(latest!.pastedImages).toHaveLength(0);
+  });
+
+  it('ignores modified Backspace/Delete so editing chords cannot destroy attachment chips', async () => {
+    // Ctrl+Backspace (delete-to-line-start) and Shift+Delete (cut) are
+    // ordinary editing chords; the fallback must never fire for them.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+
+    pressChipKey('Backspace', { ctrlKey: true });
+    pressChipKey('Delete', { metaKey: true });
+
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('ignores non-deletion keys so ordinary typing cannot destroy attachment chips', async () => {
+    // The fallback must match the two deletion keys exactly; swallowing any
+    // other keydown would both remove a chip and eat the keystroke.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+
+    pressChipKey('x');
+
+    expect(latest!.pastedImages).toHaveLength(1);
   });
 });

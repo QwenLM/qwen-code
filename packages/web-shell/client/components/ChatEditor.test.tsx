@@ -3281,9 +3281,11 @@ describe('ChatEditor file upload gating', () => {
 
 describe('ChatEditor attachment strip order', () => {
   it('renders the image strip before the attachments strip', () => {
-    // The Backspace-last / Delete-first chip semantics in useComposerCore
-    // depend on this DOM order (both strips are column flex children, so DOM
-    // order is visual order); a layout change that flips it must turn red.
+    // Pins the JSX/DOM order the chip-deletion key semantics in
+    // useComposerCore rely on: the images strip must stay before the
+    // attachments strip. jsdom has no layout engine, so CSS `order` or
+    // `flex-direction` flips are not observable here; the rendered visual
+    // order is asserted in the e2e smoke spec.
     const container = renderChatEditor({
       pastedImages: [{ data: 'aGVsbG8=', media_type: 'image/png' }],
       pastedFiles: [
