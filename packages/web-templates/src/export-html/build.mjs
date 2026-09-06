@@ -74,6 +74,15 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'resolved to src/document-echarts-stub.ts by the strip plugin below.',
   },
   {
+    pattern: /(^|\/)node_modules\/mermaid\//,
+    why:
+      'Exported transcripts render a ```mermaid fence as a plain <pre>, the ' +
+      'same degradation CodeBlock already applies to syntax highlighting in ' +
+      'document mode (#11091). Mermaid and its graph dependencies were the ' +
+      'largest remaining input at ~6 MB pre-minify; they are resolved to ' +
+      'src/document-mermaid-stub.ts by the strip plugin below.',
+  },
+  {
     pattern: /(^|\/)node_modules\/(codemirror|@codemirror)\//,
     why:
       'A read-only export has no composer. CodeMirror last reached it through ' +
@@ -89,6 +98,7 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
 // this is dead code in an export.
 const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
 const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
+const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');
 const stripDocumentDeadModules = {
   name: 'strip-document-dead-modules',
   setup(build) {
@@ -98,6 +108,9 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^echarts(\/|$)/ }, () => ({
       path: documentEchartsStub,
     }));
+    build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
+      path: documentMermaidStub,
+    }));
   },
 };
 const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
@@ -106,8 +119,65 @@ const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
     'utf8',
   ),
 );
-const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererPackageVersion}/export-transcript-document.js`;
 const rendererVersionPlaceholder = '__QWEN_RENDERER_BUILD_ID__';
+
+// Delegate the *document's* renderer to an already-published version (#11096).
+//
+// Since #9812 an exported file loads the renderer from
+// unpkg.com/@qwen-code/qwen-code@<version>, and document-main.tsx refuses to
+// render unless the envelope's `rendererVersion` equals the identity compiled
+// into the asset it just loaded. Both derive from the root package.json
+// version, so any build of a version that is not on npm yet — every source
+// build, every fork, every pre-publish CI job — produces a file whose renderer
+// URL 404s. `latest` is 0.23.0, published before #9812, which is the state of
+// main today.
+//
+// Publishing fixes the steady state. These two variables are how a build that
+// cannot wait for a release points its documents at a version that *is*
+// published. Set both or neither:
+//
+//   QWEN_EXPORT_RENDERER_IDENTITY   the `<version>+<buildId>` string the
+//                                   published asset announces, read out of the
+//                                   asset itself.
+//   QWEN_EXPORT_RENDERER_INTEGRITY  `sha384-<base64>` over that asset's bytes:
+//                                   openssl dgst -sha384 -binary <file> |
+//                                   openssl base64 -A
+//
+// The URL, the envelope identity and the SRI hash then all describe the same
+// published bytes, which is the only combination that renders. The asset built
+// here keeps its own true identity and is still what this version publishes;
+// only the generated document points elsewhere. Drop the CI wiring once a
+// release containing #9812 is on npm.
+const rendererDelegateIdentity =
+  process.env.QWEN_EXPORT_RENDERER_IDENTITY?.trim() || undefined;
+const rendererDelegateIntegrity =
+  process.env.QWEN_EXPORT_RENDERER_INTEGRITY?.trim() || undefined;
+if (Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateIntegrity)) {
+  throw new Error(
+    'QWEN_EXPORT_RENDERER_IDENTITY and QWEN_EXPORT_RENDERER_INTEGRITY must be set together: ' +
+      'the URL is derived from the identity and the SRI hash pins that same asset, ' +
+      'so one without the other produces a document that always fails closed.',
+  );
+}
+if (
+  rendererDelegateIdentity &&
+  !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\+[0-9a-f]{16}$/.test(
+    rendererDelegateIdentity,
+  )
+) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_IDENTITY must look like <semver>+<16 hex build id>; got ${rendererDelegateIdentity}. ` +
+      'It is interpolated into the renderer URL, so it is validated rather than trusted.',
+  );
+}
+if (
+  rendererDelegateIntegrity &&
+  !/^sha384-[A-Za-z0-9+/]{64}={0,2}$/.test(rendererDelegateIntegrity)
+) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateIntegrity}.`,
+  );
+}
 
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
@@ -206,17 +276,28 @@ const rendererBuildId = createHash('sha256')
   .update(documentJsBundle.contents)
   .digest('hex')
   .slice(0, 16);
-const exportTranscriptRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
+const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
 if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
   throw new Error('Document renderer build identity placeholder is missing.');
 }
+// The asset always announces the bytes it actually is. Only the document below
+// may point at a different, already-published renderer.
 const documentJs = documentJsBundle.text.replaceAll(
   rendererVersionPlaceholder,
-  exportTranscriptRendererVersion,
+  localRendererVersion,
 );
-const documentRendererIntegrity = `sha384-${createHash('sha384')
-  .update(documentJs)
-  .digest('base64')}`;
+const exportTranscriptRendererVersion =
+  rendererDelegateIdentity ?? localRendererVersion;
+const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererVersion.split('+')[0]}/export-transcript-document.js`;
+const documentRendererIntegrity =
+  rendererDelegateIntegrity ??
+  `sha384-${createHash('sha384').update(documentJs).digest('base64')}`;
+if (rendererDelegateIdentity) {
+  console.log(
+    `Document export delegates its renderer to ${documentRendererUrl} ` +
+      `(this build's own asset is ${localRendererVersion})`,
+  );
+}
 
 const faviconSvg = await readFile(join(srcDir, 'favicon.svg'), 'utf8');
 const faviconData = encodeURIComponent(faviconSvg.trim());

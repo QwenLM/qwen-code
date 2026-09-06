@@ -72,6 +72,22 @@ defaults:
     shell: 'bash'
 
 env:
+  # Point every export built in CI at a renderer that is actually published
+  # (#11096). An exported transcript loads its renderer from
+  # unpkg.com/@qwen-code/qwen-code@<version> and refuses to render unless the
+  # envelope's identity matches the asset it loaded, and both are derived from
+  # the root package.json version — so a build of a version that is not on npm
+  # yet produces a file that always fails closed. `latest` is 0.23.0, published
+  # before #9812 added the asset, which is exactly main's situation.
+  #
+  # These two describe one already-published asset: the identity it announces
+  # and a SHA-384 over its bytes. Wired once here so every lane inherits it
+  # rather than each build step hand-wiring a copy. Delete both once a release
+  # containing #9812 is on npm; the version derived from package.json is then
+  # correct on its own, and leaving these behind would pin CI's exports to a
+  # stale renderer.
+  QWEN_EXPORT_RENDERER_IDENTITY: '0.23.1-preview.0+d7962879afdccd34'
+  QWEN_EXPORT_RENDERER_INTEGRITY: 'sha384-CVacTzaM6pEzmp3UrBJQ/WMSVZfvRxbrNJtCf1c03j4Gox5y9dqndkBoTQ3ktzzh'
   ACTIONLINT_VERSION: '1.7.12'
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
