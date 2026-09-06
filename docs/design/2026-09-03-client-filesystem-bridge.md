@@ -181,7 +181,7 @@ server 名要短（会进每个工具名，事实 5）：`local-files` → `mcp_
 - `local-files/useLocalFilesBridge.ts`：React 接线。挂载时探测上下文 → 从 IndexedDB 取回句柄 → `queryPermission` 为 `granted` 就**静默重连**（片0 实测 Chrome 151 是 granted），为 `prompt` 就落到 `needs-gesture` 等一次真实点击（`requestPermission()` 消耗 activation，effect 里做不到）。`sessionId` 变化即重绑。所有每次渲染会变的选项都经 `optionsRef` 读取，使回调身份稳定——否则调用方内联的 `rewarm` 会让挂载 effect 每次渲染都重跑。
 - `components/LocalFilesControl.tsx`：StatusBar 里的图标按钮 + popover。popover 主体拆成 props 驱动的 `LocalFilesPanel`（无 hook、无 portal），所以 §4 降级矩阵的每一态都能在 jsdom 里直接断言，不需要 Radix portal 或 daemon provider。
 - 入口只加一行：`StatusBar.tsx` 的 `{connected && !compact && <LocalFilesControl />}`。StatusBar 仅在 App.tsx 渲染，而 App 已被 `DaemonWorkspaceProvider` 包裹，provider 不是新依赖。
-- i18n：`localFiles.*` 26 键 × en/zh。`Messages` 是 `Record<string, MessageValue>`，**en/zh 不做穷尽性检查**，漏一个中文键会静默回落成**英文串**（EN 也缺时才裸 key）——所以有一条测试遍历全部可渲染状态用 `zh-CN` 渲染，断言不出现 `localFiles.` 且出现真实中文字串。
+- i18n：`localFiles.*` 27 键 × en/zh。`Messages` 是 `Record<string, MessageValue>`，**en/zh 不做穷尽性检查**，漏一个中文键会静默回落成**英文串**（EN 也缺时才裸 key）——所以有一条测试遍历全部可渲染状态用 `zh-CN` 渲染，断言不出现 `localFiles.` 且出现真实中文字串。
 - 生命周期竞态（自检发现并修，各有测试钉住）：
   - 卸载或 disconnect 时若有 `connect()` 正在等原生选择框（可能几十秒），它回来后仍会 `startBridge()` → **一个没人能停掉的桥带着目录授权活在后台**。用 generation 计数在每个 await 之后校验。
   - 双击 connect 会开两个原生对话框并竞态两个桥 → in-flight 守卫，picker 只开一次。

@@ -160,7 +160,7 @@ describe('LocalFilesPanel degradation matrix', () => {
     [
       'unavailable/workspace-resolving',
       { phase: 'unavailable', blocker: 'workspace-resolving' },
-      '正在解析该会话所属的工作区',
+      '尚不能确定该会话所属的工作区',
     ],
     [
       'unavailable/unsupported-daemon',
@@ -171,6 +171,16 @@ describe('LocalFilesPanel degradation matrix', () => {
     mount(status, 'zh-CN');
     expect(text()).not.toContain('localFiles.');
     expect(text()).toContain(zh);
+  });
+
+  it('presents the resolving blocker as transient, not permanent', () => {
+    mount({ phase: 'unavailable', blocker: 'workspace-resolving' });
+    // The one transient blocker must not pair its copy with the permanent
+    // "Unavailable here" header, and must show progress instead.
+    expect(container?.querySelector('[data-slot="spinner"]')).not.toBeNull();
+    expect(text()).toContain('Resolving…');
+    expect(text()).not.toContain('Unavailable here');
+    expect(buttons()).toHaveLength(0);
   });
 });
 

@@ -71,6 +71,7 @@ export interface LocalDirectoryLimits {
   maxSearchFiles: number;
   maxSearchBytes: number;
   maxSearchHits: number;
+  maxSearchDirs: number;
 }
 
 export const DEFAULT_LOCAL_DIRECTORY_LIMITS: LocalDirectoryLimits = {
@@ -80,6 +81,7 @@ export const DEFAULT_LOCAL_DIRECTORY_LIMITS: LocalDirectoryLimits = {
   maxSearchFiles: 2_000,
   maxSearchBytes: 20_000_000,
   maxSearchHits: 200,
+  maxSearchDirs: 10_000,
 };
 
 export interface LocalDirectoryEntry {
@@ -118,8 +120,10 @@ export interface LocalSearchResult {
   bytesScanned: number;
   /** Files seen but not searched: over the read cap, binary, or unreadable. */
   filesSkipped: number;
+  /** Directory skeletons walked; bounded by its own cap, not maxFiles. */
+  dirsScanned: number;
   truncated: boolean;
-  truncatedBy: 'hits' | 'files' | 'bytes' | null;
+  truncatedBy: 'hits' | 'files' | 'bytes' | 'directories' | null;
 }
 
 export interface LocalListResult {
@@ -456,7 +460,12 @@ export class LocalDirectory {
    */
   async search(
     pattern: string,
-    options: { path?: string; maxFiles?: number; maxBytes?: number } = {},
+    options: {
+      path?: string;
+      maxFiles?: number;
+      maxBytes?: number;
+      maxDirs?: number;
+    } = {},
   ): Promise<LocalSearchResult> {
     if (typeof pattern !== 'string' || pattern === '') {
       throw new LocalDirectoryError(
@@ -488,9 +497,14 @@ export class LocalDirectory {
       options.maxBytes ?? this.limits.maxSearchBytes,
       this.limits.maxSearchBytes,
     );
+    const maxDirs = Math.min(
+      options.maxDirs ?? this.limits.maxSearchDirs,
+      this.limits.maxSearchDirs,
+    );
     const hits: LocalSearchHit[] = [];
     let filesScanned = 0;
     let filesExamined = 0;
+    let dirsExamined = 0;
     let bytesScanned = 0;
     let filesSkipped = 0;
     let truncatedBy: LocalSearchResult['truncatedBy'] = null;
@@ -505,13 +519,15 @@ export class LocalDirectory {
         for await (const entry of dir.values()) {
           if (truncatedBy !== null) break;
           if (isDirectoryEntry(entry)) {
-            // Directory skeletons must consume the budget too, or a huge
-            // near-file-less tree can hang this one tool call.
-            if (filesExamined >= maxFiles) {
-              truncatedBy = 'files';
+            // Directory skeletons need their own bound: charging them to the
+            // file budget lets a node_modules-heavy grant spend maxFiles on
+            // traversal alone and answer a definitive "No match" for files
+            // an unbounded walk would have found.
+            if (dirsExamined >= maxDirs) {
+              truncatedBy = 'directories';
               break;
             }
-            filesExamined += 1;
+            dirsExamined += 1;
             queue.push({ dir: entry, prefix: [...prefix, entry.name] });
             continue;
           }
@@ -595,6 +611,7 @@ export class LocalDirectory {
       filesScanned,
       bytesScanned,
       filesSkipped,
+      dirsScanned: dirsExamined,
       truncated: truncatedBy !== null,
       truncatedBy,
     };

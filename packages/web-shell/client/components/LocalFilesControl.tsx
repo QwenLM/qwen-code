@@ -83,14 +83,19 @@ export function LocalFilesPanel({
   // A grant worth releasing: a directory is bound, or a bridge is running.
   const granted = status.rootName !== undefined || busy || active;
   const canConnect = status.phase !== 'unavailable' && !busy && !active;
+  // The one transient blocker: pairing it with the permanent "Unavailable
+  // here" header would assert impossibility next to a promise of progress.
+  const resolving = status.blocker === 'workspace-resolving';
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
-        {busy ? <Spinner /> : null}
+        {busy || resolving ? <Spinner /> : null}
         <h2 className="text-sm font-medium">{t('localFiles.title')}</h2>
         <span className="ml-auto text-xs text-muted-foreground">
-          {t(STATUS_KEY[status.phase])}
+          {resolving
+            ? t('localFiles.status.resolving')
+            : t(STATUS_KEY[status.phase])}
         </span>
       </div>
 
@@ -186,8 +191,11 @@ interface LocalFilesControlProps {
  * for the eligible cases (primary → legacy `/acp`, trusted secondary →
  * workspace-qualified route). Unlike voice, this surface also needs an
  * explicit "no bridge" outcome: an untrusted or live workspace must withhold
- * the entry instead of collapsing onto the primary mount, and `undefined` is
- * reserved for "cannot tell yet" (capabilities snapshot pending).
+ * the entry instead of collapsing onto the primary mount, and
+ * `{ kind: 'pending' }` is reserved for "cannot tell yet" (capabilities
+ * snapshot or registry entry not landed). The resolver never returns
+ * `undefined`, so no caller can mistake an unresolved route for an eligible
+ * one.
  */
 export type LocalFilesWorkspaceRoute =
   | { kind: 'legacy' }

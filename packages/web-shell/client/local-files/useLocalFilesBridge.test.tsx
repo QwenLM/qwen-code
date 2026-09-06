@@ -120,6 +120,27 @@ function secureWindow(
   };
 }
 
+/**
+ * Exclusive owner lock: `ifAvailable` declines while held, and the holder
+ * releases in a `finally`, so an unmount or stop frees it. Shared by every
+ * two-tab case so a change to the bridge's lock acquisition cannot leave
+ * one fake simulating stale semantics.
+ */
+function exclusiveLocks(): LockManagerLike {
+  const lock = { held: false };
+  return {
+    request: async (_name, options, callback) => {
+      if (lock.held && options.ifAvailable) return undefined;
+      lock.held = true;
+      try {
+        await callback({});
+      } finally {
+        lock.held = false;
+      }
+    },
+  };
+}
+
 interface Harness {
   get(): ReturnType<typeof useLocalFilesBridge>;
   unmount(): void;
@@ -509,7 +530,7 @@ describe('useLocalFilesBridge restore', () => {
     // continuation must not start a bridge behind the disconnect.
     h.rerender({ sessionId: 'session-2' });
     await act(async () => {
-      h.get().disconnect();
+      await h.get().disconnect();
     });
     await h.flush();
     await h.flush();
@@ -521,18 +542,7 @@ describe('useLocalFilesBridge restore', () => {
   it('does not revive a peer-disconnected grant on session switch', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
-    const lock = { held: false };
-    const locks: LockManagerLike = {
-      request: async (_name, options, callback) => {
-        if (lock.held && options.ifAvailable) return undefined;
-        lock.held = true;
-        try {
-          await callback({});
-        } finally {
-          lock.held = false;
-        }
-      },
-    };
+    const locks = exclusiveLocks();
     const common = {
       baseUrl: 'https://daemon.example/',
       win: secureWindow(async () => handle),
@@ -555,7 +565,7 @@ describe('useLocalFilesBridge restore', () => {
 
     // Tab A disconnects: the store is cleared with no signal reaching B.
     await act(async () => {
-      hA.get().disconnect();
+      await hA.get().disconnect();
     });
     await hB.flush();
 
@@ -633,9 +643,12 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     await h.flush();
     expect(h.sockets).toHaveLength(0);
+    // The stored grant is named under the blocker so the panel's Disconnect
+    // (the only revoke path) stays reachable.
     expect(h.get().status).toEqual({
       phase: 'unavailable',
       blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
     });
     h.unmount();
   });
@@ -672,18 +685,7 @@ describe('useLocalFilesBridge restore', () => {
   it('a bystander tab disconnecting does not wipe the owner grant', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
-    const lock = { held: false };
-    const locks: LockManagerLike = {
-      request: async (_name, options, callback) => {
-        if (lock.held && options.ifAvailable) return undefined;
-        lock.held = true;
-        try {
-          await callback({});
-        } finally {
-          lock.held = false;
-        }
-      },
-    };
+    const locks = exclusiveLocks();
     const common = {
       baseUrl: 'https://daemon.example/',
       win: secureWindow(async () => handle),
@@ -702,7 +704,7 @@ describe('useLocalFilesBridge restore', () => {
     expect(hB.get().status.phase).toBe('held-elsewhere');
 
     await act(async () => {
-      hB.get().disconnect();
+      await hB.get().disconnect();
     });
     await hB.flush();
     // The bystander never persisted anything: the origin-global record is
@@ -711,6 +713,131 @@ describe('useLocalFilesBridge restore', () => {
     expect(await store.load()).toBe(handle);
     hA.unmount();
     hB.unmount();
+  });
+
+  it('revokes once the owner that parked this tab is gone', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const locks = exclusiveLocks();
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      // The lock-retry loop would otherwise wait real 100ms delays.
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+
+    // The owner closes: held-elsewhere is sticky, so from here on B's phase
+    // lies about who holds the lock.
+    hA.unmount();
+    await hB.flush();
+
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    // The lock is free, so the record is nobody's live grant: an explicit
+    // disconnect must revoke it instead of reporting success over it.
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    hB.unmount();
+  });
+
+  it('keeps the owner record when a session-less tab disconnects', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const locks = exclusiveLocks();
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // No session: restore loads the grant but startBridge parks before any
+    // bridge (or lock) exists, while the panel still offers Disconnect.
+    const hB = render({ ...common, sessionId: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-session');
+
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    // Tab A's live bridge depends on the single origin-global record.
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('names the stored grant under a withheld blocker so revoke stays reachable', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      withheldBlocker: 'unsupported-daemon',
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'unavailable',
+      blocker: 'unsupported-daemon',
+      rootName: 'ai_coding',
+    });
+    expect(h.sockets).toHaveLength(0);
+
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(1);
+    h.unmount();
+  });
+
+  it('lets the browser probe outrank a withheld reason', async () => {
+    const top = {};
+    Object.defineProperty(top, 'location', {
+      get() {
+        throw new DOMException('Blocked', 'SecurityError');
+      },
+    });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: {
+        isSecureContext: true,
+        showDirectoryPicker: () => Promise.resolve(fakeHandle('x')),
+        self: {},
+        top,
+      },
+      store: fakeStore(),
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    // The probe's copy carries the only recovery affordance (open in a new
+    // tab); a transient withheld reason must not mask it on first paint.
+    expect(h.get().status.blocker).toBe('cross-origin-frame');
+    h.unmount();
   });
 
   it('reports start_failed when the lock request rejects outright', async () => {
@@ -785,6 +912,7 @@ describe('useLocalFilesBridge restore', () => {
     expect(h.get().status).toEqual({
       phase: 'unavailable',
       blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
     });
     h.unmount();
   });
@@ -870,7 +998,7 @@ describe('useLocalFilesBridge teardown', () => {
     expect(h.sockets).toHaveLength(1);
 
     await act(async () => {
-      h.get().disconnect();
+      await h.get().disconnect();
     });
     await h.flush();
     expect(h.sockets[0]!.closeCount).toBe(1);
@@ -954,7 +1082,7 @@ describe('useLocalFilesBridge teardown', () => {
       await h.get().connect();
     });
     await act(async () => {
-      h.get().disconnect();
+      await h.get().disconnect();
     });
     release(fakeHandle('ai_coding', { query: 'granted' }));
     await pending;
