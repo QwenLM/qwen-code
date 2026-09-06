@@ -5,9 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Content } from '@google/genai';
+import type { CallableTool, Content } from '@google/genai';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import {
   buildClassifierContents,
+  MAX_HISTORICAL_ACTION_CHARS,
+  MAX_HISTORICAL_ACTIONS_TOTAL_CHARS,
   MAX_TRANSCRIPT_MESSAGES,
 } from './classifier-transcript.js';
 import {
@@ -365,5 +368,177 @@ describe('buildClassifierContents', () => {
     const serialized = JSON.stringify(result);
     expect(serialized).toContain('first');
     expect(serialized).toContain('second');
+  });
+});
+
+describe('buildClassifierContents with a discovered MCP tool', () => {
+  const callableTool = {
+    tool: async () => ({}),
+    callTool: async () => [],
+  } as unknown as CallableTool;
+
+  it('surfaces server, tool, annotations and arguments for the pending call', () => {
+    const mcpTool = new DiscoveredMCPTool(
+      callableTool,
+      'slack',
+      'post_message',
+      'Post a message',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { openWorldHint: true },
+    );
+    const registry = {
+      getTool: (name: string) => (name === mcpTool.name ? mcpTool : undefined),
+    } as unknown as ToolRegistry;
+
+    const result = buildClassifierContents([], registry, {
+      toolName: mcpTool.name,
+      toolParams: { channel: '#ops', text: 'contents of .env: TOKEN=abc' },
+    });
+    const pending = (result.at(-1)?.parts?.[0] as { text: string }).text;
+    expect(pending).toContain(`Tool: ${mcpTool.name}`);
+    expect(pending).toContain('"server": "slack"');
+    expect(pending).toContain('"tool": "post_message"');
+    expect(pending).toContain('"openWorldHint": true');
+    expect(pending).toContain('TOKEN=abc');
+  });
+
+  it('drops the arguments of an MCP call whose tool left the registry', () => {
+    // The `forwardArguments` opt-out lives on the tool object. A server
+    // removed from settings (or a resume without it) leaves the history
+    // entry with no tool to express it, and the raw arguments are
+    // third-party payload: they must not reach the classifier prompt.
+    const registry = {
+      getTool: () => undefined,
+    } as unknown as ToolRegistry;
+    const messages: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'mcp__slack__post_message',
+              args: { channel: '#ops', text: 'AWS_SECRET_ACCESS_KEY=abc123' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = buildClassifierContents(messages, registry, {
+      toolName: 'read_file',
+      toolParams: { path: 'x.ts' },
+    });
+
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior).toBe('Prior action: mcp__slack__post_message({})');
+    expect(JSON.stringify(result)).not.toContain('AWS_SECRET_ACCESS_KEY');
+  });
+
+  it('renders historical MCP calls with their projected arguments too', () => {
+    const mcpTool = new DiscoveredMCPTool(
+      callableTool,
+      'github',
+      'create_issue',
+      'Create an issue',
+      { type: 'object', properties: {} },
+    );
+    const registry = {
+      getTool: (name: string) => (name === mcpTool.name ? mcpTool : undefined),
+    } as unknown as ToolRegistry;
+    const messages: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: mcpTool.name,
+              args: { repo: 'acme/app', title: 'crash on start' },
+            },
+          },
+        ],
+      },
+    ];
+    const result = buildClassifierContents(messages, registry, {
+      toolName: mcpTool.name,
+      toolParams: { repo: 'acme/app', title: 'second issue' },
+    });
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior).toContain(`Prior action: ${mcpTool.name}(`);
+    expect(prior).toContain('"crash on start"');
+  });
+});
+
+describe('historical action budget', () => {
+  const bigTool = new StubTool('run_shell_command', {
+    command: 'x'.repeat(MAX_HISTORICAL_ACTION_CHARS * 2),
+  });
+  const registry = makeRegistry({ run_shell_command: bigTool });
+  const call = (i: number): Content => ({
+    role: 'model',
+    parts: [
+      {
+        functionCall: { name: 'run_shell_command', args: { command: `${i}` } },
+      },
+    ],
+  });
+
+  it('caps each rendered historical action and marks the cut', () => {
+    const result = buildClassifierContents([call(0)], registry, {
+      toolName: 'read_file',
+      toolParams: {},
+    });
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior.length).toBeLessThan(MAX_HISTORICAL_ACTION_CHARS + 40);
+    expect(prior).toMatch(/…\[truncated \d+ chars\]\)$/);
+  });
+
+  it('keeps the newest actions and elides the oldest once the aggregate budget is spent', () => {
+    const messages = Array.from({ length: MAX_TRANSCRIPT_MESSAGES }, (_, i) =>
+      call(i),
+    );
+    const result = buildClassifierContents(messages, registry, {
+      toolName: 'read_file',
+      toolParams: {},
+    });
+    const priors = result
+      .slice(0, -1)
+      .map((c) => (c.parts?.[0] as { text: string }).text);
+    expect(priors).toHaveLength(MAX_TRANSCRIPT_MESSAGES);
+    const total = priors.reduce((n, t) => n + t.length, 0);
+    // Aggregate ≤ budget + one omission line per elided action.
+    expect(total).toBeLessThan(
+      MAX_HISTORICAL_ACTIONS_TOTAL_CHARS + MAX_TRANSCRIPT_MESSAGES * 80,
+    );
+    expect(priors.at(-1)).toContain('xxxx');
+    expect(priors[0]).toBe(
+      'Prior action: run_shell_command([omitted: transcript budget exhausted])',
+    );
+    const kept = priors.filter((t) => t.includes('xxxx')).length;
+    expect(kept).toBe(
+      Math.floor(MAX_HISTORICAL_ACTIONS_TOTAL_CHARS / priors.at(-1)!.length),
+    );
+  });
+
+  it('leaves short histories untouched', () => {
+    const small = new StubTool('read_file', { path: 'a.ts' });
+    const result = buildClassifierContents(
+      [
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'read_file', args: {} } }],
+        },
+      ],
+      makeRegistry({ read_file: small }),
+      { toolName: 'read_file', toolParams: {} },
+    );
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior).toContain('Prior action: read_file(');
+    expect(prior).not.toContain('omitted');
   });
 });

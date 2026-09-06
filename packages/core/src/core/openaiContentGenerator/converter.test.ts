@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -24,6 +24,7 @@ import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -65,6 +66,26 @@ describe('OpenAIContentConverter', () => {
       responseParsingOptions: { taggedThinkingTags: true },
       taggedThinkingParser: new TaggedThinkingParser(),
     };
+  }
+
+  function withQwen3TaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      model: 'qwen3.8-max',
+      responseParsingOptions: {
+        contentOnlyThinkingTagLeaks: true,
+        taggedThinkingTagsAfterReasoning: true,
+      },
+    };
+  }
+
+  function openAIStreamChunk(
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+  ): OpenAI.Chat.ChatCompletionChunk {
+    return {
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
   }
 
   function hasOpenAIToolCalls(
@@ -5846,9 +5867,200 @@ describe('OpenAIContentConverter', () => {
         { text: 'still thinking', thought: true },
       ]);
     });
+
+    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      const reasoningChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const contentChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'answer' }),
+        context,
+      );
+
+      expect(reasoningChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+      ]);
+      expect(contentChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should parse a balanced Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const openingChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: '<thi' }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'nking>step 2</thinking>answer' }, 'stop'),
+        context,
+      );
+
+      expect(openingChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 2', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should reject an unclosed Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: '<thinking>step 2' }, 'stop'),
+          context,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('should suppress a replayed short Qwen3 thinking block', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const replayedBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(replayedBlock.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('should suppress a replayed short Qwen3 thinking opener', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const opener = '<think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const replayedOpener = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'x</think>answer' }, 'stop'),
+        context,
+      );
+
+      expect(replayedOpener.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should suppress a replayed Qwen3 snapshot beyond the detection window', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = `<thinking>${'x'.repeat(1200)}</thinking>answer`;
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      for (let offset = 0; offset < block.length; offset += 100) {
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: block.slice(offset, offset + 100) }),
+          context,
+        );
+      }
+
+      const replay = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const rewind = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block.slice(0, -1) }),
+        context,
+      );
+      const extension = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: `${block}!` }),
+        context,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(rewind.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(extension.candidates?.[0]?.content?.parts).toEqual([
+        { text: '!' },
+      ]);
+    });
+
+    it('should preserve repeated short blocks for eager tagged parsing', () => {
+      const context = withTaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const secondBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(secondBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+    });
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    it('compiles a stable tool schema only once', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'stable', parametersJsonSchema },
+          ],
+        },
+      ] as Tool[];
+      const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');
+
+      try {
+        await converter.convertLlmToolsToOpenAI(tools);
+        await converter.convertLlmToolsToOpenAI(tools);
+        expect(compileStrict).toHaveBeenCalledTimes(1);
+      } finally {
+        compileStrict.mockRestore();
+      }
+    });
+
     it('removes uniqueItems from function-calling wire schemas', async () => {
       const parametersJsonSchema = {
         type: 'object',
@@ -5893,6 +6105,140 @@ describe('OpenAIContentConverter', () => {
         },
       ]);
       expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
+    });
+
+    it('only relaxes grammar constraints backed by local validation', async () => {
+      const supportedSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedSchema = {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedVocabularySchema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'supported', parametersJsonSchema: supportedSchema },
+            { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
+            {
+              name: 'unsupported_vocabulary',
+              parametersJsonSchema: unsupportedVocabularySchema,
+            },
+            {
+              name: 'without_local_schema',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {},
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        { name: 'supported', description: '', parameters: { type: 'object' } },
+        {
+          name: 'unsupported',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'unsupported_vocabulary',
+          description: '',
+          parameters: unsupportedVocabularySchema,
+        },
+        {
+          name: 'without_local_schema',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ]);
+      expect(supportedSchema).toEqual({
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      });
+      expect(unsupportedSchema.$schema).toBe(
+        'https://json-schema.org/draft/2019-09/schema',
+      );
+      expect(
+        unsupportedVocabularySchema.properties.tuple.prefixItems[0]
+          .additionalProperties,
+      ).toBe(false);
+    });
+
+    it('keeps grammar constraints for schemas with a top-level $id', async () => {
+      const sharedId = 'https://qwen-code.test/shared-tool-schema';
+      const makeSchema = () => ({
+        $id: sharedId,
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      });
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'first', parametersJsonSchema: makeSchema() },
+            { name: 'second', parametersJsonSchema: makeSchema() },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'first',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+        {
+          name: 'second',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+      ]);
     });
 
     it('should convert Gemini tools with parameters field', async () => {

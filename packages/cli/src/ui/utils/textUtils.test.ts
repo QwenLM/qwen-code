@@ -97,6 +97,17 @@ describe('textUtils', () => {
         expect(escapeAnsiCtrlCodes('')).toBe('');
       });
 
+      it('preserves inline image data while sanitizing surrounding text', () => {
+        const imageData = 'payload\u001bwith-control-code';
+        const sanitized = escapeAnsiCtrlCodes({
+          text: '\u001b[31mcaption\u001b[0m',
+          images: [{ data: imageData, mimeType: 'image/png' }],
+        });
+
+        expect(sanitized.text).toBe('\\u001b[31mcaption\\u001b[0m');
+        expect(sanitized.images[0].data).toBe(imageData);
+      });
+
       describe('toolConfirmationDetails case study', () => {
         it('should sanitize command and rootCommand for exec type', () => {
           const details: ToolCallConfirmationDetails = {

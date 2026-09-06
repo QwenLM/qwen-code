@@ -284,12 +284,15 @@ export abstract class DeclarativeTool<
    *   - undefined: fall back to raw params (only safe when the tool is
    *     known to have no sensitive params)
    *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
    */
   toAutoClassifierInput(
     _params: TParams,
@@ -639,6 +642,7 @@ export interface AgentResultDisplay {
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  skills?: string[];
   /** Real-time output-token count during execution, accumulated across subagent rounds. */
   tokenCount?: number;
 
@@ -813,6 +817,13 @@ export interface TaskListResultDisplay {
 export interface FileDiff {
   fileDiff: string;
   fileName: string;
+  /**
+   * Full (project-relative or absolute) path to the edited file, as passed
+   * to the tool. UI consumers must prefer this over `fileName` when
+   * resolving a clickable/openable location — `fileName` is a basename and
+   * cannot be used to locate files outside the workspace root.
+   */
+  filePath?: string;
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
@@ -1012,7 +1023,13 @@ export interface ToolInfoConfirmationDetails {
 }
 
 export interface AutoModeFallbackConfirmation {
-  reason: 'classifier_unavailable';
+  reason:
+    | 'classifier_blocked_retry'
+    | 'classifier_unavailable'
+    | 'consecutive_block'
+    | 'consecutive_unavailable'
+    | 'total_denial'
+    | 'external_write';
   message: string;
 }
 

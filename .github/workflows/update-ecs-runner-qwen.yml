@@ -75,7 +75,7 @@ jobs:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
-        runner: ['ecs-update-sg', 'ecs-update-64c', 'ecs-update-hk-1', 'ecs-update-hk-2']
+        runner: ['ecs-update-hk-1', 'ecs-update-hk-2', 'ecs-update-hk-3', 'ecs-update-hk-4', 'ecs-update-hk-5']
       fail-fast: false
     runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
     concurrency:
@@ -122,3 +122,44 @@ jobs:
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           test "${actual}" = "${VERSION}"
+
+  # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
+  # `qwen-triage.yml` install the CLI only when it is absent, and on a
+  # self-hosted runner it never is, so a pool that misses an update keeps
+  # serving PRs on the old version indefinitely with nothing to distinguish it
+  # from a healthy one — on v0.22.3 that went unnoticed for a full day.
+  # `main-ci-failure-issue.yml` cannot cover this: it watches test suites on
+  # `main`, and this workflow runs off `repository_dispatch`.
+  report_failure:
+    name: 'Report a stale fleet'
+    needs: ['resolve', 'update']
+    # `cancelled` is deliberately not a failure: a newer dispatch supersedes an
+    # older one's still-pending legs through the per-pool concurrency group,
+    # which is routine and says nothing about the fleet's state.
+    if: "${{ always() && github.repository == 'QwenLM/qwen-code' && (needs.resolve.result == 'failure' || needs.update.result == 'failure') }}"
+    # Hosted, not the ECS pool: this job reports that the pools are broken, and
+    # queueing the report behind them would be the same trap it documents.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      # A job-level block replaces the workflow's, so checkout needs contents
+      # spelled out here even though the job only files an issue.
+      contents: 'read'
+      # Read this run's per-pool job conclusions.
+      actions: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'File or update the stale-fleet issue'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          RUN_ID: '${{ github.run_id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          VERSION: '${{ needs.resolve.outputs.version }}'
+          DEDUP_LABEL: 'scope/ci-cd'
+        run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'

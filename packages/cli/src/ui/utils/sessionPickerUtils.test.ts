@@ -81,6 +81,7 @@ describe('sessionPickerUtils', () => {
       s({ sessionId: 'b', customTitle: 'Add OAuth flow', gitBranch: 'feat' }),
       s({ sessionId: 'c', prompt: 'random work', gitBranch: 'hotfix/login' }),
       s({ sessionId: 'd', prompt: 'unrelated', gitBranch: 'main' }),
+      s({ sessionId: 'e', goalObjective: 'Ship release notes' }),
     ];
 
     it('passes everything through when no filter is set', () => {
@@ -96,6 +97,11 @@ describe('sessionPickerUtils', () => {
     it('is case-insensitive and trims surrounding whitespace', () => {
       const result = filterSessions(sessions, false, undefined, '  OAUTH  ');
       expect(result.map((x) => x.sessionId)).toEqual(['b']);
+    });
+
+    it('matches the query against the Goal objective', () => {
+      const result = filterSessions(sessions, false, undefined, 'release');
+      expect(result.map((x) => x.sessionId)).toEqual(['e']);
     });
 
     it('composes branch filter and query as AND', () => {

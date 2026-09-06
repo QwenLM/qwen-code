@@ -27,7 +27,11 @@ import {
   type ExtensionMutationEvent,
   type PreparedExtensionMutation,
 } from './extensionManager.js';
-import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
+import type {
+  Config,
+  MCPServerConfig,
+  ExtensionInstallMetadata,
+} from '../index.js';
 import { ExtensionStore } from './extension-store.js';
 import { ExtensionPreferencesStore } from './extensionPreferences.js';
 import {
@@ -298,6 +302,220 @@ describe('extension tests', () => {
       ...options,
     });
   }
+
+  describe('extension skill states', () => {
+    let manager: ExtensionManager;
+    let extensionDirectory: string;
+    let extensionId: string;
+
+    beforeEach(async () => {
+      extensionDirectory = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'suite',
+      });
+      for (const name of ['skill-a', 'skill-b', 'constructor', '__proto__']) {
+        const skillDirectory = path.join(extensionDirectory, 'skills', name);
+        fs.mkdirSync(skillDirectory, { recursive: true });
+        fs.writeFileSync(
+          path.join(skillDirectory, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: Test skill\n---\nSkill body`,
+        );
+      }
+      manager = createExtensionManager();
+      await manager.refreshCache();
+      extensionId = manager.getLoadedExtensions()[0]!.id;
+    });
+
+    it.each([undefined, {}])(
+      'defaults undeclared skill states to enabled: %j',
+      async (skillStates) => {
+        fs.writeFileSync(
+          path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'suite', version: '1.0.0', skillStates }),
+        );
+        await manager.refreshCache();
+        expect(
+          manager.getExtensionSkillState(extensionId, '__proto__'),
+        ).toEqual({
+          defaultEnabled: true,
+          workspaceEnabled: null,
+        });
+      },
+    );
+
+    it('parses normalized boolean defaults without losing prototype-named skills', async () => {
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'suite',
+          version: '1.0.0',
+          skillStates: Object.fromEntries([
+            [' Skill-A ', false],
+            ['constructor', true],
+            ['__proto__', false],
+          ]),
+        }),
+      );
+      await manager.refreshCache();
+      for (const [name, expected] of [
+        ['skill-a', false],
+        ['skill-b', true],
+        ['constructor', true],
+        ['__proto__', false],
+      ] as const) {
+        expect(
+          manager.getExtensionSkillState(extensionId, name).defaultEnabled,
+        ).toBe(expected);
+      }
+    });
+
+    it.each([
+      null,
+      [],
+      'enabled',
+      { 'skill-a': 'false' },
+      { 'bad name': true },
+    ])('rejects invalid native skillStates: %j', (skillStates) => {
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'suite', version: '1.0.0', skillStates }),
+      );
+      expect(() =>
+        manager.loadExtensionConfig({ extensionDir: extensionDirectory }),
+      ).toThrow();
+    });
+
+    it('saves a mixed batch on an inactive extension without changing activation or refreshing other resources', async () => {
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+      await manager.setExtensionDefaultActivation(extensionId, 'disabled');
+      refreshTools.mockClear();
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      manager.setConfig({
+        getSkillManager: () => ({ refreshCache }),
+      } as unknown as Config);
+      const before = await manager.getExtensionStoreSnapshot();
+      const onCommitted = vi.fn();
+      const result = await manager.setExtensionSkillStates(
+        extensionId,
+        tempWorkspaceDir,
+        [
+          { name: 'Skill-A', state: 'disabled' },
+          { name: '__proto__', state: 'enabled' },
+        ],
+        onCommitted,
+      );
+      expect(result.generation).toBe(before.generation + 1);
+      expect(onCommitted).toHaveBeenCalledExactlyOnceWith(result.generation);
+      expect(refreshCache).toHaveBeenCalledExactlyOnceWith({
+        throwOnError: true,
+      });
+      expect(refreshTools).not.toHaveBeenCalled();
+      expect(manager.getLoadedExtensions()[0]?.isActive).toBe(false);
+      expect(manager.getExtensionSkillState(extensionId, 'skill-a')).toEqual({
+        defaultEnabled: true,
+        workspaceEnabled: false,
+      });
+      expect(
+        manager.getExtensionSkillState(extensionId, '__proto__')
+          .workspaceEnabled,
+      ).toBe(true);
+      expect(
+        manager.getExtensionSkillState(extensionId, 'skill-b').workspaceEnabled,
+      ).toBeNull();
+      expect(
+        manager.getExtensionSkillState(
+          extensionId,
+          'skill-a',
+          path.join(tempWorkspaceDir, 'other'),
+        ).workspaceEnabled,
+      ).toBeNull();
+
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'suite',
+          version: '2.0.0',
+          skillStates: { ['__proto__']: false },
+        }),
+      );
+      await manager.refreshCache();
+      expect(
+        manager.getExtensionSkillState(extensionId, '__proto__')
+          .workspaceEnabled,
+      ).toBe(true);
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'suite', version: '3.0.0' }),
+      );
+      const restarted = createExtensionManager();
+      await restarted.refreshCache();
+      expect(
+        restarted.getExtensionSkillState(extensionId, 'skill-a')
+          .workspaceEnabled,
+      ).toBe(false);
+    });
+
+    it('rejects the entire batch for foreign ownership or duplicate names and does not refresh skills', async () => {
+      const other = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'other',
+      });
+      fs.mkdirSync(path.join(other, 'skills', 'foreign'), { recursive: true });
+      fs.writeFileSync(
+        path.join(other, 'skills', 'foreign', 'SKILL.md'),
+        '---\nname: foreign\ndescription: Other extension\n---\nOther body',
+      );
+      await manager.refreshCache();
+      const before = await manager.getExtensionStoreSnapshot();
+      const refreshCache = vi.fn();
+      manager.setConfig({
+        getSkillManager: () => ({ refreshCache }),
+      } as unknown as Config);
+      await expect(
+        manager.setExtensionSkillStates(extensionId, tempWorkspaceDir, [
+          { name: 'skill-a', state: 'disabled' },
+          { name: 'foreign', state: 'enabled' },
+        ]),
+      ).rejects.toThrow('does not belong');
+      await expect(
+        manager.setExtensionSkillStates(extensionId, tempWorkspaceDir, [
+          { name: 'skill-a', state: 'disabled' },
+          { name: ' Skill-A ', state: 'disabled' },
+        ]),
+      ).rejects.toThrow('Duplicate');
+      expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      expect(refreshCache).not.toHaveBeenCalled();
+    });
+
+    it('retains committed states and reports skill-only refresh failure', async () => {
+      manager.setConfig({
+        getSkillManager: () => ({
+          refreshCache: vi
+            .fn()
+            .mockRejectedValue(new Error('skill refresh failed')),
+        }),
+      } as unknown as Config);
+      const result = await manager.setExtensionSkillStates(
+        extensionId,
+        tempWorkspaceDir,
+        [{ name: 'skill-a', state: 'disabled' }],
+      );
+      expect(result.warnings).toEqual([
+        {
+          code: 'extension_runtime_refresh_failed',
+          error: 'skill refresh failed',
+        },
+      ]);
+      expect(
+        manager.getExtensionSkillState(extensionId, 'skill-a').workspaceEnabled,
+      ).toBe(false);
+      expect((await manager.getExtensionStoreSnapshot()).generation).toBe(
+        result.generation,
+      );
+    });
+  });
 
   describe('installExtension', () => {
     function writeExtractedExtension(destination: string, name: string) {

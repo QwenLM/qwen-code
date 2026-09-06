@@ -159,6 +159,52 @@
   color: var(--foreground, #fff);
 }
 
+.actions {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  margin-top: 4px;
+  margin-left: -2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.message:hover .actions,
+.message:focus-within .actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .actions {
+    opacity: 1;
+  }
+}
+
+.copyButton {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  background: var(--secondary);
+  outline: none;
+}
+
+.copyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
 /* Right-aligned, subtle marker for a user-cancelled (ESC) stream — reads as a
    user-side action and keeps the same divider treatment as a turn status row. */
 .cancelled {

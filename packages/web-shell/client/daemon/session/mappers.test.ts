@@ -77,6 +77,95 @@ const turnComplete: DaemonEvent = {
   data: { stopReason: 'end_turn' },
 };
 
+describe('session title metadata', () => {
+  it('keeps manual provenance with a renamed session', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_metadata_updated',
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Bug hunt',
+            titleSource: 'manual',
+          },
+        },
+      ),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+
+  it('keeps manual provenance when a pr-only event echoes the same name', () => {
+    const renamed = applyEvent(
+      { status: 'connected' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          titleSource: 'manual',
+        },
+      },
+    );
+    expect(renamed).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+    expect(
+      applyEvent(renamed, {
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        // The bridge's pr-binding publish echoes the name without a
+        // provenance: binding a PR must not wipe the manual title.
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          prs: [
+            {
+              number: 9260,
+              url: 'https://github.com/QwenLM/qwen-code/pull/9260',
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+
+  it('drops provenance when an unstamped event changes the name', () => {
+    const renamed = applyEvent(
+      { status: 'connected' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          titleSource: 'manual',
+        },
+      },
+    );
+    const next = applyEvent(renamed, {
+      id: 2,
+      v: 1,
+      type: 'session_metadata_updated',
+      data: { sessionId: 'session-1', displayName: 'New name' },
+    });
+    expect(next.displayName).toBe('New name');
+    expect(next.titleSource).toBeUndefined();
+  });
+});
+
 describe('mapReasoningControls', () => {
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
@@ -116,7 +205,29 @@ describe('mapReasoningControls', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
       canDisable: false,
+    });
+  });
+
+  it('does not restore a dormant effort when the daemon confirms default', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'default',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Provider default' },
+            { value: 'low', name: 'Daemon Low' },
+            { value: 'max', name: 'Daemon Max' },
+          ],
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'default',
+      efforts: ['low', 'max'],
     });
   });
 });
@@ -145,6 +256,7 @@ describe('mapProviderStatus reasoning preview', () => {
       enabled: true,
       effort: 'xhigh',
       efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
     });
   });
 
@@ -1062,6 +1174,31 @@ describe('updateConnectionFromDaemonEvent', () => {
 
     expect(next.commands?.map((command) => command.name)).toEqual(['review']);
     expect(next.skills).toEqual(['review']);
+  });
+
+  it('maps command aliases from available_commands_update metadata', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      availableCommandsEvent(
+        [
+          {
+            name: 'compress',
+            description: 'Compress context',
+            input: null,
+            _meta: { source: 'builtin-command', altNames: ['summarize'] },
+          },
+        ],
+        [],
+      ),
+    );
+
+    expect(next.commands).toEqual([
+      expect.objectContaining({
+        name: 'compress',
+        source: 'builtin-command',
+        altNames: ['summarize'],
+      }),
+    ]);
   });
 
   it('reads nested availableSkills from the daemon wire shape', () => {

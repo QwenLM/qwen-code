@@ -7,7 +7,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NodeReplKernelManager } from './kernel-manager.js';
@@ -22,19 +22,75 @@ import { NodeReplSecurityPolicy } from './security-policy.js';
 // test is skipped with a logged reason (the fixture is real, not synthesized).
 
 const fixtureDir = fileURLToPath(new URL('./fixtures/napi', import.meta.url));
+const windowsTaskkill = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 let builtAddonPath: string | null = null;
 let buildError: string | null = null;
 let manager: NodeReplKernelManager | null = null;
 
-beforeAll(() => {
+function terminateBuild(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.pid) {
+    child.kill('SIGKILL');
+    return;
+  }
+  if (process.platform === 'win32') {
+    execFile(
+      windowsTaskkill,
+      ['/f', '/t', '/pid', String(child.pid)],
+      { timeout: 5_000 },
+      (error) => {
+        if (error) child.kill('SIGKILL');
+      },
+    );
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+
+function rebuildAddon(nodeGyp: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodeGyp, ['rebuild'], {
+      cwd: fixtureDir,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-16_384);
+    });
+    const timeout = setTimeout(() => terminateBuild(child), 110_000);
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const reason = signal ? `signal ${signal}` : `exit ${code ?? 'unknown'}`;
+      const detail = stderr.trim();
+      reject(
+        new Error(
+          `node-gyp rebuild failed (${reason})${detail ? `: ${detail}` : ''}`,
+        ),
+      );
+    });
+  });
+}
+
+beforeAll(async () => {
   try {
     const nodeGyp = fileURLToPath(
       new URL('../../../node_modules/.bin/node-gyp', import.meta.url),
     );
-    execFileSync(nodeGyp, ['rebuild'], {
-      cwd: fixtureDir,
-      stdio: 'pipe',
-    });
+    await rebuildAddon(nodeGyp);
     const candidate = path.join(
       fixtureDir,
       'build',

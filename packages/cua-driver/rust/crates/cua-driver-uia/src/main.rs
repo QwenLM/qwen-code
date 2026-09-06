@@ -1,6 +1,6 @@
 // cua-driver-uia: Windows uiAccess-elevated tool worker.
 //
-// Listens on \\.\pipe\qwen-cua-driver-uia for line-delimited JSON requests with the
+// Listens on a parent-PID-scoped named pipe for line-delimited JSON requests with the
 // same shape as qwen-cua-driver's daemon pipe (\\.\pipe\qwen-cua-driver). This is a
 // daemon-internal privilege boundary: public CLI/MCP clients must enter through
 // the canonical daemon authorization path and cannot call this worker directly.
@@ -69,17 +69,13 @@ impl PipeResponse {
 }
 
 #[cfg(target_os = "windows")]
-fn pipe_path() -> &'static str {
+fn is_local_worker() -> bool {
     let is_local = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_name().map(|name| name.to_owned()))
         .and_then(|name| name.to_str().map(str::to_owned))
         .is_some_and(|name| name.eq_ignore_ascii_case("qwen-cua-driver-uia-local.exe"));
-    if is_local {
-        r"\\.\pipe\qwen-cua-driver-local-uia"
-    } else {
-        r"\\.\pipe\qwen-cua-driver-uia"
-    }
+    is_local
 }
 
 #[cfg(target_os = "windows")]
@@ -325,7 +321,7 @@ async fn async_main(authorized_parent_pid: u32) -> anyhow::Result<()> {
 
     let registry = std::sync::Arc::new(platform_windows::register_tools());
     let tool_count = registry.iter_defs().count();
-    let pipe_path = pipe_path();
+    let pipe_path = cua_driver_uia::pipe_path(authorized_parent_pid, is_local_worker());
     eprintln!("cua-driver-uia: {tool_count} tools registered; listening on {pipe_path}");
 
     let owner_sid = unsafe { current_user_sid_string() }
@@ -340,7 +336,7 @@ async fn async_main(authorized_parent_pid: u32) -> anyhow::Result<()> {
         let server = unsafe {
             ServerOptions::new()
                 .first_pipe_instance(false)
-                .create_with_security_attributes_raw(pipe_path, security_attributes)
+                .create_with_security_attributes_raw(&pipe_path, security_attributes)
                 .map_err(|e| anyhow::anyhow!("create named pipe {pipe_path}: {e}"))?
         };
 
@@ -391,10 +387,35 @@ async fn async_main(authorized_parent_pid: u32) -> anyhow::Result<()> {
                     }
                 };
 
-                let resp = handle_request(&reg, req).await;
+                let mut resp = handle_request(&reg, req).await;
+                let restart_required = resp
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("structuredContent"))
+                    .and_then(|value| value.get("_uia_worker_restart_required"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+                if restart_required {
+                    if let Some(structured) = resp
+                        .result
+                        .as_mut()
+                        .and_then(|value| value.get_mut("structuredContent"))
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        structured.remove("_uia_worker_restart_required");
+                    }
+                }
                 let _ = writer
                     .write_all((serde_json::to_string(&resp).unwrap() + "\n").as_bytes())
                     .await;
+                let _ = writer.flush().await;
+                if restart_required {
+                    // A provider-blocked COM thread cannot be cancelled safely.
+                    // The response already contains the screenshot/Win32 surface
+                    // and any completed partial tree, so retire this process and
+                    // let the authenticated parent launch a clean generation.
+                    std::process::exit(75);
+                }
             }
         });
     }
@@ -447,7 +468,14 @@ async fn handle_request(
             if reg.get_def(&tool_name).is_none() {
                 return PipeResponse::err(format!("Unknown tool: {tool_name}"), 64);
             }
-            let result = reg.invoke(&tool_name, args).await;
+            // The named pipe authenticates the exact parent PID and SID before
+            // request parsing. The parent already performed canonical
+            // authorization and action coordination; this private hop invokes
+            // only the platform implementation while retaining session evidence
+            // for revision lineage and element-token isolation.
+            let result = reg
+                .invoke_from_authenticated_uiaccess_parent(&tool_name, args)
+                .await;
             let is_err = result.is_error.unwrap_or(false);
             let content: Vec<serde_json::Value> = result
                 .content
@@ -465,23 +493,16 @@ async fn handle_request(
             if let Some(sc) = result.structured_content {
                 result_obj["structuredContent"] = sc;
             }
-            if is_err {
-                let msg = result
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let cua_driver_core::protocol::Content::Text { text, .. } = c {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                PipeResponse::err(msg, 1)
-            } else {
-                PipeResponse::ok(result_obj)
+            if let Some(action_record) = result.action_record.as_ref() {
+                // Private authenticated worker hop only. The parent restores
+                // this exact record and performs the canonical public action
+                // projection once; it is never exposed through MCP/SDK.
+                result_obj["_uiaccessActionRecord"] = action_record.debug_json();
             }
+            // A tool-level refusal is a successfully delivered ToolResult, not
+            // a worker transport failure. Keep its structured error code and
+            // lifecycle evidence intact for the parent SDK.
+            PipeResponse::ok(result_obj)
         }
         "shutdown" => {
             // Worker shutdown is unsupported in the prototype — restarting requires

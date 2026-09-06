@@ -37,8 +37,70 @@ const failureIssue = parse(
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
 const LANES = ['test_macos', 'test_windows'];
-const PUSH_JOBS = ['classify_pr', 'test'];
+const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
+
+// The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
+// ubuntu-latest for fork PRs from untrusted authors and when
+// MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths keep the
+// pre-contention ceiling. Evaluate the real timeout expression for both
+// routings instead of pinning a bare number -- the same
+// substitute-then-evaluate technique
+// `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
+// regression to an unconditional ceiling fails here instead of reading as a
+// passing constant.
+const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
+const HOSTED_RUNNER = '["ubuntu-latest"]';
+const timeoutMinutesOn = (job, ubuntuRunner) => {
+  // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
+  // a missing output (classify_pr skipped) is the hosted routing.
+  const effective = ubuntuRunner || HOSTED_RUNNER;
+  let expr = String(ci.jobs[job]['timeout-minutes'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '')
+    .replace(
+      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'ecs-qwen'\)/g,
+      String(effective.includes('ecs-qwen')),
+    )
+    .replace(/fromJSON\(/g, '(');
+  if (/needs\.|contains\(|fromJSON\(/.test(expr)) {
+    throw new Error(
+      `${job} timeout carries a term this guard does not model: ${expr}`,
+    );
+  }
+  return Number(new Function(`return (${expr});`)());
+};
+
+it('keeps the shared Linux test lane above its contention budget on ECS', () => {
+  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
+});
+
+it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
+  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('test', '')).toBe(60);
+});
+
+it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
+  expect(timeoutMinutesOn('integration_no_ak', ECS_RUNNER)).toBe(60);
+});
+
+it('keeps the no-AK gate on its pre-contention ceiling when hosted', () => {
+  expect(timeoutMinutesOn('integration_no_ak', HOSTED_RUNNER)).toBe(30);
+  expect(timeoutMinutesOn('integration_no_ak', '')).toBe(30);
+});
+
+it('keeps lint_and_static sized for cold-cache pool runs', () => {
+  // Both numbers are measured, not predicted: a flat 45 was tried first and
+  // the lane was beheaded twice running honestly on cold-cache hk3 pool
+  // runners — at 30 flat (install 892s vs the sibling Test job's 347s) and
+  // again at 45 (install 940s, bundle closure 681s vs a warm 171s, every
+  // step 2–4x). Routed like test's 120/60 and no_ak's 60/30 for the same
+  // pool-contention reason; hosted keeps the tighter ceiling so a genuine
+  // hang there does not burn the ECS allowance.
+  expect(timeoutMinutesOn('lint_and_static', ECS_RUNNER)).toBe(90);
+  expect(timeoutMinutesOn('lint_and_static', HOSTED_RUNNER)).toBe(45);
+  expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
+});
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
@@ -110,7 +172,8 @@ const assertEventReachesOnly = (event, allowedJobs) => {
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {
     // Without it the lanes have no path to `main` at all: `ci.yml`'s push
-    // trigger is accepted only by `test` and the `classify_pr` it depends on,
+    // trigger is accepted only by `test`, `lint_and_static`, and the
+    // `classify_pr` they depend on,
     // so a merge-queue-only gate on a repository with no merge queue is an off
     // switch for these two.
     expect(triggers.schedule).toBeDefined();
@@ -229,11 +292,12 @@ describe('platform lanes — triggers', () => {
 // `ci.yml` carried no push trigger while no merge queue was enabled, so
 // nothing validated the merged tree before it landed and the only check after
 // it was the ~40-minute E2E — a regression could sit in `main` for hours. The
-// trigger is back, taken by `test` and the `classify_pr` it depends on.
+// trigger is back, taken by `test`, `lint_and_static`, and the `classify_pr`
+// they depend on.
 //
 // The runner-routing tests in `.github/scripts/ci-runner-routing.test.mjs`
 // cannot reach any of this: they drive `pick_runner`'s shell directly with
-// EVENT_NAME=push, bypassing the trigger and both job gates, so they stay
+// EVENT_NAME=push, bypassing the trigger and all three job gates, so they stay
 // green if either loses its push arm. What is pinned here is the YAML half —
 // the same class of invariant as `keeps a nightly run to exactly the two
 // lanes` above, and for the same reason: every mutation below leaves the whole
@@ -254,6 +318,188 @@ describe('post-merge push lane', () => {
     // main-ci-failure-issue.yml's `head_branch == 'main'` filter means no
     // issue is filed for tag runs: a silent red on release day.
     expect(triggers.push).toEqual({ branches: ['main'] });
+  });
+
+  it("lint_and_static shares test's exact gate", () => {
+    // The split exists so this job can become a required check on its own;
+    // its gate is therefore as security-relevant as test's. One equality
+    // rides on test's whole-literal pin below: if the two gates ever
+    // diverge — someone widening or narrowing the lint lane independently —
+    // this fails before the divergence ships, and the literal pin still
+    // guards the shared shape.
+    expect(condOf('lint_and_static')).toBe(condOf('test'));
+  });
+
+  it('routes lint_and_static through the classify_pr fork-trust output', () => {
+    // runs-on is where the contributor code this describe's other pins talk
+    // about actually executes. classify_pr's pick_runner is the fork-trust
+    // boundary — untrusted fork PRs stay on hosted runners — and a literal
+    // pool label array here would bypass that indirection whole (and desync
+    // from timeout-minutes, which reads the same output). Whole-expression
+    // match, as no-ak-integration-ci does for test_windows.
+    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
+      String(ci.jobs.test['runs-on']),
+    );
+    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
+    // The needs edge is what makes every needs.classify_pr.outputs.* this
+    // describe relies on non-empty at runtime. Drop it and the lane silently
+    // decouples from the classifier: runs-on falls through the `|| '…'` to
+    // hosted runners, skip_ci reads '' so a release-sync PR promised a no-op
+    // pass runs the full battery, and `Use trusted CI profile` takes its
+    // documented degraded empty→full fallback.
+    expect(
+      [].concat(ci.jobs.lint_and_static.needs ?? []),
+      'lint_and_static must consume the classifier',
+    ).toContain('classify_pr');
+  });
+
+  it('lint_and_static keeps the minimal token its required-check role needs', () => {
+    // This block overrides the workflow-level `checks: write` /
+    // `statuses: write` grant. The lane runs contributor code (`npm ci`
+    // executes the PR's lifecycle scripts) on same-repo PRs, merge_group,
+    // dispatch and push; widening this — say by copying `test`'s block when
+    // adding a reporter — hands write tokens to that code. `test`'s own
+    // wider block is legitimate: dorny/test-reporter needs `checks: write`.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+  });
+
+  it('keeps every shared prelude step identical between test and lint_and_static', () => {
+    // The split copied the checkout/node/install prelude into the new job,
+    // and copies drift: the first merge after the split brought #10799's
+    // trusted-classifier rework, which updated `test`'s copy and left the
+    // lint one stale — resolved by hand that time. Field-for-field equality
+    // over every same-named step turns the next drift into a red test
+    // instead of a review archaeology exercise.
+    // Recursive canonicalisation — NOT JSON.stringify's array replacer,
+    // which is a property allowlist applied at every nesting level: with it,
+    // each step's nested `with:` and `env:` serialised as `{}`, so the guard
+    // was blind to drift in Checkout's ref/fetch-depth, setup-node's
+    // versions, and — the consequential one — `Use trusted CI profile`'s
+    // TRUSTED_CI_PROFILE binding, whose drift to a literal would skip every
+    // profile-gated step while reporting green.
+    const canon = (v) =>
+      Array.isArray(v)
+        ? v.map(canon)
+        : v && typeof v === 'object'
+          ? Object.fromEntries(
+              Object.keys(v)
+                .sort()
+                .map((k) => [k, canon(v[k])]),
+            )
+          : v;
+    // Exempt the FIELD that must differ, not the whole step: the collector's
+    // artifact name is per-job (upload-artifact v4+ rejects duplicates when
+    // both jobs fail in one run; ci-disk-pressure.test.mjs asserts the
+    // notEqual), but a whole-step exemption left its `uses:` revision — the
+    // one action pin in the job — compared by nothing.
+    const byName = (job) =>
+      new Map(
+        (ci.jobs[job].steps ?? []).map((s) => {
+          const { name: _artifactName, ...restWith } = s.with ?? {};
+          return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
+        }),
+      );
+    const t = byName('test');
+    const l = byName('lint_and_static');
+    // The serializer is the guard's eyes: both sides of every comparison below
+    // flow through it, so a regression that drops nested fields compares `{}`
+    // to `{}` and the drift loop reports green — the exact array-replacer blind
+    // spot the recursion above replaced. Pin a known nested key on the
+    // serialized OUTPUT rather than on canon alone, because the regression that
+    // matters is a call site swapped back to an allowlist, which a canon-only
+    // fixture cannot see.
+    expect(t.get('Checkout')).toContain('"fetch-depth":1');
+    const shared = [...t.keys()].filter((n) => l.has(n));
+    // The prelude is what is duplicated; if this floor ever drops, steps
+    // were renamed apart and the guard is no longer guarding anything. 13 and
+    // not 12: the collector is deliberately in both jobs, so it is in the
+    // intersection, and a floor below the real count lets any one shared step
+    // be deleted out of either job without turning this red.
+    expect(shared.length).toBeGreaterThanOrEqual(13);
+    for (const n of shared) {
+      expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
+        t.get(n),
+      );
+    }
+    // Name-keyed maps are order-blind, and order is load-bearing here: the
+    // `steps` context only exposes steps that have already run, and a
+    // nonexistent property reads as '' — so if `Use trusted CI profile`
+    // (id: ci_profile) ever lands below its consumers, every
+    // `ci_profile == 'full'` gate evaluates '' == 'full' and the lane
+    // completes green having executed nothing.
+    const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
+    const sharedSet = new Set(shared);
+    expect(
+      namesIn('lint_and_static').filter((n) => sharedSet.has(n)),
+      'shared prelude reordered between the two jobs',
+    ).toEqual(namesIn('test').filter((n) => sharedSet.has(n)));
+    const lintNames = namesIn('lint_and_static');
+    expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
+      lintNames.indexOf('Install dependencies'),
+    );
+  });
+
+  it('keeps the moved lint/static payload present, gated, and out of test', () => {
+    // The shared-prelude equality above only sees the name INTERSECTION; the
+    // twenty moved steps — the payload this job exists to run — were pinned
+    // by nothing: deleting `Run Prettier`, flipping its gate to
+    // `docs_only`, or re-adding a copy to `test` all left every suite
+    // green. A required check that silently stops running ESLint or the
+    // lockfile audit still reports green on every PR; pin the payload by
+    // name, order and gate. Two members deliberately carry different gates
+    // and are asserted as such below — do not "normalise" them: the size
+    // gate must run on github_ci_only PRs (a .github/-only PR is exactly
+    // the one most likely to breach the 500 KB workflow limit), and the
+    // helper-checks step IS the github_ci_only fast path.
+    const FULL_PAYLOAD = [
+      'Audit critical runtime dependencies',
+      'Check lockfile',
+      'Check desktop workspace isolation',
+      'Check TUI dependency direction',
+      'Install linters',
+      'Run ESLint',
+      'Run actionlint',
+      'Run shellcheck',
+      'Run yamllint',
+      'Run Prettier',
+      'Run sensitive keyword linter',
+      'Run i18n check',
+      'Generate settings schema',
+      'Check settings schema is up-to-date',
+      'Generate VS Code companion notices',
+      'Check VS Code companion notices are up-to-date',
+      'Check serve fast-path bundle closure',
+      'Run .github/scripts helper tests',
+    ];
+    const steps = ci.jobs.lint_and_static.steps ?? [];
+    const stepByName = new Map(steps.map((x) => [x.name, x]));
+    const testNames = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
+    const prelude = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
+    // Order and completeness in one shot: the full-gated steps that are not
+    // part of the shared prelude must be exactly this list, in this order.
+    expect(
+      steps
+        .filter(
+          (x) =>
+            String(x.if ?? '').includes("ci_profile == 'full'") &&
+            !prelude.has(x.name),
+        )
+        .map((x) => x.name),
+    ).toEqual(FULL_PAYLOAD);
+    for (const n of FULL_PAYLOAD) {
+      expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
+    }
+    // The two deliberately-different gates, pinned as they are.
+    expect(String(stepByName.get('Check workflow file size').if)).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
+    );
+    expect(String(stepByName.get('GitHub CI helper checks').if)).toContain(
+      "ci_profile == 'github_ci_only'",
+    );
+    expect(testNames.has('Check workflow file size')).toBe(false);
+    expect(testNames.has('GitHub CI helper checks')).toBe(false);
   });
 
   it('classify_pr admits push in its event allowlist', () => {
@@ -287,7 +533,7 @@ describe('post-merge push lane', () => {
     );
   });
 
-  it('keeps a post-merge run to exactly classify_pr and test', () => {
+  it('keeps a post-merge run to exactly its expected jobs', () => {
     // The mirror of the nightly assertion, through the same helper: a `push:`
     // trigger fires the whole workflow, so every other job must exclude push
     // outright or gate on an allowlist that cannot contain it. Otherwise a
@@ -304,25 +550,36 @@ describe('post-merge push lane', () => {
     // pull_request / merge_group, and its `merge-base --is-ancestor` check
     // passes for a newer tip regardless. Order matters as much as presence —
     // the arm has to sit before the `github.ref` fallback to ever be reached.
-    const checkout = (ci.jobs.test.steps ?? []).find((s) =>
-      String(s.uses ?? '').startsWith('actions/checkout'),
-    );
-    expect(checkout).toBeDefined();
-    expect(String(checkout.with?.ref ?? '')).toBe(
-      "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
-    );
+    for (const job of ['test', 'lint_and_static']) {
+      const checkout = (ci.jobs[job].steps ?? []).find((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(checkout, job).toBeDefined();
+      expect(String(checkout.with?.ref ?? ''), job).toBe(
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+      );
+    }
   });
 
-  it('does not upload coverage from a post-merge run', () => {
-    // The artifact's only consumer, post_coverage_comment, is gated to
-    // pull_request; nothing else under .github/ reads coverage-reports-*.
-    // Without this exclusion every merge spends pool egress and artifact
-    // retention on a lane with no reader.
+  it('collects and uploads coverage only from the post-merge run', () => {
+    // Coverage is switched on by QWEN_CI_COVERAGE, which the unit-test step
+    // sets only for push (main): pull-request runs had no reader for the
+    // reports and paid about a fifth of the suite's wall time collecting
+    // them. The upload gate must agree with the switch, or a PR run uploads
+    // an empty artifact and a push run collects reports nobody keeps.
+    const run = stepOf('test', 'Run tests and generate reports');
+    expect(run).toBeDefined();
+    expect(String(run.env?.QWEN_CI_COVERAGE)).toBe(
+      "${{ github.event_name == 'push' && '1' || '' }}",
+    );
     const step = stepOf('test', 'Upload coverage reports');
     expect(step).toBeDefined();
     expect(String(step.if)).toBe(
-      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}",
+      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'push' }}",
     );
+    // The pull-request coverage comment was the artifact's only reader; with
+    // no PR-side reports it has nothing to post and must stay gone.
+    expect(ci.jobs.post_coverage_comment).toBeUndefined();
   });
 
   it('scopes the concurrency group and keeps main uncancellable', () => {
@@ -377,6 +634,12 @@ describe('platform lanes — the retired sensitivity classifier', () => {
 });
 
 describe('GitHub helper tests', () => {
+  it('includes the disk-pressure contract suite', () => {
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/ci-disk-pressure.test.mjs',
+    );
+  });
+
   it('runs every invocation serially', () => {
     const helperSteps = Object.values(ci.jobs)
       .flatMap((job) => job.steps ?? [])

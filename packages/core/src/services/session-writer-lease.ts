@@ -7,12 +7,17 @@
 import { execFile } from 'node:child_process';
 import * as nodeConstants from 'node:constants';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
-import type { Stats } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
+import {
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 
 const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
@@ -234,6 +239,7 @@ interface SessionWriterOwnerRecord {
   owner_id: string;
   pid: number;
   process_start_identity?: string;
+  pid_namespace_id?: number;
   hostname: string;
   process_kind: SessionWriterProcessKind;
   acquired_at: string;
@@ -416,6 +422,9 @@ function hasValidOwnerFields(
     (record['process_start_identity'] === undefined ||
       (typeof record['process_start_identity'] === 'string' &&
         record['process_start_identity'].length > 0)) &&
+    (record['pid_namespace_id'] === undefined ||
+      (Number.isSafeInteger(record['pid_namespace_id']) &&
+        (record['pid_namespace_id'] as number) > 0)) &&
     typeof record['hostname'] === 'string' &&
     record['hostname'].length > 0 &&
     typeof processKind === 'string' &&
@@ -479,11 +488,38 @@ function isActiveLockRecord(
   );
 }
 
+function parseLinuxProcessStartBootId(
+  identity: string | undefined,
+): string | null {
+  if (!identity) return null;
+  const match = /^linux:([0-9a-f-]+):\d+$/i.exec(identity);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
 async function lockStateForRecord(
   record: ActiveLockRecord,
   raw: string,
 ): Promise<ExistingLockState> {
   if (record.hostname !== os.hostname()) return { kind: 'live', record, raw };
+  if (process.platform === 'linux') {
+    // Reclaim only inside the same local identity domain. The boot ID and
+    // PID namespace must both be recorded and match this reader: a record
+    // without them, or from another boot or namespace, may belong to a live
+    // writer sharing this filesystem (same-hostname machines, mounted homes,
+    // sibling containers), so it is fenced rather than reclaimed.
+    const localBootId = readLocalBootId()?.toLowerCase() ?? null;
+    const localNamespaceId = readPidNamespaceId();
+    if (
+      localBootId === null ||
+      localNamespaceId === null ||
+      parseLinuxProcessStartBootId(record.process_start_identity) !==
+        localBootId ||
+      record.pid_namespace_id === undefined ||
+      record.pid_namespace_id !== localNamespaceId
+    ) {
+      return { kind: 'live', record, raw };
+    }
+  }
   if (!isProcessAlive(record.pid)) return { kind: 'stale', record, raw };
   if (!record.process_start_identity) return { kind: 'live', record, raw };
   const currentStartIdentity = await readProcessStartIdentity(record.pid);
@@ -1582,6 +1618,7 @@ export class SessionWriterLease {
   private terminalPromise: Promise<void> | undefined;
   private operationTail: Promise<void> = Promise.resolve();
   private readonly lockRecordRaw: string;
+  private lockFileIdentity: { dev: bigint; ino: bigint } | undefined;
   private readonly retiredPath: string;
   private readonly claimPath: string;
 
@@ -1659,6 +1696,7 @@ export class SessionWriterLease {
     }
 
     const processStartIdentity = await readProcessStartIdentity(process.pid);
+    const pidNamespaceId = readPidNamespaceId();
     const lockRecord: ActiveSessionWriterLockRecord = {
       schema_version: LOCK_SCHEMA_VERSION,
       state: 'active',
@@ -1668,6 +1706,7 @@ export class SessionWriterLease {
       ...(processStartIdentity
         ? { process_start_identity: processStartIdentity }
         : {}),
+      ...(pidNamespaceId !== null ? { pid_namespace_id: pidNamespaceId } : {}),
       hostname: os.hostname(),
       process_kind: normalizedOptions.processKind ?? 'unknown',
       acquired_at: new Date().toISOString(),
@@ -1935,6 +1974,7 @@ export class SessionWriterLease {
   ): Promise<SessionWriterLease> {
     const lease = new SessionWriterLease(lockPath, lockRecord, options);
     try {
+      lease.lockFileIdentity = lease.readVerifiedLockIdentity();
       options.onOwnershipAcquired?.(lease);
       const snapshot = await captureTranscriptSnapshot(
         options.transcriptPath,
@@ -2039,16 +2079,22 @@ export class SessionWriterLease {
 
   private async readOwnedLock(): Promise<ActiveLockRecord> {
     if (this.released) throw new SessionWriterLostError();
-    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    let stat: BigIntStats;
     try {
-      stat = await fs.lstat(this.lockPath);
+      stat = await fs.lstat(this.lockPath, { bigint: true });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new SessionWriterLostError();
       }
       throw new SessionWriterUnavailableError();
     }
-    if (!stat.isFile() || stat.isSymbolicLink()) {
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      (this.lockFileIdentity !== undefined &&
+        (stat.dev !== this.lockFileIdentity.dev ||
+          stat.ino !== this.lockFileIdentity.ino))
+    ) {
       throw new SessionWriterLostError();
     }
     let raw: string;
@@ -2069,7 +2115,97 @@ export class SessionWriterLease {
     ) {
       throw new SessionWriterLostError();
     }
+    let current: BigIntStats;
+    try {
+      current = await fs.lstat(this.lockPath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new SessionWriterLostError();
+      }
+      throw new SessionWriterUnavailableError();
+    }
+    if (
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      current.dev !== stat.dev ||
+      current.ino !== stat.ino
+    ) {
+      throw new SessionWriterLostError();
+    }
     return record;
+  }
+
+  private readVerifiedLockIdentity(): { dev: bigint; ino: bigint } {
+    let descriptor: number;
+    try {
+      descriptor = nodeFs.openSync(
+        this.lockPath,
+        nodeConstants.O_RDONLY |
+          (nodeConstants.O_NOFOLLOW ?? 0) |
+          (nodeConstants.O_NONBLOCK ?? 0),
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') {
+        throw new SessionWriterLostError();
+      }
+      throw new SessionWriterUnavailableError();
+    }
+    try {
+      const stat = nodeFs.fstatSync(descriptor, { bigint: true });
+      if (!stat.isFile()) throw new SessionWriterLostError();
+      if (!hasVerifiableInode(stat.ino)) {
+        throw new SessionWriterUnavailableError();
+      }
+      const assertPathMatchesDescriptor = (): void => {
+        let pathStat: BigIntStats;
+        try {
+          pathStat = nodeFs.lstatSync(this.lockPath, { bigint: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new SessionWriterLostError();
+          }
+          throw new SessionWriterUnavailableError();
+        }
+        if (
+          !pathStat.isFile() ||
+          pathStat.isSymbolicLink() ||
+          pathStat.dev !== stat.dev ||
+          pathStat.ino !== stat.ino
+        ) {
+          throw new SessionWriterLostError();
+        }
+      };
+      assertPathMatchesDescriptor();
+      const raw = nodeFs.readFileSync(descriptor, 'utf8');
+      const record = parseLockRecord(raw);
+      if (
+        !record ||
+        !isActiveLockRecord(record) ||
+        record.owner_id !== this.ownerId ||
+        raw !== this.lockRecordRaw
+      ) {
+        throw new SessionWriterLostError();
+      }
+      assertPathMatchesDescriptor();
+      return { dev: stat.dev, ino: stat.ino };
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      throw new SessionWriterUnavailableError();
+    } finally {
+      nodeFs.closeSync(descriptor);
+    }
+  }
+
+  /** Verify ownership after the transcript snapshot intentionally changes. */
+  assertCleanupOwned(): void {
+    if (this.released) throw new SessionWriterLostError();
+    const expected = this.lockFileIdentity;
+    if (expected === undefined) throw new SessionWriterUnavailableError();
+    const current = this.readVerifiedLockIdentity();
+    if (current.dev !== expected.dev || current.ino !== expected.ino) {
+      throw new SessionWriterLostError();
+    }
   }
 
   assertOwnedAndUnchanged(): Promise<void> {

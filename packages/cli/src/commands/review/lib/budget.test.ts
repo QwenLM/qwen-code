@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_CANDIDATE_FLOOR,
   MAX_INLINE_ANGLES,
   MIN_INLINE_ANGLES,
   VERIFY_SHARD,
@@ -15,8 +16,16 @@ import {
   reverseAuditRoundCap,
   reverseAuditRoundTier,
   cappedRoundTier,
-  reviewBudget,
+  reviewBudget as deriveReviewBudget,
+  type BudgetContext,
+  type BudgetInput,
 } from './budget.js';
+import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
+
+const reviewBudget = (
+  input: Omit<BudgetInput, 'changedFiles'> & { changedFiles?: number },
+  context?: BudgetContext,
+) => deriveReviewBudget({ changedFiles: 1, ...input }, context);
 
 const budget = (srcDiffLines: number, diffLines = srcDiffLines) =>
   reviewBudget({ srcDiffLines, diffLines });
@@ -58,6 +67,44 @@ describe('reviewBudget — inline angles scale with what there is to see', () =>
     expect(budget(0, 2000).inlineAngles).toBeLessThanOrEqual(
       budget(2000, 2000).inlineAngles,
     );
+  });
+});
+
+describe('reviewBudget — low-effort candidate floor', () => {
+  it.each([
+    [0, 0],
+    [1, 1],
+    [3, 3],
+    [4, 4],
+    [12, 4],
+  ])(
+    'targets min(%i changed files, 4) candidates',
+    (changedFiles, expected) => {
+      expect(
+        reviewBudget({
+          srcDiffLines: 120,
+          diffLines: 120,
+          changedFiles,
+        }).candidateFloor,
+      ).toBe(expected);
+    },
+  );
+
+  it('is independent of diff lines and capped by its one exported maximum', () => {
+    expect(
+      reviewBudget({
+        srcDiffLines: 50_000,
+        diffLines: 50_000,
+        changedFiles: 1,
+      }).candidateFloor,
+    ).toBe(1);
+    expect(
+      reviewBudget({
+        srcDiffLines: 1,
+        diffLines: 1,
+        changedFiles: 50_000,
+      }).candidateFloor,
+    ).toBe(MAX_CANDIDATE_FLOOR);
   });
 });
 
@@ -698,14 +745,18 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000) + ' '.repeat(40_000);
     const t0 = performance.now();
     expect(budgetGapDisclosures(pathological)).toEqual([]);
-    expect(performance.now() - t0).toBeLessThan(1000);
+    expectWithinLatencyBudget(performance.now() - t0, 1000, {
+      poolMultiplier: 20,
+    });
     // The placeholder classifier's own hazard shape — a token followed by
     // a long whitespace run — must stay linear too; it was measured
     // quadratic (seconds at 40k spaces) when its quantifiers overlapped.
     const spaced = `Budget gap: (none${' '.repeat(160_000)}x)`;
     const t1 = performance.now();
     expect(budgetGapDisclosures(spaced)).toHaveLength(1);
-    expect(performance.now() - t1).toBeLessThan(1000);
+    expectWithinLatencyBudget(performance.now() - t1, 1000, {
+      poolMultiplier: 20,
+    });
     // The line matcher's own hazard shape — a long indentation run on a
     // line that is NOT a disclosure. The pre-rewrite matcher's overlapping
     // `[ \t]*` pair backtracked quadratically here (seconds at 40k tabs);
@@ -714,7 +765,9 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const indented = `Budget gap: ok\n${'\t'.repeat(40_000)}not a gap line`;
     const t2 = performance.now();
     expect(budgetGapDisclosures(indented)).toEqual(['ok']);
-    expect(performance.now() - t2).toBeLessThan(1000);
+    expectWithinLatencyBudget(performance.now() - t2, 1000, {
+      poolMultiplier: 20,
+    });
     // The Chinese clause's own hazard shape: a token, a separator, then a long
     // run that never reaches a completion word. Its first cut chained four
     // optional groups across `\s*` — the overlapping shape this test exists
@@ -722,7 +775,9 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const zhPathological = `Budget gap: 无 — ${'检查 '.repeat(20_000)}`;
     const t3 = performance.now();
     expect(budgetGapDisclosures(zhPathological)).toHaveLength(1);
-    expect(performance.now() - t3).toBeLessThan(1000);
+    expectWithinLatencyBudget(performance.now() - t3, 1000, {
+      poolMultiplier: 20,
+    });
     // And a deep-indented bullet disclosure still matches — the leading
     // whitespace lives inside the optional bullet group, not beside it.
     expect(

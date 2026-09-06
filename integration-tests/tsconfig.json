@@ -45,6 +45,9 @@
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../packages/core/src/utils/transcript-records.ts"
       ],
+      "@qwen-code/qwen-code-core/noFollowOpen": [
+        "../packages/core/src/utils/no-follow-open.ts"
+      ],
       "@qwen-code/qwen-code-core/goalWire": [
         "../packages/core/src/goals/goal-wire.ts"
       ],
@@ -124,7 +127,7 @@
       "@qwen-code/acp-bridge/workspacePaths": [
         "../packages/acp-bridge/src/workspacePaths.ts"
       ],
-      // qwen-serve-webui-live-journal-recovery.test.ts imports Web Shell's
+      // qwen-serve-web-shell-live-journal-recovery.test.ts imports Web Shell's
       // daemon bindings; map to source so typecheck does not depend on dist.
       "@qwen-code/web-shell/daemon-react-sdk": [
         "../packages/web-shell/client/daemon-react-sdk.ts"

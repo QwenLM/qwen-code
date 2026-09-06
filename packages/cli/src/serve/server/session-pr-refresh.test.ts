@@ -12,8 +12,10 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   Storage,
+  fetchGitHubPullRequestIssues,
   fetchGitHubPullRequests,
   readSessionPrs,
+  updateSessionPrStates,
   upsertSessionPr,
   type SessionService,
 } from '@qwen-code/qwen-code-core';
@@ -42,9 +44,39 @@ import {
   startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
 
+// dispose() stops the next tick but does not await the sweep already in
+// flight, so a sweep can still be writing under the temp tree while teardown
+// walks it — recursive rm then fails with ENOTEMPTY when a file lands between
+// its readdir and rmdir. Retry so cleanup waits the writer out instead of
+// failing a test that already passed.
+const removeTempTree = (dir: string) =>
+  fsp.rm(dir, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 50,
+  });
+
+// Delegating spy: the Aone tests seed a real repository, so resolution must
+// really run — the spy only makes its per-sweep cost observable.
+const aoneMocks = vi.hoisted(() => ({
+  resolveAoneWorkspaceRepo: vi.fn(),
+}));
+vi.mock('./aone-mrs.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./aone-mrs.js')>();
+  aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
+    actual.resolveAoneWorkspaceRepo,
+  );
+  return {
+    ...actual,
+    resolveAoneWorkspaceRepo: aoneMocks.resolveAoneWorkspaceRepo,
+  };
+});
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   fetchGitHubPullRequests: vi.fn(),
+  fetchGitHubPullRequestIssues: vi.fn(),
 }));
 
 const fsMocks = vi.hoisted(() => ({
@@ -62,6 +94,27 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
+const fetchGitHubPullRequestIssuesMock = vi.mocked(
+  fetchGitHubPullRequestIssues,
+);
+
+function closingIssue(number: number, state: 'open' | 'completed' = 'open') {
+  return { number, url: `https://github.com/o/r/issues/${number}`, state };
+}
+
+function prIssues(
+  entries: Array<[number, Array<ReturnType<typeof closingIssue>>]>,
+): Awaited<ReturnType<typeof fetchGitHubPullRequestIssues>> {
+  return {
+    kind: 'ok',
+    pullRequests: new Map(
+      entries.map(([number, issues]) => [
+        number,
+        { url: `https://github.com/o/r/pull/${number}`, issues },
+      ]),
+    ),
+  };
+}
 
 const SESSION_A = '00000000-0000-4000-8000-000000000001';
 const SESSION_B = '00000000-0000-4000-8000-000000000002';
@@ -175,6 +228,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       path.join(os.tmpdir(), 'qwen-pr-refresh-work-'),
     );
     process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(prIssues([]));
     markSessionCatalogChanged = vi.fn();
     runtime = {
       workspaceId: 'primary',
@@ -265,7 +319,6 @@ describe('refreshWorkspaceSessionPrStates', () => {
       overrides: Partial<AoneMrBackend> = {},
     ): AoneMrBackend {
       return {
-        list: vi.fn(async () => []),
         view: vi.fn(async (_repoPath: string, id: number) => ({
           number: id,
           url: AONE_URL,
@@ -300,6 +353,45 @@ describe('refreshWorkspaceSessionPrStates', () => {
       const persisted = await readSessionPrs(prPath);
       expect(persisted?.[0]?.state).toBe('merged');
       expect(persisted?.[0]?.createdAt).toBe(seeded[0]?.createdAt);
+    });
+
+    it('converges merged bindings without a snapshot and then costs nothing', async () => {
+      // Closing references are GitHub-only, so a merged Aone binding
+      // would otherwise keep the workspace pending forever — one origin
+      // resolution per sweep for nothing.
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, {
+        number: 26430560,
+        url: AONE_URL,
+        state: 'merged',
+      });
+      const backend = fakeAoneBackend();
+
+      const first = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(first).toEqual({ scanned: 1, updated: 1, aoneConsumed: 0 });
+      expect(backend.view).not.toHaveBeenCalled();
+      expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+      expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+      expect(aoneMocks.resolveAoneWorkspaceRepo).toHaveBeenCalledTimes(1);
+
+      const second = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      // No pending target at all: the sweep returns before it even
+      // resolves the workspace repository (no `aoneConsumed`, no origin
+      // spawn).
+      expect(second).toEqual({ scanned: 1, updated: 0 });
+      expect(backend.view).not.toHaveBeenCalled();
+      expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+      expect(aoneMocks.resolveAoneWorkspaceRepo).toHaveBeenCalledTimes(1);
     });
 
     it('dedupes one mr view across sessions binding the same MR', async () => {
@@ -707,6 +799,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     ).rejects.toBeInstanceOf(WorkspaceGenerationClosedError);
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
     expect(markSessionCatalogChanged).not.toHaveBeenCalled();
   });
@@ -894,22 +987,504 @@ describe('refreshWorkspaceSessionPrStates', () => {
     }
   });
 
-  it('skips gh entirely when every binding is merged', async () => {
+  it('skips the list query when every binding is merged, and every query once their issues are snapshotted', async () => {
     await seedSession(SESSION_A);
-    await upsertSessionPr(
-      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
-      { number: 42, url: 'https://github.com/o/r/pull/42', state: 'merged' },
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
     );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
     await seedSession(SESSION_B);
-    await upsertSessionPr(
-      sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
-      { number: 43, url: 'https://github.com/o/r/pull/43', state: 'merged' },
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'merged',
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues([
+        [42, [closingIssue(7, 'completed')]],
+        [43, []],
+      ]),
+    );
+
+    // Merged bindings that predate the issue snapshot get one by-number
+    // lookup (legacy sidecars), never the list query.
+    const first = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(first).toEqual({ scanned: 2, updated: 2 });
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledWith(
+      workspaceCwd,
+      { GH_TOKEN: 'x' },
+      [42, 43],
+    );
+    expect((await readSessionPrs(prPathA))?.[0]?.issues).toEqual([
+      closingIssue(7, 'completed'),
+    ]);
+    expect((await readSessionPrs(prPathB))?.[0]?.issues).toEqual([]);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
+    const second = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(second).toEqual({ scanned: 2, updated: 0 });
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+  });
+
+  it('snapshots the closing issues of an open binding alongside its state', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const seeded = await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues([[42, [closingIssue(7)]]]),
     );
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
 
-    expect(result).toEqual({ scanned: 2, updated: 0 });
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    const persisted = await readSessionPrs(prPath);
+    expect(persisted?.[0]).toMatchObject({
+      state: 'merged',
+      issues: [closingIssue(7)],
+      createdAt: seeded[0]?.createdAt,
+    });
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+
+    // Closing references change while a PR is open: the next sweep tracks
+    // an issue added to the body, and a closed issue's state.
+    await updateSessionPrStates(
+      prPath,
+      new Map([[42, { state: 'open' as const, url: persisted![0]!.url }]]),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues([[42, [closingIssue(7, 'completed'), closingIssue(8)]]]),
+    );
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([
+      closingIssue(7, 'completed'),
+      closingIssue(8),
+    ]);
+  });
+
+  it("never applies issues from this workspace's same-numbered PR to a foreign binding", async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/other-org/other-repo/pull/42',
+      state: 'merged',
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues([[42, [closingIssue(7)]]]),
+    );
+
+    // The repository cannot resolve a foreign binding, so the lookup
+    // converges it with an empty snapshot instead of re-querying it every
+    // sweep forever.
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 0,
+    });
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('converges a merged binding the lookup resolves to nothing', async () => {
+    // Another repository's merged PR whose number this repository does not
+    // have at all: the lookup succeeds with an empty result, and the
+    // binding must leave the sweep on that success instead of being
+    // re-queried every five minutes.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 424242,
+      url: 'https://github.com/other-org/other-repo/pull/424242',
+      state: 'merged',
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 0,
+    });
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a foreign open binding out of the issue lookup', async () => {
+    // The list query names this workspace's repository; an open binding to
+    // another repository can never resolve here and must not cost the
+    // lookup every sweep (the Aone branch filters the same way).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/other-org/other-repo/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+
+    for (const round of [1, 2]) {
+      expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+        scanned: 1,
+        updated: 0,
+      });
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(round);
+      expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+    }
+    expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
+      state: 'open',
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
+  });
+
+  it('converges merged bindings locally when the lookup is structurally impossible', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 0,
+    });
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+  });
+
+  it('converges merged bindings when the cwd is not a git repository or gh has no usable remote', async () => {
+    for (const kind of ['not_a_repo', 'repo_unresolved'] as const) {
+      const sessionId = kind === 'not_a_repo' ? SESSION_A : SESSION_B;
+      await seedSession(sessionId);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      await upsertSessionPr(prPath, {
+        number: kind === 'not_a_repo' ? 42 : 43,
+        url: `https://github.com/o/r/pull/${kind === 'not_a_repo' ? 42 : 43}`,
+        state: 'merged',
+      });
+      fetchGitHubPullRequestIssuesMock.mockClear();
+      fetchGitHubPullRequestIssuesMock.mockResolvedValue({ kind });
+
+      expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+        scanned: kind === 'not_a_repo' ? 1 : 2,
+        updated: 1,
+      });
+      expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+
+      fetchGitHubPullRequestIssuesMock.mockClear();
+      expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+        scanned: kind === 'not_a_repo' ? 1 : 2,
+        updated: 0,
+      });
+      expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it('applies fetched issues to bindings spelled with non-canonical urls', async () => {
+    // The bind path accepts any http(s) url: `/files`, `www.`, `http:`,
+    // `.diff`, `.patch` all name the same PR and must receive its issues,
+    // not a false empty snapshot (which would be permanent for a merged
+    // binding).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const spellings: Array<[number, string]> = [
+      [42, 'http://www.github.com/O/R/pull/42/files'],
+      [43, 'https://github.com/o/r/pull/43.diff'],
+      [44, 'https://github.com/o/r/pull/44.patch'],
+    ];
+    for (const [number, url] of spellings) {
+      await upsertSessionPr(prPath, { number, url, state: 'merged' });
+    }
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues(spellings.map(([number]) => [number, [closingIssue(number)]])),
+    );
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 3,
+    });
+    const persisted = await readSessionPrs(prPath);
+    for (const [number, url] of spellings) {
+      expect(persisted?.find((entry) => entry.number === number)).toMatchObject(
+        { url, issues: [closingIssue(number)] },
+      );
+    }
+  });
+
+  it('refreshes the state of a non-canonically spelled binding during a lookup outage', async () => {
+    // The list query reports the canonical url; the write must still ride
+    // the entry's own spelling or the sidecar's canonical gate drops it and
+    // the badge stays open for as long as the lookup keeps failing.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const url = 'http://www.github.com/O/R/pull/42/files';
+    await upsertSessionPr(prPath, { number: 42, url, state: 'open' });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'HTTP 502',
+      gitRoot: workspaceCwd,
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
+      url,
+      state: 'merged',
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
+  });
+
+  it('converges a merged foreign binding during a lookup outage', async () => {
+    // The list query (run for the open local binding) names the
+    // repository; the merged foreign binding can never resolve here, so it
+    // converges even while the lookup itself is failing.
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/other-org/other-repo/pull/42',
+      state: 'merged',
+    });
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(43, 'open')],
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'HTTP 502',
+      gitRoot: workspaceCwd,
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 2,
+      updated: 1,
+    });
+    expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledWith(
+      workspaceCwd,
+      { GH_TOKEN: 'x' },
+      [43],
+    );
+    expect((await readSessionPrs(prPathA))?.[0]?.issues).toEqual([]);
+    expect((await readSessionPrs(prPathB))?.[0]?.issues).toBeUndefined();
+  });
+
+  it('keeps retrying a merged binding after a transient lookup failure', async () => {
+    // A 5xx or rate limit says nothing about the PR's references; an
+    // empty snapshot here would permanently record "fetched, none".
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'HTTP 502',
+      gitRoot: workspaceCwd,
+    });
+
+    for (const round of [1, 2]) {
+      expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+        scanned: 1,
+        updated: 0,
+      });
+      expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(round);
+    }
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
+  });
+
+  it('runs the list query for a mixed workspace', async () => {
+    // One legacy merged binding (issue catch-up only) next to one open
+    // binding: the open one still needs its state refreshed.
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(43, 'merged')],
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 2,
+      updated: 2,
+    });
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPathA))?.[0]?.issues).toEqual([]);
+  });
+
+  it('never runs the issue lookup once the generation closes between the two queries', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    const guard = attachGuard(runtime);
+    fetchGitHubPullRequestsMock.mockImplementation(async () => {
+      // A trust/env replacement lands while the list query is in flight.
+      guard.close();
+      return { kind: 'ok', pullRequests: [pr(42, 'merged')] };
+    });
+
+    await expect(
+      refreshWorkspaceSessionPrStates(runtime),
+    ).rejects.toBeInstanceOf(WorkspaceGenerationClosedError);
+
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('still snapshots issues when the list query fails', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues([[42, [closingIssue(7)]]]),
+    );
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
+      state: 'open',
+      issues: [closingIssue(7)],
+    });
+  });
+
+  it('still refreshes states when the issue lookup fails', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'HTTP 502',
+      gitRoot: workspaceCwd,
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
+      state: 'merged',
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
   });
 
   it('tracks a reopened closed PR back to open', async () => {
@@ -1365,7 +1940,7 @@ describe('startSessionPrRefreshTimer', () => {
     vi.useRealTimers();
     delete process.env['QWEN_RUNTIME_DIR'];
     for (const dir of [baseDir, trustedCwd, untrustedCwd]) {
-      await fsp.rm(dir, { recursive: true, force: true });
+      await removeTempTree(dir);
     }
   });
 
@@ -1663,7 +2238,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const registry = {
       listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
@@ -1715,7 +2290,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const runtimes: WorkspaceRuntime[] = [runtime];
     const registry = {
       listAll: () => runtimes,
@@ -1787,7 +2362,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const registry = {
       listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
@@ -1852,7 +2427,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const registry = {
       listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
