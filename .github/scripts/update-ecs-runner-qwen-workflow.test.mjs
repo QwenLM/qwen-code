@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import assert from 'node:assert/strict';
 import {
   chmodSync,
   existsSync,
@@ -15,8 +16,14 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'node:test';
 
+// This suite is the ONLY guard on .github/workflows/update-ecs-runner-qwen.yml,
+// and that file routes into the dependency-free github_ci_only fast lane via
+// GITHUB_CI_ONLY_FILES. A second copy under scripts/tests/ would not run on the
+// PRs that change the workflow — vitest only runs under the full profile — so
+// the whole guard lives here, under `node --test`, importing node: builtins
+// alone (#10548 review R14-8).
 const workflow = readFileSync(
   '.github/workflows/update-ecs-runner-qwen.yml',
   'utf8',
@@ -111,13 +118,13 @@ const DEFAULT_JOBS = jobsFixture({
 
 describe('ECS runner qwen update workflow', () => {
   it('installs without the selected runner npm prefix', () => {
-    expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
+    assert.ok(workflow.includes('cd "${RUNNER_TEMP:?}"'));
     // The sudo mode drops the runner user's custom npm prefix, and
     // `--prefix` pins the install to /usr/local: on hk-4/hk-5 root's global
     // prefix is a custom Node directory, so without the pin the update lands
     // somewhere the pool never resolves.
-    expect(workflow).toContain('sudo -n env -u NPM_CONFIG_PREFIX');
-    expect(workflow).toContain('npm install -g --prefix /usr/local');
+    assert.ok(workflow.includes('sudo -n env -u NPM_CONFIG_PREFIX'));
+    assert.ok(workflow.includes('npm install -g --prefix /usr/local'));
   });
 
   it('picks the install mode by running it, not by proxy-probing sudo', () => {
@@ -134,22 +141,24 @@ describe('ECS runner qwen update workflow', () => {
       .split('\n')
       .filter((line) => !line.trim().startsWith('#'))
       .join('\n');
-    expect(updateCode).not.toContain('sudo -n true');
-    expect(updateCode).toContain(
-      'install_qwen sudo -n env -u NPM_CONFIG_PREFIX',
+    assert.ok(!updateCode.includes('sudo -n true'));
+    assert.ok(
+      updateCode.includes('install_qwen sudo -n env -u NPM_CONFIG_PREFIX'),
     );
     // The runner-user fallback has to survive: deleting it strands any pool
     // with no passwordless sudo at all, and making every mode sudo strands
     // it the same way.
-    expect(updateCode).toContain('install_qwen env');
+    assert.ok(updateCode.includes('install_qwen env'));
     // hk-1/hk-2's sudoers names one exact argv and it carries no --prefix,
     // so the pinned line can never be the one that installs there. A second
     // sudo mode running the authorized shape is what keeps those two pools
     // updatable: run 33754421601 (pinned only) rejected hk-1 and hk-2 with
     // `sudo: a password is required` on all three attempts while hk-3/4/5
     // went green.
-    expect(updateCode).toContain(
-      'install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX',
+    assert.ok(
+      updateCode.includes(
+        'install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX',
+      ),
     );
     // Order is the whole fix. Pinned first: on hk-4/hk-5 root's global
     // prefix is a custom Node directory, so the unpinned argv is *allowed*
@@ -160,9 +169,9 @@ describe('ECS runner qwen update workflow', () => {
     const pinnedAt = updateCode.indexOf('install_qwen sudo -n');
     const namedSpecAt = updateCode.indexOf('install_qwen_named_spec sudo -n');
     const runnerAt = updateCode.indexOf('install_qwen env');
-    expect(pinnedAt).toBeGreaterThan(-1);
-    expect(namedSpecAt).toBeGreaterThan(pinnedAt);
-    expect(runnerAt).toBeGreaterThan(namedSpecAt);
+    assert.ok(pinnedAt > -1);
+    assert.ok(namedSpecAt > pinnedAt);
+    assert.ok(runnerAt > namedSpecAt);
     // The order above is only worth what the advance condition is: a `||`
     // chain advances on ANY non-zero exit, so a transient npm failure of the
     // pinned mode falls through to the unpinned arm — which hk-4/hk-5's
@@ -171,24 +180,26 @@ describe('ECS runner qwen update workflow', () => {
     // (npm never ran) may advance; an npm failure goes back to the retry
     // loop. Asserted here too because the replay arm below is skipped on the
     // Windows lane.
-    expect(updateCode).not.toContain('NPM_CONFIG_PREFIX ||');
-    expect(updateCode).toContain('arm_ran_npm');
-    expect(updateCode).toContain("grep -q '^npm '");
+    assert.ok(!updateCode.includes('NPM_CONFIG_PREFIX ||'));
+    assert.ok(updateCode.includes('arm_ran_npm'));
+    assert.ok(updateCode.includes("grep -q '^npm '"));
     // Each install argv appears exactly once: the pin cannot drift between
     // the two modes that share it, and neither mode can lose the registry
     // pin or grow a flag the authorized spec does not name.
-    expect(
-      updateCode.match(/npm install -g --prefix \/usr\/local/g),
-    ).toHaveLength(1);
-    expect(
+    assert.equal(
+      updateCode.match(/npm install -g --prefix \/usr\/local/g)?.length,
+      1,
+    );
+    assert.equal(
       updateCode.match(
         /npm install -g --registry=https:\/\/registry\.npmjs\.org/g,
-      ),
-    ).toHaveLength(1);
+      )?.length,
+      1,
+    );
     // Same class the Verify step is held to: a bare `sudo` blocks on a
     // password prompt until `timeout-minutes: 10` kills the step, on the
     // pools the fallback exists for.
-    expect(updateCode).not.toMatch(/sudo\s+(?!-n\b)/);
+    assert.doesNotMatch(updateCode, /sudo\s+(?!-n\b)/);
   });
 
   it('keeps the verify diagnostics usable without passwordless sudo', () => {
@@ -198,8 +209,9 @@ describe('ECS runner qwen update workflow', () => {
     // probe must be non-interactive and the package dir must also be
     // probed as the runner user sees it.
     const verify = stepBody('Verify version');
-    expect(verify).toContain('npm prefix (user): $(npm prefix -g');
-    expect(verify).toMatch(
+    assert.ok(verify.includes('npm prefix (user): $(npm prefix -g'));
+    assert.match(
+      verify,
       /^\s*cat \/usr\/local\/lib\/node_modules\/@qwen-code\/qwen-code\/package\.json/m,
     );
     // Assert the class documented above — every sudo probe must be
@@ -212,7 +224,7 @@ describe('ECS runner qwen update workflow', () => {
       .split('\n')
       .filter((line) => !line.trim().startsWith('#'))
       .join('\n');
-    expect(verifyCode).not.toMatch(/sudo\s+(?!-n\b)/);
+    assert.doesNotMatch(verifyCode, /sudo\s+(?!-n\b)/);
   });
 
   it('captures the installed version tolerantly', () => {
@@ -221,8 +233,10 @@ describe('ECS runner qwen update workflow', () => {
     // this step exists to print — ever runs. The capture stays stdout-only:
     // any stderr byte would fold into the strict-matched version and fail a
     // healthy install on one runtime warning.
-    expect(stepBody('Verify version')).toContain(
-      'actual="$("${qwen_path}" --version)" || actual=',
+    assert.ok(
+      stepBody('Verify version').includes(
+        'actual="$("${qwen_path}" --version)" || actual=',
+      ),
     );
   });
 
@@ -236,59 +250,67 @@ describe('ECS runner qwen update workflow', () => {
       workflow.indexOf('\n  resolve:'),
       workflow.indexOf('\n  update:'),
     );
-    expect(resolveJob).toContain("RESOLVE_TIMEOUT_SECONDS: '5400'");
+    assert.ok(resolveJob.includes("RESOLVE_TIMEOUT_SECONDS: '5400'"));
     const timeoutMinutes = Number(
       resolveJob.match(/timeout-minutes: (\d+)/)?.[1] ?? 0,
     );
     const budgetSeconds = Number(
       resolveJob.match(/RESOLVE_TIMEOUT_SECONDS: '(\d+)'/)?.[1] ?? 0,
     );
-    expect(budgetSeconds).toBe(5400);
+    assert.equal(budgetSeconds, 5400);
     // The job must outlive the whole wait plus the final poll's npm call.
-    expect(timeoutMinutes * 60).toBeGreaterThanOrEqual(budgetSeconds + 600);
+    assert.ok(timeoutMinutes * 60 >= budgetSeconds + 600);
   });
 
   it('runs only when this workflow changes on main', () => {
-    expect(workflow).toContain(
-      "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+    assert.ok(
+      workflow.includes(
+        "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+      ),
     );
   });
 
   it('annotates a retry and a terminal failure distinctly', () => {
     // The final attempt must not log a "retrying" warning that never
     // retries; a sustained failure ends with an explicit exhausted error.
-    expect(workflow).toContain(
-      'echo "::warning::npm install attempt ${attempt} failed; retrying"',
+    assert.ok(
+      workflow.includes(
+        'echo "::warning::npm install attempt ${attempt} failed; retrying"',
+      ),
     );
-    expect(workflow).toContain(
-      'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
+    assert.ok(
+      workflow.includes(
+        'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
+      ),
     );
-    expect(workflow).toContain('for attempt in 1 2 3; do');
-    expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
+    assert.ok(workflow.includes('for attempt in 1 2 3; do'));
+    assert.ok(workflow.includes('if [[ "${attempt}" -lt 3 ]]; then'));
     // `-n` like every other sudo in this step: the trash cleanup runs on the
     // pools with no passwordless sudo too, where a bare `sudo` would block on
     // a password prompt instead of falling through to the `|| true`.
-    expect(workflow).toContain('sudo -n rm -rf "${PKG_DIR}"/.qwen-code-*');
+    assert.ok(workflow.includes('sudo -n rm -rf "${PKG_DIR}"/.qwen-code-*'));
   });
 
   it('resolves once on a hosted runner and feeds every pool', () => {
     // One resolution shared by the matrix is what keeps pools that start
     // hours apart from installing different versions; it also keeps the
     // registry wait off the ECS runners.
-    expect(workflow).toContain("    runs-on: 'ubuntu-latest'");
-    expect(workflow).toContain(
-      "      version: '${{ steps.version.outputs.version }}'",
+    assert.ok(workflow.includes("    runs-on: 'ubuntu-latest'"));
+    assert.ok(
+      workflow.includes(
+        "      version: '${{ steps.version.outputs.version }}'",
+      ),
     );
-    expect(workflow).toContain("    needs: 'resolve'");
+    assert.ok(workflow.includes("    needs: 'resolve'"));
     // All three consumers (install, verify, failure report) read the job
     // output; a leftover step reference would silently expand to an empty
     // version and install `@qwen-code/qwen-code@`.
     const consumers = workflow.match(
       /VERSION: '\$\{\{ needs\.resolve\.outputs\.version \}\}'/g,
     );
-    expect(consumers).toHaveLength(3);
-    expect(workflow).not.toContain(
-      "VERSION: '${{ steps.version.outputs.version }}'",
+    assert.equal(consumers?.length, 3);
+    assert.ok(
+      !workflow.includes("VERSION: '${{ steps.version.outputs.version }}'"),
     );
   });
 
@@ -296,25 +318,27 @@ describe('ECS runner qwen update workflow', () => {
     // `cancelled` is routine: the per-pool concurrency group cancels an older
     // dispatch's pending legs whenever a newer one arrives.
     const guard = workflow.match(/ {4}if: "\$\{\{ always\(\)[^"]*"/)?.[0] ?? '';
-    expect(guard).toContain("needs.resolve.result == 'failure'");
-    expect(guard).toContain("needs.update.result == 'failure'");
-    expect(guard).not.toContain('cancelled');
+    assert.ok(guard.includes("needs.resolve.result == 'failure'"));
+    assert.ok(guard.includes("needs.update.result == 'failure'"));
+    assert.ok(!guard.includes('cancelled'));
 
     const reporter = workflow.slice(workflow.indexOf('  report_failure:'));
     // Hosted, so the report does not queue behind the pools it reports on.
-    expect(reporter).toContain("    runs-on: 'ubuntu-latest'");
+    assert.ok(reporter.includes("    runs-on: 'ubuntu-latest'"));
     // A job-level permissions block REPLACES the workflow-level one, so the
     // scope actions/checkout needs has to be spelled out here; without it the
     // checkout 403s and the job that exists to break the silence never runs.
-    expect(reporter).toContain("      contents: 'read'");
-    expect(reporter).toContain("      actions: 'read'");
-    expect(reporter).toContain("      issues: 'write'");
+    assert.ok(reporter.includes("      contents: 'read'"));
+    assert.ok(reporter.includes("      actions: 'read'"));
+    assert.ok(reporter.includes("      issues: 'write'"));
     // The script lives in the repo, so the job has to check it out first.
-    expect(reporter).toContain("uses: 'actions/checkout@");
-    expect(reporter).toContain(
-      "run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'",
+    assert.ok(reporter.includes("uses: 'actions/checkout@"));
+    assert.ok(
+      reporter.includes(
+        "run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'",
+      ),
     );
-    expect(reporter).toContain("          DEDUP_LABEL: 'scope/ci-cd'");
+    assert.ok(reporter.includes("          DEDUP_LABEL: 'scope/ci-cd'"));
   });
 
   it('filters the run jobs by the prefix the matrix job actually uses', () => {
@@ -322,22 +346,23 @@ describe('ECS runner qwen update workflow', () => {
     // script's jq filter, with no runtime error when they disagree: a renamed
     // matrix job makes the filter match nothing, and every issue then reports
     // no stale pools — dropping the one datum this script exists to provide.
-    expect(updateJobName).toContain('${{ matrix.runner }}');
-    expect(poolPrefix).not.toBe('');
-    expect(pools.length).toBeGreaterThan(0);
+    assert.ok(updateJobName.includes('${{ matrix.runner }}'));
+    assert.notEqual(poolPrefix, '');
+    assert.ok(pools.length > 0);
     // Whichever way the matrix array is laid out — CI reformats it before the
     // suite runs — the pools have to come back the same.
-    expect(parsePools("\n        runner: ['a-1', 'a-2']\n")).toEqual([
+    assert.deepEqual(parsePools("\n        runner: ['a-1', 'a-2']\n"), [
       'a-1',
       'a-2',
     ]);
-    expect(
+    assert.deepEqual(
       parsePools(
         "\n        runner:\n          [\n            'a-1',\n            'a-2',\n          ]\n",
       ),
-    ).toEqual(['a-1', 'a-2']);
-    expect(reportScript).toContain(`startswith("${poolPrefix}")`);
-    expect(reportScript).toContain(`sub("^${poolPrefix}"; "")`);
+      ['a-1', 'a-2'],
+    );
+    assert.ok(reportScript.includes(`startswith("${poolPrefix}")`));
+    assert.ok(reportScript.includes(`sub("^${poolPrefix}"; "")`));
   });
 
   it('shares one dedup lookup with the sibling failure reporter', () => {
@@ -348,27 +373,29 @@ describe('ECS runner qwen update workflow', () => {
       reportScript,
       readFileSync('.github/scripts/image-build-failure-issue.sh', 'utf8'),
     ]) {
-      expect(caller).toContain(
-        'bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"',
+      assert.ok(
+        caller.includes(
+          'bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"',
+        ),
       );
-      expect(caller).toContain('MARKER_HTML="${marker_html}"');
+      assert.ok(caller.includes('MARKER_HTML="${marker_html}"'));
     }
     // GitHub search tokenizes these markers apart, so the match must stay
     // client-side; a null body must not abort the lookup; and the listing is a
     // ceiling, not a newest-first window an immortal issue can fall out of.
-    expect(lookupScript).not.toContain('--search');
-    expect(lookupScript).toContain('contains($marker_html)');
-    expect(lookupScript).toContain('(.body // "")');
-    expect(lookupScript).toContain('--limit 1000');
+    assert.ok(!lookupScript.includes('--search'));
+    assert.ok(lookupScript.includes('contains($marker_html)'));
+    assert.ok(lookupScript.includes('(.body // "")'));
+    assert.ok(lookupScript.includes('--limit 1000'));
     // Oldest match wins: the newest-first listing puts an issue that merely
     // quotes the marker ahead of the canonical one.
-    expect(lookupScript).toContain('last(.[]');
+    assert.ok(lookupScript.includes('last(.[]'));
   });
 });
 
 // The replays need POSIX paths, a `:`-joined PATH and extensionless bash
-// stubs, none of which the Windows lane can express; the YAML suite above
-// still runs there. Same gate as
+// stubs, none of which the Windows lane can express; the workflow-text suite
+// above still runs there. Same gate as
 // scripts/tests/build-and-publish-image-workflow.test.js.
 const replayable =
   process.platform !== 'win32' && spawnSync('jq', ['--version']).status === 0;
@@ -715,18 +742,18 @@ function runReport({ openIssues = [], jobs = DEFAULT_JOBS, env = {} } = {}) {
   }
 }
 
-describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
+describe('ECS runner qwen update replay', { skip: !replayable }, () => {
   it('waits out npm publish propagation instead of failing the race', () => {
     // `npm publish --provenance` returns before the version is resolvable
     // (~16 minutes for v0.22.3), and release.yml dispatches this workflow as
     // soon as it returns.
     const resolved = runResolve({ failures: 3 });
-    expect(resolved.status).toBe(0);
-    expect(resolved.attempts).toBe(4);
-    expect(resolved.output.trim()).toBe('version=0.22.3');
-    expect(resolved.stdout).toContain('is not on the registry yet');
+    assert.equal(resolved.status, 0);
+    assert.equal(resolved.attempts, 4);
+    assert.equal(resolved.output.trim(), 'version=0.22.3');
+    assert.ok(resolved.stdout.includes('is not on the registry yet'));
     // The per-attempt 404 noise stays out of the log on the happy path.
-    expect(resolved.stderr).not.toContain('E404');
+    assert.ok(!resolved.stderr.includes('E404'));
   });
 
   it('fails with the registry error once the wait budget is spent', () => {
@@ -734,20 +761,22 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
       failures: 99,
       env: { RESOLVE_TIMEOUT_SECONDS: '0' },
     });
-    expect(resolved.status).toBe(1);
-    expect(resolved.output.trim()).toBe('');
+    assert.equal(resolved.status, 1);
+    assert.equal(resolved.output.trim(), '');
     // The suppressed stderr is replayed, so the log still says *why*.
-    expect(resolved.stderr).toContain('npm error code E404');
+    assert.ok(resolved.stderr.includes('npm error code E404'));
     // The annotation stays on stdout, where Actions parses workflow commands.
-    expect(resolved.stdout).toContain(
-      "::error::No published qwen version matches '0.22.3' after 0s.",
+    assert.ok(
+      resolved.stdout.includes(
+        "::error::No published qwen version matches '0.22.3' after 0s.",
+      ),
     );
   });
 
   it('resolves the latest dist-tag when dispatched without a version', () => {
     const resolved = runResolve({ env: { INPUT_VERSION: '' } });
-    expect(resolved.status).toBe(0);
-    expect(resolved.output.trim()).toBe('version=0.22.3');
+    assert.equal(resolved.status, 0);
+    assert.equal(resolved.output.trim(), 'version=0.22.3');
   });
 
   // The fleet splits into three sudoers classes and the install step has to
@@ -768,28 +797,30 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // refuses it, the step falls through to the runner user, and all three
     // attempts EACCES against the root-owned prefix.
     const updated = runUpdate({ sudoers: 'command-specific' });
-    expect(updated.status).toBe(0);
-    expect(updated.modes).toEqual(['root']);
-    expect(updated.stderr).not.toContain('EACCES');
+    assert.equal(updated.status, 0);
+    assert.deepEqual(updated.modes, ['root']);
+    assert.ok(!updated.stderr.includes('EACCES'));
     // The install that ran is exactly the authorized argv, unpinned and
     // without the runner user's custom npm prefix. The pinned sudo attempt
     // is rejected before npm starts, so nothing else is recorded.
-    expect(updated.calls).toContain(
-      'root|NPM_CONFIG_PREFIX=UNSET|install -g --registry=https://registry.npmjs.org @qwen-code/qwen-code@0.22.3',
+    assert.ok(
+      updated.calls.includes(
+        'root|NPM_CONFIG_PREFIX=UNSET|install -g --registry=https://registry.npmjs.org @qwen-code/qwen-code@0.22.3',
+      ),
     );
-    expect(updated.calls).not.toContain('--prefix');
-    expect(updated.calls.trim().split('\n')).toHaveLength(1);
+    assert.ok(!updated.calls.includes('--prefix'));
+    assert.equal(updated.calls.trim().split('\n').length, 1);
   });
 
   it('installs as root on a pool with passwordless sudo for anything', () => {
     // hk-3/4/5 today: the sudo mode must stay the one that runs, pinned to
     // /usr/local and without the runner user's custom npm prefix.
     const updated = runUpdate({ sudoers: 'generic' });
-    expect(updated.status).toBe(0);
-    expect(updated.modes).toEqual(['root']);
-    expect(updated.calls).toContain('install -g --prefix /usr/local');
-    expect(updated.calls).toContain('--registry=https://registry.npmjs.org');
-    expect(updated.calls).toContain('NPM_CONFIG_PREFIX=UNSET');
+    assert.equal(updated.status, 0);
+    assert.deepEqual(updated.modes, ['root']);
+    assert.ok(updated.calls.includes('install -g --prefix /usr/local'));
+    assert.ok(updated.calls.includes('--registry=https://registry.npmjs.org'));
+    assert.ok(updated.calls.includes('NPM_CONFIG_PREFIX=UNSET'));
   });
 
   it('retries the pinned mode through a transient npm failure instead of escalating', () => {
@@ -800,18 +831,20 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // pinned mode — the ENOTEMPTY rename race the retry loop exists for —
     // used to reach it, as root, on the pool class that needed the pin.
     const updated = runUpdate({ sudoers: 'generic', npmFailures: 1 });
-    expect(updated.status).toBe(0);
-    expect(updated.modes).toEqual(['root', 'root']);
+    assert.equal(updated.status, 0);
+    assert.deepEqual(updated.modes, ['root', 'root']);
     // Both invocations are the pinned argv: the retry stayed in mode 1 and
     // never handed the pool the unpinned one.
     const installs = updated.calls.trim().split('\n');
-    expect(installs).toHaveLength(2);
+    assert.equal(installs.length, 2);
     for (const install of installs) {
-      expect(install).toContain('install -g --prefix /usr/local');
+      assert.ok(install.includes('install -g --prefix /usr/local'));
     }
     // The retry loop absorbed it, and says so.
-    expect(updated.stdout).toContain(
-      '::warning::npm install attempt 1 failed; retrying',
+    assert.ok(
+      updated.stdout.includes(
+        '::warning::npm install attempt 1 failed; retrying',
+      ),
     );
   });
 
@@ -823,25 +856,25 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // itself instead of dropping the pool to the runner user, which EACCESes
     // against the root-owned prefix on all three attempts.
     const updated = runUpdate({ sudoers: 'command-specific', npmFailures: 1 });
-    expect(updated.status).toBe(0);
-    expect(updated.modes).toEqual(['root', 'root']);
+    assert.equal(updated.status, 0);
+    assert.deepEqual(updated.modes, ['root', 'root']);
     const installs = updated.calls.trim().split('\n');
-    expect(installs).toHaveLength(2);
+    assert.equal(installs.length, 2);
     for (const install of installs) {
-      expect(install).toContain(
-        'install -g --registry=https://registry.npmjs.org',
+      assert.ok(
+        install.includes('install -g --registry=https://registry.npmjs.org'),
       );
-      expect(install).not.toContain('--prefix');
+      assert.ok(!install.includes('--prefix'));
     }
-    expect(updated.stderr).not.toContain('EACCES');
+    assert.ok(!updated.stderr.includes('EACCES'));
   });
 
   it('falls back to the runner user on a pool with no sudo at all', () => {
     // The mode the fallback exists for. Deleting it — or making both modes
     // sudo — leaves these pools with no way to install at all.
     const updated = runUpdate({ sudoers: 'none', prefixOwner: 'runner' });
-    expect(updated.status).toBe(0);
-    expect(updated.modes).toEqual(['runner']);
+    assert.equal(updated.status, 0);
+    assert.deepEqual(updated.modes, ['runner']);
   });
 
   it('never runs an interactive sudo in the install step', () => {
@@ -851,28 +884,30 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // `timeout-minutes: 10` kills the step instead of failing fast into the
     // next mode, which silently loses the sudo mode on every class.
     const updated = runUpdate({ sudoers: 'generic', prefixOwner: 'runner' });
-    expect(updated.status).toBe(0);
-    expect(updated.stderr).not.toContain('a terminal is required');
-    expect(updated.modes).toEqual(['root']);
+    assert.equal(updated.status, 0);
+    assert.ok(!updated.stderr.includes('a terminal is required'));
+    assert.deepEqual(updated.modes, ['root']);
   });
 
   it('fails the leg when no mode can write the prefix', () => {
     // No sudo and a root-owned prefix has no working mode: the step must
     // exhaust its retries and fail loudly rather than report success.
     const updated = runUpdate({ sudoers: 'none', prefixOwner: 'root' });
-    expect(updated.status).toBe(1);
-    expect(updated.modes).toEqual(['runner', 'runner', 'runner']);
-    expect(updated.stderr).toContain('EACCES');
-    expect(updated.stdout).toContain(
-      '::error::npm install of @qwen-code/qwen-code@0.22.3 failed after 3 attempts',
+    assert.equal(updated.status, 1);
+    assert.deepEqual(updated.modes, ['runner', 'runner', 'runner']);
+    assert.ok(updated.stderr.includes('EACCES'));
+    assert.ok(
+      updated.stdout.includes(
+        '::error::npm install of @qwen-code/qwen-code@0.22.3 failed after 3 attempts',
+      ),
     );
   });
 
   it('verifies a healthy install without diagnostics', () => {
     const verified = runVerify({ output: '0.22.3', target: '0.22.3' });
-    expect(verified.status).toBe(0);
-    expect(verified.stdout).toContain('qwen version: 0.22.3');
-    expect(verified.stdout).not.toContain('--- diagnostics ---');
+    assert.equal(verified.status, 0);
+    assert.ok(verified.stdout.includes('qwen version: 0.22.3'));
+    assert.ok(!verified.stdout.includes('--- diagnostics ---'));
   });
 
   it('ignores stderr noise on a successful --version', () => {
@@ -885,16 +920,16 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
       stderrOutput: '(node:1234) ExperimentalWarning: some future warning',
       target: '0.22.3',
     });
-    expect(verified.status).toBe(0);
-    expect(verified.stdout).toContain('qwen version: 0.22.3');
-    expect(verified.stdout).not.toContain('--- diagnostics ---');
+    assert.equal(verified.status, 0);
+    assert.ok(verified.stdout.includes('qwen version: 0.22.3'));
+    assert.ok(!verified.stdout.includes('--- diagnostics ---'));
   });
 
   it('prints the diagnostics when the installed qwen is stale', () => {
     const verified = runVerify({ output: '0.22.2', target: '0.22.3' });
-    expect(verified.status).toBe(1);
-    expect(verified.stdout).toContain('--- diagnostics ---');
-    expect(verified.stdout).toContain('--- end diagnostics ---');
+    assert.equal(verified.status, 1);
+    assert.ok(verified.stdout.includes('--- diagnostics ---'));
+    assert.ok(verified.stdout.includes('--- end diagnostics ---'));
   });
 
   it('prints the diagnostics when the installed qwen cannot run at all', () => {
@@ -903,36 +938,40 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // what keeps the step failing at the version test with diagnostics
     // instead of dying at the bare assignment under `set -e`.
     const verified = runVerify({ exitCode: 127, target: '0.22.3' });
-    expect(verified.status).toBe(1);
-    expect(verified.stdout).toContain(
-      'qwen version: (qwen --version failed, exit 127)',
+    assert.equal(verified.status, 1);
+    assert.ok(
+      verified.stdout.includes(
+        'qwen version: (qwen --version failed, exit 127)',
+      ),
     );
-    expect(verified.stdout).toContain('--- diagnostics ---');
+    assert.ok(verified.stdout.includes('--- diagnostics ---'));
   });
 
   it('files an issue naming the pools left on the old CLI', () => {
     const reported = runReport({ openIssues: [] });
-    expect(reported.status).toBe(0);
+    assert.equal(reported.status, 0);
     // Only the failed legs, and without the job-name prefix.
-    expect(reported.body).toContain(
-      `Pools left stale: ${STALE_POOLS.join(', ')}`,
+    assert.ok(
+      reported.body.includes(`Pools left stale: ${STALE_POOLS.join(', ')}`),
     );
     for (const healthy of HEALTHY_POOLS) {
-      expect(reported.body).not.toContain(healthy);
+      assert.ok(!reported.body.includes(healthy));
     }
-    expect(reported.body).toContain('Target version: `0.22.3`');
-    expect(reported.calls).toContain('gh issue create');
-    expect(reported.calls).not.toContain('gh issue comment');
+    assert.ok(reported.body.includes('Target version: `0.22.3`'));
+    assert.ok(reported.calls.includes('gh issue create'));
+    assert.ok(!reported.calls.includes('gh issue comment'));
     // The dedup label must be applied at creation: a follow-up `issue edit`
     // that failed would leave an issue this script can never find again.
-    expect(reported.calls).toMatch(/gh issue create .*--label scope\/ci-cd/);
+    assert.match(reported.calls, /gh issue create .*--label scope\/ci-cd/);
   });
 
   it('carries the dedup marker the next run matches on', () => {
     const reported = runReport({ openIssues: [] });
-    expect(reported.body).toContain('<!-- ecs-fleet-update-failure -->');
+    assert.ok(reported.body.includes('<!-- ecs-fleet-update-failure -->'));
     // Listing is scoped by label, so a stray issue outside it is invisible.
-    expect(reported.calls).toContain('--label scope/ci-cd --json number,body');
+    assert.ok(
+      reported.calls.includes('--label scope/ci-cd --json number,body'),
+    );
   });
 
   it('comments on the marked issue instead of opening a second one', () => {
@@ -941,9 +980,9 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
         { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
       ],
     });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue comment 42');
-    expect(reported.calls).not.toContain('gh issue create');
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue comment 42'));
+    assert.ok(!reported.calls.includes('gh issue create'));
   });
 
   it('ignores an unrelated issue that shares the dedup label', () => {
@@ -951,9 +990,9 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     const reported = runReport({
       openIssues: [{ number: 9, body: 'qwen update failed on my machine' }],
     });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue create');
-    expect(reported.calls).not.toContain('gh issue comment');
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue create'));
+    assert.ok(!reported.calls.includes('gh issue comment'));
   });
 
   it('still finds the marker issue once it is no longer a recent one', () => {
@@ -969,9 +1008,9 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
       { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
     ];
     const reported = runReport({ openIssues });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue comment 42');
-    expect(reported.calls).not.toContain('gh issue create');
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue comment 42'));
+    assert.ok(!reported.calls.includes('gh issue create'));
   });
 
   it('survives a labeled issue that has no body at all', () => {
@@ -983,12 +1022,12 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
         { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
       ],
     });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue comment 42');
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue comment 42'));
 
     const first = runReport({ openIssues: [{ number: 9, body: null }] });
-    expect(first.status).toBe(0);
-    expect(first.calls).toContain('gh issue create');
+    assert.equal(first.status, 0);
+    assert.ok(first.calls.includes('gh issue create'));
   });
 
   it('reports a resolve failure without inventing a pool-level state', () => {
@@ -1002,17 +1041,21 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
       jobs: jobsFixture({ resolve: 'failure', skipped: pools }),
       env: { VERSION: '' },
     });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue create');
-    expect(reported.body).toContain(
-      'failed before any pool was asked to install a release',
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue create'));
+    assert.ok(
+      reported.body.includes(
+        'failed before any pool was asked to install a release',
+      ),
     );
-    expect(reported.body).toContain(
-      'Pools left stale: none was reached — the run failed before the pool matrix started',
+    assert.ok(
+      reported.body.includes(
+        'Pools left stale: none was reached — the run failed before the pool matrix started',
+      ),
     );
-    expect(reported.body).toContain('Target version: `unresolved`');
-    expect(reported.body).toContain('read the `Resolve version` step');
-    expect(reported.body).not.toContain('`Verify version`');
+    assert.ok(reported.body.includes('Target version: `unresolved`'));
+    assert.ok(reported.body.includes('read the `Resolve version` step'));
+    assert.ok(!reported.body.includes('`Verify version`'));
   });
 
   it('says so when the job conclusions for the run cannot be read', () => {
@@ -1020,21 +1063,23 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // and must not abort the script under `set -euo pipefail` either — that
     // is the silence this job exists to break.
     const reported = runReport({ env: { STUB_API_FAILS: '1' } });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue create');
-    expect(reported.body).toContain(
-      'Pools left stale: unknown — the job conclusions for this run could not be read',
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue create'));
+    assert.ok(
+      reported.body.includes(
+        'Pools left stale: unknown — the job conclusions for this run could not be read',
+      ),
     );
     // Which shape failed is precisely what could not be read, so the body must
     // not assert one: `resolve` may have failed before any pool ran, and
     // naming `Verify version` steps that never existed is a 3 AM detour.
-    expect(reported.body).toContain(
-      'check whether the pool matrix started at all',
+    assert.ok(
+      reported.body.includes('check whether the pool matrix started at all'),
     );
-    expect(reported.body).not.toContain(
-      'at least one ECS pool is still running',
+    assert.ok(
+      !reported.body.includes('at least one ECS pool is still running'),
     );
-    expect(reported.body).not.toContain('`Verify version` step of every pool');
+    assert.ok(!reported.body.includes('`Verify version` step of every pool'));
   });
 
   it('files anyway when the dedup lookup itself fails', () => {
@@ -1042,9 +1087,9 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     // it writes anything: `set -e` aborts on a failing command substitution
     // feeding an assignment. A rare duplicate issue costs less than silence.
     const reported = runReport({ env: { STUB_LIST_FAILS: '1' } });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue create');
-    expect(reported.calls).toMatch(/gh issue create .*--label scope\/ci-cd/);
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue create'));
+    assert.match(reported.calls, /gh issue create .*--label scope\/ci-cd/);
   });
 
   it('is not hijacked by a newer issue that merely quotes the marker', () => {
@@ -1060,19 +1105,21 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
         { number: 42, body: 'stale\n<!-- ecs-fleet-update-failure -->\n' },
       ],
     });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue comment 42');
-    expect(reported.calls).not.toContain('gh issue comment 99');
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue comment 42'));
+    assert.ok(!reported.calls.includes('gh issue comment 99'));
   });
 
   it('falls back when the legs ran but none reported a failure', () => {
     const reported = runReport({
       jobs: jobsFixture({ succeeded: pools }),
     });
-    expect(reported.status).toBe(0);
-    expect(reported.calls).toContain('gh issue create');
-    expect(reported.body).toContain(
-      'Pools left stale: see the run; no pool reported a conclusion',
+    assert.equal(reported.status, 0);
+    assert.ok(reported.calls.includes('gh issue create'));
+    assert.ok(
+      reported.body.includes(
+        'Pools left stale: see the run; no pool reported a conclusion',
+      ),
     );
   });
 });
