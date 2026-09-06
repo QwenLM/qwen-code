@@ -2000,25 +2000,33 @@ export class WebViewProvider {
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
-        const viewSessionId = this.isViewHost
-          ? getRestorableDaemonSessionId(
-              // Ids persisted before this canonicalization are keyed by the
-              // folder's raw (symlinked) spelling. Read that once so upgrading
-              // does not silently start a fresh sidebar conversation. The
-              // canonical key stays the only one written —
-              // `webShellSessionChanged` keys off the payload below — and the
-              // raw spelling is consulted only when the canonical key is
-              // empty, so an id can never be restored into another folder.
-              this.context.workspaceState.get<string>(
-                webShellSessionStateKey(canonicalWorkspaceCwd),
-              ) ??
-                (canonicalWorkspaceCwd !== workspaceCwd
-                  ? this.context.workspaceState.get<string>(
-                      webShellSessionStateKey(workspaceCwd),
-                    )
-                  : undefined),
-            )
-          : undefined;
+        let viewSessionId: string | undefined;
+        if (this.isViewHost) {
+          // Ids persisted before this canonicalization are keyed by the
+          // folder's raw (symlinked) spelling. Read that entry once so
+          // upgrading does not silently start a fresh sidebar conversation —
+          // and retire it in the same bootstrap. The only writer
+          // (`webShellSessionChanged`) keys off the canonical spelling the
+          // payload below carries, so an alias entry left behind is never
+          // overwritten or cleared: a session the user has since cleared would
+          // be resurrected by the fallback on every later bootstrap, with no
+          // action able to clear it again.
+          const legacyKey = webShellSessionStateKey(workspaceCwd);
+          const legacySessionId =
+            canonicalWorkspaceCwd !== workspaceCwd
+              ? this.context.workspaceState.get<string>(legacyKey)
+              : undefined;
+          if (legacySessionId !== undefined) {
+            await this.context.workspaceState.update(legacyKey, undefined);
+          }
+          // The fallback binds an id to a folder's *spelling* rather than to
+          // folder identity, so it is only sound as this one-shot migration.
+          viewSessionId = getRestorableDaemonSessionId(
+            this.context.workspaceState.get<string>(
+              webShellSessionStateKey(canonicalWorkspaceCwd),
+            ) ?? legacySessionId,
+          );
+        }
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;

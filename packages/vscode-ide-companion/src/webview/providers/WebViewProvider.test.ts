@@ -2291,13 +2291,23 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     };
   }
 
-  /** A view-host context whose Memento only answers the keys it is seeded with. */
+  /**
+   * A view-host context whose Memento only answers the keys it is seeded with,
+   * and writes through — so a migration that retires an entry is observable.
+   */
   function createSessionStateContext(entries: Record<string, string>) {
     return {
       subscriptions: [],
       workspaceState: {
         get: vi.fn((key: string) => entries[key]),
-        update: vi.fn(() => Promise.resolve()),
+        update: vi.fn((key: string, value: string | undefined) => {
+          if (value === undefined) {
+            delete entries[key];
+          } else {
+            entries[key] = value;
+          }
+          return Promise.resolve();
+        }),
       },
     };
   }
@@ -2399,6 +2409,33 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
             sessionId: 'pre-upgrade-session-id',
           }),
         }),
+      );
+
+      // Clearing the session posts `sessionId: undefined` against the
+      // canonical cwd, which deletes only the canonical key. Without the
+      // legacy entry being retired by the bootstrap above, the next bootstrap
+      // resurrects the id the user just cleared.
+      await setup.messageHandler?.({
+        type: 'webShellSessionChanged',
+        data: { sessionId: undefined, workspaceCwd: canonical },
+      });
+      setup.postMessage.mockClear();
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as {
+              type?: string;
+              data?: { sessionId?: string };
+            },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap).toBeDefined();
+      expect(secondBootstrap?.data?.sessionId).toBeUndefined();
+      expect(context.workspaceState.update).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`,
+        undefined,
       );
     });
   });
