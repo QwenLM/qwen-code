@@ -1,5 +1,5 @@
-import 'katex/dist/katex.min.css';
 import '../styles/globals.css';
+import 'katex/dist/katex.min.css';
 import {
   useLayoutEffect,
   useMemo,
@@ -30,7 +30,7 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from '../i18n';
-import { transcriptBlocksToLocalizedMessages } from '../hooks/useMessages';
+import { transcriptBlocksToLocalizedMessages } from '../adapters/localizedMessages';
 import { WebShellPortalRootContext } from '../portalRoot';
 import { computeTodoDetails, computeTodoTimeline } from '../utils/todos';
 import {

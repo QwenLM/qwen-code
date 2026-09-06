@@ -64,6 +64,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './llm-chat.js';
@@ -254,6 +255,87 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
 ]);
+
+const OPT_IN_TOOL_MESSAGES: Record<
+  string,
+  { setting: string; defaultUnavailableMessage: string }
+> = {
+  [ToolNames.LS]: {
+    setting: 'tools.listDirectory.enabled',
+    defaultUnavailableMessage:
+      'is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.',
+  },
+  [ToolNames.TODO_WRITE]: {
+    setting: 'tools.todoWrite.enabled',
+    defaultUnavailableMessage:
+      'is a built-in tool that is disabled by default. Enable it with the tools.todoWrite.enabled setting and restart Qwen Code.',
+  },
+};
+
+type OptInToolMessageConfig = Pick<
+  Config,
+  'getDisabledTools' | 'getPermissionManager' | 'isTodoWriteEnabled'
+>;
+
+export async function getOptInToolNotFoundMessage(
+  config: OptInToolMessageConfig,
+  unknownToolName: string,
+  isCanonicalToolRegistered: (
+    canonicalName: string,
+  ) => boolean | Promise<boolean>,
+): Promise<string | undefined> {
+  const canonicalName = resolveToolName(unknownToolName);
+  const definition = Object.hasOwn(OPT_IN_TOOL_MESSAGES, canonicalName)
+    ? OPT_IN_TOOL_MESSAGES[canonicalName]
+    : undefined;
+  if (!definition || (await isCanonicalToolRegistered(canonicalName))) {
+    return undefined;
+  }
+
+  const workspaceDisabled = config.getDisabledTools().has(canonicalName);
+  if (canonicalName === ToolNames.LS) {
+    if (workspaceDisabled) {
+      return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the ${definition.setting} setting only controls whether the tool is registered by default.`;
+    }
+    return `Tool "${unknownToolName}" ${definition.defaultUnavailableMessage}`;
+  }
+
+  const settingEnabled = config.isTodoWriteEnabled();
+  const permissionManager = config.getPermissionManager();
+  const denyRule = permissionManager?.findMatchingDenyRule({
+    toolName: canonicalName,
+  });
+  const omittedFromCoreTools =
+    permissionManager?.isToolDisabledByCoreToolsAllowList(canonicalName) ===
+    true;
+
+  if (workspaceDisabled) {
+    const settingAction = settingEnabled
+      ? ''
+      : ` Also enable ${definition.setting}.`;
+    return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there.${settingAction} Restart Qwen Code after updating these controls.`;
+  }
+
+  if (denyRule) {
+    const settingAction = settingEnabled
+      ? ''
+      : ` Enable ${definition.setting} as well.`;
+    return `Tool "${unknownToolName}" is blocked by the permissions.deny or --exclude-tools rule "${denyRule}".${settingAction} Remove the deny rule and restart Qwen Code.`;
+  }
+
+  if (omittedFromCoreTools) {
+    const settingAction = settingEnabled
+      ? ''
+      : ` Enable ${definition.setting} as well.`;
+    return `Tool "${unknownToolName}" is not listed in the active core tools allowlist (--core-tools or settings tools.core).${settingAction} Add it to the allowlist and restart Qwen Code.`;
+  }
+
+  if (!settingEnabled) {
+    return `Tool "${unknownToolName}" ${definition.defaultUnavailableMessage}`;
+  }
+
+  return `Tool "${unknownToolName}" is enabled by ${definition.setting} but is blocked by active tool registration rules. Check permissions.deny, --exclude-tools, and tools.core or --core-tools, then restart Qwen Code.`;
+}
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -1465,6 +1547,7 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  private readonly askUserQuestionResponseClaims = new Set<string>();
   private readonly runtimeContentGeneratorViews = new Map<
     string,
     RuntimeContentGeneratorView
@@ -1648,6 +1731,7 @@ export class CoreToolScheduler {
               resultDisplay = {
                 fileDiff: waitingCall.confirmationDetails.fileDiff,
                 fileName: waitingCall.confirmationDetails.fileName,
+                filePath: waitingCall.confirmationDetails.filePath,
                 originalContent:
                   waitingCall.confirmationDetails.originalContent,
                 newContent: waitingCall.confirmationDetails.newContent,
@@ -2137,23 +2221,16 @@ export class CoreToolScheduler {
       return mcpMessage;
     }
 
-    // `list_directory` is an opt-in built-in: when it is genuinely unregistered,
-    // say how to turn it on instead of suggesting unrelated tools by edit
-    // distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...) so an aliased
-    // call gets the same explanation — but only once the canonical name is
-    // confirmed absent. The registry is keyed by canonical names while the
-    // lookup that lands here resolves legacy migrations only, so an alias call
-    // misses even when the tool IS enabled; that case must keep the generic
-    // path's "Did you mean list_directory" self-correction.
-    const canonicalName = resolveToolName(unknownToolName);
-    if (
-      canonicalName === ToolNames.LS &&
-      !(await this.toolRegistry.ensureTool(canonicalName))
-    ) {
-      if (this.config.getDisabledTools().has(canonicalName)) {
-        return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.listDirectory.enabled setting only controls whether the tool is registered by default.`;
-      }
-      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.`;
+    // Resolve aliases before checking registration so enabled canonical tools
+    // keep the generic "Did you mean" correction for an alias-only miss.
+    const optInToolMessage = await getOptInToolNotFoundMessage(
+      this.config,
+      unknownToolName,
+      async (canonicalName) =>
+        Boolean(await this.toolRegistry.ensureTool(canonicalName)),
+    );
+    if (optInToolMessage) {
+      return optInToolMessage;
     }
 
     // Standard "not found" message with Levenshtein suggestions
@@ -3022,16 +3099,18 @@ export class CoreToolScheduler {
             // exactly that tail rather than triggering a
             // `structuredClone` of the whole session on every non-
             // fast-path AUTO call.
+            const llmClient = this.config.getLlmClient?.();
             const messages =
-              this.config
-                .getLlmClient?.()
-                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+              llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const trustedUserAnswers =
+              llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
                 ctx: pmCtx,
                 pmForcedAsk,
                 toolParams,
                 messages,
+                trustedUserAnswers,
                 config: this.config,
                 signal,
                 skipClassifierReason: fallback.fallback
@@ -3818,6 +3897,20 @@ export class CoreToolScheduler {
       );
     }
 
+    const claimsAskUserQuestionResponse =
+      toolCall.tool instanceof AskUserQuestionTool &&
+      (toolCall as WaitingToolCall).confirmationDetails.type ===
+        'ask_user_question';
+    if (
+      claimsAskUserQuestionResponse &&
+      this.askUserQuestionResponseClaims.has(callId)
+    ) {
+      return;
+    }
+    if (claimsAskUserQuestionResponse) {
+      this.askUserQuestionResponseClaims.add(callId);
+    }
+
     try {
       await this._handleConfirmationResponseInner(
         callId,
@@ -3888,6 +3981,10 @@ export class CoreToolScheduler {
         `handleConfirmationResponse failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw error;
+    } finally {
+      if (claimsAskUserQuestionResponse) {
+        this.askUserQuestionResponseClaims.delete(callId);
+      }
     }
 
     // Execution runs outside the confirmation catch so each sister tool's
@@ -4038,6 +4135,20 @@ export class CoreToolScheduler {
         } as ToolCallConfirmationDetails);
       }
     } else {
+      const waitingToolCall = toolCall as WaitingToolCall;
+      if (
+        isApproveOutcome(outcome) &&
+        waitingToolCall.tool instanceof AskUserQuestionTool &&
+        waitingToolCall.confirmationDetails.type === 'ask_user_question'
+      ) {
+        this.config
+          .getLlmClient?.()
+          ?.recordTrustedUserAnswers(
+            callId,
+            waitingToolCall.confirmationDetails.questions,
+            payload?.answers,
+          );
+      }
       // If the client provided new content, apply it before scheduling.
       if (payload?.newContent && toolCall) {
         if (
@@ -6451,10 +6562,10 @@ export class CoreToolScheduler {
             this.config,
             actionFingerprint,
           );
+          const llmClient = this.config.getLlmClient?.();
           const messages =
-            this.config
-              .getLlmClient?.()
-              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+          const trustedUserAnswers = llmClient?.getTrustedUserAnswers?.() ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,
             () =>
@@ -6463,6 +6574,7 @@ export class CoreToolScheduler {
                 pmForcedAsk,
                 toolParams,
                 messages,
+                trustedUserAnswers,
                 config: this.config,
                 signal,
                 skipClassifierReason: fallback.fallback

@@ -10,6 +10,7 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import {
   DaemonHttpError,
+  GOAL_PAUSE_REASON_COMMAND,
   type DaemonInputAnnotation,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
@@ -759,6 +760,7 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
   return {
     ...actual,
     DaemonHttpError,
+    GOAL_PAUSE_REASON_COMMAND: 'Paused with /goal pause.',
     DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
     STANDALONE_SESSIONS_CAPABILITY: 'standalone_sessions_v1',
     isDaemonTurnError: (error: unknown) =>
@@ -16343,6 +16345,85 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('loads new-session Skills from the selected config then current runtime', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      features: ['workspace_skills_config_runtime'],
+      workspaces: [{ id: 'secondary', cwd: '/work/secondary', primary: false }],
+    };
+    let resolveEnsure!: (status: {
+      state: 'idle';
+      runtimeLive: true;
+      runtimeEpoch: number;
+      capabilities: {
+        skills: {
+          state: 'starting' | 'ready';
+          revision: number;
+          runtimeEpoch: number;
+        };
+      };
+    }) => void;
+    const workspaceConfigSkills = vi.fn().mockResolvedValue({
+      skills: [{ name: 'configured', description: 'Config', status: 'ok' }],
+    });
+    const ensureRuntime = vi.fn(
+      () =>
+        new Promise<Parameters<typeof resolveEnsure>[0]>((resolve) => {
+          resolveEnsure = resolve;
+        }),
+    );
+    const runtimeStatus = vi.fn().mockResolvedValue({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 4,
+      capabilities: {
+        skills: { state: 'ready', revision: 0, runtimeEpoch: 4 },
+      },
+    });
+    const workspaceRuntimeSkills = vi.fn().mockResolvedValue({
+      initialized: true,
+      runtimeEpoch: 4,
+      skills: [{ name: 'runtime', description: 'Runtime', status: 'ok' }],
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceConfigSkills,
+      ensureRuntime,
+      runtimeStatus,
+      workspaceRuntimeSkills,
+    }));
+
+    renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'configured', description: 'Config' },
+    ]);
+
+    await act(async () => {
+      resolveEnsure({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 4,
+        capabilities: {
+          skills: { state: 'starting', revision: 0, runtimeEpoch: 4 },
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([
+        { name: 'runtime', description: 'Runtime' },
+      ]);
+    });
+    expect(workspaceConfigSkills).toHaveBeenCalledOnce();
+    expect(ensureRuntime).toHaveBeenCalledOnce();
+    expect(runtimeStatus).toHaveBeenCalledOnce();
+    expect(workspaceRuntimeSkills).toHaveBeenCalledOnce();
+    expect(mockWorkspaceActions.loadSkillsStatus).not.toHaveBeenCalled();
+  });
+
   it('reloads skills when starting a new session', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.commands = [
@@ -31896,6 +31977,7 @@ describe('App /goal command', () => {
         action: 'pause',
         expectedGoalId: 'goal-1',
         expectedRevision: 5,
+        reason: GOAL_PAUSE_REASON_COMMAND,
       });
     });
 

@@ -49,8 +49,9 @@ on:
         type: 'boolean'
 
 concurrency:
-  # PR lifecycle events share a PR-scoped group so new pushes restart the delay
-  # and closed PRs stop any in-flight lifecycle review. Every review_requested
+  # PR lifecycle events share a PR-scoped group so a closed PR stops any
+  # in-flight lifecycle review and a new push queues behind one instead of
+  # racing it. Every review_requested
   # run — the bot-directed one included — gets a per-run group: membership is
   # decided here, before `authorize` runs, but whether a bot request reviews
   # anything is `authorize`'s call on the REQUESTER's write permission. A
@@ -64,12 +65,29 @@ concurrency:
   # lands while the lifecycle run for the same head still queues: compute,
   # never a lost review. Comment/review events use per-run groups to avoid
   # cancelling active reviews.
+  #
+  # cancel-in-progress fires on `closed` ONLY (#10110). It used to fire on
+  # `synchronize` too, and that discarded whole reviews no matter how close
+  # to done they were: on PR #9729 a push cancelled run 32726618419 4h06m in,
+  # minutes from posting, and the replacement started the same work from
+  # zero (~7h41m of cancelled review time across that one PR). A declarative
+  # cancel cannot weigh the in-flight run's progress, so the supersede
+  # decision moves INTO the run: a synchronize run now queues PENDING in this
+  # group (the latest push replaces the pending slot) while the in-flight
+  # run's supersede watcher in "Run review" notices the head move and either
+  # ends the attempt early — little invested; the queued run reviews the new
+  # head from scratch — or, past the salvage threshold, finishes and posts
+  # against the head it reviewed as a historical-head review. Accepted cost:
+  # rapid pushes during the delay window now wait out the superseded run's
+  # remaining delay (~10 minutes) plus teardown instead of cancelling it
+  # instantly; the superseded run's review-pr exits on its stale-head guard
+  # without spending review budget.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
     github.event.action != 'review_requested' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
-  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'closed' }}"
 
 env:
   # Dedup marker for the review-failure fallback comments. The in-job step
@@ -253,10 +271,11 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
+          EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
           set -euo pipefail
-          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
-          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,headRefOid --jq '[.state, .isDraft, .headRefOid] | @tsv')"
+          IFS=$'\t' read -r state is_draft current_head <<< "$pr_data"
 
           if [ "$state" != "OPEN" ]; then
             echo "Skipping delayed review: PR #${PR_NUMBER} is ${state}." >> "$GITHUB_STEP_SUMMARY"
@@ -268,6 +287,28 @@ jobs:
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # A lifecycle run can outlive its own head: with cancel-in-progress
+          # scoped to `closed` (#10110) a synchronize run waits PENDING in the
+          # PR group behind an in-flight review, and by the time it runs a
+          # newer push may have superseded its event head. Its successor run
+          # owns that newer head; skip here, before review-pr spends runner
+          # setup to reach the same conclusion at its own stale-head guard.
+          if [ -n "$EVENT_HEAD_SHA" ] && [ -n "$current_head" ] && [ "$current_head" != "$EVENT_HEAD_SHA" ]; then
+            echo "Skipping delayed review: PR #${PR_NUMBER} moved from ${EVENT_HEAD_SHA} to ${current_head} while this run queued." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # No head-level dedup on an already-posted review: the dedup an
+          # earlier round carried keyed on the bot review's ledger anchor
+          # corroborated by a successful run of THIS workflow, but the
+          # reviewed agent authors every input that lookup had — the marker
+          # sha and commit_id are caller-supplied on POST reviews, and
+          # cede/skip/docs-only runs make "a successful run" true without
+          # any posting — so a forged anchor plus one posting-less green
+          # run skipped the live head's review permanently (R13-1). The
+          # cost of no dedup is one duplicate review on an away-and-back
+          # push inside the watcher's poll gap; the dedup's failure
+          # direction was one lost review.
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
   authorize:
@@ -1011,6 +1052,13 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
+          # Supersede-salvage tunable (#10110): percentage of the size-aware
+          # review budget an automatic review must have spent before a head
+          # move salvages (finishes and posts against the reviewed head)
+          # instead of ceding to the replacement run. Empty/non-numeric falls
+          # back to 50 in the step; 0 salvages always, 100 effectively only
+          # on the compose-artifact signal.
+          SALVAGE_ELAPSED_PERCENT_VAR: '${{ vars.QWEN_REVIEW_SALVAGE_ELAPSED_PERCENT }}'
           # Install and build the review worktree BEFORE any agent starts,
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
@@ -1051,7 +1099,21 @@ jobs:
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
           PROXY_BIN=""
-          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"' EXIT
+          # WATCHER_PID/SALVAGE_DIR are set once the supersede watcher exists.
+          # The trap must reap the watcher on EVERY exit path (fail() included):
+          # a background watcher outliving this step on the reused self-hosted
+          # runner could later kill a NEXT job's review of the same PR. The
+          # kill runs FIRST and every clause is || true-guarded: under
+          # errexit a failing clause aborts the rest of the trap, and every
+          # cleanup path is agent-derivable (RUNNER_TEMP + PR number) — a
+          # planted directory holding a permission-resistant child makes
+          # rm -rf exit 1 (-f does not suppress EACCES) and would silently
+          # skip the cleanups after it. The kill itself tolerates an
+          # already-reaped watcher (salvage arming exits it on the spot),
+          # and the wait spans a ceding watcher's TERM-immune wind-down
+          # (<= 15s) so the group KILL it owes lands before the step exits
+          # (R30-1).
+          trap '[ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1127,8 +1189,38 @@ jobs:
               exit 90
             fi
             if [ -n "$expected_head" ] && [ "$current_head" != "$expected_head" ]; then
-              echo "Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}." >&2
-              exit 90
+              # Salvage escape (#10110): the supersede watcher arms this marker
+              # only past the salvage threshold (compose done, or the elapsed
+              # fraction crossed), pinning the head this run reviewed; content
+              # must equal that pin so a stale marker from another run never
+              # matches. The review then posts against the historical head —
+              # the CLI's own presubmit head-drift gate (classifyHeadDrift)
+              # annotates the body, caps the verdict and computes
+              # anchorsAtRisk, and the skill is told through
+              # QWEN_REVIEW_SALVAGE_POST (exported beside the watcher) to
+              # submit at the reviewed SHA instead of restarting — instead
+              # of discarding hours of finished work. This escape is a
+              # correctness gate, not a security boundary: the agent can read
+              # the marker path from its own environment, but forging it only
+              # lets it post to an old head — nothing it could not already
+              # post to the live one (the post-loop salvage-outputs consumer
+              # re-checks the live head too, so a forged marker cannot trade
+              # up to a false historical-head note on an unmoved PR). The
+              # OPEN check above still applies.
+              # The marker read is one timeout-bounded, size-capped open
+              # like every salvage-signal read: the path is agent-derivable,
+              # and an unbounded open of a planted or rename-swapped-in
+              # FIFO would block this read — and with it the posting path —
+              # forever; a wedged, stale or missing pin fails closed to the
+              # block below.
+              local salvage_pin
+              salvage_pin="$("${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_HEAD:-head}" -c 128 "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" 2>/dev/null || true)"
+              if [ "$salvage_pin" = "$expected_head" ]; then
+                echo "PR write allowed (salvage): PR #${pr_number} moved from ${expected_head} to ${current_head} past the salvage threshold; posting against the reviewed head." >&2
+              else
+                echo "Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}." >&2
+                exit 90
+              fi
             fi
           }
           guard_api_write() {
@@ -1215,6 +1307,62 @@ jobs:
               } > "$proxy_bin/git"
               chmod +x "$proxy_bin/git"
             fi
+
+            local real_date
+            real_date="$(command -v date || echo date)"
+            export QWEN_CI_REAL_DATE="$real_date"
+
+            # The salvage reset/cede paths below also resolve bare rm/tee
+            # through the agent-writable prepend — pin them like gh/git/date
+            # (R18-4).
+            local real_rm
+            real_rm="$(command -v rm || echo rm)"
+            export QWEN_CI_REAL_RM="$real_rm"
+            local real_tee
+            real_tee="$(command -v tee || echo tee)"
+            export QWEN_CI_REAL_TEE="$real_tee"
+
+            # The supersede watcher below polls with bare sleep and kills
+            # with bare pkill/pgrep/id through the same agent-writable
+            # prepend — pin them too (R21-2): an exit-1 planted sleep ends
+            # the one-shot watcher before its first poll, a no-op pkill
+            # leaves the superseded tree reviewing a dead head, and a
+            # planted pgrep would aim the R25-1 group KILL at a process
+            # group of the planter's choosing.
+            local real_sleep
+            real_sleep="$(command -v sleep || echo sleep)"
+            export QWEN_CI_REAL_SLEEP="$real_sleep"
+            local real_pkill
+            real_pkill="$(command -v pkill || echo pkill)"
+            export QWEN_CI_REAL_PKILL="$real_pkill"
+            local real_pgrep
+            real_pgrep="$(command -v pgrep || echo pgrep)"
+            export QWEN_CI_REAL_PGREP="$real_pgrep"
+            local real_id
+            real_id="$(command -v id || echo id)"
+            export QWEN_CI_REAL_ID="$real_id"
+
+            # The salvage signal writes and the watcher's bounded reads
+            # resolve the rest of their utilities through the same prepend
+            # (R23-1). These fork from the step shell or the watcher
+            # subshell, not from the qwen invocation, so the decoys below
+            # never cover them: a plant inherits the REAL $GITHUB_OUTPUT,
+            # $GITHUB_ENV, $GITHUB_PATH, $GITHUB_STEP_SUMMARY and GH_TOKEN.
+            local real_timeout
+            real_timeout="$(command -v timeout || echo timeout)"
+            export QWEN_CI_REAL_TIMEOUT="$real_timeout"
+            local real_head
+            real_head="$(command -v head || echo head)"
+            export QWEN_CI_REAL_HEAD="$real_head"
+            local real_node
+            real_node="$(command -v node || echo node)"
+            export QWEN_CI_REAL_NODE="$real_node"
+            local real_mktemp
+            real_mktemp="$(command -v mktemp || echo mktemp)"
+            export QWEN_CI_REAL_MKTEMP="$real_mktemp"
+            local real_mv
+            real_mv="$(command -v mv || echo mv)"
+            export QWEN_CI_REAL_MV="$real_mv"
 
             export PATH="$proxy_bin:$PATH"
             unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
@@ -1388,6 +1536,63 @@ jobs:
             echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
 
+          # Supersede-salvage state (#10110). A private per-run dir, like
+          # PROXY_BIN above: RUNNER_TEMP survives across jobs on the shared
+          # self-hosted runner, so a fixed path could be pre-seeded or left
+          # over. The watcher writes; guard_pr_write and the paths below read.
+          SALVAGE_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d "${RUNNER_TEMP:-/tmp}/qwen-review-salvage.XXXXXX")"
+          export QWEN_CI_REVIEW_SALVAGE_OK_FILE="${SALVAGE_DIR}/salvage-ok"
+          SUPERSEDE_FILE="${SALVAGE_DIR}/superseded"
+          # The composed-verdict artifact the review skill writes when its
+          # compose step completes (`.qwen/tmp/qwen-review-pr-<n>-composed.json`,
+          # see composedNameFor in packages/cli/src/commands/review/run.ts —
+          # keep the two in sync). Its existence means the findings are final
+          # and posting is minutes out; the run's Step 9 cleanup sweeps it, so
+          # the watcher LATCHES the first sighting.
+          COMPOSED_ARTIFACT="${GITHUB_WORKSPACE}/.qwen/tmp/qwen-review-pr-${PR_NUMBER}-composed.json"
+          SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT_VAR:-}"
+          case "$SALVAGE_ELAPSED_PERCENT" in
+            ''|*[!0-9]*) SALVAGE_ELAPSED_PERCENT=50 ;;
+          esac
+          # Strip leading zeros (a leading-zero value is octal to $(( )) —
+          # `08` would kill the watcher's first salvage arithmetic, `050`
+          # silently apply a 40% threshold), then bound the DIGIT COUNT
+          # before any arithmetic: bash wraps a value >= 2^63 silently, and
+          # a wrapped value landing in [0,100] applies a threshold nobody
+          # chose — 2^64 wraps to exactly 0, "salvage always", so the run
+          # never cedes. Four or more digits are over range either way, so
+          # they take the same 100 clamp a 3-digit overflow does.
+          SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT#"${SALVAGE_ELAPSED_PERCENT%%[!0]*}"}"
+          SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT:-0}"
+          if [ "${#SALVAGE_ELAPSED_PERCENT}" -gt 3 ]; then
+            SALVAGE_ELAPSED_PERCENT=100
+          fi
+          SALVAGE_ELAPSED_PERCENT=$((10#$SALVAGE_ELAPSED_PERCENT))
+          if [ "$SALVAGE_ELAPSED_PERCENT" -gt 100 ]; then
+            SALVAGE_ELAPSED_PERCENT=100
+          fi
+          # KEEP vs CEDE for a superseded in-flight review, extracted for the
+          # workflow tests. KEEP (salvage) when compose already completed and
+          # the attempt is past a 25% elapsed floor — compose is the review's
+          # final step, so a real one clears any floor, but the artifact path
+          # is agent-derivable and the floor stops a first-minute plant from
+          # short-circuiting KEEP at any elapsed (R18-3) — or when the
+          # current attempt spent at least SALVAGE_ELAPSED_PERCENT of its
+          # size-aware budget. The default 50% approximates the issue's "80% of typical
+          # wall time": measured reviews land around 55-70% of their budget
+          # tier, so half the budget is ~80% of a typical run — e.g. the
+          # 4h06m run cancelled minutes from posting on PR #9729 (360-minute
+          # budget) crosses at 180 minutes, while a 90-minute-in run of the
+          # same budget restarts cheaply on the new head.
+          salvage_eligible() {
+            local elapsed="$1" budget="$2" compose_seen="$3" pct="$4"
+            if [ "$compose_seen" = "true" ] \
+              && [ "$(( elapsed * 100 ))" -ge "$(( budget * 25 ))" ]; then
+              return 0
+            fi
+            [ "$(( elapsed * 100 ))" -ge "$(( budget * pct ))" ]
+          }
+
           PROMPT="/review ${REVIEW_URL}"
           if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
             PROMPT="${PROMPT} --effort medium"
@@ -1492,6 +1697,9 @@ jobs:
             # killed mid-verification, nothing posted). Recomputed per attempt
             # so a retry gets a fresh deadline; ignored by CLIs that predate
             # the gate.
+            # Bare `date` on purpose: packages/cli's deadline.test.ts pins this
+            # exact line as the cross-package units contract (whole seconds
+            # of epoch), so the clock pin stays out of it.
             QWEN_REVIEW_DEADLINE_EPOCH="$(( $(date +%s) + attempt_timeout ))"
             export QWEN_REVIEW_DEADLINE_EPOCH
             # The budget itself is chosen outside this file — repository
@@ -1531,7 +1739,7 @@ jobs:
             # token is random per attempt, so no output the agent produces can
             # guess it and re-enable parsing early.
             local stop_token
-            stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
+            stop_token="qwen-review-stop-$("${QWEN_CI_REAL_DATE:-date}" +%s%N)-${RANDOM}${RANDOM}"
             echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
             # The agent runs no-sandbox with the full job environment, and
@@ -1666,26 +1874,513 @@ jobs:
           RETRY_BACKOFF_SECONDS=60
           RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
-          START_TS="$(date +%s)"
+          START_TS="$("${QWEN_CI_REAL_DATE:-date}" +%s)"
+          # Signal files sit at fixed, workflow-public names inside
+          # SALVAGE_DIR — a path the reviewed agent derives from its own
+          # exported environment — so a write-open of one can hit a planted
+          # FIFO and block, and a read-open can hang the same way. Every
+          # signal write therefore goes to a fresh temp and renames over
+          # the target (rename never opens the target); every read is one
+          # timeout-bounded, size-capped open — a [ -f ] gate alone leaves
+          # a rename-swap window between check and open, and cannot cap a
+          # planted huge file.
+          write_signal() {
+            local tmp
+            tmp="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" "${SALVAGE_DIR}/.sig.XXXXXX")" || return 1
+            printf '%s' "$2" > "$tmp" && "${QWEN_CI_REAL_MV:-mv}" -f "$tmp" "$1" && return 0
+            "${QWEN_CI_REAL_RM:-rm}" -f "$tmp"
+            return 1
+          }
+          # Salvage state is per ATTEMPT — a retry re-runs the review from
+          # scratch, so the previous attempt's compose sighting (the watcher
+          # latches it) and elapsed fraction must not make the fresh attempt
+          # salvage-eligible from its first second. The composed artifact
+          # goes with the latch: a retryable death after compose skips the
+          # skill's Step 9 cleanup, and a surviving artifact would re-latch
+          # the watcher within one poll. The reset runs at the TOP of the
+          # loop AND before the retry backoff: the watcher polls through the
+          # backoff too, and a head move landing in those 60s must meet
+          # fresh state (#10110).
+          reset_attempt_salvage_state() {
+            # rm -rf, not rm -f: every operand is agent-writable, and a
+            # planted DIRECTORY makes rm -f exit 1 and abort the step under
+            # errexit instead of resetting. attempt-start goes with the
+            # latch and the artifact: a planted directory there swallows
+            # the rewrite's mv -f (rename INTO a dir exits 0, silent) and
+            # pins the watcher to the run-start fallback on every retry
+            # (R19-1). The utilities and the clock resolve through the
+            # captures taken before the $proxy_bin prepend (R18-4/R18-1).
+            # The rewrite is best-effort for the same reason the watcher's
+            # writes are: a vanished SALVAGE_DIR must degrade to the
+            # START_TS fallback, not a red abort of the retry.
+            "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}/compose-seen" \
+              "${COMPOSED_ARTIFACT:-}" "${SALVAGE_DIR}/attempt-start"
+            write_signal "${SALVAGE_DIR}/attempt-start" \
+              "$("${QWEN_CI_REAL_DATE:-date}" +%s)" || true
+          }
+          # Salvage eligibility measures the CURRENT attempt (the reset
+          # rewrites this before each attempt): a retry restarts the review
+          # from zero, so run-level elapsed would overstate a fresh attempt.
+          # Best-effort like the reset's rewrite: a failed write degrades to
+          # the watcher's START_TS fallback, not to a red step under errexit.
+          write_signal "${SALVAGE_DIR}/attempt-start" "$START_TS" || true
+
+          # Supersede watcher (#10110): only automatic lifecycle reviews — the
+          # runs cancel-in-progress used to cancel on synchronize. It polls
+          # the live head; on a move it either arms the salvage marker (past
+          # salvage_eligible — the run finishes and posts against the head it
+          # reviewed) or writes SUPERSEDE_FILE and kills the review tree so
+          # the replacement run queued in the concurrency group starts within
+          # a poll interval instead of after the full budget. The kill matches
+          # this PR's review URL in the command line AND this step shell's own
+          # children: the URL alone is not this run's identity — an explicit
+          # run gets a unique per-run concurrency group, so it reviews the
+          # same URL concurrently, and a URL-only sweep killed it too (R23-2).
+          # -P scopes to the step shell ($$ keeps that pid inside this
+          # subshell), -U to the runner user. The attempt's timeout is that
+          # direct child and forwards TERM to its whole monitored group, so
+          # a cooperative qwen tree dies with it — the CLI relaunch wrapper
+          # included, which a recorded qwen PID would miss. SIGKILL is not
+          # forwarded, so the escalation kills the group that timeout leads
+          # instead of re-sweeping the direct children (R25-1).
+          # Explicit runs (/review, review_requested, dispatch) keep today's
+          # behavior: a human asked for this head's review, and no synchronize
+          # ever cancelled them. Self-bounded past the budget so a watcher
+          # leaked through a hard step kill cannot act on a later job. Its
+          # signal writes are best-effort: SALVAGE_DIR is agent-derivable and
+          # can vanish mid-run (rm/chmod/ENOSPC), and under the inherited
+          # errexit a failed write would otherwise kill the watcher before its
+          # pkill — every cede consumer re-checks the live head, so a lost
+          # file degrades to that re-check, not to silence.
+          SALVAGE_POLL_SECONDS=60
+          supersede_watcher() {
+            local live_head compose_seen elapsed attempt_start run_elapsed attempt_budget attempt_pgid
+            while "${QWEN_CI_REAL_SLEEP:-sleep}" "$SALVAGE_POLL_SECONDS"; do
+              # Self-bound stays per RUN: the watcher must stop acting past
+              # the whole budget even though eligibility is per attempt.
+              run_elapsed=$(( $("${QWEN_CI_REAL_DATE:-date}" +%s) - START_TS ))
+              if [ "$run_elapsed" -gt "$(( BUDGET_SECONDS + 1800 ))" ]; then
+                return 0
+              fi
+              # Latch only on a REAL composed verdict: the artifact path is
+              # derivable from cwd + PR number, so the reviewed agent can
+              # create it — a bare existence check would let a forged file
+              # force KEEP. The verdict is JSON, so require a parseable JSON
+              # object; a torn mid-write fails the parse and latches on the
+              # next poll instead. Residual risk, documented like the marker
+              # escape: an agent can write valid JSON too, but it already
+              # authors the review this signal describes — and the KEEP the
+              # latch can force is bounded by salvage_eligible's elapsed
+              # floor, so a first-minute plant cannot flip a fresh attempt
+              # (R18-3). The reopen is
+              # timeout-bounded: [ -f ] refuses a statically planted FIFO,
+              # but one rename-swapped in during the check-then-open window
+              # would otherwise block readFileSync forever (no writer) and
+              # kill the watcher permanently. The read is the one salvage
+              # open not bounded by head -c, so it caps via fstat on the
+              # ALREADY-OPEN fd (a reopen would race the swap window): the
+              # agent-writable artifact would otherwise be slurped whole
+              # into node's heap on every poll — a legit verdict is bounded
+              # by the compose budget, far under the cap.
+              if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -f "$COMPOSED_ARTIFACT" ] \
+                && "${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_NODE:-node}" -e 'const fs=require("fs");const fd=fs.openSync(process.argv[1],"r");if(fs.fstatSync(fd).size>2097152)process.exit(1);const v=JSON.parse(fs.readFileSync(fd,"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
+                write_signal "${SALVAGE_DIR}/compose-seen" '' || true
+              fi
+              # QWEN_CI_REAL_GH pin (full rationale at live_head_moved):
+              # bare `gh` resolves through the agent-writable $proxy_bin
+              # PATH prepend, so a planted gh could forge the move this
+              # poll decides on.
+              live_head="$("${QWEN_CI_REAL_GH:-gh}" pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
+              if [ -z "$live_head" ] || [ "$live_head" = "$EXPECTED_HEAD_SHA" ]; then
+                continue
+              fi
+              compose_seen=false
+              if [ -f "${SALVAGE_DIR}/compose-seen" ]; then
+                compose_seen=true
+              fi
+              # Attempt-relative elapsed: the threshold rationale ("a
+              # 90-minute-in run restarts cheaply") measures the work being
+              # discarded — the current attempt's, not the run's. The case
+              # falls back to the run start on a mid-rewrite read or a
+              # leading-zero plant: bash arithmetic reads a leading 0 as
+              # octal, so a forged `08` would abort the poll and silently
+              # kill the watcher (epoch seconds start with 0 only past 2286).
+              attempt_start="$("${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_HEAD:-head}" -c 64 "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
+              case "$attempt_start" in
+                ''|0*|*[!0-9]*) attempt_start="$START_TS" ;;
+              esac
+              # Shape alone is not a bound: the file is agent-writable, so
+              # any past 10-digit epoch passes the guard and sets this
+              # clock, and a >19-digit plant wraps the 64-bit arithmetic
+              # to an attacker-chosen value. Outside [START_TS, now] fall
+              # back to the run start — a fallback, not a death: the
+              # watcher keeps deciding (R18-2). The upper bound reads the
+              # pinned clock: a future plant makes elapsed negative and
+              # flips KEEP to CEDE (R21-3), and bare `date` would re-open
+              # the forge the pin closed (R18-1).
+              if [ "${#attempt_start}" -gt 10 ] \
+                || [ "$attempt_start" -lt "$START_TS" ] \
+                || [ "$attempt_start" -gt "$("${QWEN_CI_REAL_DATE:-date}" +%s)" ]; then
+                attempt_start="$START_TS"
+              fi
+              elapsed=$(( $("${QWEN_CI_REAL_DATE:-date}" +%s) - attempt_start ))
+              # Denominator is the attempt's OWN budget — the share of the
+              # run budget still left when it started — not the whole run's:
+              # a retry that starts with less than the threshold remaining
+              # could otherwise never reach the elapsed KEEP branch and
+              # would be CEDE-killed minutes from posting (#10110).
+              attempt_budget=$(( BUDGET_SECONDS - (attempt_start - START_TS) ))
+              # A docs-only run can never post a salvaged outcome — the
+              # medium relay skips any moved head and the salvage-note step
+              # excludes docs-only — so KEEP would burn the rest of the
+              # budget and silently discard the result: cede regardless.
+              if [ "$DOCS_ONLY_MEDIUM" != "true" ] \
+                && salvage_eligible "$elapsed" "$attempt_budget" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
+                write_signal "${SALVAGE_DIR}/moved-to" "$live_head" || true
+                write_signal "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" "$EXPECTED_HEAD_SHA" || true
+                echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in (compose_seen=${compose_seen}) — finishing and posting against reviewed head ${EXPECTED_HEAD_SHA} (#10110)"
+                return 0
+              fi
+              # From here to the return this watcher must finish: every
+              # reaper — the EXIT trap on a cede or fail(), the retry
+              # branch, the post-loop reap — TERMs it and waits, and a TERM
+              # landing inside the wind-down below retired the group KILL,
+              # the only signal a TERM-resistant tree member answers; that
+              # member then outlived the step on the shared runner holding
+              # the job's credentials (R30-1). Ignore TERM for the rest of
+              # the one-shot: the sleep and the kill inherit the ignore, the
+              # wind-down is bounded (15s), and the reapers' wait spans it.
+              # The polling phase above stays TERM-killable, so a normal
+              # step end still reaps the watcher at once.
+              trap '' TERM
+              write_signal "$SUPERSEDE_FILE" "$live_head" || true
+              if [ -n "${SUPERSEDE_KILL_DIR:-}" ]; then
+                write_signal "${SUPERSEDE_KILL_DIR}/killed" "$live_head" || true
+              fi
+              echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in, before the salvage threshold — ending this review so the queued replacement covers the new head (#10110)"
+              # Escalate against the attempt's process GROUP, resolved before
+              # the TERM sweep retires the timeout that leads it: -P $$ sees
+              # only direct children, and the one carrying this review URL is
+              # the timeout wrapper. SIGKILL is not forwarded and the
+              # wrapper's --kill-after timer dies with it, so a -P $$ -KILL
+              # sweep left a TERM-resistant tree member — the hijacked
+              # agent's `trap '' TERM` — holding the tee pipe; run_review_once
+              # never returned, the cede checks below were never reached, and
+              # the run went red at the job timeout (R25-1). GNU timeout leads
+              # a group holding itself and the whole tree, pgid == its own pid
+              # (measured, coreutils 9.1/9.4). Scope is unchanged — still this
+              # shell's child matching THIS run's URL, never URL alone
+              # (R23-2) — and kill is a builtin, so no plant can shadow it.
+              attempt_pgid="$("${QWEN_CI_REAL_PGREP:-pgrep}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true)"
+              attempt_pgid="${attempt_pgid%%$'\n'*}"
+              "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
+              "${QWEN_CI_REAL_SLEEP:-sleep}" 15
+              if [ -n "$attempt_pgid" ]; then
+                kill -KILL -- "-${attempt_pgid}" 2>/dev/null || true
+              fi
+              return 0
+            done
+          }
+          WATCHER_PID=""
+          SUPERSEDE_KILL_DIR=""
+          if [ "${AUTO_REVIEW:-false}" = "true" ]; then
+            # The revert cede's local witness (supersede_reverted_during_run):
+            # a fresh dir minted here and never exported, so the reviewed
+            # agent cannot derive its path the way it derives every
+            # SALVAGE_DIR signal — only the watcher can record its kill
+            # there. mktemp failure degrades to the timeline witness alone.
+            SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d "${RUNNER_TEMP:-/tmp}/qwen-review-supersede-kill.XXXXXX" 2>/dev/null || true)"
+            # Hand the reviewed agent the contract the watcher may arm: the
+            # skill's presubmit drift rule (references/posting.md,
+            # anchorsAtRisk=true) otherwise commands abandon-and-restart in
+            # exactly the drifted state a salvage creates — a restart that
+            # re-reviews the superseded head while the queued replacement
+            # waits behind it, or one that completes at the NEW head under
+            # an old-head note. With this signal AND a marker pinning the
+            # reviewed head, the skill submits at the reviewed SHA with the
+            # drift named instead. AUTO_REVIEW-gated like the arming: an
+            # explicit run arms no watcher, so the signal is absent there
+            # and the restart rule stands (R32-2).
+            export QWEN_REVIEW_SALVAGE_POST=1
+            supersede_watcher &
+            WATCHER_PID=$!
+          fi
+
+          # The cede exits below trust marker files whose paths the reviewed
+          # agent derives from its own exported environment — existence alone
+          # is forgeable, and a forged cede suppresses the whole review with
+          # the job green and no replacement run queued. Re-read the live
+          # head at decision time instead: only a REAL move justifies
+          # ceding; an unreadable or unmoved head falls through. The read
+          # goes through QWEN_CI_REAL_GH — the absolute real-gh path
+          # captured before the wrapper existed, the same pin
+          # guard_pr_write uses: bare `gh` resolves via PATH through the
+          # agent-writable $proxy_bin prepend, so a hijacked agent could
+          # plant a gh that reports a forged move and cedes this run to
+          # itself. The :-gh fallback keeps the replay harnesses'
+          # PATH-shadowed stubs in charge where the variable is unset; in
+          # production it can only apply when no gh exists at all, and
+          # the read then fails the same way.
+          live_head_moved() {
+            local live
+            live="$("${QWEN_CI_REAL_GH:-gh}" pr view "${PR_NUMBER:-}" --repo "${REPO:-}" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+            [ -n "$live" ] && [ "$live" != "${EXPECTED_HEAD_SHA:-}" ]
+          }
+          # The supersede/moved-to files carry a head SHA this step
+          # interpolates into stdout, the step summary, and $GITHUB_OUTPUT;
+          # both are agent-writable. The read is one timeout-bounded
+          # head -c 64 — a planted FIFO cannot wedge the step and a huge
+          # plant cannot be slurped — and only the watcher's 40-hex shape
+          # passes: embedded newlines would survive command substitution
+          # and land as forged workflow commands or output lines.
+          read_head_signal() {
+            local content
+            content="$("${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_HEAD:-head}" -c 64 "${1:-}" 2>/dev/null || echo unknown)"
+            case "$content" in
+              ''|*[!0-9a-f]*) content='unknown' ;;
+              *) [ "${#content}" -eq 40 ] || content='unknown' ;;
+            esac
+            echo "$content"
+          }
+          cede_superseded() {
+            echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          # SUPERSEDE_FILE's premise against an unforgeable witness. The
+          # watcher writes it on a REAL head move and kills the tree, but a
+          # fast force-push REVERT (or a gh blip in the live-head re-check)
+          # can land before we get here — the re-check then sees the
+          # restored head and the killed attempt would fall through to
+          # fail() on a run that really was superseded. A branch only
+          # returns to a head it left by force-push, so a force-push that
+          # landed BACK on the expected head during this run is the
+          # move-then-revert signature; timeline events are server-side, so
+          # the reviewed agent cannot forge the READ while it goes through
+          # QWEN_CI_REAL_GH instead of a gh planted in the agent-writable
+          # $proxy_bin PATH prepend (live_head_moved carries the full
+          # rationale) — but it can AUTHOR the events: it inherits this
+          # step's GH_TOKEN, and neither the git wrapper nor guard_api_write
+          # blocks a ref write. Only a push by another actor witnesses the
+          # move. A match cedes clean; an unavailable or silent timeline
+          # keeps the red failure.
+          supersede_reverted_during_run() {
+            local owner repo events before after at actor bot_login departed=0
+            owner="${REPO:-}"
+            repo="${owner##*/}"
+            owner="${owner%%/*}"
+            # The events below witness a move only while someone OTHER than
+            # this credential pushed them, so resolve its login first — the
+            # dynamic read the fallback-comment dedup already relies on.
+            # Pinned like every read here, and an unreadable identity
+            # returns 1 instead of accepting every actor-bearing event: an
+            # unattributable witness keeps the red failure, never a cede.
+            # Only the credential the reviewed agent inherits is excluded —
+            # not the PR's pushers (maintainer decision, R29-1/R29-2). A
+            # pusher who wants no review needs no forgery: one real head
+            # move per run before the salvage threshold cedes that run
+            # green by design (the queued replacement owns the new head),
+            # so an author-acted away-and-back pair corroborating planted
+            # signals adds no capability the author lacks; excluding the
+            # author would instead turn the common legitimate shape — the
+            # author's own revert during a run — into a red failure.
+            bot_login="$("${QWEN_CI_REAL_GH:-gh}" api user --jq '.login' 2>/dev/null || true)"
+            [ -n "$bot_login" ] || return 1
+            events="$("${QWEN_CI_REAL_GH:-gh}" api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } actor { login } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "") + " " + (.actor.login // "")' 2>/dev/null)" || return 1
+            [ -n "$events" ] || return 1
+            # The watcher's kill record covers the modal supersede shape —
+            # a normal fast-forward departure emits no force-push event, so
+            # the pair check below misses it — but its dir is minted under
+            # the enumerable RUNNER_TEMP with a fixed prefix: never-exported
+            # stops the agent DERIVING the path, not DISCOVERING it (same
+            # uid lists the dir and writes). Accepted alone, a planted
+            # record plus a planted SUPERSEDE_FILE cedes green with the
+            # head never moved — silent suppression of the whole review.
+            # The record therefore cedes only corroborated by a server-side
+            # back-push onto the expected head during the run — always
+            # present when a real move reverted (the return is
+            # non-fast-forward), absent in the pure forgery.
+            if [ -n "${SUPERSEDE_KILL_DIR:-}" ] && [ -f "${SUPERSEDE_KILL_DIR}/killed" ]; then
+              # No skew tolerance here, unlike the pair branch below: this
+              # branch accepts a LONE back-push — the exact shape of the
+              # run's OWN triggering force-push, which predates START_TS by
+              # only the dispatch latency. The record exists only because a
+              # watcher poll observed the departure, and the poll loop
+              # sleeps SALVAGE_POLL_SECONDS BEFORE its first poll, so a
+              # genuine watcher-recorded back-push postdates run start by
+              # at least one poll interval — require that margin: it also
+              # refuses the triggering event when the GitHub server clock
+              # runs ahead of the runner clock. A genuine cede lost to
+              # skew degrades to the visible red failure the lost-record
+              # branch documents. The conversion reads QWEN_CI_REAL_DATE —
+              # captured before the $proxy_bin PATH prepend, mirroring
+              # QWEN_CI_REAL_GH: bare `date` resolves through the
+              # agent-writable prepend, and a planted `date` answering -d
+              # with a future epoch lifts the triggering event past any
+              # bound (R16-3).
+              while read -r before after at actor; do
+                case "$actor" in ''|"$bot_login") continue ;; esac
+                at="$("${QWEN_CI_REAL_DATE:-date}" -d "$at" +%s 2>/dev/null || echo 0)"
+                [ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ] || continue
+                if [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
+                  return 0
+                fi
+              done <<< "$events"
+              return 1
+            fi
+            # Lost record — the timeline pair is the fallback. Ascending
+            # events: cede only on the FULL move-then-revert pair
+            # landing during this run — a departure from the expected head
+            # with a back-push to it after. A lone back-push matches the
+            # triggering push of a reopened/ready_for_review run (its event
+            # window reaches before START_TS), so it proves nothing; the
+            # tolerance below START_TS is seconds of clock skew, and a lost
+            # cede stays a visible red failure while a forged one suppresses
+            # the review silently.
+            while read -r before after at actor; do
+              case "$actor" in ''|"$bot_login") continue ;; esac
+              at="$("${QWEN_CI_REAL_DATE:-date}" -d "$at" +%s 2>/dev/null || echo 0)"
+              [ "$at" -ge "$(( START_TS - 15 ))" ] || continue
+              if [ "$departed" = "1" ] && [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
+                return 0
+              fi
+              if [ "$before" = "${EXPECTED_HEAD_SHA:-}" ]; then
+                departed=1
+              fi
+            done <<< "$events"
+            return 1
+          }
+
           attempt=1
           while :; do
-            attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
+            # Re-check BEFORE the attempt: the watcher's cede is one-shot,
+            # and during the retry backoff its pkill matched nothing (qwen
+            # not running) — without this the next attempt re-reviews the
+            # dead head for the whole remaining budget while the queued
+            # replacement waits (#10110). AUTO_REVIEW-gated like the sibling
+            # cedes: an explicit run has no watcher that could write the file
+            # and no queued replacement to cede to, so there the derivable
+            # file must fail loudly, not exit green.
+            if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+              cede_superseded
+            fi
+            reset_attempt_salvage_state
+            attempt_timeout=$(( BUDGET_SECONDS - ($("${QWEN_CI_REAL_DATE:-date}" +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
             run_review_once "$attempt_timeout" "$PROMPT"
+            # Checked BEFORE the outcome classification: a watcher kill
+            # surfaces as a non-zero qwen status that would otherwise read as
+            # a fatal (or retryable — and a retry would re-review the
+            # superseded head from scratch) failure. Ending clean here keeps
+            # the failure fallbacks silent; the queued replacement run owns
+            # the new head. The success guard matches the salvage-cede
+            # sibling: a watcher kill can never surface as exit-0 success,
+            # but the one-shot SUPERSEDE_FILE write can RACE a natural
+            # completion, and a posted review must not be recorded as
+            # superseded (its review_completed output with it).
+            # ${VAR:-} defaults: the retry-loop replay in
+            # scripts/tests/qwen-pr-review-workflow.test.js extracts this loop
+            # verbatim and runs it under set -u without the salvage setup.
+            # The same AUTO_REVIEW gate as the sibling cede below: an
+            # explicit run has no watcher that could write the file and no
+            # queued replacement to cede to, so there the derivable file
+            # must fail loudly, not exit green.
+            if [ "$OUTCOME" != "success" ] && [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+              cede_superseded
+            fi
+            if [ "${AUTO_REVIEW:-false}" = "true" ] && [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] && live_head_moved; then
+              # Salvage was armed but the attempt still died (API error,
+              # timeout), and the head really did move — the marker's path is
+              # exported into the agent's environment, so the file alone is
+              # forgeable. Retrying would re-review a head that is no longer
+              # current — the replacement run queued behind this one already
+              # covers the live head, so cede instead of retrying or
+              # announcing a failure the fallback guards would suppress
+              # anyway. AUTO_REVIEW-gated like the watcher's arming: an
+              # explicit run has no watcher that could legitimately arm the
+              # marker and no queued replacement to cede to, so there the
+              # forgeable marker must fail loudly, not exit green.
+              echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             if [ "$OUTCOME" = "success" ]; then
               break
             fi
             if [ "$OUTCOME" = "retryable" ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ] \
-              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
+              && [ "$(( BUDGET_SECONDS - ($("${QWEN_CI_REAL_DATE:-date}" +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
               echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
-              sleep "$RETRY_BACKOFF_SECONDS"
+              reset_attempt_salvage_state
+              # The one-shot watcher exits the moment it arms or cedes, and
+              # a retryable death can outlive it (a cede whose head
+              # reverted, an arming whose attempt still died): the fresh
+              # attempt must not run unwatched, and it must not meet the
+              # dead attempt's signals — every cede consumer re-checks the
+              # live head, so the cleared state is safe (rm -rf: a planted
+              # directory must not abort the reset under errexit). Reap the
+              # spent watcher and relaunch unconditionally: a kill -0 probe
+              # races the one-shot's own exit — it succeeds on the unreaped
+              # zombie and on a cede still draining its TERM→KILL wind-down,
+              # so a probe-gated relaunch skips and attempt 2 runs
+              # unwatched. The wait reaps the zombie and bounds a draining
+              # watcher well inside the backoff.
+              "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}/moved-to" "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" "${SUPERSEDE_FILE:-}" \
+                "${SUPERSEDE_KILL_DIR:+${SUPERSEDE_KILL_DIR}/killed}"
+              if [ -n "${WATCHER_PID:-}" ]; then
+                kill "${WATCHER_PID}" 2>/dev/null || true
+                wait "${WATCHER_PID}" 2>/dev/null || true
+                supersede_watcher &
+                WATCHER_PID=$!
+              fi
+              "${QWEN_CI_REAL_SLEEP:-sleep}" "$RETRY_BACKOFF_SECONDS"
               attempt=$(( attempt + 1 ))
               continue
             fi
+            # Last look before a red failure: a genuinely superseded run
+            # cedes, not fails. A head that moved inside the watcher's
+            # poll gap left no signal file — only the live re-read sees
+            # it; a head that moved and reverted mid-attempt is verified
+            # against the timeline. Either way the queued replacement
+            # already covers the live head — which only exists in an
+            # AUTO_REVIEW run: an explicit run has no watcher and no
+            # queued replacement, so ceding there would claim a handoff
+            # to a run that does not exist and leave the failure
+            # unposted. The gate matches the watcher's arming condition.
+            if [ "${AUTO_REVIEW:-false}" = "true" ] && live_head_moved; then
+              cede_superseded
+            fi
+            if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && supersede_reverted_during_run; then
+              cede_superseded
+            fi
             fail "$REASON" 1 "$KIND"
           done
+
+          # The review is done; the watcher must not fire past this point (a
+          # head move now is the NEXT run's business). The EXIT trap also
+          # reaps it on every early-exit path above.
+          if [ -n "$WATCHER_PID" ]; then
+            kill "$WATCHER_PID" 2>/dev/null || true
+            wait "$WATCHER_PID" 2>/dev/null || true
+            WATCHER_PID=""
+          fi
+          # AUTO_REVIEW-gated like the five cede sites: an explicit run arms
+          # no watcher, so a marker there is forged, and it must not become
+          # a historical-head note.
+          if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then
+            # Same live-head re-check the cede sites apply: the marker path
+            # AND its expected content are exported into the agent's
+            # environment, so a forged marker on an UNMOVED head must not
+            # emit salvaged outputs — the historical-head note would post
+            # "head moved to unknown" on a PR whose head never moved.
+            # moved-to goes through read_head_signal: a planted FIFO must
+            # not hang a finished step, and any non-40-hex content degrades
+            # to `unknown` before it can reach $GITHUB_OUTPUT.
+            salvage_moved_to="$(read_head_signal "${SALVAGE_DIR}/moved-to")"
+            {
+              echo "salvaged=true"
+              echo "salvage_moved_to=$salvage_moved_to"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
           if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
             # The review CLI's machine-readable completion contract — batch
@@ -1717,6 +2412,59 @@ jobs:
           # exit 0 without running Qwen (closed PR, stale head), and the
           # relay must not announce a review that never ran.
           echo "review_completed=true" >> "$GITHUB_OUTPUT"
+
+      # A salvaged review just posted against a head that is no longer
+      # current (#10110). The review body itself carries the CLI's head-drift
+      # annotation and verdict cap (classifyHeadDrift), but that gate samples
+      # the live head at presubmit — a push landing between that sample and
+      # the submit is only known here. This note names the anchor either way
+      # so a reader (and the autofix loop) knows why a review of an older
+      # head just appeared and where the next delta review starts from. Never
+      # fails the job: the review itself succeeded.
+      - name: 'Report salvaged historical-head review'
+        if: |-
+          steps.context.outputs.should_run == 'true' &&
+          steps.review.outcome == 'success' &&
+          steps.review.outputs.review_completed == 'true' &&
+          steps.review.outputs.salvaged == 'true' &&
+          steps.review.outputs.docs_only_medium != 'true' &&
+          steps.context.outputs.pr_number != ''
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: '${{ steps.review.outputs.expected_head_sha }}'
+          MOVED_TO: '${{ steps.review.outputs.salvage_moved_to }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          # Claim the historical anchor only when the review really landed
+          # there: a restart that completed at the NEW head would leave this
+          # note naming a commit the posted review is not anchored to
+          # (R32-2). Read back the latest review by this credential — the
+          # list is chronological, so the last one is this run's post.
+          bot_login="$(gh api user --jq '.login' 2>/dev/null || true)"
+          posted_sha=""
+          if [ -n "$bot_login" ]; then
+            posted_sha="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq ".[] | select((.user.login // \"\") == \"${bot_login}\") | .commit_id" 2>/dev/null | tail -n1 || true)"
+          fi
+          if [ -z "$bot_login" ] || [ "$posted_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::warning::salvage note skipped: the latest review by ${bot_login:-this credential} is anchored at ${posted_sha:-unknown}, not the reviewed head ${EXPECTED_HEAD_SHA}."
+            exit 0
+          fi
+          BODY="$(printf '%s\n' \
+            "<!-- qwen-review-salvaged ${EXPECTED_HEAD_SHA} -->" \
+            '' \
+            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor. Full log in the [workflow run](${RUN_URL})." \
+            '' \
+            '<details><summary>中文说明</summary>' \
+            '' \
+            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量。完整日志见 [workflow 运行](${RUN_URL})。" \
+            '' \
+            '</details>')"
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$BODY" \
+            || echo "::warning::salvage note could not be posted; the salvaged review itself is on the PR (reviewed head ${EXPECTED_HEAD_SHA})."
 
       - name: 'Report docs-only medium outcome'
         if: |-
@@ -2306,12 +3054,15 @@ jobs:
   # `needs`: a job-level timeout cancels review-pr ALONE — authorize and
   # delay-automatic-review completed long before — while a run-level cancel
   # sweeps the whole chain, so 'cancelled' opens the gate only when neither
-  # upstream job was itself cancelled. A run-level cancel landing AFTER the
-  # chain finished (mid-review) still opens the gate: the push-supersede
-  # flavor is then suppressed by the in-step head-moved guard, the close
-  # flavor (a `closed`-action run joining the PR-scoped group hours in, the
-  # head unchanged) by the in-step PR-state check, and a same-head twin
-  # cannot land that late — its cancel fires at run creation, seconds in.
+  # upstream job was itself cancelled. Run-level cancels are rarer since
+  # cancel-in-progress dropped `synchronize` (#10110: a push now supersedes
+  # in-run — the superseded step exits 0, never opening this gate); the ones
+  # left can still land AFTER the chain finished (mid-review) and still open
+  # the gate: the close flavor (a `closed`-action run joining the PR-scoped
+  # group hours in, the head unchanged) is suppressed by the in-step PR-state
+  # check, a manual push-adjacent cancel by the in-step head-moved guard, and
+  # a same-head twin cannot land that late — its cancel fires at run
+  # creation, seconds in.
   # A manual run-cancel during the delay window goes
   # silent under this rule (the person who cancelled does not need retry
   # guidance); a cancel landing mid-review still posts, but with the
