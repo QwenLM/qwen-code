@@ -5,7 +5,54 @@
  */
 
 import type { Application, Request } from 'express';
+import { TLSSocket } from 'node:tls';
+import { bearerAuth } from '../auth.js';
+import { isPreAuthWebShellRequest } from '../web-shell-preauth.js';
+import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+
+export function installRemoteSelfOriginMiddleware(
+  app: Application,
+  bind: string,
+  token: string | undefined,
+): void {
+  if (isLoopbackBind(bind) || !token) return;
+  const authenticate = bearerAuth(token);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!origin || !host || listenerIdentityOf(req).kind !== 'primary') {
+      next();
+      return;
+    }
+    const scheme =
+      req.socket instanceof TLSSocket && req.socket.encrypted
+        ? 'https'
+        : 'http';
+    // Compare direct transport and the canonical authority; never forwarded headers.
+    if (origin !== `${scheme}://${host}`) {
+      next();
+      return;
+    }
+    try {
+      if (new URL(origin).origin !== origin) {
+        next();
+        return;
+      }
+    } catch {
+      next();
+      return;
+    }
+    const allow = () => {
+      delete req.headers.origin;
+      next();
+    };
+    // Module scripts carry Origin but cannot attach Authorization. Only
+    // existing public shell routes may bypass the credential check.
+    if (isPreAuthWebShellRequest(req)) allow();
+    else authenticate(req, res, allow);
+  });
+}
 
 /**
  * Allow same-origin requests from the Web Shell. Browsers send an `Origin`

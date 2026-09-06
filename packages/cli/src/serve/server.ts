@@ -227,7 +227,10 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
@@ -1990,6 +1993,7 @@ export function createServeApp(
   // disable. Re-registering middleware at that point is not an option:
   // Express fixes middleware order when the app is built.
   const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
   app.use(allowOriginCors(originAllowlist));
   app.use(hostAllowlist(opts.hostname, getPort));
   const credentials = new CredentialStore(opts.token);

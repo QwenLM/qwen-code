@@ -97,9 +97,13 @@ import {
 } from './local-bind-addresses.js';
 import { isLoopbackAddress, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
-import { resolveServeToken } from './serve-token.js';
+import { resolveRemoteServeToken } from './serve-token.js';
+import { printRemoteQuickstart } from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -2597,6 +2601,7 @@ function createBootstrapServeApp(input: {
   const localTerminalOpenAvailable = isLocalTerminalAvailable();
 
   installSelfOriginStripMiddleware(app, getPort, opts.hostname);
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
@@ -3319,11 +3324,14 @@ async function runQwenServeImpl(
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
-  const token = resolveServeToken(optsIn.token);
   const bindHostname =
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
       : optsIn.hostname;
+  const { token, generated: generatedToken } = resolveRemoteServeToken(
+    optsIn.token,
+    isLoopbackBind(optsIn.hostname) || isLoopbackBind(bindHostname),
+  );
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackAddress(bindHostname),
     tokenConfigured: token !== undefined,
@@ -4254,17 +4262,18 @@ async function runQwenServeImpl(
             'bind (the static shell has no secrets; the API stays token-gated). ' +
             'Pass --no-web to disable the UI.',
         );
-        // The shell HTML/JS loads (GET carries no Origin), but its same-origin
-        // POSTs (create session, prompt, permission vote) send an Origin the
-        // daemon's CORS wall rejects with 403 unless allow-listed — so without
-        // --allow-origin the UI is effectively read-only on a non-loopback
-        // bind. Front the daemon with a same-origin reverse proxy, or pass
-        // --allow-origin <origin>, to make mutations work.
+        // The remote same-origin exception covers HTTP API requests to the
+        // direct listener only. The WebSocket upgrade gate (terminal, voice)
+        // still admits loopback/allowlisted origins alone, and a TLS front
+        // proxy presents an https Origin this daemon cannot match from its
+        // plain socket — name both so the operator is not left with a
+        // silently read-only shell.
         if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
           writeStderrLine(
-            'qwen serve: without --allow-origin the Web Shell is read-only on a ' +
-              'non-loopback bind — same-origin POSTs are blocked by CORS (403). ' +
-              'Pass --allow-origin <origin> or front it with a same-origin proxy.',
+            'qwen serve: same-origin Web Shell HTTP requests work without ' +
+              '--allow-origin, but WebSocket-backed features (terminal, voice) ' +
+              'and browsers reaching the daemon through a TLS front proxy ' +
+              'still need --allow-origin <origin>.',
           );
         }
       }
@@ -9451,6 +9460,16 @@ async function runQwenServeImpl(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
       );
+      if (!isLoopbackBind(opts.hostname) && token) {
+        void printRemoteQuickstart({
+          bind: opts.hostname,
+          port: actualPort,
+          tls: Boolean(tlsOptions),
+          token,
+          generated: generatedToken,
+          web: webShellMounted,
+        });
+      }
       // Operator log on stderr too (systemd/docker/k8s default
       // captures only stderr for service diagnostics, and the
       // workspace= breadcrumb is the single piece of information

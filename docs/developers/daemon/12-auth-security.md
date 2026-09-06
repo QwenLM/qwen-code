@@ -27,6 +27,12 @@ This doc walks through each layer and the explicit invariants the boot path enfo
 In `run-qwen-serve.ts`:
 
 ```ts
+// A non-loopback bind with neither --token nor QWEN_SERVER_TOKEN first
+// generates an ephemeral 256-bit bearer (printed once at startup, rotated
+// per process). The refusals below therefore fire only when a token source
+// was supplied but is explicitly empty/whitespace, or when the requested
+// hostname resolves off-loopback (localhost pinned to a non-loopback
+// address never generates).
 if (!isLoopbackBind(opts.hostname) && !token) {
   throw new Error('Refusing to bind <host>:<port> without a bearer token. ...');
 }

@@ -148,23 +148,25 @@ Settings I/O failure, such as malformed JSON, falls back to defaults. `InvalidPo
 
 `run-qwen-serve.ts` intentionally throws instead of falling back in these cases:
 
-| Scenario                                                                      | Error prefix                                                                                        |
-| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Non-loopback bind without token                                               | `Refusing to bind ... without a bearer token`                                                       |
-| `--require-auth` without token                                                | `Refusing to start with --require-auth set but no bearer token`                                     |
-| `--workspace` does not exist, is not a directory, or is not absolute          | `Invalid --workspace ...`                                                                           |
-| `--workspace` stat permission denied                                          | `Invalid --workspace ...: permission denied`                                                        |
-| `--mcp-client-budget` is not a positive integer                               | `Must be a positive integer`                                                                        |
-| `--mcp-budget-mode=enforce` without budget                                    | `requires a positive mcpClientBudget`                                                               |
-| `--hostname` is written as `localhost:4170`                                   | `looks like a "host:port" combination. Use --port`                                                  |
-| `--hostname [::1]:8080`                                                       | `Invalid --hostname ... brackets indicate an IPv6 literal but the value is not a clean [addr] form` |
-| `--max-connections` is `NaN` or negative                                      | `Must be >= 0`                                                                                      |
-| `--event-ring-size > 1_000_000`                                               | Thrown during bridge construction                                                                   |
-| `--allow-origin '*'` without token                                            | `Refusing to start with --allow-origin '*' but no bearer token configured`                          |
-| Non-loopback HTTP(S) `--allow-origin` without token                           | `Refusing to start with --allow-origin ... but no bearer token configured`                          |
-| `--prompt-deadline-ms` / `--writer-idle-timeout-ms` is not a positive integer | `Must be a positive integer`                                                                        |
-| `--initialize-timeout-ms` is not a positive integer or exceeds `2^31-1`       | `Must be a positive integer` / `Exceeds maximum JS timer delay`                                     |
-| Unknown `policy.permissionStrategy` or non-positive `policy.consensusQuorum`  | `InvalidPolicyConfigError`                                                                          |
+A non-loopback bind with NO token source at all is not a refusal: the daemon generates an ephemeral 256-bit bearer, prints it once at startup, and rotates it on every restart (see the remote quickstart in `docs/users/qwen-serve.md`).
+
+| Scenario                                                                                        | Error prefix                                                                                        |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Non-loopback bind with an explicitly empty token source (`--token ''` / `QWEN_SERVER_TOKEN=''`) | `Refusing to bind ... without a bearer token`                                                       |
+| `--require-auth` without token                                                                  | `Refusing to start with --require-auth set but no bearer token`                                     |
+| `--workspace` does not exist, is not a directory, or is not absolute                            | `Invalid --workspace ...`                                                                           |
+| `--workspace` stat permission denied                                                            | `Invalid --workspace ...: permission denied`                                                        |
+| `--mcp-client-budget` is not a positive integer                                                 | `Must be a positive integer`                                                                        |
+| `--mcp-budget-mode=enforce` without budget                                                      | `requires a positive mcpClientBudget`                                                               |
+| `--hostname` is written as `localhost:4170`                                                     | `looks like a "host:port" combination. Use --port`                                                  |
+| `--hostname [::1]:8080`                                                                         | `Invalid --hostname ... brackets indicate an IPv6 literal but the value is not a clean [addr] form` |
+| `--max-connections` is `NaN` or negative                                                        | `Must be >= 0`                                                                                      |
+| `--event-ring-size > 1_000_000`                                                                 | Thrown during bridge construction                                                                   |
+| `--allow-origin '*'` without token                                                              | `Refusing to start with --allow-origin '*' but no bearer token configured`                          |
+| Non-loopback HTTP(S) `--allow-origin` without token                                             | `Refusing to start with --allow-origin ... but no bearer token configured`                          |
+| `--prompt-deadline-ms` / `--writer-idle-timeout-ms` is not a positive integer                   | `Must be a positive integer`                                                                        |
+| `--initialize-timeout-ms` is not a positive integer or exceeds `2^31-1`                         | `Must be a positive integer` / `Exceeds maximum JS timer delay`                                     |
+| Unknown `policy.permissionStrategy` or non-positive `policy.consensusQuorum`                    | `InvalidPolicyConfigError`                                                                          |
 
 ## 7. Curl verification checklist
 

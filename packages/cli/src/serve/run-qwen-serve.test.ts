@@ -12573,6 +12573,35 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('refuses tokenless localhost resolving outside loopback instead of generating a token', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-localhost-remote-')),
+    );
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            serveWebShell: false,
+          },
+          {
+            bridge: makeFakeBridge(),
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/token/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('preserves localhost in the TLS channel worker daemon URL after resolving the bind', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-tls-')),

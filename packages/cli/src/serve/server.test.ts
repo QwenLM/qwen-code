@@ -4280,6 +4280,46 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
+    it('admits authenticated same-origin browser requests on a non-loopback bind without --allow-origin', async () => {
+      // Pins the remote same-origin middleware's MOUNT POSITION in the real
+      // app: moving installRemoteSelfOriginMiddleware below the CORS wall
+      // (or dropping it) turns the authed case back into 403 and kills the
+      // built-in remote Web Shell's mutations.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+        undefined,
+        { webShellDir },
+      );
+      const remoteHost = `192.168.1.2:${baseOpts.port}`;
+      const remoteOrigin = `http://${remoteHost}`;
+      const authed = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', remoteOrigin)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send({});
+      // Past the origin wall (not 403) AND past the bearer gate (not 401):
+      // the route's own 404/400 for the unknown session is the success shape.
+      expect(authed.status).not.toBe(403);
+      expect(authed.status).not.toBe(401);
+      const unauthed = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', remoteOrigin)
+        .set('Content-Type', 'application/json')
+        .send({});
+      expect(unauthed.status).toBe(401);
+      const crossOrigin = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', 'http://evil.example')
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send({});
+      expect(crossOrigin.status).toBe(403);
+    });
+
     it('does not shadow /health on a browser navigation (Critical #1)', async () => {
       // Non-loopback + requireAuth registers /health POST-auth. A browser
       // navigation (Accept text/html) must fall THROUGH the SPA fallback to
@@ -33987,12 +34027,34 @@ describe('runQwenServe', () => {
     delete process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'];
   });
 
-  it('refuses to bind 0.0.0.0 without a token', async () => {
+  it('binds 0.0.0.0 without a token using a generated ephemeral bearer', async () => {
+    // Contract change (remote quickstart): a tokenless non-loopback bind no
+    // longer refuses; it generates a per-process bearer and gates every API
+    // route with it. The fail-closed half moved to the explicitly-empty case
+    // below — generation must never revive an operator's deliberate ''.
+    delete process.env['QWEN_SERVER_TOKEN'];
+    handle = await runQwenServe({
+      hostname: '0.0.0.0',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    expect(handle.resolvedToken).toMatch(/^[a-f0-9]{64}$/);
+    const port = (handle.server.address() as { port: number }).port;
+    const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: `Bearer ${handle.resolvedToken}` },
+    });
+    expect(withAuth.status).toBe(200);
+  });
+
+  it('refuses to bind 0.0.0.0 with an explicitly empty token', async () => {
     await expect(
       runQwenServe({
         hostname: '0.0.0.0',
         port: 0,
         mode: 'http-bridge',
+        token: '',
       }),
     ).rejects.toThrow(/Refusing to bind/);
   });
@@ -34519,6 +34581,18 @@ describe('runQwenServe', () => {
       mode: 'http-bridge',
     });
     expect(handle.url).toMatch(/^http:\/\/0\.0\.0\.0:\d+$/);
+    // Pin the env source end-to-end: an operator-supplied token must win
+    // over generation, and must be the credential the API authenticates
+    // against (a regression that dropped the env read would silently swap
+    // in a generated token and 401 every configured client).
+    expect(handle.resolvedToken).toBe('env-secret');
+    const port = (handle.server.address() as { port: number }).port;
+    const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: 'Bearer env-secret' },
+    });
+    expect(withAuth.status).toBe(200);
   });
 
   it('starts on a loopback ephemeral port without a token', async () => {

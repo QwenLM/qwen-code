@@ -466,6 +466,18 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+
+    // Transitive edge: run-qwen-serve.ts statically imports
+    // server/self-origin.js, so that module must not pull web-shell-static
+    // (express-static/CSP machinery) into the fast-path static closure. The
+    // pre-auth discriminators live in dependency-light web-shell-preauth.js.
+    const selfOriginSource = readFileSync(
+      'src/serve/server/self-origin.ts',
+      'utf8',
+    );
+    expect(selfOriginSource).not.toMatch(
+      /from ['"]\.\.\/web-shell-static\.js['"]/,
+    );
   });
 
   it('keeps request helpers from value-importing the ACP compatibility shim', () => {

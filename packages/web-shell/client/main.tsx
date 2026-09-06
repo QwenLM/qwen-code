@@ -6,6 +6,7 @@ import {
   type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import {
@@ -125,8 +126,10 @@ function replaceStandaloneSessionUrl(
   url.searchParams.delete('theme');
   url.searchParams.delete('language');
   url.searchParams.delete('lang');
+  // Boot already scrubbed ?token= (dev included), so drop it here too; dev
+  // keeps ?daemon= so a reload still targets the same local daemon.
+  url.searchParams.delete('token');
   if (!import.meta.env.DEV) {
-    url.searchParams.delete('token');
     url.searchParams.delete('daemon');
   }
   window.history.replaceState(null, '', url);
@@ -251,7 +254,13 @@ async function main() {
 
   ReactDOM.createRoot(container!).render(
     <React.StrictMode>
-      <StandaloneApp daemonToken={daemonToken} />
+      <StandaloneAuth
+        baseUrl={DAEMON_BASE_URL || window.location.origin}
+        initialToken={daemonToken}
+        language={getInitialLanguage()}
+      >
+        {(token) => <StandaloneApp daemonToken={token} />}
+      </StandaloneAuth>
     </React.StrictMode>,
   );
 }
