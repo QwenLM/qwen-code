@@ -35037,6 +35037,7 @@ describe('createAcpSessionBridge — background notifications', () => {
         taskId: 'worker-1',
         status: 'completed',
         kind: 'agent',
+        label: 'research worker',
       }),
     ).resolves.toEqual({ sessionId: session.sessionId, accepted: true });
 
@@ -35049,6 +35050,7 @@ describe('createAcpSessionBridge — background notifications', () => {
         taskId: 'worker-1',
         status: 'completed',
         kind: 'agent',
+        label: 'research worker',
       },
     });
     await bridge.shutdown();
