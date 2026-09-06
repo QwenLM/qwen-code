@@ -2288,6 +2288,7 @@ export async function loadCliConfig(
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     sessionWorkflowEnabled: settings.experimental?.sessionWorkflow ?? false,
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
+    todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
