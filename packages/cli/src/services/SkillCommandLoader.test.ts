@@ -45,9 +45,19 @@ describe('SkillCommandLoader', () => {
   let mockConfig: Config;
   let mockSkillManager: { listSkills: ReturnType<typeof vi.fn> };
   let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
+  let mockAddSessionHook: ReturnType<typeof vi.fn>;
+  let mockSessionHooksManager: {
+    addSessionHook: ReturnType<typeof vi.fn>;
+    getHooksForEvent: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddSessionHook = vi.fn();
+    mockSessionHooksManager = {
+      addSessionHook: mockAddSessionHook,
+      getHooksForEvent: vi.fn().mockReturnValue([]),
+    };
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
@@ -69,6 +79,10 @@ describe('SkillCommandLoader', () => {
         (skill: SkillConfig) =>
           !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
       ),
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getHookSystem: vi.fn().mockReturnValue({
+        getSessionHooksManager: () => mockSessionHooksManager,
+      }),
     } as unknown as Config;
   });
 
@@ -556,6 +570,98 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('frontmatter hooks registration (#11067)', () => {
+    const gateHooks = {
+      PreToolUse: [
+        {
+          matcher: 'Shell',
+          hooks: [
+            { type: 'command', command: '$QWEN_SKILL_ROOT/scripts/gate.sh' },
+          ],
+        },
+      ],
+    } as unknown as SkillConfig['hooks'];
+
+    async function runSkillCommand(skill: SkillConfig) {
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === skill.level ? [skill] : []),
+      );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+    }
+
+    it('registers the skill hooks when the user invokes it via /<skill-name>', async () => {
+      // Regression: the slash-command path used to grant allowedTools but
+      // never register hooks, so a skill's PreToolUse gate silently failed
+      // open when the user started the skill by hand.
+      await runSkillCommand(
+        makeSkill({
+          level: 'user',
+          skillRoot: '/skills/my-skill',
+          hooks: gateHooks,
+        }),
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        'PreToolUse',
+        'Shell',
+        expect.objectContaining({
+          type: 'command',
+          command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+          env: expect.objectContaining({ QWEN_SKILL_ROOT: '/skills/my-skill' }),
+        }),
+        expect.objectContaining({ skillRoot: '/skills/my-skill' }),
+      );
+    });
+
+    it("marks a project skill's hooks trust-gated", async () => {
+      await runSkillCommand(
+        makeSkill({
+          level: 'project',
+          filePath: '/repo/.qwen/skills/my-skill/SKILL.md',
+          skillRoot: '/repo/.qwen/skills/my-skill',
+          hooks: gateHooks,
+        }),
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        'PreToolUse',
+        'Shell',
+        expect.anything(),
+        expect.objectContaining({ trustGated: true }),
+      );
+    });
+
+    it('registers no hooks for a project skill in an untrusted folder', async () => {
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+
+      await runSkillCommand(
+        makeSkill({
+          level: 'project',
+          filePath: '/repo/.qwen/skills/my-skill/SKILL.md',
+          skillRoot: '/repo/.qwen/skills/my-skill',
+          allowedTools: ['Edit'],
+          hooks: gateHooks,
+        }),
+      );
+
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('does not register anything when the skill declares no hooks', async () => {
+      await runSkillCommand(makeSkill({ level: 'user' }));
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
     });
   });
 

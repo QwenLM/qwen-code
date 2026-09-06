@@ -402,8 +402,8 @@ function SessionOverviewPanelInner({
       false) &&
     liveStateWorkspaceCwds.length > 0;
   // Live state only replaces catalog/status polling when this panel runs the
-  // channel itself. When the sidebar owns it, its trusted-only coverage can
-  // miss workspaces this panel shows — so this panel keeps polling then.
+  // channel itself. When another view owns it, keep the fallback because that
+  // view may cover a narrower workspace set.
   const liveStateActive = manageLiveState && liveStateEnabled;
   useWorkspaceSessionLiveState(workspace.client, {
     enabled: liveStateActive,
