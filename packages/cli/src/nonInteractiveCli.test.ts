@@ -5142,6 +5142,94 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'reports terminal API errors as failures in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      const errorMessage = 'messages: text content blocks must be non-empty';
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          if (cb)
+            cb(
+              'Monitor ready',
+              '<task-notification>ready</task-notification>',
+              {
+                monitorId: 'mon_error',
+                toolUseId: 'tool_monitor',
+                status: 'running',
+                eventCount: 1,
+              },
+            );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'failed-attempt-tool',
+                name: 'test-tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'api-error-status',
+              },
+            },
+            {
+              type: LlmEventType.Error,
+              value: { error: { message: errorMessage } },
+            },
+          ]),
+        )
+        .mockImplementation(() => createStreamFromEvents([finished]));
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'unexpected execution' }],
+      });
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'api-error-status'),
+      ).rejects.toThrow(
+        format === OutputFormat.JSON ? 'process.exit(1) called' : errorMessage,
+      );
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const results = messages.filter(
+        (message: { type: string }) => message.type === 'result',
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        is_error: true,
+        subtype: 'error_during_execution',
+      });
+      expect(JSON.stringify(results[0])).toContain(errorMessage);
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+        drain ? 2 : 1,
+      );
+    },
+  );
+
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
     setupMetricsMock();

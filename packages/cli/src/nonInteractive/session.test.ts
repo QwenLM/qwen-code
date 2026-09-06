@@ -799,6 +799,58 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockOutputAdapter.emitResult).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    'emits one monitor failure result (already emitted=%s)',
+    async (alreadyEmitted) => {
+      let notify: (() => void) | undefined;
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        notify = () =>
+          cb?.(
+            'Monitor ready',
+            '<task-notification>ready</task-notification>',
+            { monitorId: 'mon_1', status: 'running' },
+          );
+      });
+      runNonInteractiveMock
+        .mockImplementationOnce(async () => {
+          notify?.();
+        })
+        .mockImplementationOnce(
+          async (
+            _config,
+            _settings,
+            _input,
+            _promptId,
+            options: { onResultEmitted?: () => void },
+          ) => {
+            if (alreadyEmitted) {
+              mockOutputAdapter.emitResult({
+                isError: true,
+                errorMessage: 'provider failed',
+              });
+              options.onResultEmitted?.();
+            }
+            throw new Error('provider failed');
+          },
+        );
+      mockInputReader.read = async function* () {
+        yield createControlRequest('initialize');
+        yield createUserMessage('Start monitor');
+        await vi.waitFor(() =>
+          expect(runNonInteractiveMock).toHaveBeenCalledTimes(2),
+        );
+      };
+      await runNonInteractiveStreamJson(config, '');
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: 'provider failed',
+        }),
+      );
+    },
+  );
+
   it('routes monitor notifications through the session queue', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start a monitor');

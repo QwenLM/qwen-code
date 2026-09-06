@@ -2466,19 +2466,17 @@ export async function runNonInteractive(
             }
             loopDetected = true;
           }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === LlmEventType.Error
-          ) {
+          if (event.type === LlmEventType.Error) {
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
+            if (outputFormat === OutputFormat.TEXT) {
+              process.stderr.write(`${errorText}\n`);
+            }
+            // The adapter (JSON) or stderr (TEXT) has already reported the
+            // formatted error. Reuse the terminal failure path without
+            // formatting or printing the message a second time.
             throw new AlreadyReportedError(errorText);
           }
         }
@@ -2782,15 +2780,14 @@ export async function runNonInteractive(
                   }
                   loopDetected = true;
                 }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === LlmEventType.Error
-                ) {
+                if (event.type === LlmEventType.Error) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
                   );
-                  process.stderr.write(`${errorText}\n`);
+                  if (outputFormat === OutputFormat.TEXT) {
+                    process.stderr.write(`${errorText}\n`);
+                  }
                   // See the matching note in the first stream loop above —
                   // we mark the throw so handleError doesn't reformat or
                   // reprint downstream.
@@ -2872,11 +2869,10 @@ export async function runNonInteractive(
                 if (structuredSubmission !== undefined) return;
                 await drainBatch();
               }
-            })();
-            drainPromise = p;
-            void p.finally(() => {
+            })().finally(() => {
               if (drainPromise === p) drainPromise = null;
             });
+            drainPromise = p;
             return p;
           };
 
