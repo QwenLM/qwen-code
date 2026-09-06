@@ -797,6 +797,35 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 
+  // The private Conversations provenance marker is a fixed constant rather
+  // than a per-spawn nonce, so the home-scoped exemption from
+  // PROJECT_ENV_HARDCODED_EXCLUSIONS must not apply to it: a home `.env`
+  // could otherwise forge Conversations provenance onto an ordinary session.
+  it('never applies the private Conversations marker from user-level .env files', () => {
+    const workspace = makeWorkspace();
+    const qwenHome = makeWorkspace();
+    process.env['QWEN_HOME'] = qwenHome;
+    fs.writeFileSync(
+      path.join(qwenHome, '.env'),
+      [
+        'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME=1',
+        'qwen_code_private_conversations_runtime=1',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(
+      process.env['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME'],
+    ).toBeUndefined();
+    expect(
+      process.env['qwen_code_private_conversations_runtime'],
+    ).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
   it('never applies loader-affecting keys from settings.env, including reload', () => {
     resetEnvironmentTrackingForTesting();
     const workspace = makeWorkspace();

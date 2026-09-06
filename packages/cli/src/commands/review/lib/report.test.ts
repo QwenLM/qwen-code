@@ -182,6 +182,29 @@ describe('buildPlanReport', () => {
       createHash('sha256').update(diff, 'utf8').digest('hex'),
     );
   });
+
+  it('records the low-effort candidate floor from changed-file count', () => {
+    const fiveFiles = Array.from({ length: 5 }, (_, i) =>
+      makeDiff(`src/file-${i}.ts`, 2),
+    ).join('');
+    const report = buildPlanReport(
+      buildDiffPlan(fiveFiles, 400),
+      () => 2,
+      {},
+      fiveFiles,
+    );
+    expect(report.files).toHaveLength(5);
+    expect(report.budget.candidateFloor).toBe(4);
+
+    const oneDiff = makeDiff('src/only.ts', 2);
+    const oneFile = buildPlanReport(
+      buildDiffPlan(oneDiff, 400),
+      () => 2,
+      {},
+      oneDiff,
+    );
+    expect(oneFile.budget.candidateFloor).toBe(1);
+  });
 });
 
 describe('stringifyPlanReport', () => {

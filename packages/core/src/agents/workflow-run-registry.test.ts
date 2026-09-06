@@ -13,6 +13,7 @@ import {
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
+import { RESUME_ARGS_TOO_LARGE_NOTE } from './workflow-resume-call.js';
 import {
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
@@ -1994,6 +1995,165 @@ describe('WorkflowRunRegistry', () => {
 
     r.setCompletionCallback(undefined);
     expect(r.hasCompletionCallback()).toBe(false);
+  });
+
+  // The notification is the whole surface a backgrounded run has: it lands in
+  // a later turn, when the handle and the tool result are long gone. What the
+  // run cost, and how to get back into it, have to be in the message itself.
+  it('reports usage and the recovery route on a background failure', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_recover', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_recover.js',
+        journalPath: '/runtime/workflows/wf_recover/journal.jsonl',
+        args: { plan: 'a' },
+        resumeInBackground: true,
+        startTime: 1_000,
+      }),
+    );
+    r.onAgentDispatched(entry.runId);
+    r.onAgentDispatched(entry.runId);
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'ok',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchQueued(entry.runId, {
+      id: 'd2',
+      prompt: 'bad',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchSettled(entry.runId, 'd1', undefined, 2);
+    r.onDispatchSettled(entry.runId, 'd2', 'boom', 2);
+    r.onAgentCompleted(entry.runId);
+    r.onAgentCompleted(entry.runId);
+    r.onBudgetUpdated(entry.runId, 4_242, null);
+    r.fail(entry.runId, 'boom', 3_500);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain(
+      '<usage>agents_dispatched=2 agents_succeeded=1 agents_cached=0 ' +
+        'agents_failed=1 agents_cancelled=0 tokens_spent=4242 duration_ms=2500</usage>',
+    );
+    expect(modelText).toContain('<recovery>');
+    expect(modelText).toContain(
+      'Workflow({ scriptPath: "/runtime/workflows/generated/inline/wf_recover.js", ' +
+        'resumeFromRunId: "wf_recover", args: {"plan":"a"}, run_in_background: true })',
+    );
+    expect(modelText).toContain(
+      'Journal: /runtime/workflows/wf_recover/journal.jsonl',
+    );
+    expect(modelText).not.toContain('<diagnostics>');
+  });
+
+  it('points a completed background run at the per-agent journal', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_diag', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_diag.js',
+        journalPath: '/runtime/workflows/wf_diag/journal.jsonl',
+      }),
+    );
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'replayed',
+      dependsOn: [],
+      queuedAt: 1,
+      cached: true,
+    });
+    r.complete(entry.runId, [], 1_700_000_001_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('agents_cached=1');
+    expect(modelText).toContain('<diagnostics>');
+    expect(modelText).toContain(
+      'Per-agent results: /runtime/workflows/wf_diag/journal.jsonl',
+    );
+    expect(modelText).toContain('read this file BEFORE diagnosing');
+    expect(modelText).not.toContain('<recovery>');
+  });
+
+  // An unpersisted inline script (no storage, symlinked root) leaves nothing
+  // to resume from, and a run with no journal has nothing to read: the
+  // notification must then say neither rather than name a path that is not
+  // there.
+  it('omits the recovery block when the run has no script or journal on disk', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_bare', { isBackgrounded: true }));
+    r.fail('wf_bare', 'boom', 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<usage>');
+    expect(modelText).not.toContain('<recovery>');
+    expect(modelText).not.toContain('Workflow({');
+  });
+
+  // Args that cannot be pasted back are NAMED, never truncated: half a JSON
+  // literal in a resume call is a call that fails to parse.
+  it('names oversized args instead of truncating the resume call', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_bigargs', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_bigargs.js',
+        args: { blob: 'x'.repeat(400) },
+      }),
+    );
+    r.fail('wf_bigargs', 'boom', 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('resumeFromRunId: "wf_bigargs" })');
+    expect(modelText).not.toContain('args:');
+    expect(modelText).toContain('too large to inline here');
+  });
+
+  it('names oversized args on completed background diagnostics', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_bigargs_done', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_bigargs_done.js',
+        args: { blob: 'x'.repeat(400) },
+      }),
+    );
+    r.complete('wf_bigargs_done', [], 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<diagnostics>');
+    expect(modelText).toContain(RESUME_ARGS_TOO_LARGE_NOTE);
+  });
+
+  it('reports cancelled live dispatches as a disjoint usage bucket', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_cancel_usage', { isBackgrounded: true }));
+    r.onAgentDispatched(entry.runId);
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'pending',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.fail(entry.runId, 'boom', 2_000);
+
+    expect(completion.mock.calls[0][1]).toContain(
+      'agents_dispatched=1 agents_succeeded=0 agents_cached=0 agents_failed=0 agents_cancelled=1',
+    );
   });
 
   it('emits one safe background failure completion and isolates callback errors', () => {

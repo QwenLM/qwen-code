@@ -69,6 +69,33 @@ describe('projectChatRecordsToDaemonTranscript', () => {
     ).toBe(true);
   });
 
+  it('keeps persisted source identity when earlier history is prepended', () => {
+    const tail = [
+      record('root', null),
+      record('answer', 'root', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'stable answer' }] },
+      }),
+    ];
+    const prepended = [
+      record('earlier', null),
+      record('root', 'earlier'),
+      tail[1],
+    ];
+
+    const tailAnswer = projectChatRecordsToDaemonTranscript(tail).blocks.find(
+      (block) => block.kind === 'assistant',
+    );
+    const prependedAnswer = projectChatRecordsToDaemonTranscript(
+      prepended,
+    ).blocks.find((block) => block.kind === 'assistant');
+
+    expect(tailAnswer?.sourceRecordIds).toEqual(['answer']);
+    expect(prependedAnswer?.sourceRecordIds).toEqual(['answer']);
+    expect(tailAnswer?.segmentId).toBe('answer:0');
+    expect(prependedAnswer?.segmentId).toBe('answer:0');
+  });
+
   it('finalizes earlier assistant blocks when record boundaries prevent merging', () => {
     const projection = projectChatRecordsToDaemonTranscript([
       record('root', null),
@@ -380,6 +407,47 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       ['plan-2'],
     ]);
     expect(new Set(plans.map((block) => block.toolCallId)).size).toBe(2);
+    expect(plans[0]).toMatchObject({
+      resultPreview: {
+        kind: 'todo_list',
+        entries: [{ content: 'A', status: 'in_progress' }],
+      },
+    });
+  });
+
+  it('marks a bounded todo preview as truncated', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('large-plan', null, {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name: 'todo_write', response: {} } }],
+        },
+        toolCallResult: {
+          callId: 'todo-large',
+          resultDisplay: {
+            type: 'todo_list',
+            todos: Array.from({ length: 1_001 }, (_, index) => ({
+              content: `Task ${index}`,
+              status: 'pending',
+            })),
+          },
+        },
+      }),
+    ]);
+    const plan = projection.blocks.find(
+      (block) => block.kind === 'tool' && block.toolName === 'todo_write',
+    );
+
+    expect(plan?.resultPreview).toMatchObject({
+      kind: 'todo_list',
+      truncated: true,
+    });
+    expect(
+      plan?.resultPreview?.kind === 'todo_list'
+        ? plan.resultPreview.entries.length
+        : 0,
+    ).toBe(1_000);
   });
 
   it('does not merge a todo plan into a persisted daemon-plan tool id', () => {
@@ -620,12 +688,10 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       (block) => block.kind === 'user',
     );
     expect(userBlocks.map((block) => block.text)).toEqual([
-      'look at this',
-      '[Attachment is no longer available]',
+      'look at this\n[Attachment is no longer available]',
       '[Attachment is no longer available]',
     ]);
     expect(userBlocks.map((block) => block.sourceRecordIds)).toEqual([
-      ['mid-text-plus-image'],
       ['mid-text-plus-image'],
       ['mid-image-only'],
     ]);

@@ -183,7 +183,10 @@ export interface GoalRuntime {
   ): Promise<GoalStateResponse>;
   bindHost(host: GoalTurnHost): () => void;
   beginTurn(turnKey: string): GoalTurnPermit | undefined;
-  releaseTurn(turnKey: string): Promise<boolean>;
+  releaseTurn(
+    turnKey: string,
+    options?: { requeue?: boolean },
+  ): Promise<boolean>;
   /**
    * Confirms the turn's prompt reached the model.
    *
@@ -1441,7 +1444,10 @@ export function createGoalRuntime(
       broadcast();
       return structuredClone(currentPermit);
     },
-    releaseTurn(turnKey: string): Promise<boolean> {
+    releaseTurn(
+      turnKey: string,
+      options?: { requeue?: boolean },
+    ): Promise<boolean> {
       return enqueue(async () => {
         assertOperational();
         let released = false;
@@ -1489,7 +1495,9 @@ export function createGoalRuntime(
           broadcast();
           released = true;
         }
-        if (released && !currentPermit) queueContinuation();
+        if (released && !currentPermit && options?.requeue !== false) {
+          queueContinuation();
+        }
         return released;
       });
     },

@@ -791,6 +791,28 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('uses normalized newText only when write_file content is unavailable', () => {
+    const messages = [
+      userMessage('u1', 'write from preview'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-preview',
+          toolName: 'write_file',
+          status: 'completed',
+          args: {
+            path: 'src/preview.ts',
+            newText: 'preview only\n',
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.diffs).toEqual([
+      { oldText: '', newText: 'preview only\n', fullContent: true },
+    ]);
+  });
+
   it('keeps empty and whitespace-only file contents', () => {
     const messages = [
       userMessage('u1', 'write blank files'),
