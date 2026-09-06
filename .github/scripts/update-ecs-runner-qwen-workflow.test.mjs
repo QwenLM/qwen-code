@@ -186,6 +186,13 @@ describe('ECS runner qwen update workflow', () => {
     assert.ok(updateCode.includes('arm_ran_npm'));
     assert.ok(updateCode.includes("grep -q '^sudo:'"));
     assert.ok(!updateCode.includes("grep -q '^npm '"));
+    // Presence of the prefix is not the refusal, though: sudo prints
+    // non-fatal diagnostics under that same program-name prefix while still
+    // running the command, so advancement requires the refusal to be the
+    // arm's whole story — nothing else on stderr, nothing on stdout. Pinned
+    // as strings too, because the replay arm below is skipped on Windows.
+    assert.ok(updateCode.includes("! grep -qv '^sudo:'"));
+    assert.ok(updateCode.includes('[[ ! -s "${out}" ]]'));
     // Each install argv appears exactly once: the pin cannot drift between
     // the two modes that share it, and neither mode can lose the registry
     // pin or grow a flag the authorized spec does not name.
@@ -518,6 +525,13 @@ function runVerify({
 //                               exhaustion does. A separate axis from
 //                               npmFailures, whose premise is that npm always
 //                               speaks for itself.
+//   sudoWarning: true — sudo prints a NON-FATAL diagnostic under its own
+//                       program-name prefix (`unable to resolve host <host>`,
+//                       routine when the machine's hostname is missing from
+//                       /etc/hosts) while still running the command. Emitted
+//                       during startup, before the policy check, so a refused
+//                       arm carries it too. Orthogonal to both npm axes: it
+//                       is not a failure and it is not a refusal.
 // The npm stub records every install it is asked to run tagged with the
 // effective user, so a test can assert *which mode* installed rather than
 // only that the step exited 0 — a fallback that succeeds after a wasted
@@ -528,6 +542,7 @@ function runUpdate({
   version = '0.22.3',
   npmFailures = 0,
   npmFailureStyle = 'npm',
+  sudoWarning = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ecs-install-'));
   try {
@@ -547,6 +562,12 @@ function runUpdate({
         '  exit 1',
         'fi',
         'shift',
+        '# Real sudo prints this during startup, before it evaluates the',
+        '# policy, and still runs the command afterwards — so it lands on the',
+        '# stderr of an authorized arm and a refused one alike.',
+        `if [[ "${sudoWarning}" == 'true' ]]; then`,
+        '  echo "sudo: unable to resolve host hk-4: Name or service not known" >&2',
+        'fi',
         'case ' + `"${sudoers}"` + ' in',
         '  generic) ;;',
         '  command-specific)',
@@ -894,6 +915,68 @@ describe('ECS runner qwen update replay', { skip: !replayable }, () => {
         '::warning::npm install attempt 1 failed; retrying',
       ),
     );
+  });
+
+  it('does not read a non-fatal sudo warning as a refusal to advance', () => {
+    // `^sudo:` is sudo's program-name prefix, not a refusal marker: real sudo
+    // prints `unable to resolve host <host>` under it — routine when the
+    // machine's own hostname is missing from /etc/hosts, and observed on a
+    // live hk pool member, where it resolved only through mDNS — while still
+    // running the command. On an hk-4/hk-5-class pool that warning therefore
+    // shares ${err} with the pinned arm's transient npm failure, the ENOTEMPTY
+    // rename race the retry loop exists for. Keying the discriminator on the
+    // prefix merely being present classifies that as a refusal: the chain
+    // escalates to the unpinned `named-spec` argv generic sudoers also allows,
+    // root installs into /usr/local/lib/nodejs/node-v22.23.2-linux-x64, that
+    // arm returns 0 and `esac && exit 0` certifies the update without ever
+    // printing the retry warning — leaving a root-owned tree the PKG_DIR
+    // cleanup glob never reaches, and a Verify leg that reds. The warning is a
+    // persistent host condition, so every later transient npm failure on that
+    // pool escalates the same way. The refusal has to be the arm's whole story.
+    const updated = runUpdate({
+      sudoers: 'generic',
+      npmFailures: 1,
+      sudoWarning: true,
+    });
+    assert.equal(updated.status, 0);
+    // Retried its own mode instead of escalating to the unpinned one.
+    assert.deepEqual(updated.modes, ['root', 'root']);
+    const installs = updated.calls.trim().split('\n');
+    assert.equal(installs.length, 2);
+    for (const install of installs) {
+      assert.ok(install.includes('install -g --prefix /usr/local'));
+    }
+    // The retry was spent as a retry, and said so.
+    assert.ok(
+      updated.stdout.includes(
+        '::warning::npm install attempt 1 failed; retrying',
+      ),
+    );
+    // The warning is still surfaced; only its meaning as a refusal is gone.
+    assert.ok(updated.stderr.includes('sudo: unable to resolve host'));
+  });
+
+  it('still advances past a refusal on a pool whose sudo also warns', () => {
+    // The negative half, so the tightening cannot strand hk-1/hk-2: their real
+    // refusal leaves stderr holding nothing but `^sudo:` lines and stdout
+    // empty, which the conjunction still reads as a refusal. The warning
+    // arrives during sudo startup, before the policy check, so the rejected
+    // arm carries both lines and the chain still moves on to the authorized
+    // spec.
+    const updated = runUpdate({
+      sudoers: 'command-specific',
+      sudoWarning: true,
+    });
+    assert.equal(updated.status, 0);
+    assert.deepEqual(updated.modes, ['root']);
+    const installs = updated.calls.trim().split('\n');
+    assert.equal(installs.length, 1);
+    // Mode 2 installed: the spec hk-1/hk-2's sudoers names, unpinned.
+    assert.ok(
+      installs[0].includes('install -g --registry=https://registry.npmjs.org'),
+    );
+    assert.ok(!installs[0].includes('--prefix'));
+    assert.ok(updated.stderr.includes('sudo: unable to resolve host'));
   });
 
   it('still advances on a sudo refusal, then retries the authorized spec', () => {

@@ -175,11 +175,17 @@ jobs:
             # attempts), and an unrecognised failure now retries its own mode
             # and fails loudly instead of installing where the pool cannot
             # see it.
-            # Residual: a refusal that is not `sudo:`-prefixed — sudo absent
-            # rather than unauthorized, which bash reports as `command not
-            # found` under its own prefix — does not advance, so that mode
-            # retries and the leg reds instead of reaching the runner-user
-            # mode. It cannot install into the wrong prefix.
+            # Residual, both directions. A refusal that is not
+            # `sudo:`-prefixed (sudo absent rather than unauthorized, which
+            # bash reports as `command not found` under its own prefix) does
+            # not advance, so that mode retries and the leg reds instead of
+            # reaching the runner-user mode; it cannot install into the
+            # wrong prefix. The other way, a non-fatal `sudo:` warning that
+            # arrives with a death quiet enough to leave BOTH captures
+            # holding nothing but `^sudo:` lines still advances. A signalled
+            # npm does not reach that corner: install_qwen is a shell
+            # function, so bash's own `Killed` diagnostic lands in stderr
+            # and supplies the non-`^sudo:` line.
             arm_ran_npm=0
             run_install_arm() {
               local out err status
@@ -188,9 +194,18 @@ jobs:
               "$@" >"${out}" 2>"${err}" && status=0 || status=$?
               cat "${out}"
               cat "${err}" >&2
-              # Advance only when sudo itself refused; npm's own error, a
-              # crash, or a kill is this mode's failure to retry.
-              if grep -q '^sudo:' "${err}"; then
+              # Advance only when sudo's refusal is this arm's WHOLE story:
+              # a `^sudo:` line, nothing else on stderr, nothing on stdout.
+              # sudo prints non-fatal diagnostics under that same
+              # program-name prefix while still running the command, so the
+              # prefix merely being present reads one of those warnings
+              # co-occurring with a real npm failure as a refusal and
+              # escalates to the unpinned arm. The conjunction only ever
+              # blocks advancement, so the property this polarity was
+              # written for survives: npm's own error, a crash, or a kill
+              # still retries this mode, and an OOM-killed npm leaves no
+              # `^sudo:` line at all.
+              if grep -q '^sudo:' "${err}" && ! grep -qv '^sudo:' "${err}" && [[ ! -s "${out}" ]]; then
                 arm_ran_npm=0
               else
                 arm_ran_npm=1
