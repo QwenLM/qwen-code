@@ -43,8 +43,17 @@ const mocks = vi.hoisted(() => ({
   errorNotifications: { current: 0 },
 }));
 
+interface RewindSnapshotStub {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: { filesChanged: number; insertions: number; deletions: number };
+}
+
 const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
+  getRewindSnapshots: vi.fn(),
+  rewindSession: vi.fn(),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
@@ -56,8 +65,8 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
         deleteSessionsData: vi.fn(async () => ({})),
       };
     }
-    getRewindSnapshots = vi.fn(async () => ({ snapshots: [] }));
-    rewindSession = vi.fn(async () => ({}));
+    getRewindSnapshots = sdkMocks.getRewindSnapshots;
+    rewindSession = sdkMocks.rewindSession;
   },
 }));
 
@@ -1139,5 +1148,94 @@ describe('EmbeddedApp permission diff request-id wiring', () => {
       type: 'closeDiff',
       data: { path: '/workspace/a.txt', requestId: 'req-a' },
     });
+  });
+});
+
+describe('EmbeddedApp message edit rewind', () => {
+  interface PrepareSubmission {
+    sessionId?: string;
+    prompt: string;
+    inputAnnotations: unknown[];
+  }
+
+  function snapshot(turnIndex: number): RewindSnapshotStub {
+    return {
+      promptId: `prompt-${turnIndex}`,
+      turnIndex,
+      timestamp: '2026-09-06T00:00:00.000Z',
+      diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    };
+  }
+
+  async function startEditing(
+    props: CapturedProps,
+    turnIndex: number,
+  ): Promise<(submission: PrepareSubmission) => Promise<unknown>> {
+    const onEdit = callback<(turnIndex: number, content: string) => boolean>(
+      props,
+      'onUserMessageEditRequest',
+    );
+    await act(async () => {
+      onEdit(turnIndex, 'original text');
+      await Promise.resolve();
+    });
+    const latest = mocks.embeddedProps.current;
+    expect(latest).not.toBeNull();
+    return callback<(submission: PrepareSubmission) => Promise<unknown>>(
+      latest as CapturedProps,
+      'prepareSubmit',
+    );
+  }
+
+  beforeEach(() => {
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [] });
+    sdkMocks.rewindSession.mockResolvedValue({});
+  });
+
+  // The daemon-backed edit/rewind shipped with the cutover but nothing ever
+  // exercised it: getRewindSnapshots and rewindSession appeared in this file
+  // only as mock stubs (#9911).
+  it('rewinds to the snapshot for the edited turn, not the newest one', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2), snapshot(5), snapshot(3)],
+    });
+    const prepareSubmit = await startEditing(props, 3);
+
+    await act(async () => {
+      await prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    // Turn 3, even though turn 5 is newer and listed before it.
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+
+  it('refuses the edit when the turn no longer has a snapshot', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2)],
+    });
+    const prepareSubmit = await startEditing(props, 7);
+
+    await expect(
+      prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }),
+    ).rejects.toThrow('The original message can no longer be edited.');
+
+    // The rejection is what the web shell now surfaces to the user; rewinding
+    // to some other turn would silently discard different work.
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
 });

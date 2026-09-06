@@ -18472,6 +18472,31 @@ describe('App session callbacks', () => {
     expect(order).toEqual(['prepare', 'gate:resolved', 'transport:resolved']);
   });
 
+  // #9911: a rejected preflight cancels the submission, and used to do it with
+  // nothing but a console warning. Hosts put user-facing text in these errors —
+  // the VS Code companion throws localized rewind failures here — so a silent
+  // cancel leaves the user in front of a composer that appeared to do nothing.
+  it('surfaces a rejected preparation instead of cancelling silently', async () => {
+    const prepareSubmit = vi
+      .fn()
+      .mockRejectedValue(
+        new Error('The original message can no longer be edited.'),
+      );
+    const onToast = vi.fn();
+    const { container } = renderApp({ prepareSubmit, onToast });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The original message can no longer be edited.',
+    );
+  });
+
   it('keeps the draft when preparation removes all prompt content', async () => {
     const prepareSubmit = vi.fn().mockResolvedValue({
       prompt: '',
