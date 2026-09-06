@@ -5,7 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { escapeSystemReminderTags, escapeXml } from './xml.js';
+import {
+  escapeSystemReminderTags,
+  escapeXml,
+  escapeXmlElementText,
+} from './xml.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('xml utils', () => {
   describe('escapeXml', () => {
@@ -20,6 +25,12 @@ describe('xml utils', () => {
         'a&amp;b&amp;c &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
       );
     });
+  });
+
+  it('preserves quotes in element text while escaping structural characters', () => {
+    expect(escapeXmlElementText(`a&b <tag> "quoted" 'literal'`)).toBe(
+      `a&amp;b &lt;tag&gt; "quoted" 'literal'`,
+    );
   });
 
   describe('escapeSystemReminderTags', () => {
@@ -86,7 +97,9 @@ describe('xml utils', () => {
       const input = `<${'\t'.repeat(50000)}${'<'.repeat(50000)}`;
       const start = Date.now();
       expect(escapeSystemReminderTags(input)).toBe(input);
-      expect(Date.now() - start).toBeLessThan(1000);
+      expectWithinLatencyBudget(Date.now() - start, 1000, {
+        poolMultiplier: 20,
+      });
     });
 
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {

@@ -103,6 +103,7 @@ describe('ReadFileTool', () => {
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
         getProjectDir: () => path.join(tempRootDir, '.project'),
+        getWorkflowRunsDir: () => path.join(tempRootDir, '.workflow-runs'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),

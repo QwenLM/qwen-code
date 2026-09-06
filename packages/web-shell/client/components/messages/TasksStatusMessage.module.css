@@ -48,6 +48,11 @@
   cursor: pointer;
 }
 
+.row:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
 .selected {
   color: var(--agent-blue-500);
 }
@@ -386,6 +391,13 @@
   overflow: hidden;
 }
 
+.embeddedPanel .inlineDetail[data-kind='workflow'] {
+  margin: 4px 0 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .embeddedPanel .detail {
   margin: 0;
   border-radius: 0;
@@ -488,6 +500,12 @@
 .actionButton:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.primaryActionButton {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .dangerButton {

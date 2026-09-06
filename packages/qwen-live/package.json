@@ -1,0 +1,60 @@
+{
+  "name": "@qwen-code/qwen-live",
+  "version": "0.1.0",
+  "description": "Standalone Live voice daemon: a realtime voice control plane that orchestrates Qwen Code sessions.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/qwen-live"
+  },
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "qwen-live": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "build:ts": "tsc --build tsconfig.build.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo tsconfig.build.tsbuildinfo",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
+    "@qwen-code/sdk": "file:../sdk-typescript",
+    "ansi-regex": "^6.2.2",
+    "prompts": "^2.4.2",
+    "proper-lockfile": "^4.1.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.1.1",
+    "@types/prompts": "^2.4.9"
+  },
+  "bugs": {
+    "url": "https://github.com/QwenLM/qwen-code/issues"
+  },
+  "homepage": "https://github.com/QwenLM/qwen-code/tree/main/packages/qwen-live#readme"
+}

@@ -99,6 +99,11 @@ export interface BridgeRuntimeEpochSource {
   allocate(): number;
 }
 
+export type BridgeMcpAuthenticationAdmission = (
+  workspaceCwd: string,
+  serverName: string,
+) => (() => void) | undefined;
+
 /**
  * Trusted child-to-daemon request made immediately before a tool executor.
  * `sessionId` and `promptId` are revalidated by BridgeClient against its
@@ -231,6 +236,14 @@ export interface BridgeOptions {
    */
   sessionAttachmentsRoot?: string;
   /**
+   * Fallback root for reading session attachments stored before
+   * `sessionAttachmentsRoot` was reconfigured (e.g. the previous default
+   * directory). Writes always go to `sessionAttachmentsRoot`; reads and
+   * removes that miss there consult this root so existing attachments
+   * survive a root switch.
+   */
+  sessionAttachmentsFallbackRoot?: string;
+  /**
    * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
@@ -248,6 +261,8 @@ export interface BridgeOptions {
   channelFactory?: ChannelFactory;
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
+  /** Daemon-global admission for the process-wide MCP OAuth callback port. */
+  acquireMcpAuthentication?: BridgeMcpAuthenticationAdmission;
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
