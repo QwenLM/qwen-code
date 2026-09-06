@@ -5,18 +5,55 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig, type } from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
+import {
+  TestRig,
+  type,
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 describe('Interactive Mode', () => {
   let rig: TestRig;
+  let fakeServer: FakeOpenAIServer | undefined;
+  let restoreNoProxy: () => void;
 
   beforeEach(() => {
     rig = new TestRig();
+    restoreNoProxy = applyContainerSandboxNoProxy();
   });
 
   afterEach(async () => {
+    await fakeServer?.close();
+    fakeServer = undefined;
+    restoreNoProxy();
     await rig.cleanup();
   });
+
+  async function runInteractiveWithFakeModel() {
+    fakeServer = await startFakeOpenAIServer(
+      ({ requestIndex }) => ({
+        content:
+          requestIndex === 0
+            ? `${'history '.repeat(1000)} Einstein`
+            : '<state_snapshot>Compressed history focused on Einstein.</state_snapshot>',
+      }),
+      fakeServerHostOptions(),
+    );
+    return rig.runInteractive(
+      '--auth-type',
+      'openai',
+      '--openai-api-key',
+      'fake-key',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--model',
+      'fake-model',
+    );
+  }
 
   it.skipIf(process.platform === 'win32')(
     'should trigger chat compression with /compress command',
@@ -31,13 +68,16 @@ describe('Interactive Mode', () => {
         },
       });
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess } = await runInteractiveWithFakeModel();
 
       let fullOutput = '';
       ptyProcess.onData((data: string) => (fullOutput += data));
 
       // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message', 15000);
+      const isReady = await rig.waitForText(
+        'Type your message',
+        rig.getDefaultTimeout(),
+      );
       expect(
         isReady,
         'CLI did not start up in interactive mode correctly',
@@ -49,7 +89,8 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, longPrompt);
       await type(ptyProcess, '\r');
 
-      await rig.waitForText('einstein', 25000);
+      const seedCompleted = await rig.waitForText('einstein');
+      expect(seedCompleted, 'seed response did not complete').toBe(true);
 
       await type(ptyProcess, '/compress');
       // A small delay to allow React to re-render the command list.
@@ -119,12 +160,15 @@ describe('Interactive Mode', () => {
         },
       });
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess } = await runInteractiveWithFakeModel();
 
       let fullOutput = '';
       ptyProcess.onData((data: string) => (fullOutput += data));
 
-      const isReady = await rig.waitForText('Type your message', 15000);
+      const isReady = await rig.waitForText(
+        'Type your message',
+        rig.getDefaultTimeout(),
+      );
       expect(
         isReady,
         'CLI did not start up in interactive mode correctly',
@@ -137,7 +181,8 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, seedPrompt);
       await type(ptyProcess, '\r');
 
-      await rig.waitForText('einstein', 25000);
+      const seedCompleted = await rig.waitForText('einstein');
+      expect(seedCompleted, 'seed response did not complete').toBe(true);
 
       // Fire /compress with a trailing instruction. We are not asserting on
       // summary CONTENT (model behaviour) — only that the wiring runs

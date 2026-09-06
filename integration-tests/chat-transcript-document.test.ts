@@ -470,9 +470,14 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(await expandAll.isDisabled()).toBe(true);
     await themeToggle.click();
     expect(await page.locator('html').getAttribute('class')).toContain('light');
-    await expect
-      .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
-      .toBeGreaterThan(0);
+    // Since #11091 a document does not render diagrams: mermaid is stubbed out
+    // of this bundle, and the fence degrades to its own source in a plain <pre>
+    // so it stays readable, selectable and findable. Math is deliberately kept,
+    // which is why `.katex` below still has to be there.
+    expect(await page.locator('div[class*="mermaidInline"]').count()).toBe(0);
+    expect(
+      await page.evaluate(() => globalThis.document.body.innerText),
+    ).toContain('graph TD; A[Export] --> B[Document]');
     expect(await page.locator('.katex').count()).toBeGreaterThan(0);
     expect(
       await page.locator('[data-agent-status]').count(),
