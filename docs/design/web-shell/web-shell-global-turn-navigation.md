@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted; Phase 1 implemented, Phases 2–3 proposed, 2026-09-02.
+Accepted; Phases 1 and 2A implemented, Phases 2B–3 proposed; delivery boundary
+clarified 2026-09-04.
 
 This design complements
 `web-shell-bounded-transcript-and-subagent-details.md`. That document defines
@@ -583,14 +584,20 @@ provisional reconciliation, and canonical locator map — belong to this phase,
 leaving Phase 3 as the rail UI. The detailed design lives in
 `web-shell-global-turn-navigation-phase2.md`.)
 
-1. Land the immutable historical page table and separate live tail described
-   by the bounded-transcript design.
-2. Add bidirectional boundaries, deduplication by record ID, page admission,
-   eviction, and detached-live behavior.
-3. Migrate existing sequential prepend pagination to that window before adding
-   random jump.
-4. Add the turn-index store, tail refresh, provisional reconciliation, and
-   canonical locator map.
+Phase 2A (implemented in [#11054](https://github.com/QwenLM/qwen-code/pull/11054),
+under review) delivers steps 1–3. Phase 2B delivers step 4. The
+[implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigation-phase2.md)
+defines the current client contract and delivery slices.
+
+1. Add the bounded turn-index store, tail refresh, provisional reconciliation,
+   and canonical locator map without coupling metadata residency to transcript
+   residency.
+2. Land the immutable historical page table beside the existing connected live
+   window, with bidirectional boundaries, deduplication by record ID, page
+   admission, eviction, detached-live behavior, and random anchored reads.
+3. Expose the complete headless state and locator contract needed by the rail.
+4. Migrate existing sequential prepend pagination behind the page-table
+   boundary while preserving its current public behavior.
 
 ### Phase 3: global rail
 
