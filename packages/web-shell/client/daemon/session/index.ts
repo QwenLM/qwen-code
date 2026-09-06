@@ -22,8 +22,29 @@ export {
   useDaemonTranscriptHistory,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
+  useDaemonTurnNavigationState,
+  useDaemonTurnNavigationStore,
 } from './DaemonSessionProvider.js';
 export type { DaemonTranscriptHistory } from './DaemonSessionProvider.js';
+export { createDaemonTurnNavigationStore } from './turn-navigation-store.js';
+export type {
+  CreateDaemonTurnNavigationStoreOptions,
+  DaemonPromptAdmission,
+  DaemonProvisionalTurn,
+  DaemonSelectedTurnState,
+  DaemonTurnIndexPage,
+  DaemonTurnLocation,
+  DaemonTurnNavigationClient,
+  DaemonTurnNavigationError,
+  DaemonTurnNavigationSession,
+  DaemonTurnNavigationSnapshot,
+  DaemonTurnNavigationStore,
+} from './turn-navigation-store.js';
+export type {
+  HistoricalTranscriptPage,
+  HistoricalTranscriptRange,
+  TranscriptBoundary,
+} from './transcript-page-table.js';
 export type {
   DaemonCommandInfo,
   DaemonConnectionState,
