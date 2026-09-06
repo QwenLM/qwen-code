@@ -120,12 +120,12 @@ function injectCssModules(): Plugin {
         // entry loads first win: a host that imports both
         // `@qwen-code/web-shell` and `@qwen-code/web-shell/transcript` would
         // silently lose the editor/dialog rules if the transcript entry ran
-        // first. Injection stays idempotent per entry, and the overlapping
-        // rules are byte-identical, so injecting both is a no-op beyond the
-        // duplicated bytes. Both tags keep `data-qwen-web-shell="component"`
-        // so shadow-root style adoption (client/shadowDom.ts) still finds
-        // them; that reader concatenates every match rather than taking the
-        // first.
+        // first. Injection stays idempotent per entry. Overlapping rules must
+        // retain the same relative order in both stylesheets because equal-
+        // specificity declarations still depend on cascade order. Both tags
+        // keep `data-qwen-web-shell="component"` so shadow-root style adoption
+        // (client/shadowDom.ts) still finds them; that reader concatenates
+        // every match rather than taking the first.
         const entry = item.facadeModuleId?.endsWith('/client/transcript.ts')
           ? 'transcript'
           : item.facadeModuleId?.endsWith('/client/index.tsx')

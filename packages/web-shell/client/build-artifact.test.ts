@@ -22,10 +22,8 @@ function readPackageJavascript(): string {
     .join('\n');
 }
 
-function readInjectedCss(): string {
-  const match = readBundle().match(
-    /^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");/,
-  );
+function readInjectedCss(bundle = readBundle()): string {
+  const match = bundle.match(/^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");/);
   if (!match?.[1]) throw new Error('Injected component CSS not found');
   return JSON.parse(match[1]) as string;
 }
@@ -372,5 +370,38 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readTranscriptBundle()).toContain(
       's.dataset.qwenWebShell="component"',
     );
+  });
+
+  it('keeps KaTeX border overrides after Tailwind preflight', () => {
+    for (const bundle of [readBundle(), readTranscriptBundle()]) {
+      const rules: Rule[] = [];
+      postcss
+        .parse(readInjectedCss(bundle))
+        .walkRules((rule) => rules.push(rule));
+      const preflightIndex = rules.findIndex(
+        (rule) =>
+          rule.selector.includes('[data-web-shell-shadcn]') &&
+          rule.selector.includes('::backdrop') &&
+          rule.nodes.some(
+            (node) =>
+              node.type === 'decl' &&
+              node.prop === 'border-color' &&
+              node.value === 'var(--border)',
+          ),
+      );
+      const katexIndex = rules.findIndex(
+        (rule) =>
+          rule.selector.includes('.katex *') &&
+          rule.nodes.some(
+            (node) =>
+              node.type === 'decl' &&
+              node.prop === 'border-color' &&
+              node.value === 'currentColor',
+          ),
+      );
+
+      expect(preflightIndex).toBeGreaterThanOrEqual(0);
+      expect(katexIndex).toBeGreaterThan(preflightIndex);
+    }
   });
 });
