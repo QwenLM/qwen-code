@@ -16584,13 +16584,15 @@ describe('runQwenServe startup observability', () => {
       });
       expect(bridge.preheat).toHaveBeenCalledTimes(1);
       expect(
-        vi.mocked(bridge.preheat).mock.calls.some(
-          ([arg]) =>
-            arg !== undefined &&
-            typeof arg === 'object' &&
-            arg !== null &&
-            'keepAliveMs' in arg,
-        ),
+        vi
+          .mocked(bridge.preheat)
+          .mock.calls.some(
+            ([arg]) =>
+              arg !== undefined &&
+              typeof arg === 'object' &&
+              arg !== null &&
+              'keepAliveMs' in arg,
+          ),
       ).toBe(false);
     } finally {
       await handle.close();
@@ -16641,6 +16643,113 @@ describe('runQwenServe startup observability', () => {
       expect(rejections).toEqual([]);
     } finally {
       process.off('unhandledRejection', recordRejection);
+      await handle.close();
+    }
+  });
+
+  it('logs when boot MCP discovery skips because lifecycle is unsupported', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-lifecycle-')),
+    );
+    const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
+    const debugSessionId = '550e8400-e29b-41d4-a716-446655440301';
+    const debugLogPath = qwenCore.Storage.getDebugLogPath(debugSessionId);
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    qwenCore.resetDebugLoggingState();
+    qwenCore.setDebugLogSession({ getSessionId: () => debugSessionId });
+    const bridge = installInternalBridge(() => Promise.resolve());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => {
+        expect(fs.existsSync(debugLogPath)).toBe(true);
+        expect(fs.readFileSync(debugLogPath, 'utf8')).toContain(
+          'workspace MCP discovery after preheat skipped: ' +
+            'workspace runtime lifecycle is not supported',
+        );
+      });
+      expect(bridge.preheat).toHaveBeenCalledOnce();
+    } finally {
+      qwenCore.setDebugLogSession(null);
+      qwenCore.resetDebugLoggingState();
+      if (previousDebugLogFile === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
+      }
+      await handle.close();
+    }
+  });
+
+  it('logs when boot MCP discovery skips because primary runtime is gone', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-runtime-')),
+    );
+    const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
+    const debugSessionId = '550e8400-e29b-41d4-a716-446655440302';
+    const debugLogPath = qwenCore.Storage.getDebugLogPath(debugSessionId);
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    qwenCore.resetDebugLoggingState();
+    qwenCore.setDebugLogSession({ getSessionId: () => debugSessionId });
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    installInternalBridge(() => preheatPromise);
+    let workspaceRegistry: WorkspaceRegistry | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      workspaceRegistry = args[2]?.workspaceRegistry;
+      return originalCreateServeApp(...args);
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      delete workspaceRegistry!.primaryEntry.current;
+      resolvePreheat();
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => {
+        expect(fs.existsSync(debugLogPath)).toBe(true);
+        expect(fs.readFileSync(debugLogPath, 'utf8')).toContain(
+          'workspace MCP discovery after preheat skipped: no primary runtime',
+        );
+      });
+    } finally {
+      qwenCore.setDebugLogSession(null);
+      qwenCore.resetDebugLoggingState();
+      if (previousDebugLogFile === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
+      }
       await handle.close();
     }
   });

@@ -8937,15 +8937,27 @@ async function runQwenServeImpl(
           | WorkspaceRegistry
           | undefined;
         const runtime = registry?.primaryEntry.current?.runtime;
-        if (!runtime) return;
-        void getWorkspaceRuntimeCoordinatorIfSupported?.(runtime)
-          ?.ensure({})
-          .catch((err) => {
-            const message = err instanceof Error ? err.message : String(err);
-            debugLogger.debug(
-              `workspace MCP discovery after preheat failed: ${message}`,
-            );
-          });
+        if (!runtime) {
+          debugLogger.debug(
+            'workspace MCP discovery after preheat skipped: no primary runtime',
+          );
+          return;
+        }
+        const coordinator =
+          getWorkspaceRuntimeCoordinatorIfSupported?.(runtime);
+        if (!coordinator) {
+          debugLogger.debug(
+            'workspace MCP discovery after preheat skipped: ' +
+              'workspace runtime lifecycle is not supported',
+          );
+          return;
+        }
+        void coordinator.ensure({}).catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          debugLogger.debug(
+            `workspace MCP discovery after preheat failed: ${message}`,
+          );
+        });
       };
       const startBridgePreheat = (
         bridge: AcpSessionBridge,

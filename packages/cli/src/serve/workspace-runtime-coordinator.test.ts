@@ -850,6 +850,64 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(harness.initializeWorkspaceMcp).toHaveBeenCalledOnce();
   });
 
+  it('skips keep-alive preheat when skipKeepAlivePreheat is true', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({ skipKeepAlivePreheat: true });
+
+    expect(harness.preheat).not.toHaveBeenCalled();
+  });
+
+  it('keep-alive preheats a live runtime when skipKeepAlivePreheat is false', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({ skipKeepAlivePreheat: false });
+
+    expect(harness.preheat).toHaveBeenCalledOnce();
+    expect(harness.preheat).toHaveBeenCalledWith({
+      keepAliveMs: 600_000,
+    });
+  });
+
+  it('does not claim ACP preheat completed when skip-path runtime dies', async () => {
+    const harness = makeRuntime();
+    let snapshotCalls = 0;
+    Object.assign(harness.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: () => {
+        snapshotCalls += 1;
+        return {
+          state: 'idle' as const,
+          runtimeLive: snapshotCalls === 1,
+          runtimeEpoch: 1,
+          activeWork: false,
+        };
+      },
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.ensure({ skipKeepAlivePreheat: true }),
+    ).rejects.toMatchObject({
+      name: 'WorkspaceRuntimeInitializationError',
+      cause: {
+        message: 'Runtime is not live after skipping keep-alive preheat',
+      },
+    });
+    expect(harness.preheat).not.toHaveBeenCalled();
+  });
+
   it('reports the bridge lifecycle snapshot without synthesizing state', () => {
     const harness = makeRuntime();
     harness.setSnapshot({
