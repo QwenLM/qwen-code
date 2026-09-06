@@ -3717,6 +3717,17 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('rejects readiness when chat recording is disabled instead of throwing synchronously', async () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      await expect(config.getGoalRuntimeReady()).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+      await expect(config.getGoalRuntimePrepared()).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const canonical = config.getGoalRuntime();
@@ -5148,6 +5159,21 @@ describe('Server Config (config.ts)', () => {
       // Second call lands mid-flight → joins the first flight instead of
       // bouncing off the already-set flag.
       const second = config.initialize();
+
+      // Pin the ordering property this test is named for: while the first
+      // flight is still gated, the joining caller must remain unsettled — it
+      // awaits the in-flight promise instead of returning early. A join branch
+      // that drops the `await` resolves `second` immediately and still passes
+      // every other assertion here, yet it reproduces #11002 (the joiner
+      // proceeds before initialization completes and dies on "Chat not
+      // initialized"). Assert nothing has settled before the gate is released
+      // so that mutant goes red.
+      const settled: string[] = [];
+      first.then(() => settled.push('first'));
+      second.then(() => settled.push('second'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toEqual([]);
+
       release();
       await Promise.all([first, second]);
       expect(initializeInternal).toHaveBeenCalledOnce();
@@ -5155,6 +5181,37 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).rejects.toThrow(
         'Config was already initialized',
       );
+    });
+
+    it('rejects a joining caller whose signal is already aborted', async () => {
+      const config = new Config({
+        ...baseParams,
+      });
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockImplementation(() => gate);
+
+      const first = config.initialize();
+      const controller = new AbortController();
+      const abortReason = new Error('joining caller already aborted');
+      controller.abort(abortReason);
+      // A joining caller cannot have its options honored, so an
+      // already-aborted signal fails fast instead of blocking on the first
+      // flight. Assert the rejection while the gate is still held: settling
+      // the first flight first would let a guard placed after the `await`
+      // reject with the same reason and pass.
+      const joining = config.initialize({ signal: controller.signal });
+      await expect(joining).rejects.toBe(abortReason);
+      release();
+      await expect(first).resolves.toBeUndefined();
     });
 
     it('shares a failed in-flight initialization with concurrent callers', async () => {
@@ -5177,6 +5234,12 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(firstError).toBeInstanceOf(Error);
       expect(secondError).toBe(firstError);
+
+      // A failed-and-settled first flight still flips `initializationSettled`,
+      // so a later call must throw rather than re-join the stale rejection.
+      await expect(config.initialize()).rejects.toThrow(
+        'Config was already initialized',
+      );
     });
 
     it('should skip implicit startup discovery in bare mode', async () => {

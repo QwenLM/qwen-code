@@ -197,7 +197,8 @@ export interface UseDaemonFollowupSuggestionReturn {
    */
   followupState: FollowupState;
   /**
-   * Accept the visible suggestion. Wire to `<ChatEditor onAcceptFollowup={...} />`.
+   * Accept the visible suggestion. Wire to
+   * `<ChatEditor onAcceptFollowup={...} />`.
    * Calls the underlying controller's accept (which invokes the
    * consumer-provided `onAccept` from options) AND clears the daemon
    * store's `lastFollowupSuggestion` so the same suggestion does not
@@ -208,7 +209,8 @@ export interface UseDaemonFollowupSuggestionReturn {
     options?: { skipOnAccept?: boolean },
   ) => void;
   /**
-   * Dismiss the visible suggestion. Wire to `<ChatEditor onDismissFollowup={...} />`.
+   * Dismiss the visible suggestion. Wire to
+   * `<ChatEditor onDismissFollowup={...} />`.
    * Same store-clear semantics as `onAcceptFollowup`.
    */
   onDismissFollowup: () => void;
@@ -228,6 +230,9 @@ export interface UseDaemonFollowupSuggestionReturn {
  *
  *   1. Render `<ChatEditor followupState={...} onAcceptFollowup={...}
  *      onDismissFollowup={...} />` with the three values returned here.
+ *      `ChatEditor` declares exactly these three props, typed from this
+ *      interface; `ChatPane` and `App` are the two in-tree hosts that call
+ *      this hook and thread them down.
  *   2. Call `clear()` from the hook just before `actions.sendPrompt(...)`
  *      so the prior turn's ghost-text disappears immediately.
  *

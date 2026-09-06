@@ -11,70 +11,11 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import {
-  assertRenderableJsonl,
-  isMainModule,
-  looksLikeChatRecord,
-  looksLikeExportJsonl,
-} from './export-html-from-chatrecord-jsonl.js';
+import { isMainModule } from './export-html-from-chatrecord-jsonl.js';
 
-function chatRecord(overrides = {}) {
-  return {
-    uuid: 'uuid-1',
-    parentUuid: null,
-    sessionId: 'session-1',
-    timestamp: '2026-09-05T00:00:00.000Z',
-    type: 'user',
-    cwd: '/workspace',
-    version: '1',
-    ...overrides,
-  };
-}
-
-function legacyEnvelope() {
-  return {
-    type: 'session_metadata',
-    sessionId: 'session-1',
-    startTime: '2026-09-05T00:00:00.000Z',
-  };
-}
-
-test('rejects legacy exported JSONL (session_metadata-first envelope)', () => {
-  const legacy = [legacyEnvelope()];
-
-  assert.equal(looksLikeExportJsonl(legacy), true);
-  // A legacy envelope is not a ChatRecord, so it can never take the happy path.
-  assert.equal(looksLikeChatRecord(legacy[0]), false);
-});
-
-test('accepts source ChatRecord JSONL', () => {
-  const records = [chatRecord()];
-
-  assert.equal(looksLikeExportJsonl(records), false);
-  assert.equal(looksLikeChatRecord(records[0]), true);
-});
-
-test('fails closed on legacy exported JSONL with its own remediation hint', () => {
-  assert.throws(() => assertRenderableJsonl([legacyEnvelope()]), {
-    message:
-      'Legacy exported JSONL cannot be rendered safely; provide source ChatRecord JSONL.',
-  });
-});
-
-test('renders only ChatRecord lines, rejecting empty and unrecognized input', () => {
-  const record = chatRecord();
-
-  assert.deepEqual(assertRenderableJsonl([record, { type: 'noise' }]), [
-    record,
-  ]);
-  assert.throws(() => assertRenderableJsonl([]), {
-    message: 'Input JSONL is empty.',
-  });
-  assert.throws(() => assertRenderableJsonl([{ type: 'noise' }]), {
-    message: 'Unrecognized JSONL format (expected ChatRecord-per-line).',
-  });
-});
-
+// The input gate itself is covered by the vitest suite in
+// scripts/tests/export-html-from-chatrecord-jsonl.test.js; this lane only pins
+// the main-module check, which that suite cannot exercise without spawning.
 const exporterPath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   'export-html-from-chatrecord-jsonl.js',
