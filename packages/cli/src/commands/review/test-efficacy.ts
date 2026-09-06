@@ -1782,17 +1782,57 @@ function restoreProbeTreeTracked(
  * runs share a window that reserves the revert probe's full slot, and the
  * revert probe gets the remainder of the whole budget.
  */
+/**
+ * Write a file inside the probe tree, or refuse because it is no longer ours.
+ *
+ * The runners write twice per probe — the mutation itself, and the restore of
+ * the original after the suite — and the second of those sits on the far side
+ * of a whole suite run. A tree swapped during it takes the write, so these
+ * ask the same question the spawns ask, through the same identity. One helper
+ * rather than four inline checks, so that a fifth write inherits it.
+ */
+function writeInProbeTree(
+  probeTree: string,
+  anchor: string | undefined,
+  abs: string,
+  content: string,
+): void {
+  if (anchor !== undefined && probeRootIdentity(probeTree) !== anchor) {
+    throw new Error(
+      `${probeTree} stopped being the tree this run created, so this write ` +
+        'would land somewhere else',
+    );
+  }
+  writeFileSync(abs, content, 'utf8');
+}
+
 function runProbeSuite(
   probeTree: string,
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  /**
+   * The tree's identity as of `worktree add`. Checked HERE rather than at each
+   * of this function's five call sites: everything below writes into the tree
+   * (the dependency farm is rebuilt inside it) and then runs a suite with its
+   * cwd there, so this is the single door those writes go through — and a
+   * sixth caller added later inherits the check instead of having to remember
+   * it. `probeRunOutsideItsTree` is thrown, not returned, because every caller
+   * already has a catch that records a probe as not-run.
+   */
+  anchor?: string,
 ): {
   perFile: ProbeResult[];
   ms: number;
   exposed: { linked: number; failed: number };
 } {
+  if (anchor !== undefined && probeRootIdentity(probeTree) !== anchor) {
+    throw new Error(
+      `${probeTree} stopped being the tree this run created, so the suite ` +
+        'would build and execute somewhere else',
+    );
+  }
   const started = now();
   const timeout =
     deadlineAt !== undefined
@@ -2158,7 +2198,14 @@ const MAX_GITFILE_BYTES = 4096;
  * middle stages must look clean to git.
  */
 export function gitfileMarker(dotGit: string): string {
-  const st = lstatSync(dotGit);
+  let st;
+  try {
+    st = lstatSync(dotGit);
+  } catch {
+    // Absent is a state like any other, and a distinct one: a file appearing
+    // or vanishing between the two captures has to register as a change.
+    return 'absent';
+  }
   if (st.isDirectory()) return 'dir';
   if (!st.isFile()) return 'other';
   const fd = openSync(dotGit, 'r');
@@ -2176,6 +2223,27 @@ export function gitfileMarker(dotGit: string): string {
     return `file:${n}:${buf.subarray(0, n).toString('base64')}`;
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Where a tree's git administrative files live — its own `.git` when that is a
+ * directory, the path its gitfile names when it is a linked worktree.
+ *
+ * Filesystem only, and deliberately not `git rev-parse --git-dir`: this runs
+ * inside an identity whose whole point is to not ask git to resolve anything.
+ * A gitfile git itself would reject resolves to a path that will not exist,
+ * and the marker for a missing file is its own distinct value — which is the
+ * correct answer, because the tree is not one this identity can vouch for.
+ */
+function adminDirOf(probeTree: string, dotGit: string): string {
+  try {
+    if (!lstatSync(dotGit).isFile()) return dotGit;
+    const raw = readFileSync(dotGit, 'utf8').trim();
+    const named = raw.startsWith('gitdir:') ? raw.slice(7).trim() : raw;
+    return isAbsolute(named) ? named : resolve(probeTree, named);
+  } catch {
+    return dotGit;
   }
 }
 
@@ -2208,7 +2276,16 @@ function probeRootIdentity(probeTree: string): string | null {
     // shares this helper, and a shared answer is cheaper than two.)
     const dotGit = join(probeTree, '.git');
     const marker = gitfileMarker(dotGit);
-    return [realpathSync(probeTree), st.dev, st.ino, marker].join('\u0000');
+    // And the HEAD inside the admin directory that gitfile NAMES. Pinning the
+    // pointer without pinning what it points at leaves the restore's
+    // `checkout --force HEAD -- .` resolving its target commit through a file
+    // this identity never read — one plain write into the never-wiped common
+    // dir retargets every restore that follows, and the guard reports success
+    // over it. Read the same way as the gitfile, for the same reasons.
+    const adminHead = gitfileMarker(join(adminDirOf(probeTree, dotGit), 'HEAD'));
+    return [realpathSync(probeTree), st.dev, st.ino, marker, adminHead].join(
+      '\u0000',
+    );
   } catch {
     return null;
   }
@@ -2308,6 +2385,15 @@ export function runOneHunkProbe(
         'the probe target was relinked through a symlink before the reverse patch applied — nothing was neutralised',
     };
   }
+  // Same question as every other write below, before the one spawn that
+  // reaches the working tree on this path.
+  if (anchor !== undefined && probeRootIdentity(probeTree) !== anchor) {
+    return {
+      ...hunk,
+      verdict: 'inconclusive' as const,
+      detail: `${probeTree} stopped being the tree this run created, so the reverse-apply would land somewhere else`,
+    };
+  }
   const applied = spawnSync('git', ['apply', '--reverse', '-'], {
     cwd: probeTree,
     input: hunk.patch,
@@ -2335,6 +2421,7 @@ export function runOneHunkProbe(
         deadlineAt,
         now,
         dependencyRoot,
+        anchor,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2363,7 +2450,7 @@ export function runOneHunkProbe(
         // emptied, and a restore that throws ENOENT here loses the verdict
         // AND marks every remaining hunk inconclusive.
         mkdirSync(dirname(abs), { recursive: true });
-        writeFileSync(abs, original, 'utf8');
+        writeInProbeTree(probeTree, anchor, abs, original);
       }
     }
   };
@@ -2440,6 +2527,7 @@ export function runControlMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        anchor,
       );
       // `gated` is the runner's "went red" verdict; anything else — still
       // green, collected nothing, crashed — means the control did NOT
@@ -2452,7 +2540,7 @@ export function runControlMutant(
       if (probeTargetEscapes(probeTree, probeFile)) {
         relinkedMidRun = true;
       } else {
-        writeFileSync(abs, original, 'utf8');
+        writeInProbeTree(probeTree, anchor, abs, original);
       }
     }
   };
@@ -2536,13 +2624,14 @@ export function runOneMutant(
             'the probe target was relinked through a symlink before the mutation was written — nothing was mutated',
         };
       }
-      writeFileSync(abs, lines.join('\n'), 'utf8');
+      writeInProbeTree(probeTree, anchor, abs, lines.join('\n'));
       const { perFile } = runProbeSuite(
         probeTree,
         probes,
         deadlineAt,
         now,
         dependencyRoot,
+        anchor,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2563,7 +2652,7 @@ export function runOneMutant(
       if (probeTargetEscapes(probeTree, mutant.file)) {
         relinkedMidRun = true;
       } else {
-        writeFileSync(abs, original, 'utf8');
+        writeInProbeTree(probeTree, anchor, abs, original);
       }
     }
   };
@@ -2941,6 +3030,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           mutantDeadline,
           now,
           worktree,
+          probeAnchor ?? undefined,
         );
         noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
@@ -3115,6 +3205,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                probeAnchor ?? undefined,
               ),
             );
           }
@@ -3293,6 +3384,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,
+          probeAnchor ?? undefined,
         );
         noteDependencyFarm(revertRun.exposed);
         results.push(...revertRun.perFile);

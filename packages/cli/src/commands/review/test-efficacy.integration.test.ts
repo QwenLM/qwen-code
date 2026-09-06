@@ -2010,6 +2010,81 @@ process.stdout.write(JSON.stringify({
     },
   );
 
+  // POSIX-only: the swap is a `mv` pair driven from the fake runner.
+  it.skipIf(process.platform === 'win32')(
+    'refuses the next suite run after a swap during the previous one',
+    async () => {
+      // The identity was re-asked before the destructive spawns and nowhere
+      // else, so everything the runners do between them — rebuilding the
+      // dependency farm inside the tree, running vitest with its cwd there,
+      // writing the mutation and writing the original back after the suite —
+      // ran on a verdict taken before the suite that could have swapped it.
+      // `runProbeSuite` is the single door those go through, so the question
+      // is asked there.
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-suitevictim-'));
+      let probe = '';
+      try {
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
+          cwd: victim,
+        });
+        execFileSync('git', ['add', '-A'], { cwd: victim });
+        execFileSync(
+          'git',
+          ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'v'],
+          { cwd: victim },
+        );
+        const { wt, base } = scaffoldModifiedPr();
+        probe = `${wt}-probe`;
+        // Swap from INSIDE a suite run — the window the pre-spawn re-asks
+        // never covered.
+        writeFileSync(
+          vitestScript(),
+          `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const stamp = '${probe}.swapped';
+if (!fs.existsSync(stamp) && fs.existsSync('${probe}')) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('sh', ['-c', 'mv ${probe} ${probe}.gone && mv ${victim} ${probe}']);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+        );
+
+        await runHandler({
+          report: join(repo, 'report.json'),
+          worktree: wt,
+          base,
+          out: join(repo, 'out.json'),
+        });
+
+        // Whichever guard fires first, the run must refuse rather than keep
+        // building and executing in a tree it did not create. In practice the
+        // revert's pre-spawn re-ask gets there first — both consult the same
+        // anchor, which is the point: the identity is one answer, asked at
+        // every door rather than at one of them.
+        const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+        expect(JSON.stringify(out)).toMatch(
+          /stopped being (its own root|the tree this run created)/,
+        );
+      } finally {
+        if (probe) rmSync(`${probe}.gone`, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the
     // probe tree both derive from the same commit, so the command cannot reach
