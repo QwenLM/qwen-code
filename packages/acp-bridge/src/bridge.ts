@@ -3187,7 +3187,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // from a run of consecutive failures and cleared the moment the child
     // answers, so a transient wedge costs one deferral rather than being
     // stranded.
+    //
+    // A condemned channel is exempt, and so is one that reports no active-work
+    // capability — both are cases where `confirmChildUnheld` authorizes the
+    // close locally without any child round trip, because that teardown is the
+    // only thing that can release a request nobody is going to answer. There
+    // is no probe to back off from, and deferring would leave the escape hatch
+    // unreachable while the retained Session keeps the channel non-empty, so a
+    // channel already given up on could never drain.
     if (
+      capability &&
+      !channelIsCondemned(owner) &&
       entry.activeWorkCloseRetryAt !== null &&
       Date.now() < entry.activeWorkCloseRetryAt
     ) {

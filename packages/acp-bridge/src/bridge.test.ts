@@ -1039,6 +1039,75 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('still reclaims through a condemned channel while a deferral is armed', async () => {
+      // The deferral backs off a child that cannot answer; it is not a reason
+      // to keep holding a Session in a channel the daemon has already given up
+      // on. `confirmChildUnheld` skips the round trip entirely for a condemned
+      // channel because that teardown is the only thing able to release a
+      // request nobody will answer — so deferring here would leave the Session
+      // registered and the channel unable to drain.
+      vi.useFakeTimers();
+      const lateRestore = deferred<LoadSessionResponse>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        loadSessionImpl: () => lateRestore.promise,
+        // The wedged child answers no close at all.
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? new Promise<Record<string, unknown>>(() => {})
+            : Promise.resolve({}),
+      });
+      const bridge = makeBridge({
+        sessionScope: 'thread',
+        maxSessions: 5,
+        sessionRestoreTimeoutMs: 20,
+        channelIdleTimeoutMs: 60_000,
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const wedged = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: wedged.sessionId, holds: [] },
+        ]);
+
+        // Two unanswered probes arm the deferral; the first retry is immediate
+        // by design, so it takes two failures to reach a non-null delay. The
+        // detach cannot be awaited directly: it waits on a close this child
+        // never answers, so the timers have to move first.
+        const detached = bridge.detachClient(wedged.sessionId, wedged.clientId);
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+        await detached;
+        await sendActiveWorkSnapshot(handle, 2, [
+          { sessionId: wedged.sessionId, holds: [] },
+        ]);
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+        expect(handle.killed).toBe(false);
+        expect(bridge.sessionCount).toBe(1);
+
+        // Condemn the channel through the abandoned-restore bound.
+        const timedOut = bridge
+          .loadSession({ sessionId: 'wedged-restore', workspaceCwd: WS_A })
+          .catch((error: unknown) => error);
+        await advanceRestoreDeadline(20);
+        expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+        await vi.advanceTimersByTimeAsync(20);
+
+        // The still-armed deferral must not suppress the condemned path: the
+        // next trigger closes locally, and the bounded agent close expiring
+        // kills the channel — the drain this bound exists to force.
+        await sendActiveWorkSnapshot(handle, 3, [
+          { sessionId: wedged.sessionId, holds: [] },
+        ]);
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(handle.killed).toBe(true);
+      } finally {
+        lateRestore.reject(new Error('channel torn down'));
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
     it.each([
       {
         count: ACTIVE_WORK_MAX_SESSION_HOLDS,
