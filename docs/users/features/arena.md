@@ -104,23 +104,17 @@ If you want to inspect the complete reasoning path before deciding, each agent's
 
 ## Configuration
 
-Arena behavior can be customized in [settings.json](../configuration/settings.md):
+Arena settings are nested under `agents.arena` in
+[settings.json](../configuration/settings.md). The schema accepts
+`maxRoundsPerAgent` and `timeoutSeconds`, but the CLI currently drops both
+values when building the configuration used by `/arena`. Setting either field
+therefore does not limit `/arena` runs.
 
-```json
-{
-  "arena": {
-    "worktreeBaseDir": "~/.qwen/arena",
-    "maxRoundsPerAgent": 50,
-    "timeoutSeconds": 600
-  }
-}
-```
-
-| Setting                   | Description                        | Default         |
-| :------------------------ | :--------------------------------- | :-------------- |
-| `arena.worktreeBaseDir`   | Base directory for arena worktrees | `~/.qwen/arena` |
-| `arena.maxRoundsPerAgent` | Maximum reasoning rounds per agent | `50`            |
-| `arena.timeoutSeconds`    | Timeout for each agent in seconds  | `600`           |
+| Setting                          | Description                                                                                          | Default                         |
+| :------------------------------- | :--------------------------------------------------------------------------------------------------- | :------------------------------ |
+| `agents.arena.worktreeBaseDir`   | Custom base directory for Arena worktrees. Use an absolute path; `~` is not expanded.                | The Qwen home `arena` directory |
+| `agents.arena.maxRoundsPerAgent` | Accepted by the schema, but currently not forwarded to `/arena`; setting it has no effect on the run | Unset                           |
+| `agents.arena.timeoutSeconds`    | Accepted by the schema, but currently not forwarded to `/arena`; setting it has no effect on the run | Unset                           |
 
 ## Best practices
 
@@ -168,7 +162,8 @@ For routine changes like renaming a variable or updating a config file, a single
 
 - Verify that each model in `--models` is properly configured with valid API credentials
 - Check that your working directory is a Git repository (worktrees require Git)
-- Ensure you have write access to the worktree base directory (`~/.qwen/arena/` by default)
+- Ensure you have write access to the `arena` directory under the Qwen home
+  directory (the default worktree base directory)
 
 ### Worktree creation fails
 
@@ -178,9 +173,9 @@ For routine changes like renaming a variable or updating a config file, a single
 
 ### Agent takes too long
 
-- Increase the timeout: set `arena.timeoutSeconds` in settings
 - Reduce task complexity — Arena tasks should be focused and well-defined
-- Lower `arena.maxRoundsPerAgent` if agents are spending too many rounds
+- Use fewer agents or models with lower latency
+- Stop the Arena run manually if an agent is taking too long
 
 ### Applying winner fails
 

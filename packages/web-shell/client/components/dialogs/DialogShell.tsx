@@ -43,7 +43,12 @@ const sizeClass: Record<DialogSize, string> = {
   // room. `w-max` wins over DialogContent's base `w-full` through
   // tailwind-merge. The floor keeps small graphs from collapsing to a narrow
   // panel; the ceiling keeps large ones from spanning a wide monitor.
-  auto: 'w-max min-w-[min(100%,560px)] sm:max-w-[min(calc(100vw-2rem),1120px)]',
+  // The floor uses the same 2rem gutter the base ceiling
+  // (`max-w-[calc(100%-2rem)]`) reserves: twMerge keeps both classes, and
+  // below `sm:` a bare `min(100%,560px)` floor outranks that ceiling, so the
+  // panel rendered flush to both screen edges on a phone while every fixed
+  // size kept its gutter.
+  auto: 'w-max min-w-[min(calc(100%-2rem),560px)] sm:max-w-[min(calc(100vw-2rem),1120px)]',
 };
 
 const FOCUSABLE_SELECTOR = [
