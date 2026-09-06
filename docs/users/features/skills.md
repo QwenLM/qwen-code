@@ -200,14 +200,14 @@ name: gated-skill
 description: Calls the downstream CLI using a runtime-injected session ID
 hooks:
   PreToolUse:
-    - matcher: Shell
+    - matcher: run_shell_command
       hooks:
         - type: command
           command: '$QWEN_SKILL_ROOT/scripts/gate-session-id.sh'
 ---
 ```
 
-`$QWEN_SKILL_ROOT` is set to the Skill's own directory, so hook commands can reference files shipped alongside `SKILL.md`. A `PreToolUse` hook blocks the tool call when it exits with code `2` (stderr is fed back to the model as the reason), or when it prints `hookSpecificOutput.permissionDecision: "deny"`:
+`$QWEN_SKILL_ROOT` is set to the Skill's own directory, so hook commands can reference files shipped alongside `SKILL.md`. **Make the script executable** (`chmod +x`) — a hook command that cannot be executed fails open: the tool call proceeds, and nothing appears in the transcript or the log to say the gate did not run. A `PreToolUse` hook blocks the tool call when it exits with code `2` (stderr is fed back to the model as the reason), or when it prints `hookSpecificOutput.permissionDecision: "deny"`:
 
 ```bash
 #!/usr/bin/env bash
@@ -224,7 +224,7 @@ Notes:
 - Session hooks live only in memory, so resuming a session with `--continue` / `--resume` does **not** restore them, on either invocation path. The Skill's instructions can come back with the replayed conversation while the hooks meant to enforce them are gone — re-run the Skill after resuming to re-arm its gate.
 - Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
 - Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, bare mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there.
-- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and folder trust is re-checked each time a hook fires — revoking trust mid-session silences them without a restart. The same gate applies to `allowedTools`.
+- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder. Changing that trust takes effect on restart — a trust change made during a session does not arm or silence an already-running session's hooks. The same gate applies to `allowedTools`.
 - `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
 - See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.
 

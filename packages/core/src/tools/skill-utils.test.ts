@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 
 const debugLoggerSpies = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -132,6 +132,14 @@ describe('canApplySkillSideEffects', () => {
 });
 
 describe('applySkillSideEffects', () => {
+  beforeEach(() => {
+    // Module-scoped spies: without clearing, each case sees the previous
+    // case's log calls and both the positive and negative assertions below
+    // stop meaning anything.
+    debugLoggerSpies.warn.mockClear();
+    debugLoggerSpies.debug.mockClear();
+  });
+
   const gatedSkill = {
     name: 'gated-skill',
     description: 'Gated',
@@ -204,6 +212,26 @@ describe('applySkillSideEffects', () => {
     expect(debugLoggerSpies.debug).not.toHaveBeenCalledWith(
       expect.stringContaining('Skipping hook registration for skill'),
     );
+  });
+
+  // Pins `applySkillHooks`'s `if (!skill.hooks) return;`. That early return is
+  // what lets the no-hook-system branch below it be a `warn`: it fires only
+  // for a skill that actually declares a gate. Without it, every hookless
+  // skill invoked in a hooks-disabled session emits a warning, which is the
+  // steady-state noise the level was chosen to avoid.
+  it('stays silent for a skill that declares no hooks, even with no hook system', () => {
+    const { config, addSessionAllowRule } = makeConfig({
+      getHookSystem: () => undefined,
+    });
+    const hookless = { ...gatedSkill, hooks: undefined } as SkillConfig;
+
+    applySkillSideEffects(config, hookless);
+
+    expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
+    // The allowedTools half is unaffected by the hooks early return.
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
   });
 
   it('registers nothing and does not throw when there is no session id', () => {
