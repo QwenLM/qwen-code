@@ -245,6 +245,40 @@ export function useReactToolScheduler(
             });
           await scheduler.schedule(request, signal, runtimeView);
         } catch (error) {
+          const requests = Array.isArray(request) ? request : [request];
+          if (signal.aborted) {
+            // The busy scheduler rejects a queued request once its signal
+            // aborts, which is a cancellation rather than a scheduling
+            // failure. Completing it as `cancelled` — instead of returning
+            // early — still runs the caller's completion path, the only place
+            // that releases the batch and continuation ownership registered
+            // for these callIds.
+            const reason =
+              '[Operation Cancelled] Reason: Tool call cancelled before execution.';
+            const cancelledCalls: CompletedToolCall[] = requests.map(
+              (toolRequest) => ({
+                status: 'cancelled',
+                request: toolRequest,
+                response: {
+                  callId: toolRequest.callId,
+                  responseParts: convertToFunctionErrorResponse(
+                    toolRequest.name,
+                    toolRequest.callId,
+                    reason,
+                    reason,
+                  ),
+                  resultDisplay: undefined,
+                  error: undefined,
+                  errorType: undefined,
+                  executionStatus: 'not_started',
+                  contentLength: reason.length,
+                },
+                durationMs: 0,
+              }),
+            );
+            await allToolCallsCompleteHandler(cancelledCalls);
+            return;
+          }
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)
@@ -252,7 +286,6 @@ export function useReactToolScheduler(
           );
           const message =
             'Full-turn tool scheduling failed. The tool was not executed.';
-          const requests = Array.isArray(request) ? request : [request];
           const completedCalls: CompletedToolCall[] = requests.map(
             (toolRequest) => {
               const toolError = new Error(message);
