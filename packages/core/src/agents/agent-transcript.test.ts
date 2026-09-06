@@ -792,6 +792,7 @@ describe('agent-transcript', () => {
         subagentId: 'agent-x',
         kind: 'message',
         text: 'follow-up from parent',
+        deliveryId: 'delivery-1',
         timestamp: 100,
       });
       cleanup();
@@ -804,6 +805,7 @@ describe('agent-transcript', () => {
         parts: [{ text: 'follow-up from parent' }],
       });
       expect(records[1].externalInputKind).toBe('message');
+      expect(records[1].externalInputDeliveryId).toBe('delivery-1');
       expect(records[1].parentUuid).toBe(records[0].uuid);
     });
 

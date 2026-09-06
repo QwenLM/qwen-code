@@ -1416,7 +1416,7 @@ export class BackgroundAgentResumeService {
       };
 
       const residentController: ResidentBackgroundAgent = {
-        continue: (message) => {
+        continue: (input) => {
           if (!canStayResident || disposeRequested || runtimeDisposed) {
             return false;
           }
@@ -1465,7 +1465,11 @@ export class BackgroundAgentResumeService {
           });
 
           const nextContextState = new ContextState();
-          nextContextState.set('task_prompt', message);
+          if (typeof input === 'string') {
+            nextContextState.set('task_prompt', input);
+          } else {
+            nextContextState.set('external_inputs_override', [input]);
+          }
           nextContextState.set('hook_context', '');
           const previousTurn = currentTurnPromise ?? Promise.resolve();
           currentTurnPromise = previousTurn
