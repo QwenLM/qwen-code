@@ -306,7 +306,7 @@ export function runYamllint() {
 // reports.
 export function runPrettier() {
   console.log('\nRunning Prettier...');
-  if (!runCommand('prettier --check .')) {
+  if (!runCommand('prettier --experimental-cli --check .')) {
     process.exit(1);
   }
 }
