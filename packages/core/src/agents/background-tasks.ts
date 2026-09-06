@@ -462,7 +462,7 @@ export type ResidentAgentContinuationResult =
  * task state is serializable, while the live runtime is process-local.
  */
 export interface ResidentBackgroundAgent {
-  continue(message: string): ResidentAgentContinuationResult;
+  continue(input: AgentExternalInput): ResidentAgentContinuationResult;
   dispose(): void;
 }
 
@@ -796,12 +796,17 @@ export class BackgroundTaskRegistry {
   continueResidentAgent(
     agentId: string,
     message: string,
+    deliveryId?: string,
   ): ResidentAgentContinuationResult {
     const entry = this.agents.get(agentId);
     const resident = this.residentAgents.get(agentId);
     if (entry?.status !== 'completed') return 'not_completed';
     if (!resident) return 'fallback';
-    return resident.continue(message);
+    return resident.continue(
+      deliveryId !== undefined
+        ? { kind: 'message', text: message, deliveryId }
+        : message,
+    );
   }
 
   unregisterResidentAgent(

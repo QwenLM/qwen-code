@@ -1,7 +1,7 @@
 # Mesh implementation — step-by-step acceptance criteria
 
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) §5.2 (ten steps, as numbered on the `codex/multi-agent-mesh-foundation` branch) and [`2026-09-07-mesh-review-round2-handoff.md`](./2026-09-07-mesh-review-round2-handoff.md).
-> Delivery shape: **one PR to main** (#11206), fed by sub-PRs based on its branch. Runtime changes #11200 / #11202 / #11204 are the first three sub-PRs; see §4 for the order and the CI caveat.
+> Delivery shape: **one implementation and delivery PR** (#11206). Runtime changes #11200 / #11202 / #11204 are merged into its branch and stay open as drafts only so their review history remains available.
 > Nothing in this file was executed by its author. "Evidence" means what the implementer reports, with observed values, in the PR description or a `docs/verification/mesh/` package.
 
 ## 0. Corrections to the round-2 hand-off
@@ -57,7 +57,7 @@ Evidence: the three tests. No live model.
 ### Step 7 — Live vertical slice (first integration gate)
 
 Lands: nothing new; this is a run.
-Gate: the §8 demo steps 1-5 complete against two real agents on a build-capable machine, plus: a forced `queueExternalInput` miss (kill the agent between its last tool round and finish) is rebooked and delivered on the next run; a synthetic ping-pong between two *running* agents on one thread stops at 12 with `turn_budget_exhausted` in the thread and one channel-less notification record.
+Gate: the §8 demo steps 1-5 complete against two real agents on a build-capable machine, plus: a forced `queueExternalInput` miss (kill the agent between its last tool round and finish) is rebooked and delivered on the next run; a synthetic ping-pong between two _running_ agents on one thread stops at 12 with `turn_budget_exhausted` in the thread and one channel-less notification record.
 Evidence: the thread JSON files after the run, the two agents' transcript slices, and the observed wall-clock between the child's `thread_review` and the parent's wake. If any prompt in §6 had to change to make the model close its run explicitly, the changed prompt and the failure it fixed.
 
 ### Step 8 — Dispatcher reliability
@@ -84,10 +84,9 @@ Open in §9 of the design: envelope role transport (§9.9), parent-to-child repl
 
 One more decision that predates all of these: the relationship between this subsystem and the agent board in #9402. Both are filesystem-backed shared work items under the runtime dir with per-item locks. Decide before step 3 whether the board becomes the thread store, the thread store supersedes the board, or they stay separate with a documented reason. Two stores for the same concept is the outcome to avoid.
 
-## 4. Working as a stack under one PR
+## 4. Working in one PR
 
-- #11206 is the only PR that merges to `main`. Every step lands as a **sub-PR whose base is `codex/multi-agent-mesh-foundation`**, merged into that branch with an ordinary merge commit (no squash; the integration bot squashes #11206 at the end).
-- **A PR based on the mesh branch runs no unit tests and no lint** in this repo (`ci.yml` triggers on `main` and `release/**` only). The gate for every sub-PR is therefore #11206's CI *after* the merge. Merge one sub-PR, watch #11206's run, then merge the next; never merge several and read one run.
-- Runtime preparation is part of the stack: merge order #11200 → #11204 → #11202. #11202 conflicts with #11204 in the resident-continuation tests and must be merged onto it first.
+- #11206 is the only implementation PR and the only PR that merges to `main`. Each numbered step is committed directly to `codex/multi-agent-mesh-foundation` and pushed for #11206's whole-branch CI gate.
+- Runtime preparation was merged in the order #11200 → #11204 → #11202. The expected final conflict keeps both contracts: structured external input and typed continuation outcomes. Those source PRs remain open as drafts and are not merged separately to `main`.
 - Merge `main` into the mesh branch when it falls behind; never rebase (repo policy, and the force-push bot).
 - Keep the design doc and this file current in the same commit as the code that changes them.

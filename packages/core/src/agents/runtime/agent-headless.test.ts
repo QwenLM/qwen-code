@@ -637,27 +637,47 @@ describe('subagent.ts', () => {
         const externalEvents: Array<{
           kind: string | undefined;
           text: string;
+          deliveryId: string | undefined;
         }> = [];
         scope.getEventEmitter().on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
-          externalEvents.push({ kind: event.kind, text: event.text });
+          externalEvents.push({
+            kind: event.kind,
+            text: event.text,
+            deliveryId: event.deliveryId,
+          });
         });
 
         const initialContext = new ContextState();
         initialContext.set('task_prompt', 'Initial task');
         await scope.execute(initialContext);
         await scope.executeExternalInputs(
-          ['late correction', { kind: 'notification', text: 'monitor fired' }],
+          [
+            {
+              kind: 'message',
+              text: 'late correction',
+              deliveryId: 'delivery-1',
+            },
+            { kind: 'notification', text: 'monitor fired' },
+          ],
           undefined,
           { resetStats: false },
         );
 
         expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
-          { text: '[Message from parent agent]: late correction' },
+          { text: 'late correction' },
           { text: 'monitor fired' },
         ]);
         expect(externalEvents).toEqual([
-          { kind: 'message', text: 'late correction' },
-          { kind: 'notification', text: 'monitor fired' },
+          {
+            kind: 'message',
+            text: 'late correction',
+            deliveryId: 'delivery-1',
+          },
+          {
+            kind: 'notification',
+            text: 'monitor fired',
+            deliveryId: undefined,
+          },
         ]);
         expect(scope.getExecutionSummary()).toMatchObject({ rounds: 2 });
       });
@@ -1340,6 +1360,40 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
           { text: '<task-notification>terminal</task-notification>' },
         ]);
+      });
+
+      it('should preserve a delivery id for input drained between rounds', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+        const pendingInputs = [
+          {
+            kind: 'message' as const,
+            text: 'review this result',
+            deliveryId: 'delivery-2',
+          },
+        ];
+        const deliveryIds: Array<string | undefined> = [];
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.getEventEmitter().on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
+          deliveryIds.push(event.deliveryId);
+        });
+        scope.setExternalMessageProvider(() => pendingInputs.splice(0));
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: 'review this result' },
+        ]);
+        expect(deliveryIds).toEqual(['delivery-2']);
       });
 
       it('should not idle-wait when max turns prevents another round', async () => {

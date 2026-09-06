@@ -6377,10 +6377,22 @@ describe('AgentTool', () => {
       });
 
       const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
-        | { continue: (message: string) => string }
+        | {
+            continue: (input: {
+              kind: 'message';
+              text: string;
+              deliveryId: string;
+            }) => string;
+          }
         | undefined;
       expect(resident).toBeDefined();
-      expect(resident?.continue('Now inspect the helper')).toBe('continued');
+      expect(
+        resident?.continue({
+          kind: 'message',
+          text: 'Now inspect the helper',
+          deliveryId: 'delivery-3',
+        }),
+      ).toBe('continued');
 
       await vi.waitFor(() => {
         expect(mockAgent.execute).toHaveBeenCalledTimes(2);
@@ -6391,8 +6403,14 @@ describe('AgentTool', () => {
         expect.any(AbortController),
       );
       expect(mockContextState.set).toHaveBeenCalledWith(
-        'task_prompt',
-        'Now inspect the helper',
+        'external_inputs_override',
+        [
+          {
+            kind: 'message',
+            text: 'Now inspect the helper',
+            deliveryId: 'delivery-3',
+          },
+        ],
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(

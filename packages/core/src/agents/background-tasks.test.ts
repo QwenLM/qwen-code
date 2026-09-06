@@ -314,10 +314,18 @@ describe('BackgroundTaskRegistry', () => {
       );
 
       registry.complete('resident-1', 'first result');
-      expect(registry.continueResidentAgent('resident-1', 'keep going')).toBe(
-        'continued',
-      );
-      expect(resident.continue).toHaveBeenCalledWith('keep going');
+      expect(
+        registry.continueResidentAgent(
+          'resident-1',
+          'keep going',
+          'delivery-1',
+        ),
+      ).toBe('continued');
+      expect(resident.continue).toHaveBeenCalledWith({
+        kind: 'message',
+        text: 'keep going',
+        deliveryId: 'delivery-1',
+      });
 
       const staleHandle = makeResident();
       expect(registry.unregisterResidentAgent('resident-1', staleHandle)).toBe(

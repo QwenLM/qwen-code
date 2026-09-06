@@ -5,15 +5,15 @@
 
 ## 1. Seams to reuse — do not build parallel ones
 
-| Need | Existing | Where | Note |
-| --- | --- | --- | --- |
-| Execution-layer tool allowlist | `ToolConfig.executionAllowedTools` | `agents/runtime/agent-types.ts:88-100`; enforced `agent-core.ts:1599`; parsed `:505-518` | Exact names plus MCP `server*` patterns. Calls outside it are rejected before scheduling or approval. This is the seam for "definition may narrow, never widen" |
-| Declaration filtering and blocklist | `toolConfig.tools`, `toolConfig.disallowedTools` | `agent-core.ts` `prepareTools` | Explicit lists are already filtered through `EXCLUDED_TOOLS_FOR_SUBAGENTS` (`agent-core.ts:203`, 20 control-plane tools) |
-| Definition → runtime config merge | `convertToRuntimeConfig` | `subagents/subagent-manager.ts:893` | Accepts a `toolConfigOverride`; the mesh launcher (step 4) passes the boundary here |
-| Read-only shell classification | `classifyShellCommandSafetyInDirectory(command, cwd)` → `'read-only' \| 'write' \| 'unknown'` | `utils/shellAstParser.ts:1186`; root table `:83`, git/npm/yarn/pnpm/docker/pip/cargo/kubectl subcommand tables `:169-538` | tree-sitter WASM; tests call `initParser()` in `beforeAll`. `shell.ts:2140` uses it only to skip confirmation, never to refuse, so refusal is new wiring |
-| Tool name enumeration | `ToolNames` | `tools/tool-names.ts:21-69` | The classification test enumerates `Object.values(ToolNames)` |
-| Store primitives | `proper-lockfile`, `async-mutex`, `atomicWriteJSON(..., {noFollow})`, `Storage.setRuntimeBaseDir` | `mesh-store.ts`, tests | Keep |
-| Two-process tests | `tsx` | `node_modules/.bin/tsx` | Spawn `tsx <script.ts>` twice against one runtime dir passed by env |
+| Need                                | Existing                                                                                          | Where                                                                                                                     | Note                                                                                                                                                            |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Execution-layer tool allowlist      | `ToolConfig.executionAllowedTools`                                                                | `agents/runtime/agent-types.ts:88-100`; enforced `agent-core.ts:1599`; parsed `:505-518`                                  | Exact names plus MCP `server*` patterns. Calls outside it are rejected before scheduling or approval. This is the seam for "definition may narrow, never widen" |
+| Declaration filtering and blocklist | `toolConfig.tools`, `toolConfig.disallowedTools`                                                  | `agent-core.ts` `prepareTools`                                                                                            | Explicit lists are already filtered through `EXCLUDED_TOOLS_FOR_SUBAGENTS` (`agent-core.ts:203`, 20 control-plane tools)                                        |
+| Definition → runtime config merge   | `convertToRuntimeConfig`                                                                          | `subagents/subagent-manager.ts:893`                                                                                       | Accepts a `toolConfigOverride`; the mesh launcher (step 4) passes the boundary here                                                                             |
+| Read-only shell classification      | `classifyShellCommandSafetyInDirectory(command, cwd)` → `'read-only' \| 'write' \| 'unknown'`     | `utils/shellAstParser.ts:1186`; root table `:83`, git/npm/yarn/pnpm/docker/pip/cargo/kubectl subcommand tables `:169-538` | tree-sitter WASM; tests call `initParser()` in `beforeAll`. `shell.ts:2140` uses it only to skip confirmation, never to refuse, so refusal is new wiring        |
+| Tool name enumeration               | `ToolNames`                                                                                       | `tools/tool-names.ts:21-69`                                                                                               | The classification test enumerates `Object.values(ToolNames)`                                                                                                   |
+| Store primitives                    | `proper-lockfile`, `async-mutex`, `atomicWriteJSON(..., {noFollow})`, `Storage.setRuntimeBaseDir` | `mesh-store.ts`, tests                                                                                                    | Keep                                                                                                                                                            |
+| Two-process tests                   | `tsx`                                                                                             | `node_modules/.bin/tsx`                                                                                                   | Spawn `tsx <script.ts>` twice against one runtime dir passed by env                                                                                             |
 
 ## 2. Step 2 — capability boundary
 
@@ -35,11 +35,11 @@
 
 **Lock.** One workspace mutex (in-process `Mutex` keyed by mesh dir) plus `proper-lockfile` on `workspace.json`. Every public entry point acquires it exactly once and hands internals a transaction object; the per-file locks go away. The mutex is not reentrant: add an `AsyncLocalStorage` flag so a nested acquisition throws a clear error instead of deadlocking.
 
-**Sequences.** `ThreadMessage.sequence` from `Thread.nextMessageSequence`. `ThreadRun.queueSequence` from `workspace.nextRunSequence`, written to `workspace.json` *before* the thread file so a crash between the two leaves a gap, never a duplicate. `queuedAt` stays diagnostic.
+**Sequences.** `ThreadMessage.sequence` from `Thread.nextMessageSequence`. `ThreadRun.queueSequence` from `workspace.nextRunSequence`, written to `workspace.json` _before_ the thread file so a crash between the two leaves a gap, never a duplicate. `queuedAt` stays diagnostic.
 
 **Tokens.** `ThreadRun.usageByRound: {attempt, round, tokens}[]`, upserted by key; `Thread.tokensUsed` becomes a derived cache of its own runs, recomputed on every write; the tree total is a scan of threads sharing `rootThreadId` under the lock. No token outbox, no `appliedTokenChargeIds`.
 
-**Outbox.** `Thread.outbox: ThreadEvent[]` on the *source* thread: `{id, kind: 'parent_report' | 'notification', causedByRunId?, payload, status: 'pending' | 'acknowledged', attempts, createdAt}`. Protocol per event: persist `attempts + 1` → apply to target → persist `acknowledged`. Target idempotency for parent reports: `ThreadMessage.originEventId`; `postMessage` called with an `originEventId` that already exists returns the persisted message and its outcomes without booking (the design's "retry with the same key" rule). `deleteThread` refuses while any event is pending.
+**Outbox.** `Thread.outbox: ThreadEvent[]` on the _source_ thread: `{id, kind: 'parent_report' | 'notification', causedByRunId?, payload, status: 'pending' | 'acknowledged', attempts, createdAt}`. Protocol per event: persist `attempts + 1` → apply to target → persist `acknowledged`. Target idempotency for parent reports: `ThreadMessage.originEventId`; `postMessage` called with an `originEventId` that already exists returns the persisted message and its outcomes without booking (the design's "retry with the same key" rule). `deleteThread` refuses while any event is pending.
 
 **Outcomes on the message.** `ThreadMessage.outcomes: MessageOutcome[]` (flat record, not the `DispatchDecision` type, to avoid a types↔policy import cycle). The `otherThreads` option on `postMessage` is removed; the queue count is read from disk inside the lock.
 
@@ -48,18 +48,19 @@
 **Schema batching — recommendation against the design's current stance.** The design refuses "inert optional fields before a producer exists". With a versioned store every later field is a migration, and steps 5-8 add at least twelve (`authorKind`, `sourceRunId`, `triggerKind`, `authorNameSnapshot`, `deliveryByAgent`, `acceptedMessageIds`, `consumedMessageIds`, `contextThroughSequence`, `definitionVersion`, `transcriptStartOffset/EndOffset`, `closeKind`, `closeAcknowledgedAtSequence`, `finalMessageId`, `failureStage`, plus `finishing`/`cancelling` run statuses). Recommendation: declare and validate all §3 fields in v1 now, populate them when their producers land, and state in §3 that v1 is the whole §3 shape. Owner decides; if refused, expect v2..v6 migrations with tests for each.
 
 **Named tests and what each proves.**
+
 - `capability.test.ts`: every `ToolNames` value is classified; unlisted name → deny; `'*'` and narrowing definitions; shell: `cat`, `git status`, `grep -r` allowed; `rm -rf`, `echo > f`, `git push`, `unknownbin --x` refused with reason.
 - `mesh-store.test.ts`: newer `schemaVersion` on thread, agents, and workspace each fail closed; v0 fixtures (bare agents array; thread without version but with messages and runs) migrate with sequences assigned in order and the backup removed; deletion refused with a pending event; crash injection — `apply` writes the target then throws, second run finds the message by `originEventId`, event acknowledged with `attempts === 2`, exactly one target message; depth-3 tree with a stale `tokensUsed` on the root gates on the true sum.
 - `workspace-lock.test.ts`: two `tsx` child processes allocate N `queueSequence` each; all 2N unique, each process strictly increasing.
 - `thread-actions.test.ts`: fixtures gain the new fields; message `sequence` monotonic; `queueSequence` increasing across two threads; outcomes persisted on the message; `queue_full` computed from disk.
 
-## 4. Runtime PRs are sub-PRs of the stack — merge, do not copy
+## 4. Runtime preparation merged into #11206
 
 - #11200 (cumulative `USAGE_METADATA.round`): `usageByRound` is keyed on it. Without it the key collides across a `finishingInputs` segment.
 - #11202 (`deliveryId` on structured external input): step 5's `consumedMessageIds`.
 - #11204 (typed resident continuation): step 6's dispatcher branch.
 
-All three are retargeted to base `codex/multi-agent-mesh-foundation` and merge into it in the order #11200 → #11204 → #11202 (the last conflicts with #11204 in the resident-continuation tests). Steps 2 and 3 do not need them; step 5 must not open until they are on the mesh branch. Never copy their diffs into a step branch; a sub-PR based on the mesh branch gets no unit-test or lint CI, so read #11206's run after each merge.
+All three are merged into `codex/multi-agent-mesh-foundation` in the order #11200 → #11204 → #11202. The expected final conflict was resolved by keeping both contracts: structured `AgentExternalInput` delivery and typed continuation outcomes. The source PRs remain open as drafts for their review history; #11206 is the implementation and delivery PR.
 
 ## 5. Test harness on a build-less box (observed)
 
