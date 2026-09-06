@@ -16,6 +16,8 @@ import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
+  HookEventName,
+  HookType,
   type Config,
   type SkillConfig,
 } from '@qwen-code/qwen-code-core';
@@ -61,6 +63,11 @@ describe('SkillCommandLoader', () => {
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      // No hook system by default: applySkillHooks no-ops, so the existing
+      // assertions stay focused on allowedTools. The hooks describe block
+      // below overrides these to install a session-hooks mock.
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue(undefined),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -556,6 +563,197 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('frontmatter hooks registration via /<skill-name> (#11067)', () => {
+    let mockAddSessionHook: ReturnType<typeof vi.fn>;
+
+    function installHookSystem(): void {
+      mockAddSessionHook = vi.fn();
+      const byEvent = new Map<
+        string,
+        Array<{ matcher: string; skillRoot?: string; config: unknown }>
+      >();
+      const sessionHooksManager = {
+        // Minimal fake mirroring SessionHooksManager's storage shape so
+        // registerSkillHooks' dedup (matcher + skillRoot + config key)
+        // sees what a previous addSessionHook actually stored.
+        addSessionHook: mockAddSessionHook.mockImplementation(
+          (
+            _sessionId: string,
+            event: string,
+            matcher: string,
+            hook: unknown,
+            options?: { skillRoot?: string },
+          ) => {
+            const list = byEvent.get(event) ?? [];
+            list.push({ matcher, skillRoot: options?.skillRoot, config: hook });
+            byEvent.set(event, list);
+          },
+        ),
+        getHooksForEvent: vi.fn(
+          (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+        ),
+      };
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-1');
+      (mockConfig.getHookSystem as ReturnType<typeof vi.fn>).mockReturnValue({
+        getSessionHooksManager: () => sessionHooksManager,
+      });
+    }
+
+    function gatedSkill(): SkillConfig {
+      return makeSkill({
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/my-skill/SKILL.md',
+        skillRoot: '/test/project/.qwen/skills/my-skill',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+                },
+              ],
+            },
+          ],
+          PostToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: '$QWEN_SKILL/scripts/audit.sh',
+                },
+              ],
+            },
+          ],
+        },
+      });
+    }
+
+    async function loadGatedSkillCommand() {
+      const skill = gatedSkill();
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const loader = new SkillCommandLoader(mockConfig);
+      const [command] = await loader.loadCommands(signal);
+      return command;
+    }
+
+    it('registers every frontmatter hook event when the user starts the skill — not just when the model does', async () => {
+      installHookSystem();
+      const command = await loadGatedSkillCommand();
+
+      await command.action?.(
+        { invocation: { raw: '/my-skill', args: '' } } as CommandContext,
+        '',
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Shell',
+        expect.objectContaining({
+          type: HookType.Command,
+          command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+          env: { QWEN_SKILL_ROOT: '/test/project/.qwen/skills/my-skill' },
+        }),
+        {
+          skillRoot: '/test/project/.qwen/skills/my-skill',
+          trustGated: true,
+        },
+      );
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        HookEventName.PostToolUse,
+        'Shell',
+        expect.objectContaining({
+          type: HookType.Command,
+          command: '$QWEN_SKILL/scripts/audit.sh',
+        }),
+        {
+          skillRoot: '/test/project/.qwen/skills/my-skill',
+          trustGated: true,
+        },
+      );
+    });
+
+    it('does not double-register across repeated invocations', async () => {
+      installHookSystem();
+      const command = await loadGatedSkillCommand();
+
+      await command.action?.({} as CommandContext, '');
+      await command.action?.({} as CommandContext, '');
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(2);
+    });
+
+    it('registers nothing for a project skill in an untrusted folder (fail-closed)', async () => {
+      installHookSystem();
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+      const command = await loadGatedSkillCommand();
+
+      const result = await command.action?.(
+        { invocation: { raw: '/my-skill', args: '' } } as CommandContext,
+        '',
+      );
+
+      // The skill body still loads (the body only influences the model);
+      // only the repo-supplied side effects are withheld.
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+    });
+
+    it('marks user-level skill hooks as not trust-gated', async () => {
+      installHookSystem();
+      const skill = {
+        ...gatedSkill(),
+        level: 'user' as const,
+        filePath: '/tmp/qwen-test/skills/my-skill/SKILL.md',
+        skillRoot: '/tmp/qwen-test/skills/my-skill',
+      };
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+
+      await command.action?.({} as CommandContext, '');
+
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Shell',
+        expect.anything(),
+        { skillRoot: '/tmp/qwen-test/skills/my-skill', trustGated: false },
+      );
+    });
+
+    it('still submits the skill body when no hook system exists (no crash, hooks skipped)', async () => {
+      // Default beforeEach mocks have getHookSystem/getSessionId => undefined.
+      const skill = gatedSkill();
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+
+      const result = await command.action?.(
+        { invocation: { raw: '/my-skill', args: '' } } as CommandContext,
+        '',
+      );
+
+      expect(result).toMatchObject({ type: 'submit_prompt' });
     });
   });
 

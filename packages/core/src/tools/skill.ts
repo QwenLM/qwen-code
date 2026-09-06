@@ -22,7 +22,6 @@ import {
 } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 const debugLogger = createDebugLogger('SKILL');
@@ -37,6 +36,7 @@ export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  applySkillHooks,
   canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
@@ -516,17 +516,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       );
       return;
     }
-    const hookSystem = this.config.getHookSystem();
-    const sessionId = this.config.getSessionId();
-    debugLogger.debug('Hook system and session:', {
-      hasHookSystem: !!hookSystem,
-      sessionId,
-    });
-    if (!hookSystem || !sessionId) {
-      return;
-    }
-    const sessionHooksManager = hookSystem.getSessionHooksManager();
-    const hookCount = registerSkillHooks(sessionHooksManager, sessionId, skill);
+    // Shared with the slash-command startup path (SkillCommandLoader /
+    // BundledSkillLoader): both must register the same session hooks so a
+    // PreToolUse gate can't be bypassed by starting the skill as
+    // `/<skill-name>` instead of via the model (#11067).
+    const hookCount = applySkillHooks(this.config, skill);
     if (hookCount > 0) {
       debugLogger.info(
         `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
@@ -534,7 +528,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     } else {
       // Zero is the expected outcome of every re-invocation: the hooks are
       // already registered and `registerSkillHooks` dedups them (it logs
-      // each skip at debug level). Not a warning — a steady-state WARN
+      // each skip at debug level), or there is no hook system / session id
+      // yet (SDK-mode callers). Not a warning — a steady-state WARN
       // claiming "no hooks registered" over hooks that are firing sends
       // whoever reads the log after a phantom failure.
       debugLogger.debug(

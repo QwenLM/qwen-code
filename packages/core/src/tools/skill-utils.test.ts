@@ -7,15 +7,18 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   applySkillAllowedTools,
+  applySkillHooks,
   canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   clearLoadedSkillTracking,
 } from './skill-utils.js';
+import { HookEventName, HookType } from '../hooks/types.js';
 import { ToolNames } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
+import type { SkillConfig } from '../skills/types.js';
 import type { Config } from '../config/config.js';
 
 function mockPermissionManager(): {
@@ -95,6 +98,119 @@ describe('applySkillAllowedTools', () => {
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read', {
       trustGated: false,
     });
+  });
+});
+
+describe('applySkillHooks', () => {
+  function mockHookSystem(): {
+    config: Config;
+    addSessionHook: ReturnType<typeof vi.fn>;
+    getHooksForEvent: ReturnType<typeof vi.fn>;
+  } {
+    const byEvent = new Map<
+      string,
+      Array<{ matcher: string; skillRoot?: string; config: unknown }>
+    >();
+    const addSessionHook = vi.fn(
+      (
+        _sessionId: string,
+        event: string,
+        matcher: string,
+        hook: unknown,
+        options?: { skillRoot?: string },
+      ) => {
+        const list = byEvent.get(event) ?? [];
+        list.push({ matcher, skillRoot: options?.skillRoot, config: hook });
+        byEvent.set(event, list);
+      },
+    );
+    const getHooksForEvent = vi.fn(
+      (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+    );
+    const sessionHooksManager = { addSessionHook, getHooksForEvent };
+    const config = {
+      getHookSystem: () => ({
+        getSessionHooksManager: () => sessionHooksManager,
+      }),
+      getSessionId: () => 'session-1',
+    } as unknown as Config;
+    return { config, addSessionHook, getHooksForEvent };
+  }
+
+  function gatedSkill(): SkillConfig {
+    return {
+      name: 'gated-skill',
+      description: 'Runs shell work behind a gate',
+      level: 'project',
+      filePath: '/repo/.qwen/skills/gated-skill/SKILL.md',
+      skillRoot: '/repo/.qwen/skills/gated-skill',
+      body: 'Do the gated work.',
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Shell',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+              },
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  it('registers frontmatter hooks as session hooks and injects QWEN_SKILL_ROOT into the command env', () => {
+    const { config, addSessionHook } = mockHookSystem();
+    const skill = gatedSkill();
+
+    const registered = applySkillHooks(config, skill);
+
+    expect(registered).toBe(1);
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.PreToolUse,
+      'Shell',
+      expect.objectContaining({
+        type: HookType.Command,
+        command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+        env: { QWEN_SKILL_ROOT: '/repo/.qwen/skills/gated-skill' },
+      }),
+      { skillRoot: '/repo/.qwen/skills/gated-skill', trustGated: true },
+    );
+  });
+
+  it('dedups across repeated applications so re-invocations never double-fire', () => {
+    const { config, addSessionHook } = mockHookSystem();
+    const skill = gatedSkill();
+
+    expect(applySkillHooks(config, skill)).toBe(1);
+    expect(applySkillHooks(config, skill)).toBe(0);
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 0 for a configless caller or a hookless skill', () => {
+    const { config } = mockHookSystem();
+    expect(applySkillHooks(null, gatedSkill())).toBe(0);
+    expect(applySkillHooks(undefined, gatedSkill())).toBe(0);
+    expect(applySkillHooks(config, { ...gatedSkill(), hooks: undefined })).toBe(
+      0,
+    );
+  });
+
+  it('no-ops when the hook system or session id is unavailable', () => {
+    const noHookSystem = {
+      getHookSystem: () => undefined,
+      getSessionId: () => 'session-1',
+    } as unknown as Config;
+    const noSessionId = {
+      getHookSystem: () => ({}),
+      getSessionId: () => '',
+    } as unknown as Config;
+
+    expect(applySkillHooks(noHookSystem, gatedSkill())).toBe(0);
+    expect(applySkillHooks(noSessionId, gatedSkill())).toBe(0);
   });
 });
 

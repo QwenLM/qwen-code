@@ -10,6 +10,7 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  applySkillHooks,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -98,11 +99,17 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          // Auto-approve the skill's declared allowedTools before its body is submitted.
+          // Apply the skill's session side effects before its body is
+          // submitted: auto-approve its declared allowedTools and register
+          // its frontmatter hooks. Both mirror the Skill-tool path
+          // (packages/core/src/tools/skill.ts applySideEffects) so a
+          // PreToolUse gate declared in SKILL.md also fires when the user
+          // starts the skill via /<skill-name> instead of the model (#11067).
           applySkillAllowedTools(
             this.config?.getPermissionManager(),
             skill.allowedTools,
           );
+          applySkillHooks(this.config, skill);
 
           // Resolve template variables in skill body
           let body = skill.body;

@@ -10,6 +10,7 @@ import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { ToolNames } from './tool-names.js';
+import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { escapeXml } from '../utils/xml.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -322,6 +323,50 @@ export function applySkillAllowedTools(
 }
 
 /**
+ * Registers a skill's frontmatter `hooks:` as session-scoped hooks — the
+ * hooks counterpart of `applySkillAllowedTools`.
+ *
+ * Skill hooks are a safety boundary as often as a convenience: a
+ * `PreToolUse` gate that denies a matching tool call is only a gate if it
+ * is actually registered. This helper exists so that EVERY startup path of
+ * a skill — the model invoking the Skill tool, the user typing
+ * `/<skill-name>` (interactive, stacked, non-interactive, ACP), a stacked
+ * `/a /b` expansion — funnels through one registration function instead of
+ * re-deriving it per call site. Previously the slash-command path applied
+ * `allowedTools` but silently skipped hooks, so a gated skill failed open
+ * whenever the user rather than the model started it (#11067).
+ *
+ * Registration is idempotent: `registerSkillHooks` dedups entries already
+ * registered for this session, so calling this on every invocation (not
+ * just the first load) is safe and lets a folder-trust grant landed
+ * mid-session take effect on the next use.
+ *
+ * No-ops when there is no config, no hooks to register, or no live hook
+ * system / session id yet (e.g. SDK-mode callers without a session).
+ *
+ * @returns Number of hooks newly registered (0 when there was nothing to
+ * register or everything was already registered).
+ */
+export function applySkillHooks(
+  config: Config | null | undefined,
+  skill: SkillConfig,
+): number {
+  if (!config || !skill.hooks) {
+    return 0;
+  }
+  const hookSystem = config.getHookSystem();
+  const sessionId = config.getSessionId();
+  if (!hookSystem || !sessionId) {
+    return 0;
+  }
+  return registerSkillHooks(
+    hookSystem.getSessionHooksManager(),
+    sessionId,
+    skill,
+  );
+}
+
+/**
  * Conservatively drop ALL loaded-skill tracking after a destructive
  * history rewrite (compaction, truncation, orphan stripping). The rewrite
  * may have removed a skill body; the dedup guard must not leave that
@@ -330,7 +375,7 @@ export function applySkillAllowedTools(
  * most one duplicate injection on the next invoke, while a stale entry
  * makes the body unrecoverable until session restart.
  *
- * Duck-typed (mirroring `clearCommand`'s existing `clearLoadedSkills`
+ * Duck-typed (mirrors `clearCommand`'s existing `clearLoadedSkills`
  * call) so history-rewrite sites don't need a runtime import of the
  * SkillTool class.
  */
