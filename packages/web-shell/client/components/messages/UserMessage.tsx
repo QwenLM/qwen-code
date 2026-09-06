@@ -13,7 +13,10 @@ import { CalendarClockIcon, PencilIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagValue,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
@@ -31,11 +34,6 @@ import type {
 } from '../../customization';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
-import {
-  getComposerTagDisplay,
-  getComposerTagLabel,
-  getComposerTagValue,
-} from '../../hooks/useComposerCore';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
