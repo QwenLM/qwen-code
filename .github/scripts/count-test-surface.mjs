@@ -81,9 +81,10 @@
 // so it neither shields nor decides whether the baseline holds the file.
 // Reports the net assertion and enabled-test deltas, the charged
 // registrations, and whether the baseline holds the file at all.
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // The parser is the measurement's authority, so it must not be the round's
 // to choose: on the runner the gate passes WEAKEN_PARSER_FILE, the exact
@@ -659,14 +660,33 @@ export function measure({ path, tip, pre, events = [] }) {
   };
 }
 
-const [mode, arg] = process.argv.slice(2);
-if (mode === 'count') {
-  const text = readFileSync(0, 'utf8');
-  process.stdout.write(`${JSON.stringify(count(text, arg ?? ''))}\n`);
-} else if (mode === 'measure') {
-  const manifest = JSON.parse(readFileSync(arg, 'utf8'));
-  process.stdout.write(`${JSON.stringify(measure(manifest))}\n`);
-} else if (mode !== undefined) {
-  process.stderr.write(`count-test-surface: unknown mode '${mode}'\n`);
-  process.exit(2);
+// Run the CLI only when this file IS the program. Without the guard the
+// dispatch reads the argv of whatever imported it: a test runner invoked
+// with a positional argument would land in the unknown-mode arm and take
+// the importing process down with `process.exit(2)`.
+// Compared as REAL paths: the gate runs this from RUNNER_TEMP, and on
+// macOS that is reached through /var -> /private/var, so the argv string
+// and the module URL disagree while naming the same file.
+const realOrSelf = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+if (
+  process.argv[1] &&
+  realOrSelf(fileURLToPath(import.meta.url)) === realOrSelf(process.argv[1])
+) {
+  const [mode, arg] = process.argv.slice(2);
+  if (mode === 'count') {
+    const text = readFileSync(0, 'utf8');
+    process.stdout.write(`${JSON.stringify(count(text, arg ?? ''))}\n`);
+  } else if (mode === 'measure') {
+    const manifest = JSON.parse(readFileSync(arg, 'utf8'));
+    process.stdout.write(`${JSON.stringify(measure(manifest))}\n`);
+  } else {
+    process.stderr.write(`count-test-surface: unknown mode '${mode ?? ''}'\n`);
+    process.exit(2);
+  }
 }

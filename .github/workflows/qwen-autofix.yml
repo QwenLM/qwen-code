@@ -4757,9 +4757,11 @@ jobs:
           # by its exact context value — it carries no workflowName), and
           # binds to the commit the rollup describes: a moved head reads
           # `none`. GREEN is an ALLOWLIST, never a default: the charge-
-          # enabling verdict requires every counted check to hold a state
-          # this classifier recognises as passing, so any state it does not
-          # know (a new conclusion, a verdict that never came) is pending.
+          # enabling verdict requires every counted check to have FINISHED
+          # and to hold a conclusion this classifier recognises as passing,
+          # so any state it does not know (a new conclusion, a verdict that
+          # never came, a re-run still in flight over a stale conclusion) is
+          # pending.
           # Full rationale → qwen-autofix.md#af-155
           CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" '
             [ .[] | select((((.workflowName // "")
@@ -4768,8 +4770,10 @@ jobs:
             | if ($c | length) == 0 then "none"
               elif any($c[]; (.conclusion // .state // "")
                 | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")) then "red"
-              elif all($c[]; (.conclusion // .state // "")
-                | IN("SUCCESS", "NEUTRAL", "SKIPPED")) then "green"
+              elif all($c[]; (((.status // "")
+                | IN("QUEUED", "IN_PROGRESS", "WAITING", "PENDING")) | not)
+                and ((.conclusion // .state // "")
+                | IN("SUCCESS", "NEUTRAL", "SKIPPED"))) then "green"
               else "pending" end' "${WORKDIR}/checks.json" 2> /dev/null || echo 'none')"
           case "${CHECK_STATE}" in green | red | pending | none) ;; *) CHECK_STATE='none' ;; esac
           if [[ "${ROLLUP_HEAD:-}" != "${CHECKED_OUT_HEAD}" ]]; then

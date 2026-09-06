@@ -19,7 +19,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
@@ -23599,6 +23599,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       const fx = weaken ? WEAKEN_FIXTURES[weaken] : null;
       if (fx && fx.onMain) {
         for (const cmd of fixtureWrite(fx.onMain)) g(cmd);
+        // Raw commands for content `fixtureWrite` cannot express — a byte
+        // no shell argument can carry, for instance.
+        for (const cmd of fx.onMainSeed ?? []) g(cmd);
         g('git add . && git commit -qm seed-test && git push -q origin main');
       }
       g('git checkout -qb feature');
@@ -25649,6 +25652,30 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- `git merge-file` REFUSES a file carrying a NUL byte (exit 255, no
+    //    output). The branch's own side has to stand in for the auto-merge
+    //    then, or the empty result reads as "main emptied the file" and
+    //    credits the round with the whole baseline surface — masking a
+    //    removal of up to that size. Here main only appends a comment while
+    //    the round deletes an assertion.
+    'binary-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-touches',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        // Rewritten, not filtered: a line filter reads this file as binary
+        // and would empty it instead of dropping one assertion. The NUL
+        // only has to exist on the three sides of the MERGE.
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
     'merge-delete-freight': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -26151,6 +26178,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // auto-merge result for that event is EMPTY, and the attribution
       // subtracts it like any other main event.
       acceptsWithoutCharge('main-empties');
+      // ...and when the auto-merge cannot be COMPUTED at all (a NUL byte
+      // makes the file binary and `git merge-file` refuses), the branch's
+      // own side stands in for it. Without that substitution the refusal's
+      // empty output reads as main having emptied the file, and the round's
+      // deletion is credited away instead of charged.
+      const binary = rejectsWeakening(
+        'binary-merge',
+        'net 1 assertion(s) removed',
+      );
+      expect(binary.rejection).toContain('pkg/a.test.ts');
       // The round dropped an assertion, main edited it, and the merge
       // resolution took main's side: the tip carries the assertion.
       acceptsWithoutCharge('merge-restore');
@@ -26404,6 +26441,34 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       const surfaceScript = stageStep
         .slice(stageStep.indexOf('run: |-') + 'run: |-'.length)
         .replace(/^ {10}/gm, '');
+      // GitHub runs a `run:` block under `bash --noprofile --norc -e -o
+      // pipefail`, and this step is unconditional: any command inside it
+      // that fails kills the whole review-address job for every round. The
+      // probe therefore runs it the same way, or the guards it exists to
+      // witness ("rm -f's non-zero exit would abort this -e step") are not
+      // being witnessed at all.
+      const runStage = () =>
+        spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            surfaceScript,
+          ],
+          {
+            cwd: surfaceProbeDir,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_TEMP: surfaceRunnerTemp,
+              GITHUB_OUTPUT: surfaceOutput,
+            },
+          },
+        );
       for (const asDirectory of [false, true]) {
         rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
           recursive: true,
@@ -26433,15 +26498,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           'module.exports = { ATTACKER_CONTROLLED: true };\n',
         );
         writeFileSync(surfaceOutput, '');
-        const surfaceProbe = spawnSync('bash', ['-c', surfaceScript], {
-          cwd: surfaceProbeDir,
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            RUNNER_TEMP: surfaceRunnerTemp,
-            GITHUB_OUTPUT: surfaceOutput,
-          },
-        });
+        const surfaceProbe = runStage();
         expect(surfaceProbe.status).toBe(0);
         expect(
           existsSync(join(surfaceRunnerTemp, 'count-test-surface.mjs')),
@@ -26451,6 +26508,64 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         );
         expect(readFileSync(surfaceOutput, 'utf8')).toBe('');
       }
+      // ...and the branch that runs in PRODUCTION once this lands: the
+      // counter present, the parser where npm ci puts it. Text pins cannot
+      // see ordering or a newly-failing command inside that `if`, and this
+      // step is unconditional, so a break there kills every round. Run it.
+      writeFileSync(
+        join(surfaceProbeDir, '.github', 'scripts', 'count-test-surface.mjs'),
+        readFileSync('.github/scripts/count-test-surface.mjs'),
+      );
+      mkdirSync(join(surfaceProbeDir, 'node_modules', 'typescript', 'lib'), {
+        recursive: true,
+      });
+      const plantedParser = '// planted typescript build\nmodule.exports={};\n';
+      writeFileSync(
+        join(
+          surfaceProbeDir,
+          'node_modules',
+          'typescript',
+          'lib',
+          'typescript.js',
+        ),
+        plantedParser,
+      );
+      rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
+        recursive: true,
+        force: true,
+      });
+      rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+        recursive: true,
+        force: true,
+      });
+      writeFileSync(surfaceOutput, '');
+      const staged = runStage();
+      expect(staged.stderr).toBe('');
+      expect(staged.status).toBe(0);
+      expect(
+        readFileSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), 'utf8'),
+      ).toBe(readFileSync('.github/scripts/count-test-surface.mjs', 'utf8'));
+      expect(
+        readFileSync(
+          join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+          'utf8',
+        ),
+      ).toBe(plantedParser);
+      // The digests the gate verifies against are of the bytes that were
+      // actually staged, and BOTH reach expression context.
+      const digestOf = (file) =>
+        createHash('sha256').update(readFileSync(file)).digest('hex');
+      const emitted = readFileSync(surfaceOutput, 'utf8');
+      expect(emitted).toContain(
+        `weaken_counter_sha256=${digestOf(
+          join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+        )}\n`,
+      );
+      expect(emitted).toContain(
+        `weaken_parser_sha256=${digestOf(
+          join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+        )}\n`,
+      );
     } finally {
       rmSync(surfaceProbeDir, { recursive: true, force: true });
       rmSync(surfaceRunnerTemp, { recursive: true, force: true });
@@ -26922,6 +27037,40 @@ describe('count-test-surface: the declared test surface of a test file', () => {
     expect(surface(source, path)).toEqual(expected);
   });
 
+  it('measures every dialect the gate selects, not only .ts', () => {
+    // The pathspec selects `*.test.*` and `*.spec.*` whatever the
+    // extension, and the repository tracks hundreds of `*.test.js` files.
+    // A dialect missing from the parser's table measures ZERO — which the
+    // gate reads as a file with no surface to weaken, so gutting one is
+    // free. Every extension the table claims must therefore be exercised.
+    const body = [
+      "it('a', () => {",
+      '  expect(one()).toBe(1);',
+      '  expect(two()).toBe(2);',
+      '});',
+      "it.skip('b', () => {",
+      '  expect(three()).toBe(3);',
+      '});',
+    ];
+    for (const ext of [
+      '.ts',
+      '.mts',
+      '.cts',
+      '.tsx',
+      '.js',
+      '.mjs',
+      '.cjs',
+      '.jsx',
+    ]) {
+      expect({ ext, ...surface(body, `a.test${ext}`) }).toEqual({
+        ext,
+        a: 2,
+        e: 1,
+        d: ['test:b'],
+      });
+    }
+  });
+
   it('measures a zero surface for a non-JS test file', () => {
     expect(
       countTestSurface('def test_x():\n    assert 1\n', 'test_x.py'),
@@ -26947,6 +27096,42 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       assertions: 1,
       enabled: 1,
     });
+    // The gate runs the counter from a STAGED copy under RUNNER_TEMP, which
+    // on macOS is reached through /var -> /private/var. The CLI must fire
+    // when this file is the program however its path was spelled — a
+    // main-module guard comparing argv to the module URL literally would
+    // read as "imported", print nothing, and the gate would report every
+    // file unmeasurable.
+    const linkDir = mkdtempSync(join(tmpdir(), 'surface-link-'));
+    try {
+      const linked = join(linkDir, 'count-test-surface.mjs');
+      symlinkSync(counter, linked);
+      const viaLink = spawnSync('node', [linked, 'count', 'pkg/a.test.ts'], {
+        input: "it('a', () => {\n  expect(one()).toBe(1);\n});\n",
+        encoding: 'utf8',
+      });
+      expect(viaLink.status).toBe(0);
+      expect(JSON.parse(viaLink.stdout)).toMatchObject({ assertions: 1 });
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+    // ...and IMPORTING it must not run the CLI against the importer's argv:
+    // a positional the importing program owns would otherwise land in the
+    // unknown-mode arm and take that process down with exit 2.
+    const imported = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `await import(${JSON.stringify(pathToFileURL(counter).href)}); console.log('IMPORT_OK');`,
+        'measure',
+        'not-a-manifest.json',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(imported.stderr).toBe('');
+    expect(imported.status).toBe(0);
+    expect(imported.stdout).toContain('IMPORT_OK');
     const dir = mkdtempSync(join(tmpdir(), 'surface-'));
     try {
       const blob = (name, lines) => {
@@ -27304,6 +27489,13 @@ describe('review-address: regression accounting (af-155)', () => {
         run({ checks: [{ name: 'a', status: 'COMPLETED', conclusion }] }).state,
       ).toBe('green');
     }
+    // A check still in flight is pending even when it carries a conclusion
+    // from an earlier attempt: the verdict on the head is not in yet.
+    for (const status of ['QUEUED', 'IN_PROGRESS', 'WAITING', 'PENDING']) {
+      expect(
+        run({ checks: [{ name: 'a', status, conclusion: 'SUCCESS' }] }).state,
+      ).toBe('pending');
+    }
     for (const conclusion of ['MOON_PHASE', 'DEGRADED', 'ABANDONED']) {
       expect(
         run({ checks: [{ name: 'a', status: 'COMPLETED', conclusion }] }).state,
@@ -27505,6 +27697,10 @@ describe('review-address: regression accounting (af-155)', () => {
     expect(pushAndReportScript).toContain(
       '<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->',
     );
+    // The field carries the CLASSIFIER's verdict, not a literal: replacing
+    // this one line with `PUSH_PRE=green` would leave the whole mechanism
+    // shaped exactly as it is while charging every red head to the round.
+    expect(pushAndReportScript).toContain('PUSH_PRE="${CHECK_STATE:-none}"');
     // A salvage-merged branch move or a base-conflict merge means the pushed
     // head did not start from the head prepare classified: the premise is
     // stamped unknown.
