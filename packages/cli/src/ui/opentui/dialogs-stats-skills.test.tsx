@@ -76,12 +76,24 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock('@opentui/react', () => ({
-  useKeyboard: (handler: (key: unknown) => void) => {
-    mocks.state.keyboardHandlers.push(handler);
-  },
-  useRenderer: () => mocks.renderer,
-}));
+// The useKeyboard mock mirrors the real hook's lifetime: handlers are
+// registered on mount and removed on unmount, so a later press() cannot
+// reach an already-unmounted dialog's onClose.
+vi.mock('@opentui/react', async () => {
+  const React = await import('react');
+  return {
+    useKeyboard: (handler: (key: unknown) => void) => {
+      React.useEffect(() => {
+        mocks.state.keyboardHandlers.push(handler);
+        return () => {
+          const index = mocks.state.keyboardHandlers.indexOf(handler);
+          if (index >= 0) mocks.state.keyboardHandlers.splice(index, 1);
+        };
+      }, [handler]);
+    },
+    useRenderer: () => mocks.renderer,
+  };
+});
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 vi.mock('./key-map.js', () => ({
@@ -158,7 +170,7 @@ describe('OpenTuiStatsDialog', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
-    mocks.state.metrics = makeMetrics() as never;
+    mocks.state.metrics = makeMetrics();
   });
 
   it('renders the session tab numbers from telemetry + computeSessionStats', () => {
@@ -183,7 +195,7 @@ describe('OpenTuiStatsDialog', () => {
   });
 
   it('falls back to aggregate metrics without a session id', () => {
-    mocks.state.metrics = makeMetrics() as never;
+    mocks.state.metrics = makeMetrics();
     render(<OpenTuiStatsDialog config={undefined} onClose={vi.fn()} />);
     expect(screen.getByText('n/a')).toBeTruthy();
     expect(screen.getByText('✓ 4')).toBeTruthy();
@@ -216,6 +228,27 @@ describe('OpenTuiStatsDialog', () => {
     render(<OpenTuiStatsDialog config={undefined} onClose={onCloseParsed} />);
     press('escape');
     expect(onCloseParsed).toHaveBeenCalledTimes(1);
+  });
+
+  it('unregisters its key handlers on unmount, so later keys miss it', () => {
+    const firstOnClose = vi.fn();
+    const { unmount } = render(
+      <OpenTuiStatsDialog config={undefined} onClose={firstOnClose} />,
+    );
+    // The Stats dialog registers two parsed-key handlers (the shared Esc
+    // fallback + tab cycling) plus one raw input handler.
+    expect(mocks.state.keyboardHandlers.length).toBeGreaterThan(0);
+    expect(mocks.state.inputHandlers.length).toBeGreaterThan(0);
+    unmount();
+    expect(mocks.state.keyboardHandlers).toHaveLength(0);
+    expect(mocks.state.inputHandlers).toHaveLength(0);
+
+    // After a second dialog mounts, a key press must only reach that one.
+    const secondOnClose = vi.fn();
+    render(<OpenTuiStatsDialog config={undefined} onClose={secondOnClose} />);
+    press('escape');
+    expect(firstOnClose).not.toHaveBeenCalled();
+    expect(secondOnClose).toHaveBeenCalledTimes(1);
   });
 
   it('ignores Tab and Esc while embedded (isFocused=false)', async () => {
@@ -285,6 +318,13 @@ describe('OpenTuiSkillsDialog', () => {
     const onClose = vi.fn();
     render(<OpenTuiSkillsDialog config={undefined} onClose={onClose} />);
     expect(await pressEsc()).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes on the parsed-key Esc fallback', () => {
+    const onClose = vi.fn();
+    render(<OpenTuiSkillsDialog config={undefined} onClose={onClose} />);
+    press('escape');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

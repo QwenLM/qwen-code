@@ -350,8 +350,14 @@ describe('OpenTuiArenaDialog status', () => {
   it('closes on Esc, Enter, or q', () => {
     const onClose = vi.fn();
     renderArena({ mode: 'status', config: makeConfig(), onClose });
+    // ArenaStatus handles all three keys in one || chain — pin each branch
+    // separately so deleting any one of them turns this red.
     press('q');
     expect(onClose).toHaveBeenCalledTimes(1);
+    press('escape');
+    expect(onClose).toHaveBeenCalledTimes(2);
+    press('return');
+    expect(onClose).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -450,6 +456,53 @@ describe('OpenTuiArenaDialog stop', () => {
       ),
     );
   });
+
+  it('closes on Esc without running the teardown chain', () => {
+    const manager = makeManager({
+      getSessionStatus: () => ArenaSessionStatus.RUNNING,
+    });
+    const config = makeConfig({ getArenaManager: () => manager });
+    const onClose = vi.fn();
+    renderArena({ mode: 'stop', config, notify: vi.fn(), onClose });
+
+    press('escape');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(manager.cancel).not.toHaveBeenCalled();
+    expect(manager.cleanup).not.toHaveBeenCalled();
+    expect(manager.cleanupRuntime).not.toHaveBeenCalled();
+    expect(config.setArenaManager).not.toHaveBeenCalled();
+  });
+
+  it('ignores further Enter and Esc while a stop is processing', async () => {
+    let resolveCancel!: () => void;
+    const manager = makeManager({
+      getSessionStatus: () => ArenaSessionStatus.RUNNING,
+      cancel: vi.fn(
+        () => new Promise<void>((resolve) => (resolveCancel = resolve)),
+      ),
+    });
+    const config = makeConfig({ getArenaManager: () => manager });
+    const notify = vi.fn();
+    const onClose = vi.fn();
+    renderArena({ mode: 'stop', config, notify, onClose });
+
+    press('return'); // enters runStop and parks on the pending cancel()
+    press('return'); // re-entrancy guard: processing=true swallows it
+    press('escape'); // guarded too — no second onClose, no second teardown
+    expect(manager.cancel).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1); // only runStop's own onClose()
+
+    await act(async () => {
+      resolveCancel();
+    });
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        'Arena session stopped. All Arena resources (including Git worktrees) were cleaned up.',
+      ),
+    );
+    expect(manager.waitForSettled).toHaveBeenCalledTimes(1);
+    expect(manager.cleanup).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('OpenTuiArenaDialog select', () => {
@@ -460,8 +513,13 @@ describe('OpenTuiArenaDialog select', () => {
     ).toBeTruthy();
   });
 
-  function setupSelect(overrides: { applyResult?: unknown } = {}) {
-    const agents = [
+  function setupSelect(
+    overrides: {
+      applyResult?: unknown;
+      agents?: Array<ReturnType<typeof makeAgentState>>;
+    } = {},
+  ) {
+    const agents = overrides.agents ?? [
       makeAgentState({
         agentId: 'agent-b',
         model: { modelId: 'model-b' },
@@ -471,7 +529,16 @@ describe('OpenTuiArenaDialog select', () => {
     ];
     const manager = makeManager({
       getAgentStates: () => agents,
-      getResult: () => makeResult(),
+      getResult: () =>
+        makeResult({
+          agents: [
+            makeResultAgent(),
+            makeResultAgent({
+              agentId: 'agent-c',
+              model: { modelId: 'model-c' },
+            }),
+          ],
+        }),
       getAgentState: (agentId: string) =>
         agents.find((a) => a.agentId === agentId),
       applyAgentResult: vi
@@ -559,5 +626,58 @@ describe('OpenTuiArenaDialog select', () => {
     const { onClose } = setupSelect();
     press('escape');
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the next winner after moving down', async () => {
+    // rows: [failed b (disabled), a, c] — the cursor starts on a.
+    const { manager, notify } = setupSelect({
+      agents: [
+        makeAgentState({
+          agentId: 'agent-b',
+          model: { modelId: 'model-b' },
+          status: AgentStatus.FAILED,
+        }),
+        makeAgentState({ agentId: 'agent-a' }),
+        makeAgentState({
+          agentId: 'agent-c',
+          model: { modelId: 'model-c' },
+        }),
+      ],
+    });
+    press('down');
+    press('return');
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        'Applied changes from model-c to workspace. Arena session complete.',
+      ),
+    );
+    expect(manager.applyAgentResult).toHaveBeenCalledWith('agent-c');
+  });
+
+  it('moves up without ever landing on the disabled failed row', async () => {
+    const { manager, notify } = setupSelect({
+      agents: [
+        makeAgentState({
+          agentId: 'agent-b',
+          model: { modelId: 'model-b' },
+          status: AgentStatus.FAILED,
+        }),
+        makeAgentState({ agentId: 'agent-a' }),
+        makeAgentState({
+          agentId: 'agent-c',
+          model: { modelId: 'model-c' },
+        }),
+      ],
+    });
+    press('down'); // a → c
+    press('up'); // c → a
+    press('up'); // a → would be the disabled row 0: clamps back to a
+    press('return');
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        'Applied changes from qwen3-coder-plus to workspace. Arena session complete.',
+      ),
+    );
+    expect(manager.applyAgentResult).toHaveBeenCalledWith('agent-a');
   });
 });
