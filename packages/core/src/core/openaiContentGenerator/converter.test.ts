@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -24,6 +24,7 @@ import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -6035,6 +6036,31 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    it('compiles a stable tool schema only once', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'stable', parametersJsonSchema },
+          ],
+        },
+      ] as Tool[];
+      const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');
+
+      try {
+        await converter.convertLlmToolsToOpenAI(tools);
+        await converter.convertLlmToolsToOpenAI(tools);
+        expect(compileStrict).toHaveBeenCalledTimes(1);
+      } finally {
+        compileStrict.mockRestore();
+      }
+    });
+
     it('removes uniqueItems from function-calling wire schemas', async () => {
       const parametersJsonSchema = {
         type: 'object',
@@ -6079,6 +6105,140 @@ describe('OpenAIContentConverter', () => {
         },
       ]);
       expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
+    });
+
+    it('only relaxes grammar constraints backed by local validation', async () => {
+      const supportedSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedSchema = {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedVocabularySchema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'supported', parametersJsonSchema: supportedSchema },
+            { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
+            {
+              name: 'unsupported_vocabulary',
+              parametersJsonSchema: unsupportedVocabularySchema,
+            },
+            {
+              name: 'without_local_schema',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {},
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        { name: 'supported', description: '', parameters: { type: 'object' } },
+        {
+          name: 'unsupported',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'unsupported_vocabulary',
+          description: '',
+          parameters: unsupportedVocabularySchema,
+        },
+        {
+          name: 'without_local_schema',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ]);
+      expect(supportedSchema).toEqual({
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      });
+      expect(unsupportedSchema.$schema).toBe(
+        'https://json-schema.org/draft/2019-09/schema',
+      );
+      expect(
+        unsupportedVocabularySchema.properties.tuple.prefixItems[0]
+          .additionalProperties,
+      ).toBe(false);
+    });
+
+    it('keeps grammar constraints for schemas with a top-level $id', async () => {
+      const sharedId = 'https://qwen-code.test/shared-tool-schema';
+      const makeSchema = () => ({
+        $id: sharedId,
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      });
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'first', parametersJsonSchema: makeSchema() },
+            { name: 'second', parametersJsonSchema: makeSchema() },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'first',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+        {
+          name: 'second',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+      ]);
     });
 
     it('should convert Gemini tools with parameters field', async () => {

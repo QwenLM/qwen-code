@@ -503,7 +503,7 @@ describe('daemon event schema', () => {
             id: 'mutation-1',
             kind: 'skill_toggle',
             skills: [{ name: 'review', enabled: false }],
-            activation: 'applied',
+            activation: 'reconciling',
             sessionsRefreshed: 1,
             sessionsFailed: 0,
           },

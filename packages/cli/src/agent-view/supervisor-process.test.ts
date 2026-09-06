@@ -306,7 +306,13 @@ describe('Agent View supervisor process helpers', () => {
       globalDir,
       platform: 'linux',
       waitForWorkerReady: true,
-      workerReadyTimeoutMs: 1000,
+      // 15s is the product default; 1s was the developer-machine figure and
+      // it is a deadline the test does not otherwise care about. On the
+      // shared pool a worker takes longer than that to report ready, and
+      // release run 33713579913 failed three of these on it, each three
+      // times over, with --retry=2 already on. The cases that DO assert the
+      // timeout keep their 1ms.
+      workerReadyTimeoutMs: 15_000,
       launchPtyHost: async (launch) => {
         launchedArgv = launch.argv;
         token = launch.env['QWEN_AGENT_VIEW_TOKEN'] ?? '';
@@ -586,7 +592,7 @@ describe('Agent View supervisor process helpers', () => {
       globalDir,
       platform: 'linux',
       waitForWorkerReady: true,
-      workerReadyTimeoutMs: 1000,
+      workerReadyTimeoutMs: 15_000,
       launchPtyHost: async () => {
         const host = fakePtyHost();
         setImmediate(() => host.resolveExit(1));
@@ -628,7 +634,7 @@ describe('Agent View supervisor process helpers', () => {
       globalDir,
       platform: 'linux',
       waitForWorkerReady: true,
-      workerReadyTimeoutMs: 1000,
+      workerReadyTimeoutMs: 15_000,
       launchPtyHost: async () => {
         replacementLaunched();
         return fakePtyHost();
@@ -1198,7 +1204,7 @@ describe('Agent View supervisor process helpers', () => {
       globalDir,
       platform: 'linux',
       waitForWorkerReady: true,
-      workerReadyTimeoutMs: 1000,
+      workerReadyTimeoutMs: 15_000,
       launchPtyHost: async (launch) => {
         setImmediate(() => {
           void Promise.resolve(

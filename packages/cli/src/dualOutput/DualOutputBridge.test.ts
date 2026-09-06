@@ -20,6 +20,7 @@ import {
   DUAL_OUTPUT_PROTOCOL_VERSION,
   SUPPORTED_EVENTS,
 } from './DualOutputBridge.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 function createMockConfig(): Config {
   return {
@@ -386,7 +387,7 @@ describe('DualOutputBridge', () => {
         bridge = new DualOutputBridge(config, { filePath: fifoPath });
         const elapsed = Date.now() - start;
 
-        expect(elapsed).toBeLessThan(500);
+        expectWithinLatencyBudget(elapsed, 500);
         expect(bridge.isConnected).toBe(true);
       });
 

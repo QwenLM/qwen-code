@@ -2133,6 +2133,14 @@ export function createDaemonSessionActions({
       return await session.readAttachment(attachmentId);
     },
 
+    async listAttachments() {
+      // Background panel refresh: failures are swallowed by the caller, so a
+      // missing or unreachable session must never surface a user-facing notice.
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return await session.listAttachments();
+    },
+
     async removeAttachment(attachmentId, opts) {
       const session = sessionRef.current;
       const sessionId = opts?.sessionId ?? session?.sessionId;
@@ -2439,6 +2447,29 @@ export function createDaemonSessionActions({
           'Run saved workflow failed',
           error,
           'run_saved_workflow',
+        );
+      }
+    },
+
+    async readSavedWorkflow(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Read saved workflow failed',
+        'read_saved_workflow',
+      );
+      try {
+        const status = await withActionTimeout(
+          session.savedWorkflow(name),
+          'Read saved workflow timed out',
+        );
+        return status.workflow;
+      } catch (error) {
+        throw dispatchActionError(
+          noticeForSession(session),
+          'Read saved workflow failed',
+          error,
+          'read_saved_workflow',
         );
       }
     },
