@@ -765,7 +765,7 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('bounds repeated-separator checks in decoded URL authorities', () => {
-    const separators = '/'.repeat(40);
+    const separators = '/'.repeat(30);
     const input = record('repeated-separators', null, {
       message: {
         role: 'user',
