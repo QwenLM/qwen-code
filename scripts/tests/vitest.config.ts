@@ -6,6 +6,15 @@
 
 import { configDefaults, defineConfig } from 'vitest/config';
 
+// The knob is an operator escape hatch for a slow pool, so an unusable value
+// must fail safe rather than disarm the floor: Number('') is 0, which Node
+// reads as no bound at all, and a non-numeric value is NaN, which makes
+// spawnSync throw ERR_OUT_OF_RANGE far from the cause. Anything that does
+// not parse to a positive finite figure falls back to the default.
+const knobTimeoutMs = Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS']);
+const suiteTestTimeoutMs =
+  Number.isFinite(knobTimeoutMs) && knobTimeoutMs > 0 ? knobTimeoutMs : 90_000;
+
 export default defineConfig({
   test: {
     globals: true,
@@ -42,7 +51,7 @@ export default defineConfig({
     // and acp-serve-boundary-guard.test.js — neither of them slow, both past
     // 30s under contention. Per-test `vi.setConfig` does not help: these
     // cases register their timeout at collection, before it runs.
-    testTimeout: Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS'] ?? 90_000),
+    testTimeout: suiteTestTimeoutMs,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

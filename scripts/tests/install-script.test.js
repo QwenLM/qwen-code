@@ -3001,7 +3001,6 @@ describe('Linux/macOS installer end-to-end', () => {
         restoreMinimalDist(createdDist);
       }
     },
-    15000,
   );
 
   itOnUnix(
@@ -3125,7 +3124,6 @@ describe('Linux/macOS installer end-to-end', () => {
         restoreMinimalDist(createdDist);
       }
     },
-    15000,
   );
 
   itOnUnix('uninstalls standalone files while preserving user config', () => {
@@ -3528,202 +3526,190 @@ describe('Linux/macOS installer end-to-end', () => {
     }
   });
 
-  itOnUnix(
-    'shell-quotes PATH updates written to shell rc files',
-    () => {
-      const createdDist = ensureMinimalDist();
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+  itOnUnix('shell-quotes PATH updates written to shell rc files', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
-      try {
-        const archive = packageFakeStandalone(tmpDir);
-        const fakeBin = path.join(tmpDir, 'shadow-bin');
-        const installRoot = path.join(tmpDir, 'install');
-        const home = path.join(tmpDir, 'home');
-        const marker = path.join(tmpDir, 'qwen-pwned');
-        const unsafeBinDir = path.join(
-          installRoot,
-          'bin path $(touch qwen-pwned)',
-        );
+    try {
+      const archive = packageFakeStandalone(tmpDir);
+      const fakeBin = path.join(tmpDir, 'shadow-bin');
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+      const marker = path.join(tmpDir, 'qwen-pwned');
+      const unsafeBinDir = path.join(
+        installRoot,
+        'bin path $(touch qwen-pwned)',
+      );
 
-        mkdirSync(fakeBin, { recursive: true });
-        writeFileSync(path.join(fakeBin, 'qwen'), '#!/usr/bin/env sh\n');
-        chmodSync(path.join(fakeBin, 'qwen'), 0o755);
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(path.join(fakeBin, 'qwen'), '#!/usr/bin/env sh\n');
+      chmodSync(path.join(fakeBin, 'qwen'), 0o755);
 
-        runUnixInstaller(archive, installRoot, home, 'standalone', {
+      runUnixInstaller(archive, installRoot, home, 'standalone', {
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        SHELL: '/bin/bash',
+        QWEN_INSTALL_BIN_DIR: unsafeBinDir,
+      });
+
+      const bashrc = path.join(home, '.bashrc');
+      expect(readScript(bashrc)).toContain(
+        `export PATH='${unsafeBinDir}':$PATH`,
+      );
+      execFileSync('bash', ['-c', `source "${bashrc}"`], {
+        cwd: tmpDir,
+        stdio: 'pipe',
+      });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  itOnUnix('skips shell rc PATH updates for unsupported shells', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = packageFakeStandalone(tmpDir);
+      const fakeBin = path.join(tmpDir, 'shadow-bin');
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(path.join(fakeBin, 'qwen'), '#!/usr/bin/env sh\n');
+      chmodSync(path.join(fakeBin, 'qwen'), 0o755);
+
+      const output = runUnixInstaller(
+        archive,
+        installRoot,
+        home,
+        'standalone',
+        {
           PATH: `${fakeBin}:${process.env.PATH}`,
-          SHELL: '/bin/bash',
-          QWEN_INSTALL_BIN_DIR: unsafeBinDir,
-        });
+          SHELL: '/bin/tcsh',
+        },
+      ).toString();
 
-        const bashrc = path.join(home, '.bashrc');
-        expect(readScript(bashrc)).toContain(
-          `export PATH='${unsafeBinDir}':$PATH`,
-        );
-        execFileSync('bash', ['-c', `source "${bashrc}"`], {
-          cwd: tmpDir,
-          stdio: 'pipe',
-        });
-        expect(existsSync(marker)).toBe(false);
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
+      expect(output).toContain('Unsupported shell for automatic PATH update');
+      expect(output).toContain(path.join(installRoot, 'bin'));
+      expect(existsSync(path.join(home, '.profile'))).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  itOnUnix('uses ranged GET fallback when archive HEAD probes fail', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = packageFakeStandalone(tmpDir);
+      const checksumFile = path.join(path.dirname(archive), 'SHA256SUMS');
+      const fakeBin = path.join(tmpDir, 'bin');
+      const curlLog = path.join(tmpDir, 'curl-urls.log');
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(
+        path.join(fakeBin, 'uname'),
+        [
+          '#!/usr/bin/env sh',
+          'case "$1" in',
+          '  -s) echo Linux ;;',
+          '  -m) echo x86_64 ;;',
+          '  *) /usr/bin/uname "$@" ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        path.join(fakeBin, 'curl'),
+        [
+          '#!/usr/bin/env sh',
+          'url=',
+          'dest=',
+          'is_head=0',
+          'is_range=0',
+          'while [ "$#" -gt 0 ]; do',
+          '  case "$1" in',
+          '    -o) shift; dest="$1" ;;',
+          '    --range|-r) is_range=1; shift ;;',
+          '    -H) shift; case "$1" in Range:*) is_range=1 ;; esac ;;',
+          '    -*) case "$1" in *I*) is_head=1 ;; esac ;;',
+          '    http*) url="$1" ;;',
+          '  esac',
+          '  shift',
+          'done',
+          'printf "%s %s %s\\n" "$url" "$is_head" "$is_range" >> "$QWEN_FAKE_CURL_LOG"',
+          'case "$url" in',
+          '  */qwen-code-linux-x64.tar.gz)',
+          '    if [ "$is_head" = "1" ]; then exit 22; fi',
+          '    if [ "$is_range" = "1" ]; then : > "${dest:-/dev/null}"; exit 0; fi',
+          '    cp "$QWEN_FAKE_ARCHIVE" "$dest"; exit 0 ;;',
+          '  */SHA256SUMS)',
+          '    cp "$QWEN_FAKE_SHA256SUMS" "$dest"; exit 0 ;;',
+          '  *)',
+          '    echo "unexpected url: $url" >&2',
+          '    exit 22 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        path.join(fakeBin, 'node'),
+        [
+          '#!/usr/bin/env sh',
+          'if [ "$1" = "-p" ]; then echo 22.0.0; exit 0; fi',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        path.join(fakeBin, 'npm'),
+        '#!/usr/bin/env sh\necho npm fallback should not run >&2\nexit 1\n',
+      );
+      for (const command of ['uname', 'curl', 'node', 'npm']) {
+        chmodSync(path.join(fakeBin, command), 0o755);
       }
-    },
-    15000,
-  );
 
-  itOnUnix(
-    'skips shell rc PATH updates for unsupported shells',
-    () => {
-      const createdDist = ensureMinimalDist();
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
-
-      try {
-        const archive = packageFakeStandalone(tmpDir);
-        const fakeBin = path.join(tmpDir, 'shadow-bin');
-        const installRoot = path.join(tmpDir, 'install');
-        const home = path.join(tmpDir, 'home');
-
-        mkdirSync(fakeBin, { recursive: true });
-        writeFileSync(path.join(fakeBin, 'qwen'), '#!/usr/bin/env sh\n');
-        chmodSync(path.join(fakeBin, 'qwen'), 0o755);
-
-        const output = runUnixInstaller(
-          archive,
-          installRoot,
-          home,
-          'standalone',
-          {
+      const output = execFileSync(
+        'bash',
+        [
+          'scripts/installation/install-qwen-standalone.sh',
+          '--method',
+          'detect',
+          '--base-url',
+          'https://example.com/qwen-code',
+          '--source',
+          'smoke',
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
             PATH: `${fakeBin}:${process.env.PATH}`,
-            SHELL: '/bin/tcsh',
+            QWEN_FAKE_ARCHIVE: archive,
+            QWEN_FAKE_SHA256SUMS: checksumFile,
+            QWEN_FAKE_CURL_LOG: curlLog,
+            QWEN_INSTALL_ROOT: installRoot,
           },
-        ).toString();
+          stdio: 'pipe',
+        },
+      ).toString();
 
-        expect(output).toContain('Unsupported shell for automatic PATH update');
-        expect(output).toContain(path.join(installRoot, 'bin'));
-        expect(existsSync(path.join(home, '.profile'))).toBe(false);
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
-      }
-    },
-    15000,
-  );
-
-  itOnUnix(
-    'uses ranged GET fallback when archive HEAD probes fail',
-    () => {
-      const createdDist = ensureMinimalDist();
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
-
-      try {
-        const archive = packageFakeStandalone(tmpDir);
-        const checksumFile = path.join(path.dirname(archive), 'SHA256SUMS');
-        const fakeBin = path.join(tmpDir, 'bin');
-        const curlLog = path.join(tmpDir, 'curl-urls.log');
-        const installRoot = path.join(tmpDir, 'install');
-        const home = path.join(tmpDir, 'home');
-
-        mkdirSync(fakeBin, { recursive: true });
-        writeFileSync(
-          path.join(fakeBin, 'uname'),
-          [
-            '#!/usr/bin/env sh',
-            'case "$1" in',
-            '  -s) echo Linux ;;',
-            '  -m) echo x86_64 ;;',
-            '  *) /usr/bin/uname "$@" ;;',
-            'esac',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          path.join(fakeBin, 'curl'),
-          [
-            '#!/usr/bin/env sh',
-            'url=',
-            'dest=',
-            'is_head=0',
-            'is_range=0',
-            'while [ "$#" -gt 0 ]; do',
-            '  case "$1" in',
-            '    -o) shift; dest="$1" ;;',
-            '    --range|-r) is_range=1; shift ;;',
-            '    -H) shift; case "$1" in Range:*) is_range=1 ;; esac ;;',
-            '    -*) case "$1" in *I*) is_head=1 ;; esac ;;',
-            '    http*) url="$1" ;;',
-            '  esac',
-            '  shift',
-            'done',
-            'printf "%s %s %s\\n" "$url" "$is_head" "$is_range" >> "$QWEN_FAKE_CURL_LOG"',
-            'case "$url" in',
-            '  */qwen-code-linux-x64.tar.gz)',
-            '    if [ "$is_head" = "1" ]; then exit 22; fi',
-            '    if [ "$is_range" = "1" ]; then : > "${dest:-/dev/null}"; exit 0; fi',
-            '    cp "$QWEN_FAKE_ARCHIVE" "$dest"; exit 0 ;;',
-            '  */SHA256SUMS)',
-            '    cp "$QWEN_FAKE_SHA256SUMS" "$dest"; exit 0 ;;',
-            '  *)',
-            '    echo "unexpected url: $url" >&2',
-            '    exit 22 ;;',
-            'esac',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          path.join(fakeBin, 'node'),
-          [
-            '#!/usr/bin/env sh',
-            'if [ "$1" = "-p" ]; then echo 22.0.0; exit 0; fi',
-            'exit 0',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          path.join(fakeBin, 'npm'),
-          '#!/usr/bin/env sh\necho npm fallback should not run >&2\nexit 1\n',
-        );
-        for (const command of ['uname', 'curl', 'node', 'npm']) {
-          chmodSync(path.join(fakeBin, command), 0o755);
-        }
-
-        const output = execFileSync(
-          'bash',
-          [
-            'scripts/installation/install-qwen-standalone.sh',
-            '--method',
-            'detect',
-            '--base-url',
-            'https://example.com/qwen-code',
-            '--source',
-            'smoke',
-          ],
-          {
-            env: {
-              ...process.env,
-              HOME: home,
-              PATH: `${fakeBin}:${process.env.PATH}`,
-              QWEN_FAKE_ARCHIVE: archive,
-              QWEN_FAKE_SHA256SUMS: checksumFile,
-              QWEN_FAKE_CURL_LOG: curlLog,
-              QWEN_INSTALL_ROOT: installRoot,
-            },
-            stdio: 'pipe',
-          },
-        ).toString();
-
-        const curlUrls = readScript(curlLog);
-        expect(curlUrls).toContain('qwen-code-linux-x64.tar.gz 1 0');
-        expect(curlUrls).toContain('qwen-code-linux-x64.tar.gz 0 1');
-        expect(output).toContain('Downloading qwen-code-linux-x64.tar.gz');
-        expect(output).not.toContain('Falling back to npm installation');
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
-      }
-    },
-    15000,
-  );
+      const curlUrls = readScript(curlLog);
+      expect(curlUrls).toContain('qwen-code-linux-x64.tar.gz 1 0');
+      expect(curlUrls).toContain('qwen-code-linux-x64.tar.gz 0 1');
+      expect(output).toContain('Downloading qwen-code-linux-x64.tar.gz');
+      expect(output).not.toContain('Falling back to npm installation');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
 
   itOnUnix(
     'adds a new shell rc PATH entry when reinstalling with a different bin dir',
@@ -3755,7 +3741,6 @@ describe('Linux/macOS installer end-to-end', () => {
         restoreMinimalDist(createdDist);
       }
     },
-    15000,
   );
 
   itOnUnix('rejects a tampered local archive', () => {

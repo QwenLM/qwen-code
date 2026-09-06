@@ -224,6 +224,9 @@ describe('scripts suite timeout', () => {
     for (const [stub, expected] of [
       [undefined, 90_000],
       ['5000', 5_000],
+      ['', 90_000],
+      ['abc', 90_000],
+      ['-5', 90_000],
     ] as const) {
       if (stub === undefined) {
         vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '');
@@ -241,22 +244,77 @@ describe('scripts suite timeout', () => {
   it('keeps the floor the config sets unlowered by any file in the suite', () => {
     // Release run 33957952281 lost Quality Checks (Scripts) to two files that
     // still carried quiet-host figures of their own: install-script.test.js
-    // capped itself at 30s with vi.setConfig, so a packaging case that costs
-    // 3s idle timed out at exactly 30000ms, and qwen-autofix-workflow.test.js
-    // bounded a subprocess at 30s, where the kill truncated the stub's
-    // recording and the timeout surfaced as a content mismatch. The config
-    // above owns testTimeout; a per-file override of it can only lower it.
+    // capped itself at 30s with a per-file setConfig, so a packaging case
+    // that costs 3s idle timed out at exactly 30000ms, and
+    // qwen-autofix-workflow.test.js bounded a subprocess at 30s, where the
+    // kill truncated the stub's recording and the timeout surfaced as a
+    // content mismatch. The config above owns testTimeout; a per-file
+    // override of it can only lower it.
     const tests = fileURLToPath(new URL('.', import.meta.url));
+    // vitest lowers a file's budget three ways: re-declaring testTimeout in
+    // a setConfig call, a timeout option object on a describe, it, or test
+    // registration, and a trailing numeric timeout argument. Ban the first
+    // two spellings suite-wide — neither survives anywhere today — and the
+    // third in the two files whose quiet-host figures lost the release
+    // run. The option-object pattern cannot reach inside a callback body
+    // (the callback's own parens stop it), so spawnSync option objects
+    // and their deliberate small bounds are not matched.
     for (const file of readdirSync(tests)) {
       if (!/\.test\.[jt]s$/.test(file)) continue;
       expect(
         readFileSync(join(tests, file), 'utf8'),
         `${file} overrides the suite testTimeout`,
-      ).not.toMatch(/vi\.setConfig\(\{[^}]*testTimeout/);
+      ).not.toMatch(
+        /vi\.setConfig\(\{[^)]*?testTimeout|\b(?:describe|it|test)(?:\.\w+)*\([^()]*,\s*\{\s*timeout:/,
+      );
+    }
+    // The two close shapes a re-added per-test timeout takes; binding the
+    // figure to the call's own closing lines keeps stub fixture strings (a
+    // setTimeout inside a spawned child) from matching.
+    for (const file of [
+      'install-script.test.js',
+      'qwen-autofix-workflow.test.js',
+    ]) {
+      expect(
+        readFileSync(join(tests, file), 'utf8'),
+        `${file} re-caps a test below the suite floor`,
+      ).not.toMatch(
+        /^\s*\},\s*\d[\d_]*,?\s*\);$|\},\s*\n\s*\d[\d_]*,?\s*\n\s*\);/m,
+      );
+    }
+
+    // The deferred-findings harness consumes the suite's resolved figure for
+    // its subprocess bound instead of re-reading the knob, and stays
+    // strictly below it: a bound equal to the suite timeout can never fire
+    // first, so the kill would surface as vitest's generic timeout with no
+    // attribution. Pin the single ownership, the bound sites, and the
+    // headroom.
+    const harness = readFileSync(
+      join(tests, 'qwen-autofix-workflow.test.js'),
+      'utf8',
+    );
+    expect(
+      harness,
+      'the deferred-findings harness re-reads the suite knob instead of consuming the resolved config',
+    ).not.toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
+    expect(
+      (harness.match(/timeout: subprocessTimeoutMs/g) ?? []).length,
+      'a spawnSync bound in the deferred-findings harness drifted off the knob',
+    ).toBeGreaterThanOrEqual(4);
+    const factor = harness.match(
+      /subprocessTimeoutMs = Math\.floor\(\s*scriptsTestsConfig\.test\.testTimeout \* ([\d.]+),?\s*\)/,
+    )?.[1];
+    expect(
+      factor,
+      'the harness bound no longer derives from the resolved suite testTimeout',
+    ).toBeTruthy();
+    const floor = scriptsTestsConfig.test?.testTimeout;
+    if (typeof floor !== 'number') {
+      throw new Error('the suite config resolved no testTimeout');
     }
     expect(
-      readFileSync(join(tests, 'qwen-autofix-workflow.test.js'), 'utf8'),
-      'the deferred-findings harness bounds its subprocess with its own figure',
-    ).toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
+      Math.floor(floor * Number(factor)),
+      'the subprocess bound must stay strictly below the suite timeout so a kill fires first and stays attributable',
+    ).toBeLessThan(floor);
   });
 });

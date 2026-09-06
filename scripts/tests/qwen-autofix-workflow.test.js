@@ -22,14 +22,17 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
+import scriptsTestsConfig from './vitest.config.js';
 
-// A hung-runner bound, not a performance budget, so it rides the suite's own
-// knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
-// quiet machine. Release run 33957952281: this harness's heaviest case costs
-// 0.9s idle, the pool ran it past a hardcoded 30s, and the kill truncated the
-// stub's recording — so a timeout surfaced as a content mismatch.
-const subprocessTimeoutMs = Number(
-  process.env.QWEN_SCRIPTS_TEST_TIMEOUT_MS ?? 90_000,
+// A hung-runner bound, not a performance budget, so it consumes the suite's
+// resolved testTimeout instead of re-deriving a figure that can drift — and
+// sits strictly inside it, so the kill fires while the test still has
+// budget to attribute it. Release run 33957952281: this harness's heaviest
+// case costs 0.9s idle, the pool ran it past a hardcoded 30s, and the kill
+// truncated the stub's recording — so a timeout surfaced as a content
+// mismatch.
+const subprocessTimeoutMs = Math.floor(
+  scriptsTestsConfig.test.testTimeout * 0.75,
 );
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -1556,9 +1559,7 @@ describe('qwen-autofix workflow', () => {
         wfName: 'Qwen Autofix',
       }),
     ).toEqual({ reran: true, continued: true });
-    // Spawn-heavy: each run() forks bash + a stubbed gh. The default 5s per-test
-    // budget is tight for this many cases, so give it a comfortable margin.
-  }, 20000);
+  });
 
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
@@ -2073,7 +2074,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  }, 30000);
+  });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -10013,8 +10014,8 @@ exit 1
     // ACTUAL runner against the staged layout and asserts it reads the
     // staged SKILL, exercising the stage↔resolve contract for real.
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
-    const printPrompt = (scriptPath, dir) =>
-      spawnSync(
+    const printPrompt = (scriptPath, dir) => {
+      const res = spawnSync(
         process.execPath,
         [
           scriptPath,
@@ -10032,6 +10033,9 @@ exit 1
         // fire — bound each subprocess directly against a hung runner.
         { encoding: 'utf8', timeout: subprocessTimeoutMs },
       );
+      expect(res.error).toBeUndefined();
+      return res;
+    };
     withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
       mkdirSync(join(dir, 'autofix-skill', 'scripts'), { recursive: true });
@@ -11843,7 +11847,7 @@ exit 1
         'without required output',
       );
     });
-  }, 10000);
+  });
 
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
@@ -12652,7 +12656,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  }, 30000);
+  });
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -13683,7 +13687,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  }, 30000);
+  });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -14204,6 +14208,7 @@ exit 1
           },
         },
       );
+      expect(res.error).toBeUndefined();
       const calls = existsSync(join(dir, 'gh.log'))
         ? readFileSync(join(dir, 'gh.log'), 'utf8')
         : '';
@@ -17522,7 +17527,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  }, 30000);
+  });
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -21286,7 +21291,7 @@ exit 0
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  }, 30000);
+  });
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -21806,7 +21811,7 @@ exit 0
       expect(stderr).toContain('pr-title.txt');
       expect(stderr).toContain('pr-body.md');
     });
-  }, 10000);
+  });
 
   it('does not reference stale comment-trigger routing in the skill', () => {
     const skill = readAutofixSkill();
@@ -23968,11 +23973,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.outputs).toContain('outcome=handoff');
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
-    // Eight runGate arms, each a fixture repo plus a full gate-script
-    // replay under bash — this outgrows the 5s default on slow runners
-    // (it timed out at ~6.4s on the PR head); the suite's convention is
-    // an explicit per-test budget for tests that spawn subprocesses.
-  }, 30000);
+  });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside
@@ -24580,6 +24581,7 @@ describe('run-agent idle watchdog', () => {
           },
         },
       );
+      expect(res.error).toBeUndefined();
       return {
         status: res.status,
         stdout: res.stdout,
@@ -24824,6 +24826,7 @@ describe('stale sandbox container cleanup', () => {
           },
         },
       );
+      expect(res.error).toBeUndefined();
       return {
         status: res.status,
         failure: existsSync(join(workdir, 'failure.md'))
