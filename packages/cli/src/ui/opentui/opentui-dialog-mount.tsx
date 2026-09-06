@@ -308,8 +308,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
               onClose();
               return;
             }
-            if (props.onSelectSetting) props.onSelectSetting(name, scope);
-            else notify(`'${name}' opens a dialog this shell does not mount.`);
+            if (props.onSelectSetting) {
+              // The owner routes sub-dialog settings by replacing the
+              // request — closing here would clobber the dialog it opens.
+              props.onSelectSetting(name, scope);
+              return;
+            }
+            notify(`'${name}' opens a dialog this shell does not mount.`);
             onClose();
           }}
         />

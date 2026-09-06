@@ -314,6 +314,68 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('input-prompt')).toBeTruthy();
   });
 
+  it('routes settings sub-dialog rows to their own dialogs (U-9)', async () => {
+    renderApp();
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'settings' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/settings');
+    expect(screen.getByText('dialog:settings')).toBeTruthy();
+
+    const onSelectSetting = mocks.state.dialogProps?.['onSelectSetting'] as (
+      name: string,
+    ) => void;
+    expect(typeof onSelectSetting).toBe('function');
+
+    // Ink DialogManager parity: each row opens the dialog ink opens, the
+    // model rows in their own mode. Each selection replaces the current
+    // request, so no close/re-open dance is needed between rows.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['ui.theme', { dialog: 'theme' }],
+      ['general.preferredEditor', { dialog: 'editor' }],
+      ['fastModel', { dialog: 'model', mode: 'fast' }],
+      ['visionModel', { dialog: 'model', mode: 'vision' }],
+    ];
+    for (const [name, request] of cases) {
+      await act(async () => {
+        onSelectSetting(name);
+      });
+      expect(mocks.state.dialogProps?.['request']).toEqual(request);
+    }
+
+    await act(async () => {
+      onSelectSetting('some.other.setting');
+    });
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('fills the composer through the entry-owned handle (U-9)', async () => {
+    const setText = vi.fn();
+    const composerHandle = { current: { getText: () => '', setText } };
+    renderApp({ composerHandle });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'arena', mode: 'start' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/arena start');
+    expect(screen.getByText('dialog:arena')).toBeTruthy();
+
+    // The picker unmounts the prompt before remounting it, so the shell
+    // fills through the polling injector rather than the current handle.
+    const fillInput = mocks.state.dialogProps?.['fillInput'] as (
+      text: string,
+    ) => void;
+    expect(typeof fillInput).toBe('function');
+    await act(async () => {
+      fillInput('/arena start --models a,b ');
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(setText).toHaveBeenCalledWith('/arena start --models a,b ');
+  });
+
   it('sends a submit_prompt outcome to the live-turn seam', async () => {
     const onSubmitPrompt = vi.fn();
     renderApp({ onSubmitPrompt });

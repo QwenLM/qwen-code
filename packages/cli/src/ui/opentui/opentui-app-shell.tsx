@@ -62,6 +62,7 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import { isExitInProgress } from './exit-lifecycle.js';
+import { injectCapturedInput } from './early-input.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
@@ -207,6 +208,28 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
+
+  // U-9: the shell owns the settings sub-dialog routing (ink DialogManager
+  // parity: ui.theme/editor/model rows open their dialogs; anything else
+  // closes) and the composer fill the arena picker relies on.
+  const handleSelectSetting = useCallback((name: string) => {
+    if (name === 'ui.theme') setDialog({ dialog: 'theme' });
+    else if (name === 'general.preferredEditor')
+      setDialog({ dialog: 'editor' });
+    else if (name === 'fastModel') setDialog({ dialog: 'model', mode: 'fast' });
+    else if (name === 'visionModel')
+      setDialog({ dialog: 'model', mode: 'vision' });
+    else setDialog(null);
+  }, []);
+
+  const fillComposer = useCallback(
+    (text: string) => {
+      // The picker unmounts the prompt before remounting it, so the handle
+      // is briefly absent; the injector polls until it reattaches.
+      injectCapturedInput(() => props.composerHandle?.current ?? null, text);
+    },
+    [props.composerHandle],
+  );
 
   // Modal confirmation bridge (Batch 6): presentShell/presentAction enqueue
   // a dialog and hand back the promise that its resolution settles. Both
@@ -552,6 +575,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             commands={commandList}
             onClose={() => setDialog(null)}
             notify={notify}
+            fillInput={fillComposer}
+            onSelectSetting={handleSelectSetting}
             onApprovalModeChanged={undefined}
             availableTerminalHeight={props.availableTerminalHeight}
           />

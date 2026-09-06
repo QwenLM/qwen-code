@@ -192,7 +192,7 @@ per-item height distribution itself stays open as transcript-region work.
 ## The nine ledger items (to be recorded as they land)
 
 U-6/G-1 (landed — Decision 8), U-7/G-2 (follow-up suggestions),
-U-9 (settings sub-dialog routing + `fillInput` owner), G-3 (landed —
+U-9 (landed — Decision 10), G-3 (landed —
 Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (steer
 recording), U-11 (queue separator decision), U-13 (landed — Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
@@ -251,6 +251,32 @@ in the entry harness (`root.render` is mocked, so React never runs and no
 effect fires — the same boundary as Decision 8); they are review-pinned
 against AppContainer's idle effect. Entry suite, typecheck, and eslint
 clean.
+
+## Decision 10 — U-9: the shell owns settings sub-dialog routing and composer fill
+
+The mount-side seams (`fillInput` / `onSelectSetting` on
+`OpenTuiDialogMount`) existed since Batch 4 but nothing fed them: the shell
+passed neither, so every settings sub-dialog row reported "opens a dialog
+this shell does not mount" and the arena picker's fill was reported lost.
+The settings dialog itself already mirrors ink (only the four sub-dialog
+rows — `ui.theme`, `general.preferredEditor`, `fastModel`, `visionModel` —
+fire `onSelect` with a name; everything else is handled in-dialog), so the
+fix is ownership only. The shell now routes those rows exactly like ink's
+DialogManager (`theme`, `editor`, and the model dialog in `fast`/`vision`
+mode) and owns the composer fill, reusing `injectCapturedInput`'s
+poll-until-attached injection because the picker unmounts the prompt (the
+handle detaches) before remounting it. One ownership change in the mount:
+with an owner present, a named selection no longer calls `onClose`
+afterwards — the owner navigates by replacing the request, and a close
+there would clobber the dialog it just opened (ink's owner closes for
+non-sub-dialog names; here the owner's `else` does the same).
+
+Coverage: shell tests pin all four routings (each selection's request
+observed through the mount mock), the unknown-name close, and the composer
+fill through a pre-attached handle (real-timer poll, 40ms budget); the
+mount test pins the no-owner notify fallback (pre-existing) and that an
+owner-present selection does not close. 43 tests across the two suites,
+typecheck and eslint clean.
 
 ## Coverage boundary
 
