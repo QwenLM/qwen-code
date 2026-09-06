@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,11 +19,45 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../..',
 );
+
+// Capability probe, not a platform check: the FIFO wedge tests need
+// mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
+// gated test_macos lane runs this suite too, and on a host without mkfifo
+// spawnSync('mkfifo', ...) returns ENOENT without throwing, no FIFO is
+// ever created, and the wedge assertions would pass for the wrong reason
+// (R11-7). Probe PRESENCE, not GNU-ness: BSD mkfifo rejects `--help`, so
+// an exit-code probe skipped the coverage on every macOS host although
+// macOS ships /usr/bin/mkfifo. With no operand both implementations print
+// usage and exit non-zero; only ENOENT means "absent".
+const hasMkfifo = (() => {
+  const probe = spawnSync('mkfifo', [], { stdio: 'ignore' });
+  return probe.error?.code !== 'ENOENT';
+})();
+
+// The review lane exports the production QWEN_CI_REAL_* captures into the
+// reviewed agent's environment, and every replay harness below spreads
+// process.env: inherited, a capture resolves a replayed
+// `"${QWEN_CI_REAL_X:-x}"` read to the REAL utility instead of the
+// bin-planted stub — the FIFO wedge tests then pass without a FIFO ever
+// being swapped in, and a bound-removing regression ships green on exactly
+// the lane the suite is documented to run on (R28-1). Neutralize EVERY
+// inherited capture up front (empty reads as unset to the :- fallbacks,
+// restoring PATH-stub resolution); the per-harness pins after the spread
+// still override. A sweep, not a name list: the next capture production
+// adds must not reopen the door.
+function neutralizedRealPins() {
+  return Object.fromEntries(
+    Object.keys(process.env)
+      .filter((k) => k.startsWith('QWEN_CI_REAL_'))
+      .map((k) => [k, '']),
+  );
+}
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -76,18 +111,69 @@ function reviewGhWrapper(runStep) {
   );
 }
 
+// A timeout(1) stub that ENFORCES the bound: the wrapper's salvage marker
+// read is a `timeout 5 head -c 128` open, and a lane without GNU coreutils
+// (macOS) ships no timeout(1). A bare pass-through is not sufficient: a
+// rename-swapped FIFO then blocks the open forever (R8-10).
+function boundedTimeoutStub() {
+  const js =
+    'const [dur, ...cmd] = process.argv.slice(1);' +
+    'const ms = Math.max(0, Number.parseFloat(dur) || 0) * 1000;' +
+    'const child = require("child_process").spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });' +
+    'let killed = false;' +
+    'const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL"); } catch (e) {} }, ms);' +
+    'child.on("exit", (code, signal) => { clearTimeout(timer); process.exit(killed ? 124 : code === null ? (signal ? 137 : 1) : code); });';
+  return `#!/bin/bash\nexec "${process.execPath}" -e '${js}' "$@"\n`;
+}
+
+// A reader stub (installed as head AND cat) that rename-swaps a FIFO onto
+// its target at open time — the window [ -f ] cannot refuse — then blocks
+// like a real open (no writer). Only a timeout bound resolves the read;
+// shimming both readers keeps the wedge red for a regression back to a
+// bare `cat`.
+function swapAtOpenStub() {
+  return (
+    [
+      '#!/bin/bash',
+      'for last in "$@"; do :; done',
+      'if [ -n "$last" ] && [ -f "$last" ]; then',
+      '  rm -f "$last"',
+      '  mkfifo "$last"',
+      'fi',
+      'exec cat "$last"',
+    ].join('\n') + '\n'
+  );
+}
+
 function runReviewGhWrapper(
   runStep,
   args,
   prState,
   currentHead,
   expectedHead = 'head-a',
+  // salvageContent: when set, a salvage marker file with that content is
+  // created and exported as QWEN_CI_REVIEW_SALVAGE_OK_FILE — the supersede
+  // watcher's past-threshold pin (#10110). salvageFifo plants a static
+  // FIFO at the marker; swapSalvageOnRead rename-swaps one in at the
+  // read's open — the window [ -f ] cannot refuse (R8-10).
+  { salvageContent, salvageFifo = false, swapSalvageOnRead = false } = {},
 ) {
   const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-review-gh-'));
   try {
     const wrapperPath = path.join(tempDir, 'gh');
     const realGhPath = path.join(tempDir, 'real-gh');
     const ghLogPath = path.join(tempDir, 'gh.log');
+    let salvagePath = '';
+    if (salvageFifo) {
+      salvagePath = path.join(tempDir, 'salvage-ok');
+      spawnSync('mkfifo', [salvagePath]);
+      // A plant that silently failed would let the wedge case pass for
+      // the wrong reason (the read of a missing file returns at once).
+      expect(statSync(salvagePath).isFIFO()).toBe(true);
+    } else if (salvageContent !== undefined) {
+      salvagePath = path.join(tempDir, 'salvage-ok');
+      writeFileSync(salvagePath, salvageContent);
+    }
     writeFileSync(wrapperPath, reviewGhWrapper(runStep));
     writeFileSync(
       realGhPath,
@@ -104,11 +190,32 @@ function runReviewGhWrapper(
     writeFileSync(ghLogPath, '');
     chmodSync(wrapperPath, 0o755);
     chmodSync(realGhPath, 0o755);
+    // The marker read is a bounded `timeout 5 head -c 128` open: give the
+    // wrapper a bound-enforcing timeout(1) on every lane (macOS ships
+    // none) — and the swap head stub when the wedge arm is requested.
+    const binDir = path.join(tempDir, 'bin');
+    mkdirSync(binDir);
+    writeFileSync(path.join(binDir, 'timeout'), boundedTimeoutStub());
+    chmodSync(path.join(binDir, 'timeout'), 0o755);
+    if (swapSalvageOnRead) {
+      for (const name of ['head', 'cat']) {
+        writeFileSync(path.join(binDir, name), swapAtOpenStub());
+        chmodSync(path.join(binDir, name), 0o755);
+      }
+    }
 
     const result = spawnSync(wrapperPath, args, {
       encoding: 'utf8',
+      // A regression that unbounds the marker read must turn the suite
+      // RED on the harness bound, not hang it: spawnSync kills the child
+      // at 30s and the status assertions fail on the missing exit.
+      timeout: 30_000,
       env: {
         ...process.env,
+        // Inherited review-lane captures would route the guard's bounded
+        // marker read past the bin timeout/head stubs (R28-1).
+        ...neutralizedRealPins(),
+        PATH: `${binDir}:${process.env.PATH}`,
         FAKE_GH_LOG: ghLogPath,
         FAKE_HEAD_SHA: currentHead,
         FAKE_PR_STATE: prState,
@@ -116,6 +223,7 @@ function runReviewGhWrapper(
         QWEN_CI_REVIEW_EXPECTED_HEAD_SHA: expectedHead,
         QWEN_CI_REVIEW_PR_NUMBER: '123',
         QWEN_CI_REVIEW_REPO: 'owner/repo',
+        ...(salvagePath ? { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvagePath } : {}),
       },
     });
 
@@ -209,16 +317,29 @@ describe('qwen resolve workflow', () => {
     );
   });
 
-  it('keeps synchronize cancellation expression simple for workflow-level concurrency', () => {
+  it('cancels in progress on closed only — synchronize supersede is decided in-run (#10110)', () => {
     const concurrencyStart = workflow.indexOf('\nconcurrency:');
     const concurrency = workflow.slice(
       concurrencyStart,
       workflow.indexOf('\njobs:', concurrencyStart),
     );
 
+    // Verbatim: re-adding `synchronize` here silently reinstates the
+    // declarative cancel that discarded a 4h06m review minutes from posting
+    // (PR #9729, run 32726618419). A push now queues PENDING in the PR group
+    // while the in-flight run's supersede watcher decides KEEP (salvage past
+    // the threshold, post against the reviewed head) vs CEDE (end early);
+    // `closed` still cancels — a closed PR's review is pointless and its
+    // posting is blocked by the OPEN guard anyway.
     expect(concurrency).toContain(
-      "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}\"",
+      "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && github.event.action == 'closed' }}\"",
     );
+    // The other half of the model: every CEDE branch relies on a push
+    // QUEUING a replacement lifecycle run, which only happens while
+    // `synchronize` stays a pull_request_target trigger.
+    const types = parse(workflow).on?.pull_request_target?.types ?? [];
+    expect(types).toContain('synchronize');
+    expect(types).toContain('closed');
   });
 
   it('listens for /resolve comments', () => {
@@ -658,6 +779,96 @@ describe('qwen resolve workflow', () => {
     );
     expect(staleSummary.ghLog).toBe('');
   });
+
+  it('lets a salvage-armed run post against its reviewed head after a move (#10110)', () => {
+    const runStep = step(reviewJob, 'Run review');
+    // The marker content must equal the head this run reviewed
+    // (EXPECTED_HEAD_SHA): the supersede watcher pins it there, so a stale
+    // marker left by another run on the reused runner can never match.
+    const salvaged = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'OPEN',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-a' },
+    );
+    expect(salvaged.status).toBe(0);
+    expect(salvaged.stderr).toContain('PR write allowed (salvage)');
+    expect(salvaged.ghLog).toContain(
+      'api repos/owner/repo/pulls/123/reviews --input review.json',
+    );
+
+    // Wrong pin — a marker for some other head blocks exactly as before.
+    const wrongPin = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'OPEN',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-z' },
+    );
+    expect(wrongPin.status).toBe(90);
+    expect(wrongPin.stderr).toContain(
+      'Blocked PR write: PR #123 moved from head-a to head-b',
+    );
+    expect(wrongPin.ghLog).toBe('');
+
+    // Salvage never overrides the OPEN check: a closed PR stays blocked.
+    const closedSalvage = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'CLOSED',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-a' },
+    );
+    expect(closedSalvage.status).toBe(90);
+    expect(closedSalvage.stderr).toContain(
+      'Blocked PR write: PR #123 is CLOSED',
+    );
+    expect(closedSalvage.ghLog).toBe('');
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'bounds the salvage marker read on the posting path (#10110)',
+    () => {
+      const runStep = step(reviewJob, 'Run review');
+      // R8-10: the escape's marker read is one timeout-bounded, size-capped
+      // open. A FIFO rename-swapped in at open time — or planted statically —
+      // must fail CLOSED to the block inside the bound: an unbounded open
+      // wedges the posting path forever, the attempt budget bleeds out, and
+      // the salvage-armed cede then discards a finished review with no
+      // failure signal at all.
+      const wedged = runReviewGhWrapper(
+        runStep,
+        ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+        'OPEN',
+        'head-b',
+        'head-a',
+        { salvageContent: 'head-a', swapSalvageOnRead: true },
+      );
+      expect(wedged.status).toBe(90);
+      expect(wedged.stderr).toContain(
+        'Blocked PR write: PR #123 moved from head-a to head-b',
+      );
+      expect(wedged.ghLog).toBe('');
+
+      const fifo = runReviewGhWrapper(
+        runStep,
+        ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+        'OPEN',
+        'head-b',
+        'head-a',
+        { salvageFifo: true },
+      );
+      expect(fifo.status).toBe(90);
+      expect(fifo.stderr).toContain(
+        'Blocked PR write: PR #123 moved from head-a to head-b',
+      );
+      expect(fifo.ghLog).toBe('');
+    },
+  );
 
   it('allows wrapped gh review writes when the PR is still current', () => {
     const runStep = step(reviewJob, 'Run review');
