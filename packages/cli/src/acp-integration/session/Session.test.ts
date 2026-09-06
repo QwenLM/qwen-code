@@ -4109,6 +4109,44 @@ describe('Session', () => {
     await session.waitForActiveTurnsToSettle();
   });
 
+  it('polls rather than spins when the active turn publishes no completion', async () => {
+    // `historyMutationActive` blocks `#hasActiveTurn()` without publishing a
+    // completion promise, so the wait has nothing to await. Yielding on
+    // `setImmediate` alone would cycle the event loop as fast as it can turn
+    // and burn a core for the whole wait — on the conditional-close path that
+    // is the full drain budget. Counting the yields is the observable proxy:
+    // the polled wait makes none from this path.
+    const releaseMutation = session.beginHistoryMutation();
+    const immediateSpy = vi.spyOn(globalThis, 'setImmediate');
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      let settled = false;
+      const waiting = session.waitForActiveTurnsToSettle().then(() => {
+        settled = true;
+      });
+      // The hold is still up, so the wait must still be waiting. Without this
+      // a `#hasActiveTurn()` that stopped consulting `historyMutationActive`
+      // would resolve at once and both yield counts below would be vacuously
+      // zero — the test would pass while pinning nothing.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      releaseMutation();
+      await waiting;
+      expect(settled).toBe(true);
+      expect(immediateSpy).toHaveBeenCalledTimes(0);
+      // The poll has to be a real interval, and the constant is module-local
+      // so the literal has to be spelled here. A 0ms `setTimeout` still hands
+      // back a macrotask, so the count above stays green while the loop
+      // re-arms as fast as the event loop turns — the same spin, one level
+      // down. Two re-arms is the floor: 50ms of holding at 10ms allows ~5.
+      const polls = timeoutSpy.mock.calls.filter((call) => call[1] === 10);
+      expect(polls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      immediateSpy.mockRestore();
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('rejects a prompt when the close gate starts during writer admission', async () => {
     let resolveAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
