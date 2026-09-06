@@ -1334,7 +1334,12 @@ export async function listWorkspaceSessionsForResponse(
       }),
   );
   readOptions.signal?.throwIfAborted();
-  return result;
+  return {
+    ...result,
+    sessions: result.sessions.filter(
+      (session) => session.sourceType !== 'mesh',
+    ),
+  };
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(
@@ -1498,6 +1503,7 @@ export async function listLiveWorkspaceSessionsForResponse(
         : undefined;
     const sessions = bridge
       .listWorkspaceSessions(workspaceCwd)
+      .filter((session) => session.sourceType !== 'mesh')
       .sort((a, b) =>
         compareLiveSessionCursorKeys(
           getLiveSessionCursorKey(a),

@@ -29,7 +29,12 @@ export {
   sanitizeFilenameComponent,
 } from './agent-transcript.js';
 export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
+export {
+  claimMeshHostSession,
+  readMeshAgents,
+  readMeshWorkspace,
+} from './mesh/mesh-store.js';
 export { launchMeshAgent } from './mesh/launcher.js';
 export type { MeshAgentLaunchResult } from './mesh/launcher.js';
-export type { MeshAgent } from './mesh/types.js';
+export type { MeshAgent, MeshWorkspaceState } from './mesh/types.js';
 export * from './tasks/types.js';

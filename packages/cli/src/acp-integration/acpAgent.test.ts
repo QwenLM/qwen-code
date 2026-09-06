@@ -85,6 +85,11 @@ const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
     mockRunManagedRememberByAgent: vi.fn(),
   }));
 
+const { mockLaunchMeshAgent, mockReadMeshAgents } = vi.hoisted(() => ({
+  mockLaunchMeshAgent: vi.fn(),
+  mockReadMeshAgents: vi.fn(),
+}));
+
 const { mockExecuteGeneration } = vi.hoisted(() => ({
   mockExecuteGeneration: vi.fn(),
 }));
@@ -248,6 +253,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   stripRuntimeSnapshotPrefix: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).stripRuntimeSnapshotPrefix,
+  launchMeshAgent: mockLaunchMeshAgent,
+  readMeshAgents: mockReadMeshAgents,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -7213,6 +7220,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(recording.recordSessionSource).toHaveBeenCalledWith(
       'standalone',
       undefined,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('launches a configured agent only from a trusted mesh host session', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const meshAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getSessionSourceType = vi.fn().mockReturnValue('mesh');
+    innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
+    mockReadMeshAgents.mockResolvedValue([meshAgent]);
+    mockLaunchMeshAgent.mockResolvedValue({
+      status: 'started',
+      runtimeId: 'local:mesh-ag_alice',
+      backgroundAgentId: 'mesh-ag_alice',
+      sessionId,
+    });
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch, {
+        sessionId,
+        agentId: meshAgent.id,
+        prompt: 'go',
+      }),
+    ).resolves.toMatchObject({ status: 'started', sessionId });
+    expect(mockReadMeshAgents).toHaveBeenCalledWith('/tmp');
+    expect(mockLaunchMeshAgent).toHaveBeenCalledWith(
+      innerConfig,
+      meshAgent,
+      'go',
     );
 
     mockConnectionState.resolve();

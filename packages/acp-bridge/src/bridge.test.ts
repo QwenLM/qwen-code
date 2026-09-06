@@ -15470,6 +15470,32 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('routes mesh launches through the owning session', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method, params) => {
+          expect(method).toBe('qwen/control/session/mesh-agent/launch');
+          expect(params).toMatchObject({ agentId: 'ag_alice', prompt: 'go' });
+          return {
+            status: 'started',
+            runtimeId: 'local:mesh-ag_alice',
+            backgroundAgentId: 'mesh-ag_alice',
+            sessionId: params['sessionId'],
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.launchMeshAgent(session.sessionId, 'ag_alice', 'go'),
+      ).resolves.toMatchObject({
+        status: 'started',
+        sessionId: session.sessionId,
+      });
+
+      await bridge.shutdown();
+    });
+
     it('returns the accepted decision even if the dispatched continuation turn rejects', async () => {
       const handle = makeChannel({
         promptImpl: () => {

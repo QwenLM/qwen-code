@@ -147,6 +147,8 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
+  launchMeshAgent,
+  readMeshAgents,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -8459,12 +8461,13 @@ class QwenAgent implements Agent {
             }
           : params;
       if (
-        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
+        (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch) &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
           undefined,
-          'Background notifications require a trusted private ACP parent',
+          'This operation requires a trusted private ACP parent',
         );
       }
       const sessionId = normalizedParams['sessionId'];
@@ -12210,6 +12213,42 @@ class QwenAgent implements Agent {
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );
         return result;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch: {
+        const sessionId = params['sessionId'];
+        const agentId = params['agentId'];
+        const prompt = params['prompt'];
+        if (
+          typeof sessionId !== 'string' ||
+          sessionId.length === 0 ||
+          typeof agentId !== 'string' ||
+          agentId.length === 0 ||
+          typeof prompt !== 'string' ||
+          prompt.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid mesh agent launch request',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (config.getSessionSourceType() !== 'mesh') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Mesh agents require a mesh host session',
+          );
+        }
+        const agent = (await readMeshAgents(config.getProjectRoot())).find(
+          (candidate) => candidate.id === agentId,
+        );
+        if (!agent) {
+          return {
+            status: 'agent_unavailable',
+            error: `Mesh agent "${agentId}" is unavailable.`,
+          };
+        }
+        return launchMeshAgent(config, agent, prompt);
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const request = readRuntimeMcpAddRequest(params);

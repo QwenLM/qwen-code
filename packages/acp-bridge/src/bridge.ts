@@ -230,6 +230,7 @@ import type {
   ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
+  BridgeMeshAgentLaunchResult,
 } from './bridgeTypes.js';
 import {
   isSessionAttachmentReference,
@@ -12356,6 +12357,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
         { taskId, taskKind },
+      );
+    },
+
+    async launchMeshAgent(sessionId, agentId, prompt) {
+      return requestSessionStatus<BridgeMeshAgentLaunchResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch,
+        { agentId, prompt },
       );
     },
 

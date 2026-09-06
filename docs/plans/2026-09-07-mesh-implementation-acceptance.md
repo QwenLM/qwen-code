@@ -47,8 +47,21 @@ Supporting local observation: `mesh-store.test.ts`, `workspace-lock.test.ts`,
 ### Step 4 — Hidden host session, keepalive, launcher
 
 Lands: one hidden `Config` + registry per workspace; keepalive registration reusing `scheduled-task-keepalive.ts`; `launchMeshAgent(agent)` that builds the persona through `convertToRuntimeConfig` and starts a background agent; typed launch results `started | capacity_wait | agent_unavailable | launch_failed`.
-Gate: (a) with `QWEN_CODE_MAX_BACKGROUND_AGENTS=1`, launching a second agent returns `capacity_wait` and books nothing; (b) an agent whose `agentType` names no definition returns `agent_unavailable` and no runtime is created; (c) the host session does not appear in the session list API; (d) after the reaper closes the host session, keepalive reloads it and the next launch succeeds without a daemon restart; (e) `continueResidentAgent` returns `continued` for a completed resident and `capacity_wait` never triggers a cold revive (#11204's tests, now on this branch).
-Evidence: (d) is the one that needs the daemon; report the reaper timeout used and the observed reload latency.
+Gate: (a) with `QWEN_CODE_MAX_BACKGROUND_AGENTS=1`, launching a second agent returns `capacity_wait` and books nothing; (b) an agent whose `agentType` names no definition returns `agent_unavailable` and no runtime is created; (c) the host session does not appear in the session list API; (d) after the real bridge reaper closes the host session, keepalive reloads it and the next launch succeeds without recreating the bridge; (e) `continueResidentAgent` returns `continued` for a completed resident and `capacity_wait` never triggers a cold revive (#11204's tests, now on this branch).
+Evidence: report the reaper timeout and observed reload latency from an in-process `AcpSessionBridge` with a fake ACP child. Step 4 deliberately has no server-bootstrap caller before the dispatcher exists, so the equivalent daemon-process observation moves to step 6/7 instead of adding unused wiring here.
+
+Supporting local observations on the stacked step branch: `capability.test.ts`
+and `launcher.test.ts` pass 16 tests; `background-agent-resume.test.ts` passes
+52 tests including cold-revive capability restoration; `background-tasks.test.ts`
+passes 150 tests including typed resident continuation; `mesh-host-session.test.ts`
+and `scheduled-task-keepalive.test.ts` pass 33 tests; `bridge.test.ts` passes
+914 tests; and `acpAgent.test.ts` passes 623 tests. A targeted `acp-bridge`
+package build also succeeds. The real `AcpSessionBridge` reaper was configured
+to 20 ms in-process with a fake ACP child; it closed the host, a second channel
+resumed the same session, and the next launch returned `started` after a
+measured 4.3 ms reload (1,000 ms resume deadline), without recreating the
+bridge. The child merge and #11206's whole-branch CI remain the step gate; the
+daemon-process observation is deferred to step 6/7 for the reason above.
 
 ### Step 5 — Run envelope, tools, runtime correlation
 

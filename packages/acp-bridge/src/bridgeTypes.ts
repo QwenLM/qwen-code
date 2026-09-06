@@ -9,6 +9,7 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
+  MeshAgentLaunchResult,
   SessionGroupPresetColor,
   TurnResultCode,
   TurnResultErrorPayload,
@@ -649,6 +650,8 @@ export interface BridgeForkAgentResult {
   description: string;
   launched: boolean;
 }
+
+export type BridgeMeshAgentLaunchResult = MeshAgentLaunchResult;
 
 export interface BridgeConversationDirectoryExpectation {
   canonicalSessionId: string;
@@ -1980,6 +1983,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
+
+  /** Launch one configured mesh identity inside its hidden host session. */
+  launchMeshAgent(
+    sessionId: string,
+    agentId: string,
+    prompt: string,
+  ): Promise<BridgeMeshAgentLaunchResult>;
 
   /** Control a run, delete history, or start a saved workflow definition. */
   controlSessionWorkflowTask(
