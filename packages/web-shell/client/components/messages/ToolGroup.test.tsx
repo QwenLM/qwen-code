@@ -98,7 +98,10 @@ function renderToolGroup(
     beforeToolCallId?: string;
   }>,
   renderModeOrCompactSummary:
-    'interactive' | 'readonly' | 'document' | boolean = 'interactive',
+    | 'interactive'
+    | 'readonly'
+    | 'document'
+    | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
