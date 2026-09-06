@@ -85,6 +85,13 @@ continuations already emit `EXTERNAL_MESSAGE`, and cold revival explicitly
 seeds the continuation prompt in the transcript. Mesh still uses structured
 input because correlation, not transcript presence, is the missing contract.
 
+**Verified locally in steps 2-3, not yet end to end.** The capability table and
+shell predicate pass their named tests. The versioned store tests exercise
+newer-version refusal, v0 migration and backup recovery, two-process sequence
+allocation, source-first outbox replay, persisted admission outcomes, and
+tree-wide token accounting. These are local observations only until the merged
+step is green in #11206; they still do not launch an agent or run a dispatcher.
+
 **Still never prototyped end to end.** No mesh agent has been launched, no
 thread has been dispatched, no prompt in §6 has been sent to a model. The
 dispatch rules in §4 are reasoned from Multica's and Agent Team's failure modes,
@@ -111,7 +118,7 @@ Nearly everything the execution layer needs already exists:
 | Need                                                                 | Existing machinery                                                    |
 | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | Agent loop                                                           | `AgentCore` / `AgentInteractive`                                      |
-| Persona: prompt and restricted tools                                | `convertToRuntimeConfig`                                              |
+| Persona: prompt and restricted tools                                 | `convertToRuntimeConfig`                                              |
 | Durable log                                                          | `attachJsonlTranscriptWriter`                                         |
 | Reading that log in Web Shell                                        | virtual subagent sessions + the existing panel                        |
 | Deliver into a **running** agent                                     | `BackgroundTaskRegistry.queueExternalInput` (boolean acknowledgement) |
@@ -154,10 +161,9 @@ Recorded so implementation does not relitigate them.
 | 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                        | No second permission model. An enabled mesh agent with a missing definition is unavailable, never silently replaced by a generic persona.                              |
 | 4   | Agents are **scoped to one workspace**.                                                                                                                                            | Trust and permissions follow the workspace. Five repos means five rosters.                                                                                             |
 
-Until the owner decides the MCP policy, the capability boundary fails
-closed for every unlisted name, including MCP tools. This is a conservative
-implementation default, not a settled decision that mesh agents can never use
-private MCP servers.
+The owner settled the v1 MCP policy: every MCP tool fails closed. A later
+release may admit only individual tools whose policy can prove they are
+read-only; a private server or trusted-looking name is not evidence.
 
 ### Identity and memory
 
@@ -202,19 +208,22 @@ private MCP servers.
 ```
 MeshWorkspaceState  schemaVersion, workspaceId, hostSessionId,
                     nextRunSequence
+MeshAgentsFile      schemaVersion, agents[]
 
 MeshAgent           id, name, description, color, agentType, model,
                     queueLimit, enabled, createdAt,
-                    backgroundAgentId                         ← execution binding
+                    backgroundAgentId, runtimeId              ← execution binding
 
-Thread              id, title, body, status, assigneeAgentId, createdAt,
+Thread              schemaVersion, id, title, body, status,
+                    assigneeAgentId, createdAt,
                     createdBy, messages[], runs[],
                     parentThreadId, rootThreadId,
                     autoTurnsUsed, tokensUsed,
                     nextMessageSequence, deliveryByAgent{}, outbox[]
 
 ThreadMessage       id, sequence, authorKind, from, authorNameSnapshot,
-                    sourceRunId, triggerKind, text, mentions[], outcomes[], at
+                    sourceRunId, triggerKind, text, mentions[], outcomes[], at,
+                    originEventId
 ThreadRun           id, agentId, sessionId, status, triggerMessageIds[],
                     acceptedMessageIds[], consumedMessageIds[],
                     contextThroughSequence, definitionVersion,
@@ -225,8 +234,9 @@ ThreadRun           id, agentId, sessionId, status, triggerMessageIds[],
                     queueSequence, queuedAt, startedAt, endedAt, attempts, error
 
 AgentDelivery       committedThroughSequence
-DispatchOutcome     targetAgentId, kind, reason, runId
-ThreadEvent         id, kind, causedByRunId, payload, status, attempts
+DispatchOutcome     targetAgentId, targetAgentName, kind, reason, runId, into
+ThreadEvent         id, kind, causedByRunId, payload, status, attempts,
+                    createdAt
 
 ThreadStatus        open | in_progress | blocked | in_review | done
 ThreadRunStatus     queued | running | finishing | cancelling |
@@ -234,18 +244,20 @@ ThreadRunStatus     queued | running | finishing | cancelling |
 RunCloseKind        waiting | blocked | review | unclosed
 ```
 
-Most fields through `tokensUsed` are landed. The current proposal repeats
-`hostSessionId` on each agent; step 4 moves that workspace singleton into
-versioned `MeshWorkspaceState`. The sequence, provenance, delivery, outbox,
-failure-stage, and transcript-slice fields are required with the dispatcher;
-adding inert optional fields before a producer and consumer exist would only
-pretend the contract was implemented.
+V1 declares and validates this whole shape in one storage version. The owner
+chose one migration rather than serial schema bumps for fields already designed
+for steps 5-8. Fields whose producers do not exist yet remain optional and do
+not claim that delivery, provenance, recovery, or transcript slicing is
+implemented. `hostSessionId` is a workspace singleton; `runtimeId` is the
+generic execution binding beside the local `backgroundAgentId`.
 
-`authorKind` is `human | agent | system`. An agent post requires `sourceRunId`;
-the server derives both from the ambient run rather than accepting them from the
-model or an HTTP body. A system trigger records the run or human action that
-caused it. This provenance does not neutralise prompt injection, but it prevents
-identity spoofing and makes every automated hop auditable.
+`authorKind` is `human | agent | system`. Until the ambient producer lands in
+step 5, migrated and rule-layer posts may omit `sourceRunId` and `triggerKind`.
+Once that producer exists an agent post requires `sourceRunId`; the server
+derives it and the author kind from the ambient run rather than accepting them
+from the model or an HTTP body. A system trigger records the run or human action
+that caused it. This provenance does not neutralise prompt injection, but it
+prevents identity spoofing and makes every automated hop auditable.
 
 Deleting an agent removes its runnable identity and transcript, not the audit
 meaning of old posts. Messages therefore retain the author's display-name
@@ -304,7 +316,8 @@ _backlog_, hence `queueLimit`.
 
 `rootThreadId` is inherited at creation rather than resolved by walking parents
 at spend time. Missing or invalid roots fail closed. A child inherits the
-parent's `autoTurnsUsed`, while only token spend is read from the root.
+parent's `autoTurnsUsed`; token spend is summed from runs on every thread with
+that root id.
 
 The workspace lock prevents concurrent writers; it does **not** make two JSON
 files one transaction. A thread post, its admission outcomes, and its booked run
@@ -313,9 +326,10 @@ notifications use durable, idempotent outbox events. Every runtime
 `USAGE_METADATA` event upserts `(runId, attempt, cumulativeRound, usage)` on the
 source run; duplicate events replace the same entry. Admission sums
 `runs[].usageByRound` across the root's thread tree under the workspace lock
-before checking the token gate. Root `tokensUsed` may be a validated cache, not
-the source of truth. Transcript round usage can reconstruct a missing run entry;
-finish reconciles rather than creating the first usage record. Parent reports
+before checking the token gate. Each thread's `tokensUsed` is a validated cache
+of its own runs, not the source of truth. Transcript round usage can reconstruct
+a missing run entry; finish reconciles rather than creating the first usage
+record. Parent reports
 and notifications use write-source-first, apply-idempotently,
 acknowledge-last.
 Thread deletion refuses non-terminal runs, descendants, or unacknowledged
@@ -531,9 +545,11 @@ starts an agent yet):
 5. Stale daemon-session comments and the unreachable `explicit_routing` outcome
    were removed. The latter remains a target-resolution rule.
 
-This is still only the admission foundation. Delivery acknowledgement,
-assignment triggers, status commands, provenance, and transcript slices are
-scheduled below rather than represented by dead optional fields.
+Steps 1-3 now cover admission, capability classification, and the versioned
+storage protocol. Delivery acknowledgement, assignment triggers, status
+commands, provenance producers, and transcript slices remain scheduled below;
+their storage fields exist because v1 deliberately batches the full §3 schema,
+not because those behaviors have run.
 
 ### 5.2 Order of work
 
@@ -557,9 +573,9 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    launch path. Prove resident continue and transcript-backed revive separately;
    definition absence produces `agent_unavailable`, while registry saturation
    produces `capacity_wait`. Runtime preparation is integrated on this branch.
-5. **Run envelope and tools** — add the §3 delivery/provenance fields, prompt
-   assembler, correlated mesh external-input/consumed events, per-turn ambient
-   mesh context, incremental run usage recording, and minimal `thread_post`,
+5. **Run envelope and tools** — populate the §3 delivery/provenance fields, add
+   the prompt assembler, correlated mesh external-input/consumed events,
+   per-turn ambient mesh context, incremental run usage recording, and minimal `thread_post`,
    `thread_wait`, `thread_block`, `thread_review`, and `thread_read` tools. No
    model-supplied mutation thread, author, run, or idempotency id.
 6. **Minimal in-process dispatcher, no recovery** — pick one queued run per
@@ -605,9 +621,23 @@ npx vitest run src/agents/mesh/capability.test.ts
 # 1 file, 10 tests passed
 ```
 
-Targeted lint and core typecheck also pass on this branch. They establish
-compile/style health only; they do not validate the design or the unbuilt
-execution path. Update the test count above if the foundation changes.
+Supporting local evidence for step 3; its gate is likewise #11206 CI after the
+child PR merges:
+
+```bash
+cd packages/core
+npx vitest run src/agents/mesh/mesh-store.test.ts \
+  src/agents/mesh/workspace-lock.test.ts \
+  src/agents/mesh/thread-actions.test.ts \
+  src/agents/mesh/dispatch-policy.test.ts \
+  src/agents/mesh/mentions.test.ts
+# 5 files, 59 tests passed
+```
+
+The earlier foundation's targeted lint and core typecheck passed. Step 3 has
+run only the named tests above; compile/style health waits for the whole-branch
+CI gate. None of these checks validate the unbuilt execution path. Update the
+test counts above when the implementation changes.
 
 Future unit coverage is required for: all twelve admission outcomes; unknown
 mention suppressing assignee fallback; assignment and parent-dependency triggers;
@@ -635,7 +665,6 @@ Still to build:
 | Piece                                                                                                       | Where                                  |
 | ----------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | Invocation-time enforcement of the read-only shell predicate                                                | launcher/tool hook in steps 4-5        |
-| Versioned workspace record, migration, workspace lock, and cross-file outbox protocol                       | `core/src/agents/mesh/`                |
 | Hidden host-session owner and programmatic launcher                                                         | `core/src/agents/`                     |
 | Run envelope, delivery state, prompt assembler, ambient run context                                         | `core/src/agents/mesh/`                |
 | Consume the integrated correlated external-input runtime contract                                           | `core/src/agents/mesh/`                |
@@ -793,7 +822,8 @@ difference, not a backlog.
 
 **Measured against multi-agent collaboration itself — hand-off, observability,
 steering, guardrails — the target reaches roughly 80%**, which is the part that
-was actually asked for. The implementation is still only at §5.2 step 1.
+was actually asked for. The implementation is at §5.2 step 3 and has still not
+launched or dispatched a mesh agent.
 
 ### 7.1 Relationship to the Agent Board (#9402)
 
@@ -802,48 +832,47 @@ files, both have an owner, a status, and a question/answer flow, and both were
 written by the same author within a month. They are nonetheless different
 layers, and the difference is structural, not cosmetic:
 
-| | Agent Board (#9402) | Mesh threads (this design) |
-| --- | --- | --- |
-| Who participates | any process that can run `qwen board` — Codex, shell scripts, cron | agents Qwen Code hosts itself, on the background-agent layer |
-| Actor identity | `--as <label>`, recorded, not authenticated (`board-lock.ts`, user doc) | derived from the ambient run; never model- or caller-supplied (§6) |
-| Delivery | pull: a participant sees work only when it reads the board | push: admission books a run, the dispatcher wakes the body (§4) |
-| Storage scope | global named boards, `~/.qwen/boards/<board>/` | one workspace, `~/.qwen/tmp/<project-hash>/mesh/` (§3) |
-| Roster, launcher, wake, budgets, provenance, sequences, outbox | none by design (its PR body lists each as absent) | all present (§2, §3) |
-| Question flow | `ask` with TTL and exit codes; any label may answer | `thread_block` ends the run; a person answers; aggregate status (§4) |
-| Item model | task `pending → in_progress → completed`, `notes[]`; asks `open/answered/declined/timeout` | thread `open → in_progress → blocked/in_review → done`, sequenced messages, runs |
+|                                                                | Agent Board (#9402)                                                                        | Mesh threads (this design)                                                       |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Who participates                                               | any process that can run `qwen board` — Codex, shell scripts, cron                         | agents Qwen Code hosts itself, on the background-agent layer                     |
+| Actor identity                                                 | `--as <label>`, recorded, not authenticated (`board-lock.ts`, user doc)                    | derived from the ambient run; never model- or caller-supplied (§6)               |
+| Delivery                                                       | pull: a participant sees work only when it reads the board                                 | push: admission books a run, the dispatcher wakes the body (§4)                  |
+| Storage scope                                                  | global named boards, `~/.qwen/boards/<board>/`                                             | one workspace, `~/.qwen/tmp/<project-hash>/mesh/` (§3)                           |
+| Roster, launcher, wake, budgets, provenance, sequences, outbox | none by design (its PR body lists each as absent)                                          | all present (§2, §3)                                                             |
+| Question flow                                                  | `ask` with TTL and exit codes; any label may answer                                        | `thread_block` ends the run; a person answers; aggregate status (§4)             |
+| Item model                                                     | task `pending → in_progress → completed`, `notes[]`; asks `open/answered/declined/timeout` | thread `open → in_progress → blocked/in_review → done`, sequenced messages, runs |
 
 The Board is a **passive interoperability surface for processes Qwen Code
 does not host**. The mesh is an **active collaboration runtime for agents it
 does host**. Making one the storage of the other fails in both directions:
 
-- *Board as the thread store* would force label actors, global boards, and
+- _Board as the thread store_ would force label actors, global boards, and
   no sequences or outbox onto the mesh — every property §3 and §6 exist to
   provide. Not viable without rewriting the Board into the mesh store.
-- *Mesh as the Board* would require Codex or a shell script to speak the
-  mesh REST surface (§5.2 step 9) and be admitted as a *runtime*. That is
-  exactly §9.12, and it is a v2 question, not a v1 storage choice.
+- _Mesh as the Board_ would require Codex or a shell script to speak the
+  mesh REST surface (§5.2 step 9) and be admitted as a _runtime_. Runtime is
+  now a first-class binding, but a foreign claimer remains a v2 adapter and not
+  a v1 storage choice.
 
 **Conservative v1 default while the owner decision remains open: separate
 stores, with the convergence path recorded.**
 
-1. Unless the owner chooses otherwise before step 3, the two stores stay
-   separate and neither imports the other. The user-facing
-   names stay distinct: *board* is the foreign-process surface, *threads*
-   (with *agents*) is the orchestrated one. Do not call mesh threads a board.
+1. The two v1 stores stay separate and neither imports the other. The
+   user-facing
+   names stay distinct: _board_ is the foreign-process surface, _threads_
+   (with _agents_) is the orchestrated one. Do not call mesh threads a board.
 2. The Board does not ship as a standalone user surface while this design is
    in flight. Its own PR body already says a standalone merge needs a concrete
    native consumer; the mesh is not that consumer in v1.
-3. If §9.12 is answered *runtime is first-class*, the v2 foreign-runtime
-   claimer — a process that claims mesh runs through REST — replaces the
-   Board's use case, and the Board's `claim / done / ask / answer` CLI is the
-   natural shape of that claimer's command surface. The Board's code is then
-   the seed of a runtime adapter, not a parallel store.
-4. If §9.12 is answered *no*, the Board remains the only way a non-hosted
-   process shares work, and the single integration point is a bridge agent: a
-   mesh agent whose body polls a board. That bridge is out of scope for v1.
+3. Runtime is now first-class. If the owner chooses convergence, the v2
+   foreign-runtime claimer — a process that claims mesh runs through REST —
+   replaces the Board's use case, and the Board's `claim / done / ask / answer`
+   CLI is the natural shape of that claimer's command surface. The Board's code
+   is then the seed of a runtime adapter, not a parallel store.
 
-Until §9.12 is decided, step 3 builds the mesh store as designed and takes
-nothing from `packages/core/src/agents/team/board-*.ts`.
+Step 3 keeps the stores separate and takes nothing from
+`packages/core/src/agents/team/board-*.ts`; whether #9402 becomes a later
+runtime adapter remains a separate owner decision.
 
 ## 8. Demo
 
@@ -874,16 +903,19 @@ screenshots locally and in CI.
 The review closed several ambiguities, but these product or storage questions
 remain genuinely open:
 
-1. **Persistent cross-thread prompt injection.** Provenance and a trusted run
-   envelope stop spoofing and wrong-thread actions; they cannot make a model
+1. **Persistent cross-thread prompt injection.** Provenance and an ambient-bound
+   run envelope stop spoofing and wrong-thread actions; they cannot make a model
    forget a malicious or simply wrong instruction learned in thread A before it
    works on B. Read-only tools and budgets limit impact, not trust. Write access
    must remain out of scope until this has an explicit policy and adversarial
    test suite.
 2. **Retention and delivery history.** `MAX_THREAD_MESSAGES` /
    `MAX_THREAD_RUNS` retain active references but trim old terminal history. The
-   dispatcher must record the first retained sequence and emit a gap; whether
-   full history moves to a separate append-only archive is undecided.
+   v1 conservative default also retains messages carrying an `originEventId`
+   and runs carrying usage, because trimming either would break replay
+   idempotency or reset the token gate. The dispatcher must record the first
+   retained sequence and emit a gap; whether full history and these durable
+   ledgers move to a separate append-only archive is undecided.
 3. **Cancellation UX.** Done now has defined cancellation semantics, but the
    user-facing choice between graceful stop and immediate abort, and what partial
    output should be posted, remains to be designed.
@@ -931,18 +963,15 @@ remain genuinely open:
     reply aimed at `@bob` must not silently clear an unrelated question raised
     by Alice. Decide whether acknowledgement follows mentioned targets, the
     assignee, or an explicit blocker id.
-12. **Runtime as a first-class concept (v2 binding).** V1 binds an agent to a
-    local background agent (`MeshAgent.backgroundAgentId`) in a hidden host
-    session. Multica binds a task to a _runtime_ that claims it
-    (`taskWakeupLoop`, runtime ids), which is what makes remote, cloud, and
-    non-Qwen agents possible — the gap §7 calls the one hard one. Decide now,
-    because it shapes step 3 and step 4: if v2 wants runtimes, the v1 schema
-    should carry a binding field that is not local-specific (a `runtimeId`
-    beside, not instead of, `backgroundAgentId`), and the launcher must be an
-    interface `launch(agent) → typed result` whose first implementation is the
-    local background agent. If v2 does not, say so and let the schema stay
-    local. Related prior work: #9402's `--as` actor model, #10078's session
-    boundary, #10247 §5's supervisor.
+
+### Resolved during step 3
+
+Runtime shape is settled: runtime is a first-class concept. V1 carries
+`runtimeId` beside `backgroundAgentId`; step 4 exposes the smallest launcher
+contract with the local background agent as its first implementation. Remote,
+cloud, and foreign-runtime adapters remain out of scope for v1. This settles
+the schema dependency formerly listed here as open question 12 without deciding
+whether #9402 becomes the seed of a later adapter.
 
 ## 10. Out of scope
 

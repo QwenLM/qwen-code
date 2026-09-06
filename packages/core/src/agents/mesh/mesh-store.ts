@@ -4,44 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @fileoverview File I/O for the agent mesh.
- *
- * Layout, under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/`)
- * rather than the working tree — the same reasoning the durable scheduled
- * tasks file records: this is the user's own automation state, and thread
- * text written by one agent is fed to another, so it must never become a
- * committed, pulled, prompt-injection surface.
- *
- *   mesh/agents.json          — the workspace's agent identities
- *   mesh/threads/<id>.json    — one file per thread
- *
- * Concurrency follows the team modules: an in-process `Mutex` serialises
- * writers here, and a `proper-lockfile` lock guards writers in other
- * processes (the daemon, a CLI session, and a teammate can all post).
- *
- * A file that exists but does not parse is corruption, not emptiness. Reads
- * throw rather than returning a default, so a read-modify-write can never
- * replace a recoverable file with a valid-but-empty one.
- */
-
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { Mutex } from 'async-mutex';
 import lockfile from 'proper-lockfile';
 
-import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
-import { getProjectHash } from '../../utils/paths.js';
 import { Storage } from '../../config/storage.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { isNodeError } from '../../utils/errors.js';
+import { getProjectHash } from '../../utils/paths.js';
 import {
   DEFAULT_QUEUE_LIMIT,
   HUMAN_AUTHOR_ID,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
+  MESH_SCHEMA_VERSION,
   type MeshAgent,
+  type MeshAgentsFile,
+  type MeshWorkspaceState,
+  type MessageOutcome,
+  type RunCloseKind,
+  type RunUsageRound,
   type Thread,
+  type ThreadEvent,
   type ThreadMessage,
   type ThreadRun,
   type ThreadRunStatus,
@@ -49,17 +36,14 @@ import {
 } from './types.js';
 
 const MESH_DIRNAME = 'mesh';
+const WORKSPACE_FILENAME = 'workspace.json';
 const AGENTS_FILENAME = 'agents.json';
 const THREADS_DIRNAME = 'threads';
 
-/** Display form used in user-facing messages and docs. */
 export const MESH_DISPLAY_PATH = `~/.qwen/tmp/<project-hash>/${MESH_DIRNAME}`;
 
-// Matches the team mailbox's settings: ten retries with jittered backoff.
-// Jitter matters because the daemon dispatcher and an agent's `thread_post`
-// contend for the same thread file, and lockstep retries starve each other
-// out of the budget.
 const LOCK_OPTIONS: lockfile.LockOptions = {
+  realpath: false,
   retries: {
     retries: 10,
     minTimeout: 5,
@@ -70,15 +54,19 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   stale: 10_000,
 };
 
-const updateMutexes = new Map<string, Mutex>();
+const workspaceMutexes = new Map<string, Mutex>();
+const workspaceTransaction = new AsyncLocalStorage<boolean>();
 
-function getUpdateMutex(filePath: string): Mutex {
-  let mutex = updateMutexes.get(filePath);
-  if (!mutex) {
-    mutex = new Mutex();
-    updateMutexes.set(filePath, mutex);
+export class MeshSchemaVersionError extends Error {
+  constructor(
+    readonly filePath: string,
+    readonly foundVersion: unknown,
+  ) {
+    super(
+      `Unsupported mesh schema version ${JSON.stringify(foundVersion)} in ${filePath}; this build supports version ${MESH_SCHEMA_VERSION}.`,
+    );
+    this.name = 'MeshSchemaVersionError';
   }
-  return mutex;
 }
 
 export function getMeshDir(projectRoot: string): string {
@@ -89,6 +77,10 @@ export function getMeshDir(projectRoot: string): string {
   );
 }
 
+export function getWorkspaceFilePath(projectRoot: string): string {
+  return path.join(getMeshDir(projectRoot), WORKSPACE_FILENAME);
+}
+
 export function getAgentsFilePath(projectRoot: string): string {
   return path.join(getMeshDir(projectRoot), AGENTS_FILENAME);
 }
@@ -97,11 +89,6 @@ export function getThreadsDir(projectRoot: string): string {
   return path.join(getMeshDir(projectRoot), THREADS_DIRNAME);
 }
 
-/**
- * Thread ids are path components, so they are generated — never taken from a
- * caller — and validated on the way back in. `..`, separators and control
- * characters can therefore never reach `path.join`.
- */
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function generateAgentId(): string {
@@ -120,6 +107,10 @@ export function generateRunId(): string {
   return `rn_${randomUUID()}`;
 }
 
+export function generateEventId(): string {
+  return `ev_${randomUUID()}`;
+}
+
 export function isValidId(value: unknown): value is string {
   return typeof value === 'string' && ID_PATTERN.test(value);
 }
@@ -131,7 +122,9 @@ export function getThreadPath(projectRoot: string, threadId: string): string {
   return path.join(getThreadsDir(projectRoot), `${threadId}.json`);
 }
 
-// ─── Validation ─────────────────────────────────────────────
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function isFiniteTimestamp(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -141,13 +134,20 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+function isOptionalNonNegativeInteger(value: unknown): boolean {
+  return value === undefined || isNonNegativeInteger(value);
+}
+
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
-/**
- * Names are the mention vocabulary, so the character set is deliberately
- * narrow: whatever is legal here has to be unambiguously delimitable inside
- * prose after an `@`.
- */
 export const AGENT_NAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,47}$/u;
 
 export function isValidAgentName(value: unknown): value is string {
@@ -155,31 +155,32 @@ export function isValidAgentName(value: unknown): value is string {
 }
 
 function isValidAgent(value: unknown): value is MeshAgent {
-  if (typeof value !== 'object' || value === null) return false;
-  const a = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
   return (
-    isValidId(a['id']) &&
-    isValidAgentName(a['name']) &&
-    isFiniteTimestamp(a['createdAt']) &&
-    (a['description'] === undefined || typeof a['description'] === 'string') &&
-    (a['color'] === undefined ||
-      (typeof a['color'] === 'string' && HEX_COLOR.test(a['color']))) &&
-    (a['agentType'] === undefined || isNonEmptyString(a['agentType'])) &&
-    (a['model'] === undefined || isNonEmptyString(a['model'])) &&
-    (a['queueLimit'] === undefined ||
-      (typeof a['queueLimit'] === 'number' &&
-        Number.isInteger(a['queueLimit']) &&
-        a['queueLimit'] > 0)) &&
-    (a['enabled'] === undefined || typeof a['enabled'] === 'boolean') &&
-    (a['backgroundAgentId'] === undefined ||
-      isNonEmptyString(a['backgroundAgentId'])) &&
-    (a['hostSessionId'] === undefined || isNonEmptyString(a['hostSessionId']))
+    isValidId(value['id']) &&
+    isValidAgentName(value['name']) &&
+    isFiniteTimestamp(value['createdAt']) &&
+    (value['description'] === undefined ||
+      typeof value['description'] === 'string') &&
+    (value['color'] === undefined ||
+      (typeof value['color'] === 'string' && HEX_COLOR.test(value['color']))) &&
+    (value['agentType'] === undefined ||
+      isNonEmptyString(value['agentType'])) &&
+    (value['model'] === undefined || isNonEmptyString(value['model'])) &&
+    (value['queueLimit'] === undefined ||
+      isPositiveInteger(value['queueLimit'])) &&
+    (value['enabled'] === undefined || typeof value['enabled'] === 'boolean') &&
+    (value['backgroundAgentId'] === undefined ||
+      isNonEmptyString(value['backgroundAgentId'])) &&
+    (value['runtimeId'] === undefined || isNonEmptyString(value['runtimeId']))
   );
 }
 
 const RUN_STATUSES = new Set<ThreadRunStatus>([
   'queued',
   'running',
+  'finishing',
+  'cancelling',
   'completed',
   'failed',
   'cancelled',
@@ -193,74 +194,231 @@ const THREAD_STATUSES = new Set<ThreadStatus>([
   'done',
 ]);
 
-function isValidMessage(value: unknown): value is ThreadMessage {
-  if (typeof value !== 'object' || value === null) return false;
-  const m = value as Record<string, unknown>;
+const CLOSE_KINDS = new Set<RunCloseKind>([
+  'waiting',
+  'blocked',
+  'review',
+  'unclosed',
+]);
+
+function isValidOutcome(value: unknown): value is MessageOutcome {
+  if (!isRecord(value)) return false;
+  const commonFieldsAreValid =
+    (value['targetAgentId'] === undefined ||
+      isValidId(value['targetAgentId'])) &&
+    (value['targetAgentName'] === undefined ||
+      typeof value['targetAgentName'] === 'string') &&
+    (value['reason'] === undefined || typeof value['reason'] === 'string') &&
+    (value['runId'] === undefined || isValidId(value['runId'])) &&
+    (value['into'] === undefined ||
+      value['into'] === 'queued' ||
+      value['into'] === 'running');
+  if (!commonFieldsAreValid) return false;
+  if (value['kind'] === 'dispatch') {
+    return (
+      isValidId(value['targetAgentId']) &&
+      isValidId(value['runId']) &&
+      value['reason'] === undefined &&
+      value['into'] === undefined
+    );
+  }
+  if (value['kind'] === 'coalesce') {
+    return (
+      isValidId(value['targetAgentId']) &&
+      isValidId(value['runId']) &&
+      (value['into'] === 'queued' || value['into'] === 'running') &&
+      value['reason'] === undefined
+    );
+  }
   return (
-    isValidId(m['id']) &&
-    isNonEmptyString(m['from']) &&
-    typeof m['text'] === 'string' &&
-    Array.isArray(m['mentions']) &&
-    m['mentions'].every((id) => isValidId(id)) &&
-    isFiniteTimestamp(m['at'])
+    value['kind'] === 'skip' &&
+    isNonEmptyString(value['reason']) &&
+    value['runId'] === undefined &&
+    value['into'] === undefined
+  );
+}
+
+function isValidMessage(value: unknown): value is ThreadMessage {
+  if (!isRecord(value)) return false;
+  return (
+    isValidId(value['id']) &&
+    isPositiveInteger(value['sequence']) &&
+    (value['authorKind'] === 'human' ||
+      value['authorKind'] === 'agent' ||
+      value['authorKind'] === 'system') &&
+    isNonEmptyString(value['from']) &&
+    isNonEmptyString(value['authorNameSnapshot']) &&
+    (value['sourceRunId'] === undefined || isValidId(value['sourceRunId'])) &&
+    (value['triggerKind'] === undefined ||
+      isNonEmptyString(value['triggerKind'])) &&
+    typeof value['text'] === 'string' &&
+    Array.isArray(value['mentions']) &&
+    value['mentions'].every(isValidId) &&
+    Array.isArray(value['outcomes']) &&
+    value['outcomes'].every(isValidOutcome) &&
+    isFiniteTimestamp(value['at']) &&
+    (value['originEventId'] === undefined || isValidId(value['originEventId']))
+  );
+}
+
+function isValidUsageRound(value: unknown): value is RunUsageRound {
+  if (!isRecord(value)) return false;
+  return (
+    isPositiveInteger(value['attempt']) &&
+    isNonNegativeInteger(value['round']) &&
+    isNonNegativeInteger(value['tokens'])
   );
 }
 
 function isValidRun(value: unknown): value is ThreadRun {
-  if (typeof value !== 'object' || value === null) return false;
-  const r = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const valid =
+    isValidId(value['id']) &&
+    isValidId(value['agentId']) &&
+    RUN_STATUSES.has(value['status'] as ThreadRunStatus) &&
+    Array.isArray(value['triggerMessageIds']) &&
+    value['triggerMessageIds'].every(isValidId) &&
+    Array.isArray(value['acceptedMessageIds']) &&
+    value['acceptedMessageIds'].every(isValidId) &&
+    Array.isArray(value['consumedMessageIds']) &&
+    value['consumedMessageIds'].every(isValidId) &&
+    isOptionalNonNegativeInteger(value['contextThroughSequence']) &&
+    (value['definitionVersion'] === undefined ||
+      isNonEmptyString(value['definitionVersion'])) &&
+    isOptionalNonNegativeInteger(value['transcriptStartOffset']) &&
+    isOptionalNonNegativeInteger(value['transcriptEndOffset']) &&
+    (value['closeKind'] === undefined ||
+      CLOSE_KINDS.has(value['closeKind'] as RunCloseKind)) &&
+    isOptionalNonNegativeInteger(value['closeAcknowledgedAtSequence']) &&
+    (value['finalMessageId'] === undefined ||
+      isValidId(value['finalMessageId'])) &&
+    Array.isArray(value['usageByRound']) &&
+    value['usageByRound'].every(isValidUsageRound) &&
+    (value['failureStage'] === undefined ||
+      isNonEmptyString(value['failureStage'])) &&
+    isPositiveInteger(value['queueSequence']) &&
+    isNonNegativeInteger(value['attempts']) &&
+    isFiniteTimestamp(value['queuedAt']) &&
+    (value['sessionId'] === undefined ||
+      isNonEmptyString(value['sessionId'])) &&
+    (value['startedAt'] === undefined ||
+      isFiniteTimestamp(value['startedAt'])) &&
+    (value['endedAt'] === undefined || isFiniteTimestamp(value['endedAt'])) &&
+    (value['error'] === undefined || typeof value['error'] === 'string');
+  if (!valid) return false;
+  const keys = new Set<string>();
+  for (const usage of value['usageByRound'] as RunUsageRound[]) {
+    const key = `${usage.attempt}:${usage.round}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+  }
+  return true;
+}
+
+function isValidEvent(value: unknown): value is ThreadEvent {
+  if (!isRecord(value)) return false;
   return (
-    isValidId(r['id']) &&
-    isValidId(r['agentId']) &&
-    RUN_STATUSES.has(r['status'] as ThreadRunStatus) &&
-    typeof r['attempts'] === 'number' &&
-    Number.isInteger(r['attempts']) &&
-    r['attempts'] >= 0 &&
-    Array.isArray(r['triggerMessageIds']) &&
-    r['triggerMessageIds'].every((id) => isValidId(id)) &&
-    isFiniteTimestamp(r['queuedAt']) &&
-    (r['sessionId'] === undefined || isNonEmptyString(r['sessionId'])) &&
-    (r['startedAt'] === undefined || isFiniteTimestamp(r['startedAt'])) &&
-    (r['endedAt'] === undefined || isFiniteTimestamp(r['endedAt'])) &&
-    (r['error'] === undefined || typeof r['error'] === 'string')
+    isValidId(value['id']) &&
+    (value['kind'] === 'parent_report' || value['kind'] === 'notification') &&
+    (value['causedByRunId'] === undefined ||
+      isValidId(value['causedByRunId'])) &&
+    isRecord(value['payload']) &&
+    (value['status'] === 'pending' || value['status'] === 'acknowledged') &&
+    isNonNegativeInteger(value['attempts']) &&
+    isFiniteTimestamp(value['createdAt'])
   );
 }
 
 function isValidThread(value: unknown): value is Thread {
-  if (typeof value !== 'object' || value === null) return false;
-  const t = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  if (
+    value['schemaVersion'] !== MESH_SCHEMA_VERSION ||
+    !isValidId(value['id']) ||
+    typeof value['title'] !== 'string' ||
+    typeof value['body'] !== 'string' ||
+    !THREAD_STATUSES.has(value['status'] as ThreadStatus) ||
+    !isFiniteTimestamp(value['createdAt']) ||
+    !isNonEmptyString(value['createdBy']) ||
+    !Array.isArray(value['messages']) ||
+    !value['messages'].every(isValidMessage) ||
+    !Array.isArray(value['runs']) ||
+    !value['runs'].every(isValidRun) ||
+    !isPositiveInteger(value['nextMessageSequence']) ||
+    !isRecord(value['deliveryByAgent']) ||
+    !Object.entries(value['deliveryByAgent']).every(
+      ([agentId, delivery]) =>
+        isValidId(agentId) &&
+        isRecord(delivery) &&
+        isNonNegativeInteger(delivery['committedThroughSequence']),
+    ) ||
+    !Array.isArray(value['outbox']) ||
+    !value['outbox'].every(isValidEvent) ||
+    !isNonNegativeInteger(value['autoTurnsUsed']) ||
+    !isNonNegativeInteger(value['tokensUsed']) ||
+    !isValidId(value['rootThreadId']) ||
+    (value['parentThreadId'] !== undefined &&
+      !isValidId(value['parentThreadId'])) ||
+    (value['assigneeAgentId'] !== undefined &&
+      !isValidId(value['assigneeAgentId']))
+  ) {
+    return false;
+  }
+  let previousSequence = 0;
+  const messageIds = new Set<string>();
+  const originEventIds = new Set<string>();
+  for (const message of value['messages']) {
+    if (message.sequence <= previousSequence) return false;
+    previousSequence = message.sequence;
+    if (messageIds.has(message.id)) return false;
+    messageIds.add(message.id);
+    if (message.originEventId) {
+      if (originEventIds.has(message.originEventId)) return false;
+      originEventIds.add(message.originEventId);
+    }
+  }
+  const runIds = new Set<string>();
+  const queueSequences = new Set<number>();
+  for (const run of value['runs']) {
+    if (runIds.has(run.id) || queueSequences.has(run.queueSequence))
+      return false;
+    runIds.add(run.id);
+    queueSequences.add(run.queueSequence);
+  }
+  const eventIds = new Set<string>();
+  for (const event of value['outbox']) {
+    if (eventIds.has(event.id)) return false;
+    eventIds.add(event.id);
+  }
+  return value['nextMessageSequence'] > previousSequence;
+}
+
+function isValidWorkspace(value: unknown): value is MeshWorkspaceState {
   return (
-    isValidId(t['id']) &&
-    typeof t['title'] === 'string' &&
-    typeof t['body'] === 'string' &&
-    THREAD_STATUSES.has(t['status'] as ThreadStatus) &&
-    isFiniteTimestamp(t['createdAt']) &&
-    isNonEmptyString(t['createdBy']) &&
-    Array.isArray(t['messages']) &&
-    t['messages'].every(isValidMessage) &&
-    Array.isArray(t['runs']) &&
-    t['runs'].every(isValidRun) &&
-    typeof t['autoTurnsUsed'] === 'number' &&
-    Number.isInteger(t['autoTurnsUsed']) &&
-    t['autoTurnsUsed'] >= 0 &&
-    typeof t['tokensUsed'] === 'number' &&
-    Number.isInteger(t['tokensUsed']) &&
-    t['tokensUsed'] >= 0 &&
-    isValidId(t['rootThreadId']) &&
-    (t['parentThreadId'] === undefined || isValidId(t['parentThreadId'])) &&
-    (t['assigneeAgentId'] === undefined || isValidId(t['assigneeAgentId']))
+    isRecord(value) &&
+    value['schemaVersion'] === MESH_SCHEMA_VERSION &&
+    isValidId(value['workspaceId']) &&
+    (value['hostSessionId'] === undefined ||
+      isNonEmptyString(value['hostSessionId'])) &&
+    isPositiveInteger(value['nextRunSequence'])
   );
 }
 
-// ─── Agents ─────────────────────────────────────────────────
+function assertKnownVersion(value: unknown, filePath: string): void {
+  if (!isRecord(value) || value['schemaVersion'] === undefined) {
+    throw new MeshSchemaVersionError(filePath, undefined);
+  }
+  if (value['schemaVersion'] !== MESH_SCHEMA_VERSION) {
+    throw new MeshSchemaVersionError(filePath, value['schemaVersion']);
+  }
+}
 
 async function readJsonFile(filePath: string): Promise<unknown | undefined> {
   let raw: string;
   try {
     raw = await fs.readFile(filePath, 'utf-8');
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return undefined;
-    throw err;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return undefined;
+    throw error;
   }
   try {
     return JSON.parse(raw);
@@ -271,66 +429,618 @@ async function readJsonFile(filePath: string): Promise<unknown | undefined> {
   }
 }
 
-export async function readMeshAgents(
+function workspaceMutex(meshDir: string): Mutex {
+  let mutex = workspaceMutexes.get(meshDir);
+  if (!mutex) {
+    mutex = new Mutex();
+    workspaceMutexes.set(meshDir, mutex);
+  }
+  return mutex;
+}
+
+async function withWorkspaceLock<T>(
   projectRoot: string,
-): Promise<MeshAgent[]> {
+  run: () => Promise<T>,
+): Promise<T> {
+  if (workspaceTransaction.getStore()) {
+    throw new Error('Nested mesh workspace transactions are not allowed.');
+  }
+  const meshDir = getMeshDir(projectRoot);
+  return workspaceMutex(meshDir).runExclusive(async () => {
+    await fs.mkdir(meshDir, { recursive: true });
+    const release = await lockfile.lock(
+      getWorkspaceFilePath(projectRoot),
+      LOCK_OPTIONS,
+    );
+    try {
+      return await workspaceTransaction.run(true, run);
+    } finally {
+      await release();
+    }
+  });
+}
+
+function backupPath(filePath: string): string {
+  return filePath.replace(/\.json$/, '.v0.json');
+}
+
+async function writeBackup(filePath: string, value: unknown): Promise<void> {
+  const target = backupPath(filePath);
+  try {
+    await fs.access(target);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    await atomicWriteJSON(target, value, { noFollow: true });
+  }
+}
+
+async function replaceMigratedFile<T>(
+  filePath: string,
+  legacy: unknown,
+  migrated: T,
+  validate: (value: unknown) => value is T,
+): Promise<void> {
+  await writeBackup(filePath, legacy);
+  await atomicWriteJSON(filePath, migrated, { noFollow: true });
+  const reread = await readJsonFile(filePath);
+  if (!validate(reread)) {
+    throw new Error(`Migrated mesh record failed validation: ${filePath}.`);
+  }
+  await fs.unlink(backupPath(filePath));
+}
+
+function migrateAgent(value: unknown): MeshAgent | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    value['hostSessionId'] !== undefined &&
+    !isNonEmptyString(value['hostSessionId'])
+  ) {
+    return undefined;
+  }
+  const agent = { ...value };
+  delete agent['hostSessionId'];
+  return isValidAgent(agent) ? agent : undefined;
+}
+
+function legacyHostSessionId(agents: readonly unknown[]): string | undefined {
+  const ids = new Set(
+    agents
+      .filter(isRecord)
+      .map((agent) => agent['hostSessionId'])
+      .filter(isNonEmptyString),
+  );
+  if (ids.size > 1) {
+    throw new Error(
+      'Cannot migrate agents with conflicting hostSessionId values.',
+    );
+  }
+  return ids.values().next().value;
+}
+
+function migrateMessage(
+  value: unknown,
+  sequence: number,
+  agents: readonly MeshAgent[],
+): ThreadMessage {
+  if (!isRecord(value)) throw new Error('Malformed v0 thread message.');
+  const from = value['from'];
+  const author = agents.find((agent) => agent.id === from);
+  const message: ThreadMessage = {
+    id: value['id'] as string,
+    sequence,
+    authorKind: from === HUMAN_AUTHOR_ID ? 'human' : 'agent',
+    from: from as string,
+    authorNameSnapshot:
+      from === HUMAN_AUTHOR_ID
+        ? HUMAN_AUTHOR_ID
+        : (author?.name ?? String(from)),
+    text: value['text'] as string,
+    mentions: value['mentions'] as string[],
+    outcomes: [],
+    at: value['at'] as number,
+  };
+  if (!isValidMessage(message)) throw new Error('Malformed v0 thread message.');
+  return message;
+}
+
+function migrateRun(value: unknown, queueSequence: number): ThreadRun {
+  if (!isRecord(value)) throw new Error('Malformed v0 thread run.');
+  const run: ThreadRun = {
+    id: value['id'] as string,
+    agentId: value['agentId'] as string,
+    status: value['status'] as ThreadRunStatus,
+    triggerMessageIds: value['triggerMessageIds'] as string[],
+    acceptedMessageIds: [],
+    consumedMessageIds: [],
+    usageByRound: [],
+    queueSequence,
+    attempts: value['attempts'] as number,
+    queuedAt: value['queuedAt'] as number,
+    ...(value['sessionId'] !== undefined
+      ? { sessionId: value['sessionId'] as string }
+      : {}),
+    ...(value['startedAt'] !== undefined
+      ? { startedAt: value['startedAt'] as number }
+      : {}),
+    ...(value['endedAt'] !== undefined
+      ? { endedAt: value['endedAt'] as number }
+      : {}),
+    ...(value['error'] !== undefined
+      ? { error: value['error'] as string }
+      : {}),
+  };
+  if (!isValidRun(run)) throw new Error('Malformed v0 thread run.');
+  return run;
+}
+
+function sumRunTokens(runs: readonly ThreadRun[]): number {
+  return runs.reduce(
+    (total, run) =>
+      total + run.usageByRound.reduce((sum, usage) => sum + usage.tokens, 0),
+    0,
+  );
+}
+
+function migrateThread(
+  value: unknown,
+  agents: readonly MeshAgent[],
+  allocateRunSequence: () => number,
+): Thread {
+  if (!isRecord(value)) throw new Error('Malformed v0 thread record.');
+  if (
+    !Array.isArray(value['messages']) ||
+    !Array.isArray(value['runs']) ||
+    !isNonNegativeInteger(value['tokensUsed'])
+  ) {
+    throw new Error('Malformed v0 thread record.');
+  }
+  const messages = value['messages'].map((message, index) =>
+    migrateMessage(message, index + 1, agents),
+  );
+  const runs = value['runs'].map((run) =>
+    migrateRun(run, allocateRunSequence()),
+  );
+  const oldTokens = value['tokensUsed'];
+  if (isPositiveInteger(oldTokens)) {
+    const lastRun = runs.at(-1);
+    if (!lastRun) {
+      throw new Error('Cannot migrate non-zero tokensUsed without a run.');
+    }
+    lastRun.usageByRound.push({
+      attempt: Math.max(1, lastRun.attempts),
+      round: 0,
+      tokens: oldTokens,
+    });
+  }
+  const thread: Thread = {
+    schemaVersion: MESH_SCHEMA_VERSION,
+    id: value['id'] as string,
+    title: value['title'] as string,
+    body: value['body'] as string,
+    status: value['status'] as ThreadStatus,
+    createdAt: value['createdAt'] as number,
+    createdBy: value['createdBy'] as string,
+    rootThreadId: value['rootThreadId'] as string,
+    messages,
+    runs,
+    nextMessageSequence: messages.length + 1,
+    deliveryByAgent: {},
+    outbox: [],
+    autoTurnsUsed: value['autoTurnsUsed'] as number,
+    tokensUsed: sumRunTokens(runs),
+    ...(value['parentThreadId'] !== undefined
+      ? { parentThreadId: value['parentThreadId'] as string }
+      : {}),
+    ...(value['assigneeAgentId'] !== undefined
+      ? { assigneeAgentId: value['assigneeAgentId'] as string }
+      : {}),
+  };
+  if (!isValidThread(thread)) throw new Error('Malformed v0 thread record.');
+  return thread;
+}
+
+async function listThreadIdsUnlocked(projectRoot: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(getThreadsDir(projectRoot));
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return [];
+    throw error;
+  }
+  return entries
+    .filter((name) => name.endsWith('.json') && !name.endsWith('.v0.json'))
+    .map((name) => name.slice(0, -'.json'.length))
+    .filter(isValidId)
+    .sort();
+}
+
+function agentsFileIsValid(value: unknown): value is MeshAgentsFile {
+  if (
+    !isRecord(value) ||
+    value['schemaVersion'] !== MESH_SCHEMA_VERSION ||
+    !Array.isArray(value['agents']) ||
+    !value['agents'].every(isValidAgent)
+  ) {
+    return false;
+  }
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  for (const agent of value['agents']) {
+    const name = agent.name.toLowerCase();
+    if (ids.has(agent.id) || names.has(name)) return false;
+    ids.add(agent.id);
+    names.add(name);
+  }
+  return true;
+}
+
+async function ensureMigratedUnlocked(
+  projectRoot: string,
+): Promise<MeshWorkspaceState> {
+  const workspacePath = getWorkspaceFilePath(projectRoot);
+  const currentWorkspace = await readJsonFile(workspacePath);
+  if (currentWorkspace !== undefined && isValidWorkspace(currentWorkspace)) {
+    try {
+      await fs.unlink(backupPath(workspacePath));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    }
+    return currentWorkspace;
+  }
+  if (currentWorkspace !== undefined) {
+    assertKnownVersion(currentWorkspace, workspacePath);
+    throw new Error(`Malformed mesh workspace record in ${workspacePath}.`);
+  }
+
+  const agentsPath = getAgentsFilePath(projectRoot);
+  const currentAgents = await readJsonFile(agentsPath);
+  if (
+    isRecord(currentAgents) &&
+    typeof currentAgents['schemaVersion'] === 'number' &&
+    currentAgents['schemaVersion'] > MESH_SCHEMA_VERSION
+  ) {
+    throw new MeshSchemaVersionError(
+      agentsPath,
+      currentAgents['schemaVersion'],
+    );
+  }
+  const agentsBackup = await readJsonFile(backupPath(agentsPath));
+  const rawAgents = agentsFileIsValid(currentAgents)
+    ? currentAgents
+    : (agentsBackup ?? currentAgents);
+  let agents: MeshAgent[];
+  let hostSessionId: string | undefined;
+  if (rawAgents === undefined) {
+    agents = [];
+    await atomicWriteJSON(
+      agentsPath,
+      { schemaVersion: MESH_SCHEMA_VERSION, agents } satisfies MeshAgentsFile,
+      { noFollow: true },
+    );
+  } else if (agentsFileIsValid(rawAgents)) {
+    agents = rawAgents.agents;
+    try {
+      await fs.unlink(backupPath(agentsPath));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    }
+  } else if (Array.isArray(rawAgents)) {
+    hostSessionId = legacyHostSessionId(rawAgents);
+    agents = [];
+    for (const rawAgent of rawAgents) {
+      const agent = migrateAgent(rawAgent);
+      if (!agent)
+        throw new Error('Cannot migrate a malformed v0 agent record.');
+      agents.push(agent);
+    }
+    const migratedAgents = {
+      schemaVersion: MESH_SCHEMA_VERSION,
+      agents,
+    } satisfies MeshAgentsFile;
+    if (!agentsFileIsValid(migratedAgents)) {
+      throw new Error('Cannot migrate malformed or duplicate v0 agents.');
+    }
+    await replaceMigratedFile(
+      agentsPath,
+      rawAgents,
+      migratedAgents,
+      agentsFileIsValid,
+    );
+  } else {
+    assertKnownVersion(rawAgents, agentsPath);
+    throw new Error(`Malformed mesh agents record in ${agentsPath}.`);
+  }
+
+  const threadIds = await listThreadIdsUnlocked(projectRoot);
+  const rawThreads = new Map<string, unknown>();
+  let nextRunSequence = 1;
+  for (const threadId of threadIds) {
+    const filePath = getThreadPath(projectRoot, threadId);
+    const current = await readJsonFile(filePath);
+    if (
+      isRecord(current) &&
+      typeof current['schemaVersion'] === 'number' &&
+      current['schemaVersion'] > MESH_SCHEMA_VERSION
+    ) {
+      throw new MeshSchemaVersionError(filePath, current['schemaVersion']);
+    }
+    const savedLegacy = await readJsonFile(backupPath(filePath));
+    const raw = isValidThread(current) ? current : (savedLegacy ?? current);
+    rawThreads.set(threadId, raw);
+    if (isValidThread(raw)) {
+      for (const run of raw.runs) {
+        nextRunSequence = Math.max(nextRunSequence, run.queueSequence + 1);
+      }
+    }
+  }
+  for (const threadId of threadIds) {
+    const filePath = getThreadPath(projectRoot, threadId);
+    const raw = rawThreads.get(threadId);
+    if (isValidThread(raw)) {
+      try {
+        await fs.unlink(backupPath(filePath));
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+      }
+      continue;
+    }
+    if (isRecord(raw) && raw['schemaVersion'] !== undefined) {
+      assertKnownVersion(raw, filePath);
+      throw new Error(`Malformed thread record in ${filePath}.`);
+    }
+    const migrated = migrateThread(raw, agents, () => nextRunSequence++);
+    if (migrated.id !== threadId) {
+      throw new Error(
+        `Thread id mismatch: file ${threadId}.json contains id ${migrated.id}.`,
+      );
+    }
+    await replaceMigratedFile(filePath, raw, migrated, isValidThread);
+  }
+
+  const workspace: MeshWorkspaceState = {
+    schemaVersion: MESH_SCHEMA_VERSION,
+    workspaceId: `ws_${randomUUID()}`,
+    nextRunSequence,
+    ...(hostSessionId ? { hostSessionId } : {}),
+  };
+  await atomicWriteJSON(workspacePath, workspace, { noFollow: true });
+  const reread = await readJsonFile(workspacePath);
+  if (!isValidWorkspace(reread)) {
+    throw new Error(
+      `Migrated mesh record failed validation: ${workspacePath}.`,
+    );
+  }
+  return workspace;
+}
+
+export async function ensureMigrated(projectRoot: string): Promise<void> {
+  const current = await readJsonFile(getWorkspaceFilePath(projectRoot));
+  if (isValidWorkspace(current)) return;
+  await withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+  });
+}
+
+async function readAgentsUnlocked(projectRoot: string): Promise<MeshAgent[]> {
   const filePath = getAgentsFilePath(projectRoot);
   const parsed = await readJsonFile(filePath);
   if (parsed === undefined) return [];
-  if (!Array.isArray(parsed)) {
-    throw new Error(
-      `Expected a JSON array in ${filePath} — fix or delete the file; refusing to treat it as no agents.`,
-    );
+  assertKnownVersion(parsed, filePath);
+  if (!agentsFileIsValid(parsed)) {
+    throw new Error(`Malformed mesh agents record in ${filePath}.`);
   }
-  // One malformed entry must not hide the rest: an unreadable agent is
-  // dropped from the roster, exactly as the board listing skips a bad record,
-  // while a corrupt *file* still throws above.
-  return parsed.filter(isValidAgent);
+  return parsed.agents;
 }
 
-async function withFileLock<T>(
-  filePath: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  // proper-lockfile needs the target to exist before it can lock it.
-  try {
-    await fs.access(filePath);
-  } catch {
-    await atomicWriteJSON(
-      filePath,
-      filePath.endsWith(AGENTS_FILENAME) ? [] : {},
-      {
-        noFollow: true,
-      },
+async function writeAgentsUnlocked(
+  projectRoot: string,
+  agents: readonly MeshAgent[],
+): Promise<void> {
+  const record = {
+    schemaVersion: MESH_SCHEMA_VERSION,
+    agents: [...agents],
+  } satisfies MeshAgentsFile;
+  if (!agentsFileIsValid(record)) {
+    throw new Error('Refusing to write malformed mesh agents.');
+  }
+  await atomicWriteJSON(getAgentsFilePath(projectRoot), record, {
+    noFollow: true,
+  });
+}
+
+async function readThreadUnlocked(
+  projectRoot: string,
+  threadId: string,
+): Promise<Thread | undefined> {
+  const filePath = getThreadPath(projectRoot, threadId);
+  const parsed = await readJsonFile(filePath);
+  if (parsed === undefined) return undefined;
+  assertKnownVersion(parsed, filePath);
+  if (!isValidThread(parsed)) {
+    throw new Error(`Malformed thread record in ${filePath}.`);
+  }
+  if (parsed.id !== threadId) {
+    throw new Error(
+      `Thread id mismatch: file ${threadId}.json contains id ${parsed.id}.`,
     );
   }
-  const release = await lockfile.lock(filePath, LOCK_OPTIONS);
-  try {
-    return await fn();
-  } finally {
-    await release();
+  return parsed;
+}
+
+async function listThreadsUnlocked(
+  projectRoot: string,
+): Promise<{ threads: Thread[]; unreadable: string[] }> {
+  const threads: Thread[] = [];
+  const unreadable: string[] = [];
+  for (const id of await listThreadIdsUnlocked(projectRoot)) {
+    try {
+      const thread = await readThreadUnlocked(projectRoot, id);
+      if (thread) threads.push(thread);
+    } catch (error) {
+      if (error instanceof MeshSchemaVersionError) throw error;
+      unreadable.push(id);
+    }
   }
+  threads.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+  return { threads, unreadable };
+}
+
+function trimThread(thread: Thread): Thread {
+  if (
+    thread.messages.length <= MAX_THREAD_MESSAGES &&
+    thread.runs.length <= MAX_THREAD_RUNS
+  ) {
+    return thread;
+  }
+  const firstRetainedMessage = Math.max(
+    0,
+    thread.messages.length - MAX_THREAD_MESSAGES,
+  );
+  const firstRetainedRun = Math.max(0, thread.runs.length - MAX_THREAD_RUNS);
+  const retainedRuns = thread.runs.filter(
+    (run, index) =>
+      index >= firstRetainedRun ||
+      run.usageByRound.length > 0 ||
+      run.status === 'queued' ||
+      run.status === 'running' ||
+      run.status === 'finishing' ||
+      run.status === 'cancelling',
+  );
+  const referencedMessageIds = new Set(
+    retainedRuns.flatMap((run) => [
+      ...run.triggerMessageIds,
+      ...run.acceptedMessageIds,
+      ...run.consumedMessageIds,
+      ...(run.finalMessageId ? [run.finalMessageId] : []),
+    ]),
+  );
+  return {
+    ...thread,
+    messages: thread.messages.filter(
+      (message, index) =>
+        index >= firstRetainedMessage ||
+        message.originEventId !== undefined ||
+        referencedMessageIds.has(message.id),
+    ),
+    runs: retainedRuns,
+  };
+}
+
+async function writeThreadUnlocked(
+  projectRoot: string,
+  thread: Thread,
+): Promise<Thread> {
+  const next = trimThread({ ...thread, tokensUsed: sumRunTokens(thread.runs) });
+  if (!isValidThread(next)) {
+    throw new Error(
+      `Refusing to write malformed thread record "${thread.id}".`,
+    );
+  }
+  const filePath = getThreadPath(projectRoot, next.id);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await atomicWriteJSON(filePath, next, { noFollow: true });
+  return next;
+}
+
+export interface MeshStoreTransaction {
+  readonly projectRoot: string;
+  readAgents(): Promise<MeshAgent[]>;
+  writeAgents(agents: readonly MeshAgent[]): Promise<void>;
+  readThread(threadId: string): Promise<Thread | undefined>;
+  listThreads(): Promise<{ threads: Thread[]; unreadable: string[] }>;
+  writeThread(thread: Thread): Promise<Thread>;
+  deleteThreadFile(threadId: string): Promise<boolean>;
+  allocateRunSequence(): Promise<number>;
+  threadTreeTokens(rootThreadId: string): Promise<number>;
+}
+
+function makeTransaction(
+  projectRoot: string,
+  initialWorkspace: MeshWorkspaceState,
+): MeshStoreTransaction {
+  let workspace = initialWorkspace;
+  return {
+    projectRoot,
+    readAgents: () => readAgentsUnlocked(projectRoot),
+    writeAgents: (agents) => writeAgentsUnlocked(projectRoot, agents),
+    readThread: (threadId) => readThreadUnlocked(projectRoot, threadId),
+    listThreads: () => listThreadsUnlocked(projectRoot),
+    writeThread: (thread) => writeThreadUnlocked(projectRoot, thread),
+    deleteThreadFile: async (threadId) => {
+      try {
+        await fs.unlink(getThreadPath(projectRoot, threadId));
+        return true;
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') return false;
+        throw error;
+      }
+    },
+    allocateRunSequence: async () => {
+      const sequence = workspace.nextRunSequence;
+      workspace = { ...workspace, nextRunSequence: sequence + 1 };
+      await atomicWriteJSON(getWorkspaceFilePath(projectRoot), workspace, {
+        noFollow: true,
+      });
+      return sequence;
+    },
+    threadTreeTokens: async (rootThreadId) => {
+      const { threads, unreadable } = await listThreadsUnlocked(projectRoot);
+      if (unreadable.length > 0) {
+        throw new Error(
+          `Cannot calculate thread budget while records are unreadable: ${unreadable.join(', ')}.`,
+        );
+      }
+      return threads
+        .filter((thread) => thread.rootThreadId === rootThreadId)
+        .reduce((sum, thread) => sum + sumRunTokens(thread.runs), 0);
+    },
+  };
+}
+
+export async function withMeshStoreTransaction<T>(
+  projectRoot: string,
+  run: (transaction: MeshStoreTransaction) => Promise<T>,
+): Promise<T> {
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    return run(makeTransaction(projectRoot, workspace));
+  });
+}
+
+export async function readMeshWorkspace(
+  projectRoot: string,
+): Promise<MeshWorkspaceState> {
+  return withMeshStoreTransaction(projectRoot, async () => {
+    const filePath = getWorkspaceFilePath(projectRoot);
+    const parsed = await readJsonFile(filePath);
+    if (!isValidWorkspace(parsed)) {
+      assertKnownVersion(parsed, filePath);
+      throw new Error('Malformed mesh workspace record.');
+    }
+    return parsed;
+  });
+}
+
+export async function readMeshAgents(
+  projectRoot: string,
+): Promise<MeshAgent[]> {
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    transaction.readAgents(),
+  );
 }
 
 export async function updateMeshAgents(
   projectRoot: string,
   mutate: (agents: MeshAgent[]) => MeshAgent[],
 ): Promise<MeshAgent[]> {
-  const filePath = getAgentsFilePath(projectRoot);
-  return getUpdateMutex(filePath).runExclusive(async () =>
-    withFileLock(filePath, async () => {
-      const agents = await readMeshAgents(projectRoot);
-      const next = mutate(agents);
-      if (next !== agents) {
-        await atomicWriteJSON(filePath, next, { noFollow: true });
-      }
-      return next;
-    }),
-  );
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const next = mutate(agents);
+    if (next !== agents) await transaction.writeAgents(next);
+    return next;
+  });
 }
 
-/** Case-insensitive: mention routing must not depend on capitalisation. */
 export function findAgentByName(
   agents: readonly MeshAgent[],
   name: string,
@@ -347,107 +1057,36 @@ export function queueLimitFor(agent: MeshAgent): number {
   return agent.queueLimit ?? DEFAULT_QUEUE_LIMIT;
 }
 
-// ─── Threads ────────────────────────────────────────────────
-
 export async function listThreadIds(projectRoot: string): Promise<string[]> {
-  const dir = getThreadsDir(projectRoot);
-  let entries: string[];
-  try {
-    entries = await fs.readdir(dir);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return [];
-    throw err;
-  }
-  return entries
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => name.slice(0, -'.json'.length))
-    .filter(isValidId);
+  return withMeshStoreTransaction(projectRoot, () =>
+    listThreadIdsUnlocked(projectRoot),
+  );
 }
 
 export async function readThread(
   projectRoot: string,
   threadId: string,
 ): Promise<Thread | undefined> {
-  const parsed = await readJsonFile(getThreadPath(projectRoot, threadId));
-  if (parsed === undefined) return undefined;
-  if (!isValidThread(parsed)) {
-    throw new Error(
-      `Malformed thread record in ${getThreadPath(projectRoot, threadId)} — fix or delete the file.`,
-    );
-  }
-  // The id in the file wins over the filename only if they agree; a mismatch
-  // means the file was moved or hand-edited, and silently trusting either
-  // one would let a thread answer to two ids.
-  if (parsed.id !== threadId) {
-    throw new Error(
-      `Thread id mismatch: file ${threadId}.json contains id ${parsed.id}.`,
-    );
-  }
-  return parsed;
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    transaction.readThread(threadId),
+  );
 }
 
-/** Reads every thread, skipping (and reporting) ones that fail validation. */
 export async function listThreads(
   projectRoot: string,
 ): Promise<{ threads: Thread[]; unreadable: string[] }> {
-  const ids = await listThreadIds(projectRoot);
-  const threads: Thread[] = [];
-  const unreadable: string[] = [];
-  for (const id of ids) {
-    try {
-      const thread = await readThread(projectRoot, id);
-      if (thread) threads.push(thread);
-    } catch {
-      unreadable.push(id);
-    }
-  }
-  threads.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
-  return { threads, unreadable };
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    transaction.listThreads(),
+  );
 }
 
 export async function writeThread(
   projectRoot: string,
   thread: Thread,
 ): Promise<void> {
-  const filePath = getThreadPath(projectRoot, thread.id);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await atomicWriteJSON(filePath, trimThread(thread), { noFollow: true });
-}
-
-/**
- * Drops the oldest terminal history past the retention bounds. Messages and
- * runs still needed by queued/running work are retained even if that exceeds a
- * bound; retention must not break a live run's durable trigger references.
- */
-function trimThread(thread: Thread): Thread {
-  if (
-    thread.messages.length <= MAX_THREAD_MESSAGES &&
-    thread.runs.length <= MAX_THREAD_RUNS
-  ) {
-    return thread;
-  }
-  const firstRetainedMessage = Math.max(
-    0,
-    thread.messages.length - MAX_THREAD_MESSAGES,
-  );
-  const firstRetainedRun = Math.max(0, thread.runs.length - MAX_THREAD_RUNS);
-  const retainedRuns = thread.runs.filter(
-    (run, index) =>
-      index >= firstRetainedRun ||
-      run.status === 'queued' ||
-      run.status === 'running',
-  );
-  const referencedMessageIds = new Set(
-    retainedRuns.flatMap((run) => run.triggerMessageIds),
-  );
-  return {
-    ...thread,
-    messages: thread.messages.filter(
-      (message, index) =>
-        index >= firstRetainedMessage || referencedMessageIds.has(message.id),
-    ),
-    runs: retainedRuns,
-  };
+  await withMeshStoreTransaction(projectRoot, async (transaction) => {
+    await transaction.writeThread(thread);
+  });
 }
 
 export async function updateThread(
@@ -455,16 +1094,15 @@ export async function updateThread(
   threadId: string,
   mutate: (thread: Thread) => Thread,
 ): Promise<Thread> {
-  const filePath = getThreadPath(projectRoot, threadId);
-  return getUpdateMutex(filePath).runExclusive(async () =>
-    withFileLock(filePath, async () => {
-      const thread = await readThread(projectRoot, threadId);
-      if (!thread) throw new Error(`No thread with id "${threadId}".`);
-      const next = mutate(thread);
-      if (next !== thread) await writeThread(projectRoot, next);
-      return next;
-    }),
-  );
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) throw new Error(`No thread with id "${threadId}".`);
+    const next = mutate(thread);
+    if (next.id !== threadId) {
+      throw new Error('A thread update cannot change its id.');
+    }
+    return next === thread ? thread : transaction.writeThread(next);
+  });
 }
 
 export async function createThread(
@@ -474,106 +1112,176 @@ export async function createThread(
     body?: string;
     createdBy?: string;
     assigneeAgentId?: string;
-    /** Set when an agent splits work out of a thread it is already on. */
     parentThreadId?: string;
   },
 ): Promise<Thread> {
-  const id = generateThreadId();
-  // The root is inherited, not recomputed, so a chain of sub-threads keeps
-  // spending one budget however deep it goes. Resolving it by walking parents
-  // at spend time would make the budget depend on files that may be missing.
-  let rootThreadId = id;
-  let autoTurnsUsed = 0;
-  if (input.parentThreadId) {
-    const parent = await readThread(projectRoot, input.parentThreadId);
-    if (!parent) {
-      throw new Error(`No parent thread with id "${input.parentThreadId}".`);
-    }
-    rootThreadId = parent.rootThreadId;
-    autoTurnsUsed = parent.autoTurnsUsed;
-    if (rootThreadId !== parent.id) {
-      const root = await readThread(projectRoot, rootThreadId);
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const id = generateThreadId();
+    let rootThreadId = id;
+    let autoTurnsUsed = 0;
+    if (input.parentThreadId) {
+      const parent = await transaction.readThread(input.parentThreadId);
+      if (!parent) {
+        throw new Error(`No parent thread with id "${input.parentThreadId}".`);
+      }
+      rootThreadId = parent.rootThreadId;
+      autoTurnsUsed = parent.autoTurnsUsed;
+      const root = await transaction.readThread(rootThreadId);
       if (!root || root.rootThreadId !== root.id) {
         throw new Error(`No valid root thread with id "${rootThreadId}".`);
       }
     }
-  }
-  const thread: Thread = {
-    id,
-    title: input.title,
-    body: input.body ?? '',
-    status: 'open',
-    createdAt: Date.now(),
-    createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
-    rootThreadId,
-    messages: [],
-    runs: [],
-    autoTurnsUsed,
-    tokensUsed: 0,
-    ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
-    ...(input.assigneeAgentId
-      ? { assigneeAgentId: input.assigneeAgentId }
-      : {}),
-  };
-  await writeThread(projectRoot, thread);
-  return thread;
+    return transaction.writeThread({
+      schemaVersion: MESH_SCHEMA_VERSION,
+      id,
+      title: input.title,
+      body: input.body ?? '',
+      status: 'open',
+      createdAt: Date.now(),
+      createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
+      rootThreadId,
+      messages: [],
+      runs: [],
+      nextMessageSequence: 1,
+      deliveryByAgent: {},
+      outbox: [],
+      autoTurnsUsed,
+      tokensUsed: 0,
+      ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
+      ...(input.assigneeAgentId
+        ? { assigneeAgentId: input.assigneeAgentId }
+        : {}),
+    });
+  });
 }
 
-/**
- * Reads the record a thread's budget is spent from. A root thread is its own.
- *
- * Fails closed when the root is absent or invalid. A child carries less token
- * spend than the tree, so falling back to it would weaken the budget gate.
- */
 export async function readTokenBudgetThread(
   projectRoot: string,
   thread: Thread,
 ): Promise<Thread> {
-  if (thread.rootThreadId === thread.id) return thread;
-  const root = await readThread(projectRoot, thread.rootThreadId);
-  if (!root || root.rootThreadId !== root.id) {
-    throw new Error(
-      `No valid root thread with id "${thread.rootThreadId}" for "${thread.id}".`,
-    );
-  }
-  return root;
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const root = await transaction.readThread(thread.rootThreadId);
+    if (!root || root.rootThreadId !== root.id) {
+      throw new Error(
+        `No valid root thread with id "${thread.rootThreadId}" for "${thread.id}".`,
+      );
+    }
+    return {
+      ...root,
+      tokensUsed: await transaction.threadTreeTokens(root.id),
+    };
+  });
+}
+
+export async function allocateRunSequence(
+  projectRoot: string,
+): Promise<number> {
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    transaction.allocateRunSequence(),
+  );
 }
 
 export async function deleteThread(
   projectRoot: string,
   threadId: string,
 ): Promise<boolean> {
-  const thread = await readThread(projectRoot, threadId);
-  if (!thread) return false;
-  if (
-    thread.runs.some(
-      (run) => run.status === 'queued' || run.status === 'running',
-    )
-  ) {
-    throw new Error(`Cannot delete thread "${threadId}" with active runs.`);
-  }
-  const { threads, unreadable } = await listThreads(projectRoot);
-  if (unreadable.length > 0) {
-    throw new Error(
-      `Cannot safely delete thread "${threadId}" while thread records are unreadable.`,
-    );
-  }
-  if (
-    threads.some(
-      (candidate) =>
-        candidate.id !== threadId &&
-        (candidate.parentThreadId === threadId ||
-          (thread.rootThreadId === thread.id &&
-            candidate.rootThreadId === thread.id)),
-    )
-  ) {
-    throw new Error(`Cannot delete thread "${threadId}" with sub-threads.`);
-  }
-  try {
-    await fs.unlink(getThreadPath(projectRoot, threadId));
-    return true;
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return false;
-    throw err;
-  }
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) return false;
+    if (
+      thread.runs.some(
+        (run) =>
+          run.status === 'queued' ||
+          run.status === 'running' ||
+          run.status === 'finishing' ||
+          run.status === 'cancelling',
+      )
+    ) {
+      throw new Error(`Cannot delete thread "${threadId}" with active runs.`);
+    }
+    if (thread.outbox.some((event) => event.status === 'pending')) {
+      throw new Error(
+        `Cannot delete thread "${threadId}" with pending events.`,
+      );
+    }
+    const { threads, unreadable } = await transaction.listThreads();
+    if (unreadable.length > 0) {
+      throw new Error(
+        `Cannot safely delete thread "${threadId}" while thread records are unreadable.`,
+      );
+    }
+    if (
+      threads.some(
+        (candidate) =>
+          candidate.id !== threadId &&
+          (candidate.parentThreadId === threadId ||
+            (thread.rootThreadId === thread.id &&
+              candidate.rootThreadId === thread.id)),
+      )
+    ) {
+      throw new Error(`Cannot delete thread "${threadId}" with sub-threads.`);
+    }
+    return transaction.deleteThreadFile(threadId);
+  });
+}
+
+export async function enqueueThreadEvent(
+  projectRoot: string,
+  threadId: string,
+  event: Omit<ThreadEvent, 'id' | 'status' | 'attempts' | 'createdAt'> & {
+    id?: string;
+    createdAt?: number;
+  },
+): Promise<ThreadEvent> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) throw new Error(`No thread with id "${threadId}".`);
+    const stored: ThreadEvent = {
+      ...event,
+      id: event.id ?? generateEventId(),
+      status: 'pending',
+      attempts: 0,
+      createdAt: event.createdAt ?? Date.now(),
+    };
+    await transaction.writeThread({
+      ...thread,
+      outbox: [...thread.outbox, stored],
+    });
+    return stored;
+  });
+}
+
+export async function reconcileThreadOutbox(
+  projectRoot: string,
+  threadId: string,
+  apply: (
+    transaction: MeshStoreTransaction,
+    event: ThreadEvent,
+  ) => Promise<void>,
+): Promise<Thread> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    let source = await transaction.readThread(threadId);
+    if (!source) throw new Error(`No thread with id "${threadId}".`);
+    for (const event of source.outbox) {
+      if (event.status !== 'pending') continue;
+      const attempted = { ...event, attempts: event.attempts + 1 };
+      source = await transaction.writeThread({
+        ...source,
+        outbox: source.outbox.map((candidate) =>
+          candidate.id === event.id ? attempted : candidate,
+        ),
+      });
+      await apply(transaction, attempted);
+      source = (await transaction.readThread(threadId)) ?? source;
+      source = await transaction.writeThread({
+        ...source,
+        outbox: source.outbox.map((candidate) =>
+          candidate.id === event.id
+            ? { ...candidate, status: 'acknowledged' }
+            : candidate,
+        ),
+      });
+    }
+    return source;
+  });
 }

@@ -12,6 +12,7 @@ import {
 } from './dispatch-policy.js';
 import {
   HUMAN_AUTHOR_ID,
+  MESH_SCHEMA_VERSION,
   type MeshAgent,
   type Thread,
   type ThreadMessage,
@@ -24,6 +25,7 @@ function agent(overrides: Partial<MeshAgent> = {}): MeshAgent {
 
 function thread(overrides: Partial<Thread> = {}): Thread {
   return {
+    schemaVersion: MESH_SCHEMA_VERSION,
     id: 'th_1',
     title: 'Investigate the flake',
     body: '',
@@ -33,6 +35,9 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     rootThreadId: 'th_1',
     messages: [],
     runs: [],
+    nextMessageSequence: 1,
+    deliveryByAgent: {},
+    outbox: [],
     autoTurnsUsed: 0,
     tokensUsed: 0,
     ...overrides,
@@ -42,9 +47,13 @@ function thread(overrides: Partial<Thread> = {}): Thread {
 function message(overrides: Partial<ThreadMessage> = {}): ThreadMessage {
   return {
     id: 'ms_1',
+    sequence: 1,
+    authorKind: 'human',
     from: HUMAN_AUTHOR_ID,
+    authorNameSnapshot: HUMAN_AUTHOR_ID,
     text: 'have a look',
     mentions: [],
+    outcomes: [],
     at: 2_000,
     ...overrides,
   };
@@ -56,6 +65,10 @@ function run(overrides: Partial<ThreadRun> = {}): ThreadRun {
     agentId: 'ag_alice',
     status: 'queued',
     triggerMessageIds: ['ms_0'],
+    acceptedMessageIds: [],
+    consumedMessageIds: [],
+    usageByRound: [],
+    queueSequence: 1,
     queuedAt: 1_500,
     attempts: 0,
     ...overrides,
