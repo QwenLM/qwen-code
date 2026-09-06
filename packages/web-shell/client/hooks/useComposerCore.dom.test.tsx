@@ -2459,4 +2459,70 @@ describe('useComposerCore attachment chip deletion keys', () => {
     expect(latest!.composerTags).toHaveLength(1);
     expect(latest!.pastedImages).toHaveLength(0);
   });
+
+  it('removes a removable composer tag before pasted attachments with Delete', async () => {
+    // Delete twin of the Backspace tag-precedence test: weakening the named
+    // Delete handler's tag scan must turn red instead of destroying the image.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'orders', value: 'orders' }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
+      );
+    });
+
+    expect(latest!.composerTags).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('removes the last pasted file with Backspace when only files are attached', async () => {
+    // Two files pin the file-side index: Backspace removes the visually last
+    // file, so 'a.log' must survive.
+    await mount();
+    const files = [
+      new File(['a'], 'a.log', { type: 'text/plain' }),
+      new File(['b'], 'b.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 0, files: 2 });
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'a.log' }]);
+  });
+
+  it('removes the first pasted file with Delete when only files are attached', async () => {
+    // Delete twin of the file-side index pin: Delete removes the visually
+    // first file, so 'b.log' must survive. This also exercises the Delete
+    // wrapper's file branch, which no other test reaches.
+    await mount();
+    const files = [
+      new File(['a'], 'a.log', { type: 'text/plain' }),
+      new File(['b'], 'b.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 0, files: 2 });
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'b.log' }]);
+  });
 });

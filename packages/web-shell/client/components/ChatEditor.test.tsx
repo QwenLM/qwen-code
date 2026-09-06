@@ -3278,3 +3278,29 @@ describe('ChatEditor file upload gating', () => {
     });
   });
 });
+
+describe('ChatEditor attachment strip order', () => {
+  it('renders the image strip before the attachments strip', () => {
+    // The Backspace-last / Delete-first chip semantics in useComposerCore
+    // depend on this DOM order (both strips are column flex children, so DOM
+    // order is visual order); a layout change that flips it must turn red.
+    const container = renderChatEditor({
+      pastedImages: [{ data: 'aGVsbG8=', media_type: 'image/png' }],
+      pastedFiles: [
+        { name: 'notes.log', media_type: 'text/plain', text: 'log' },
+      ],
+      visibleToolbarActions: [],
+    });
+    const images = container.querySelector('[data-web-shell-composer-images]')!;
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    )!;
+
+    expect(images).toBeTruthy();
+    expect(attachments).toBeTruthy();
+    expect(
+      images.compareDocumentPosition(attachments) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
