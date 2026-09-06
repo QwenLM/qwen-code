@@ -87,7 +87,7 @@
     "async-mutex": "^0.5.0",
     "chardet": "^2.1.0",
     "chokidar": "^4.0.3",
-    "diff": "^8.0.2",
+    "diff": "^8.0.3",
     "dotenv": "^17.1.0",
     "fast-levenshtein": "^2.0.6",
     "fast-uri": "^3.0.6",
@@ -128,7 +128,6 @@
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "devDependencies": {
-    "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
     "@types/minimatch": "^5.1.2",
