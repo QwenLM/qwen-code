@@ -2219,3 +2219,53 @@ describe('useComposerCore tags', () => {
     expect(editor.textContent).not.toContain(serialized);
   });
 });
+
+describe('useComposerCore attachment chip deletion keys', () => {
+  it('removes the last pasted image with Backspace when the composer has no text or tags', async () => {
+    // Regression for issue #10794: Backspace used to return false when no
+    // removable @-tag existed, so image-only composers ignored the key.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedImages).toHaveLength(1);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedImages).toHaveLength(0);
+  });
+
+  it('removes the first pasted image with Delete when the composer has no text or tags', async () => {
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['png2'], 'photo2.png', { type: 'image/png' }),
+    ];
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedImages).toHaveLength(2);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedImages).toHaveLength(1);
+    // data is stored base64-encoded: 'png2' identifies the *second* image,
+    // proving Delete removed the first one.
+    expect(atob(latest!.pastedImages[0].data as string)).toBe('png2');
+  });
+});

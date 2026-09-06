@@ -2906,7 +2906,19 @@ export function useComposerCore(
               break;
             }
           }
-          if (removableIndex < 0) return false;
+          if (removableIndex < 0) {
+            // No @-tags to remove: fall back to the last pasted attachment
+            // (files render after images) so Backspace still deletes a chip.
+            if (pastedFilesRef.current.length > 0) {
+              removeFile(pastedFilesRef.current.length - 1);
+              return true;
+            }
+            if (pastedImagesRef.current.length > 0) {
+              removeImage(pastedImagesRef.current.length - 1);
+              return true;
+            }
+            return false;
+          }
           setComposerTags((current) =>
             current.filter((_, index) => index !== removableIndex),
           );
@@ -2926,7 +2938,19 @@ export function useComposerCore(
           const removableIndex = composerTagsRef.current.findIndex(
             (tag) => tag.removable !== false,
           );
-          if (removableIndex < 0) return false;
+          if (removableIndex < 0) {
+            // No @-tags to remove: fall back to the first pasted attachment
+            // (images render before files) so Delete still deletes a chip.
+            if (pastedImagesRef.current.length > 0) {
+              removeImage(0);
+              return true;
+            }
+            if (pastedFilesRef.current.length > 0) {
+              removeFile(0);
+              return true;
+            }
+            return false;
+          }
           setComposerTags((current) =>
             current.filter((_, index) => index !== removableIndex),
           );
