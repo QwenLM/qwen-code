@@ -44484,7 +44484,7 @@ describe('Session', () => {
       // (`if (result.stopReason !== 'end_turn') return;`) is the only line
       // keeping an interrupted or token-capped turn from firing a wasted
       // generatePromptSuggestion call. The published contract
-      // (docs/users/features/features/followup-suggestions.md, #11101)
+      // (docs/users/features/followup-suggestions.md, #11101)
       // suppresses on every non-end_turn member of the ACP StopReason union:
       // cancelled / refusal / max_tokens / max_turn_requests. The gate is a
       // single `!== 'end_turn'` check, and of those four only cancelled and
@@ -44524,6 +44524,7 @@ describe('Session', () => {
         async () =>
           (async function* () {
             await streamGate;
+            yield* createEmptyStream();
           })(),
       );
       const cancellation = new AbortController();
