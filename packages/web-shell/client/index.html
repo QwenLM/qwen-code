@@ -24,11 +24,9 @@
       <html> background matches the app theme on mobile. Without this, the
       iOS Safari rubber-band overscroll and the status-bar / home-indicator
       safe areas briefly show the default white canvas. Storage key mirrors
-      THEME_STORAGE_KEY in main.tsx.
-
-      Kept on one line: this is a render-blocking inline script in <head>, and
-      the expanded form ships ~600 more bytes on the critical path for no
-      readability the surrounding comment does not already give.
+      THEME_STORAGE_KEY in main.tsx. Kept on one line behind the guard below:
+      this comment ships verbatim in the built index.html, so the rationale
+      stays short.
     -->
     <!-- prettier-ignore -->
     <script>
