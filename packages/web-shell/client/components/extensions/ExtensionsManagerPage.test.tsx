@@ -521,4 +521,180 @@ describe('ExtensionsManagerPage activation refresh', () => {
     });
     expect(container.textContent).not.toContain('session refresh failed');
   });
+
+  it('decides the refresh on the trust the reload observes', async () => {
+    await renderPage();
+
+    // Trust is revoked out of band after the page mounted; the reload the
+    // activation performs observes it before the refresh decision.
+    state.workspaceHandle.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'primary',
+      workspaceCwd: '/work/primary',
+      trusted: false,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'a'.repeat(64),
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+      ],
+    });
+    await chooseActivation('user', 'Disabled');
+
+    // The success message renders only after the refresh call site, so a
+    // refresh that would happen could not arrive after this assertion.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Extension "demo" disabled.');
+    });
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+    expect(
+      state.workspaceHandle.refreshExtensionRuntime,
+    ).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
+  });
+
+  it('keeps the newer refresh failure when a superseded refresh rejects late', async () => {
+    state.actions.loadExtensionsStatus.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/work/primary',
+      initialized: true,
+      extensions: [
+        {
+          kind: 'extension',
+          id: 'a'.repeat(64),
+          name: 'demo',
+          displayName: 'Demo',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/demo',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+        {
+          kind: 'extension',
+          id: 'b'.repeat(64),
+          name: 'other',
+          displayName: 'Other',
+          version: '2.0.0',
+          isActive: true,
+          path: '/extensions/other',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+      ],
+    });
+    state.workspaceHandle.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'primary',
+      workspaceCwd: '/work/primary',
+      trusted: true,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'a'.repeat(64),
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+        {
+          extensionId: 'b'.repeat(64),
+          name: 'other',
+          version: '2.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+      ],
+    });
+    // Each submission gets its own promise so the two refreshes can fail
+    // independently and out of order.
+    const rejections: Array<(error: Error) => void> = [];
+    state.workspaceHandle.refreshExtensionRuntime.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejections.push(reject);
+        }),
+    );
+    await renderPage();
+    await chooseActivation('workspace', 'Disabled');
+    await vi.waitFor(() => {
+      expect(
+        state.workspaceHandle.refreshExtensionRuntime,
+      ).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      findButton('Manage Extensions').click();
+    });
+    const otherCard = container.querySelector<HTMLElement>(
+      '[aria-label="Other"]',
+    );
+    expect(otherCard).not.toBeNull();
+    await act(async () => {
+      otherCard!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(2);
+    });
+    await chooseActivation('workspace', 'Disabled');
+    await vi.waitFor(() => {
+      expect(
+        state.workspaceHandle.refreshExtensionRuntime,
+      ).toHaveBeenCalledTimes(2);
+    });
+
+    // The newer refresh fails first and owns the banner.
+    await act(async () => {
+      rejections[1]!(new Error('boom-newer-refresh'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain(
+        'session refresh failed: boom-newer-refresh',
+      );
+    });
+
+    // A rejection from the superseded refresh must not evict it.
+    await act(async () => {
+      rejections[0]!(new Error('boom-superseded-refresh'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain(
+      'session refresh failed: boom-newer-refresh',
+    );
+    expect(container.textContent).not.toContain('boom-superseded-refresh');
+  });
 });

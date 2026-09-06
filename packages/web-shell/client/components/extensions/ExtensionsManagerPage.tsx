@@ -480,6 +480,7 @@ export function ExtensionsManagerPage({
   const [submittingInteraction, setSubmittingInteraction] = useState(false);
   const [operationsRecovered, setOperationsRecovered] = useState(false);
   const mutationInFlightRef = useRef(false);
+  const refreshTokenRef = useRef(0);
   const uninstallInFlightNameRef = useRef<string | null>(null);
   const interactionOperationIdRef = useRef<string | null>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
@@ -578,6 +579,9 @@ export function ExtensionsManagerPage({
               ? name
               : preserveSelectedExtensionName(name, nextExtensions),
           );
+          // Resolve the trust this load observed so awaiting callers decide
+          // on the fresh value, not the render-time state snapshot.
+          return activation ? activation.trusted : null;
         })
         .catch((error: unknown) => {
           if (!preserveMessage) {
@@ -1138,7 +1142,7 @@ export function ExtensionsManagerPage({
             completed.error ?? t('extensions.manage.operationFailed'),
           );
         }
-        await load(true);
+        const observedTrust = (await load(true)) ?? workspaceTrusted;
         setMessageTone('success');
         setMessage(
           operation === 'inherit'
@@ -1147,11 +1151,17 @@ export function ExtensionsManagerPage({
         );
         // An untrusted runtime rejects this refresh; the reconciler is the
         // only path that can serve it.
-        if (activationRequiresExplicitRefresh && workspaceTrusted) {
+        if (activationRequiresExplicitRefresh && observedTrust) {
+          // A rejection from a superseded refresh must not evict the banner
+          // of the refresh that is still current.
+          const refreshToken = ++refreshTokenRef.current;
           void workspace.client
             .workspaceByCwd(workspace.workspaceCwd)
             .refreshExtensionRuntime()
             .catch((error: unknown) => {
+              if (refreshToken !== refreshTokenRef.current) {
+                return;
+              }
               setRefreshError({
                 name: extension.name,
                 text: t('extensions.manage.refreshFailed', {
