@@ -1234,6 +1234,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenPlugins?: () => void;
+      onOpenAgents?: () => void;
       onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
@@ -1384,6 +1385,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onOpenPlugins,
           },
           'plugins',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-agents',
+            type: 'button',
+            onClick: props.onOpenAgents,
+          },
+          'agents',
         ),
         React.createElement(
           'button',
@@ -23874,6 +23884,24 @@ describe('App session callbacks', () => {
         ?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[2]
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('opens Agent management from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-agents"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Agents');
   });
 
   it('restores composer interaction after closing Plugins on the MCP tab', async () => {
