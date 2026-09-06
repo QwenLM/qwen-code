@@ -756,6 +756,27 @@ function mapSessionWriterRequestError(error: unknown): unknown {
     : error;
 }
 
+/**
+ * A write-barrier refusal is only a lifecycle miss when the recorder has
+ * stopped accepting writes and has not latched a writeFailure. Do not key
+ * this on `instanceof SessionWriterUnavailableError`: the barrier rethrows
+ * writeFailure first, and that failure can itself be that class.
+ */
+function isWriterLifecycleUnavailable(recording: object): boolean {
+  const writer = recording as {
+    writeFailure?: unknown;
+    acceptingWrites?: boolean;
+    state?: string;
+  };
+  if (writer.writeFailure != null) {
+    return false;
+  }
+  return (
+    writer.acceptingWrites === false ||
+    (writer.state !== undefined && writer.state !== 'active')
+  );
+}
+
 async function shutdownSessionConfig(config: Config): Promise<void> {
   await config.shutdown({ shutdownTelemetry: false });
   if (config.hasSessionWriteOwnership()) {
@@ -9050,12 +9071,22 @@ class QwenAgent implements Agent {
                 maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
               });
             };
-            // Barrier only the latest tail (#9704). Cursor/anchor pages
-            // never consulted writer health; the barrier would 503 them
-            // after a write failure or during handoff.
+            // Barrier the request's backward/latest page (#9704). The
+            // request direction, not the resolved page direction, is the
+            // gate. Cursor/anchor pages never consulted writer health.
+            // The barrier still waits for in-flight writes. A recorder
+            // that is only lifecycle-unavailable falls back to a direct
+            // disk read; a latched writeFailure still fails the read.
             const page =
               recording !== undefined && rawDirection === 'backward'
-                ? await recording.runWithWriteBarrier(readPersistedPage)
+                ? await recording
+                    .runWithWriteBarrier(readPersistedPage)
+                    .catch((error: unknown) => {
+                      if (!isWriterLifecycleUnavailable(recording)) {
+                        throw error;
+                      }
+                      return readPersistedPage();
+                    })
                 : await readPersistedPage();
             const config = await this.getTranscriptReplayConfig(cwd, settings);
             const replay = await replayTranscriptRecordPage({
