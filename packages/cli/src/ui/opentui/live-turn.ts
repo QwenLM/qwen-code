@@ -26,12 +26,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { readFileSync } from 'node:fs';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   collectText,
   normalizeParts,
-  ToolConfirmationOutcome,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   foldLiveEvent,

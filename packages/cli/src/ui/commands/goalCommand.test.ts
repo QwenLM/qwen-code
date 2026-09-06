@@ -13,6 +13,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   emptyGoalSnapshot,
+  GOAL_PAUSE_REASON_COMMAND,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
@@ -173,6 +174,7 @@ describe('goalCommand', () => {
         action: 'pause',
         expectedGoalId: 'goal-1',
         expectedRevision: 4,
+        reason: GOAL_PAUSE_REASON_COMMAND,
       },
     ],
     [
@@ -210,7 +212,11 @@ describe('goalCommand', () => {
       { action: 'edit', objective: 'revised' },
       { kind: 'edit', objective: 'revised' },
     ],
-    ['pause', { action: 'pause' }, { kind: 'pause' }],
+    [
+      'pause',
+      { action: 'pause', reason: GOAL_PAUSE_REASON_COMMAND },
+      { kind: 'pause' },
+    ],
     ['resume', { action: 'resume' }, { kind: 'resume' }],
     ['clear', { action: 'clear' }, { kind: 'clear' }],
   ] as const)(
@@ -343,6 +349,7 @@ describe('goalCommand', () => {
           action: 'pause',
           expectedGoalId: 'goal-1',
           expectedRevision: 4,
+          reason: GOAL_PAUSE_REASON_COMMAND,
         },
       ],
       [

@@ -19,7 +19,7 @@ import { useState } from 'react';
 import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
-import { MCPServerStatus } from '@qwen-code/qwen-code-core';
+import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
