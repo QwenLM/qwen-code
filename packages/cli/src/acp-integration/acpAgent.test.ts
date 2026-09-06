@@ -659,6 +659,24 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       this.code = code;
     }
   },
+  // The real predicates: the skill install/listing routes reach them through
+  // skill-management.ts, and a stand-in could drift from the core loader's
+  // notion of an install-artifact name shape.
+  isInstallArtifactName: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isInstallArtifactName,
+  isInstallArtifactOfSkill: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isInstallArtifactOfSkill,
+  installArtifactPid: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).installArtifactPid,
+  isSelfNamedSkillDirectory: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isSelfNamedSkillDirectory,
+  resolveLegacyArtifactNamedSkillFile: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveLegacyArtifactNamedSkillFile,
   getMCPDiscoveryState: vi.fn().mockReturnValue('completed'),
   getMCPServerStatus: vi.fn().mockReturnValue('connected'),
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
