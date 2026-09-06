@@ -1162,6 +1162,33 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   });
 }
 
+/**
+ * Scan the text following a consumed opening thinking tag and report whether
+ * a later tag returns the nesting depth to zero, plus whether any nested
+ * opening tag was seen along the way. Single shared depth-counting
+ * implementation for the hold/reject classifier
+ * (classifyContentOnlyThinkingTagPrefix) and the leading-block demotion
+ * detector (hasLeadingBalancedThinkingBlock) so the two scanners can never
+ * drift apart on what "balanced" means.
+ */
+function scanThinkingTagBalance(rest: string): {
+  balanced: boolean;
+  hasNestedOpening: boolean;
+} {
+  let depth = 1;
+  let hasNestedOpening = false;
+  for (;;) {
+    const nextTag = THINKING_TAG_PATTERN.exec(rest);
+    if (!nextTag) return { balanced: false, hasNestedOpening };
+
+    const closing = nextTag[0].startsWith('</');
+    depth += closing ? -1 : 1;
+    if (depth === 0) return { balanced: true, hasNestedOpening };
+    hasNestedOpening ||= !closing;
+    rest = rest.slice(nextTag.index + nextTag[0].length);
+  }
+}
+
 function classifyContentOnlyThinkingTagPrefix(
   text: string,
   streamFinished: boolean,
@@ -1210,19 +1237,8 @@ function classifyContentOnlyThinkingTagPrefix(
     }
   }
 
-  let depth = 1;
-  let hasNestedOpening = false;
-  for (;;) {
-    const nextTag = THINKING_TAG_PATTERN.exec(rest);
-    if (!nextTag) break;
-
-    const closing = nextTag[0].startsWith('</');
-    depth += closing ? -1 : 1;
-    if (depth === 0) return 'clean';
-    hasNestedOpening ||= !closing;
-    rest = rest.slice(nextTag.index + nextTag[0].length);
-  }
-
+  const { balanced, hasNestedOpening } = scanThinkingTagBalance(rest);
+  if (balanced) return 'clean';
   if (!hasNestedOpening) return 'pending';
   return streamFinished ? 'leaked' : 'suspicious';
 }
@@ -1233,23 +1249,16 @@ function classifyContentOnlyThinkingTagPrefix(
  * `<think>/<thinking> ... </think>/</thinking>` shape production captures
  * showed as leaked chain-of-thought (issues #6666, #10791). False for a
  * leading closing tag, no leading tag, or a block that has not balanced yet.
- * Shares the depth-counting semantics of classifyContentOnlyThinkingTagPrefix.
+ * Delegates to the same depth-counting scan as
+ * classifyContentOnlyThinkingTagPrefix so detector and classifier share one
+ * source of truth for balance.
  */
 function hasLeadingBalancedThinkingBlock(text: string): boolean {
   const candidate = text.trimStart();
   const opening = LEADING_THINKING_TAG_PATTERN.exec(candidate)?.[0];
   if (!opening || opening.trimStart().startsWith('</')) return false;
 
-  let rest = candidate.slice(opening.length);
-  let depth = 1;
-  for (;;) {
-    const nextTag = THINKING_TAG_PATTERN.exec(rest);
-    if (!nextTag) return false;
-
-    depth += nextTag[0].startsWith('</') ? -1 : 1;
-    if (depth === 0) return true;
-    rest = rest.slice(nextTag.index + nextTag[0].length);
-  }
+  return scanThinkingTagBalance(candidate.slice(opening.length)).balanced;
 }
 
 function throwProtocolTagLeak(requestContext: RequestContext): never {
@@ -1282,13 +1291,33 @@ export function convertOpenAIResponseToLlm(
       // with no structured reasoning channel, demote the block through the
       // same tagged-thinking parser the streaming path uses instead of
       // passing the raw tags through verbatim.
-      textParts =
+      const demoteLeadingContentOnlyBlock =
         requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
           true &&
         !reasoningText &&
-        hasLeadingBalancedThinkingBlock(choice.message.content)
-          ? parseTaggedThinkingText(choice.message.content)
-          : convertOpenAITextToParts(choice.message.content, requestContext);
+        hasLeadingBalancedThinkingBlock(choice.message.content);
+      if (demoteLeadingContentOnlyBlock) {
+        // Parse with a real TaggedThinkingParser and fail closed when the
+        // closing tag never arrives, mirroring the streaming finish guard:
+        // the tolerant balance detector accepts whitespace like
+        // `</think >` that the parser's exact tag literals do not, and the
+        // old throwaway parse would silently hide the whole message —
+        // including the visible answer — in the thought channel (review
+        // finding 1 / #10982). Stray closing tags left by depth-nested
+        // input are stripped as protocol remnants (review finding 2).
+        const parser = new TaggedThinkingParser({
+          stripStrayClosingTags: true,
+        });
+        textParts = parser.parse(choice.message.content, true);
+        if (parser.hasUnclosedThought()) {
+          throwProtocolTagLeak(requestContext);
+        }
+      } else {
+        textParts = convertOpenAITextToParts(
+          choice.message.content,
+          requestContext,
+        );
+      }
     }
 
     // Handle reasoning content (thoughts).
@@ -1486,7 +1515,15 @@ export function convertOpenAIChunkToLlm(
           !taggedThinkingCandidate.trimStart().startsWith('</')) ||
         contentOnlyBalancedThinkingBlock
       ) {
-        requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
+        // The content-only demotion detector counts nesting depth while the
+        // parser is a binary toggle, so depth-nested input can return the
+        // parser to text mode one tag early and leak a stray closing tag as
+        // the visible answer — strip those remnants on the demotion path
+        // (review finding 2). The after-reasoning branch keeps the default
+        // parser so its literal-tag behavior is unchanged.
+        requestContext.taggedThinkingParser ??= contentOnlyBalancedThinkingBlock
+          ? new TaggedThinkingParser({ stripStrayClosingTags: true })
+          : new TaggedThinkingParser();
         requestContext.pendingThinkingTagCandidate = undefined;
         contentParts = requestContext.taggedThinkingParser.parse(
           taggedThinkingCandidate,

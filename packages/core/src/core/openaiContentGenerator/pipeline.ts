@@ -674,7 +674,13 @@ export class ContentGenerationPipeline {
         }
       } else if (
         context.pendingThinkingTagCandidate ||
-        (context.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+        // Mirrors the converter's finish-reason guard: a demotion-installed
+        // parser with an unclosed thought must fail closed at stream end
+        // even when no chunk ever carried finish_reason (truncated
+        // connection, provider quirk) — for both the after-reasoning and
+        // the content-only demotion options.
+        ((context.responseParsingOptions?.taggedThinkingTagsAfterReasoning ||
+          context.responseParsingOptions?.contentOnlyThinkingTagLeaks) &&
           context.taggedThinkingParser?.hasUnclosedThought())
       ) {
         throw new InvalidStreamError(
