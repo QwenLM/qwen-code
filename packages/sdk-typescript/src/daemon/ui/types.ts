@@ -21,6 +21,7 @@ export type DaemonUiEventType =
   | 'user.text.delta'
   | 'user.image.delta'
   | 'user.file.delta'
+  | 'user.resource_link.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -146,6 +147,24 @@ export interface DaemonUiUserFileEvent extends DaemonUiEventBase {
   name: string;
   mimeType: string;
   attachmentId: string;
+  meta?: DaemonTextDeltaMeta;
+}
+
+/**
+ * A resource link the user attached to a message (ACP `resource_link`
+ * content, e.g. a `file://` reference from an IDE companion). Reference
+ * only: the SDK persists the URI and metadata for replay but never
+ * fetches, previews, or downloads the linked content, and never
+ * fabricates an `attachmentId` for it.
+ */
+export interface DaemonUiUserResourceLinkEvent extends DaemonUiEventBase {
+  type: 'user.resource_link.delta';
+  uri: string;
+  /** Display name; falls back to the URI leaf when the peer omitted it. */
+  name: string;
+  mimeType?: string;
+  size?: number;
+  description?: string;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -710,6 +729,7 @@ export type DaemonUiEvent =
   | DaemonUiTextEvent
   | DaemonUiUserImageEvent
   | DaemonUiUserFileEvent
+  | DaemonUiUserResourceLinkEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiAssistantUsageEvent
@@ -971,6 +991,20 @@ export interface DaemonTranscriptBlockBase {
   updatedAt: number;
 }
 
+/**
+ * A user-attached resource link preserved on a user transcript block.
+ * Mirrors the ACP `resource_link` content shape (URI + display metadata).
+ * Reference only — renderers may show an attachment card, but nothing in
+ * the SDK fetches the URI or fabricates an `attachmentId`.
+ */
+export interface DaemonResourceLink {
+  uri: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
+  description?: string;
+}
+
 export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'user' | 'assistant' | 'thought';
   text: string;
@@ -989,6 +1023,14 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
     text?: string;
     attachmentId?: string;
   }>;
+  /**
+   * Resource links (ACP `resource_link` content) the user attached to this
+   * message. Deduplicated by URI within one block: repeated echoes of the
+   * same link never duplicate the entry, while distinct URIs sharing a
+   * filename (and the same URI reused across separate messages) stay
+   * distinct. Absent when the message carried none.
+   */
+  resourceLinks?: DaemonResourceLink[];
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */

@@ -298,6 +298,50 @@ function createTranscriptAttachmentReferenceUpdate(
   } as unknown as SessionUpdate;
 }
 
+/**
+ * Rebuild an ACP `resource_link` user chunk from the `fileData` part the
+ * prompt path persisted for a user-attached resource link (file-scheme
+ * links are stored as `{ fileUri, name, mimeType }` parts). Replay-only
+ * projection: emits the reference so SDK transcript rebuilds keep the
+ * attachment card — nothing here reads or uploads the linked file.
+ *
+ * `mimeData` is accepted alongside `mimeType` because the CLI's ACP prompt
+ * ingestion historically wrote `mimeData` into the persisted part.
+ */
+export function createTranscriptResourceLinkUpdate(
+  fileData: Record<string, unknown>,
+  options: UpdateMetaOptions,
+): SessionUpdate | undefined {
+  const rawFileUri = fileData['fileUri'];
+  if (typeof rawFileUri !== 'string' || rawFileUri.length === 0) {
+    return undefined;
+  }
+  const uri = rawFileUri.startsWith('file://')
+    ? rawFileUri
+    : `file://${rawFileUri}`;
+  const name =
+    typeof fileData['name'] === 'string' && fileData['name'].length > 0
+      ? fileData['name']
+      : (uri.slice(uri.lastIndexOf('/') + 1) || uri);
+  const mimeType =
+    typeof fileData['mimeType'] === 'string'
+      ? fileData['mimeType']
+      : typeof fileData['mimeData'] === 'string'
+        ? fileData['mimeData']
+        : undefined;
+  const meta = buildUpdateMeta(options);
+  return {
+    sessionUpdate: 'user_message_chunk',
+    content: {
+      type: 'resource_link',
+      uri,
+      name,
+      ...(mimeType ? { mimeType } : {}),
+    },
+    ...(meta ? { _meta: meta } : {}),
+  } as unknown as SessionUpdate;
+}
+
 export function createTranscriptUsageUpdate(
   usageMetadata: TranscriptUsageMetadataInput,
   options: TranscriptUsageUpdateOptions = {},
@@ -829,6 +873,30 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             record.uuid,
             `message.parts[${partIndex}].inlineData`,
           );
+        }
+      }
+      // User-attached resource links persist as `fileData` parts (the
+      // prompt path converts ACP `resource_link` file-scheme content into
+      // `{ fileUri, name, mimeType }`). Project them back into
+      // `resource_link` user chunks so transcript replay keeps the
+      // attachment cards; assistant turns never carry them.
+      const fileData = isObjectRecord(part['fileData'])
+        ? part['fileData']
+        : undefined;
+      if (fileData) {
+        recognized = true;
+        if (role === 'user') {
+          const update = createTranscriptResourceLinkUpdate(fileData, meta);
+          if (update) {
+            yield emit(update);
+          } else {
+            this.report(
+              'malformed_part',
+              'Skipped a malformed transcript file part.',
+              record.uuid,
+              `message.parts[${partIndex}].fileData`,
+            );
+          }
         }
       }
       const functionCall = isObjectRecord(part['functionCall'])

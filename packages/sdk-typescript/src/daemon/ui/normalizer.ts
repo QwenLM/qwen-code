@@ -776,6 +776,21 @@ function isAttachmentReferenceContent(value: unknown): boolean {
   );
 }
 
+/**
+ * Display name for a `resource_link` whose peer omitted `name` (ACP marks
+ * it required, but the SDK degrades gracefully): the decoded URI leaf, or
+ * the full URI when there is nothing leaf-shaped to show.
+ */
+function resourceLinkNameFallback(uri: string): string {
+  const leaf = uri.slice(uri.lastIndexOf('/') + 1);
+  if (leaf.length === 0) return uri;
+  try {
+    return decodeURIComponent(leaf);
+  } catch {
+    return leaf;
+  }
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -851,6 +866,24 @@ function normalizeSessionUpdate(
                 },
               ]
             : [];
+        }
+        if (part.kind === 'resource') {
+          // ACP `resource_link` content the user attached to this message.
+          // Preserve the reference (URI + display metadata) so transcript
+          // rebuilds keep the attachment card. Reference only — never fetch
+          // the URI and never fabricate an `attachmentId` for it.
+          return [
+            {
+              ...base,
+              type: 'user.resource_link.delta',
+              uri: part.uri,
+              name: part.name ?? resourceLinkNameFallback(part.uri),
+              ...(part.mediaType ? { mimeType: part.mediaType } : {}),
+              ...(part.size !== undefined ? { size: part.size } : {}),
+              ...(part.description ? { description: part.description } : {}),
+              ...(meta ? { meta } : {}),
+            },
+          ];
         }
         return [];
       }
