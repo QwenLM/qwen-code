@@ -71,6 +71,7 @@ import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
+import { insertSessionAnswerSeparator } from '../utils/session-answer-argv.js';
 import {
   TOP_LEVEL_GLOBAL_OPTIONS,
   DEFAULT_COMMAND,
@@ -578,6 +579,15 @@ export async function parseArguments(): Promise<CliArgs> {
   ) {
     rawArgv = rawArgv.slice(1);
   }
+
+  // Fence the free-text answer payload off from the root parse: a quoted
+  // `--help`/`--version` (or a bare trailing `help`) inside `qwen sessions
+  // answer <session> <text...>` would otherwise print the usage block or
+  // strip the token from the text and exit 0, so the answer is silently
+  // never delivered (issue #11193). After the separator the payload is
+  // positional data to this parse; the answer command splices the first
+  // `--` back out of its raw-args tail, so the text arrives verbatim.
+  rawArgv = insertSessionAnswerSeparator(rawArgv);
 
   const yargsInstance = yargs(rawArgv)
     .locale('en')
