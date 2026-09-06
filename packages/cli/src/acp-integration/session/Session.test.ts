@@ -4126,6 +4126,17 @@ describe('Session', () => {
     releaseMutation();
     expect(session.isIdle()).toBe(true);
     expect(session.isTurnIdle()).toBe(true);
+    expect(session.hasActiveTurn()).toBe(false);
+  });
+
+  it('reports no active turn while the close gate is held', () => {
+    expect(session.hasActiveTurn()).toBe(false);
+    expect(session.isTurnIdle()).toBe(true);
+    const releaseClose = session.beginClose();
+    expect(session.hasActiveTurn()).toBe(false);
+    expect(session.isTurnIdle()).toBe(false);
+    releaseClose();
+    expect(session.isTurnIdle()).toBe(true);
   });
 
   it('rejects a prompt when a history mutation begins during writer admission', async () => {

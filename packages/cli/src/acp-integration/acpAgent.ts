@@ -4649,12 +4649,23 @@ class QwenAgent implements Agent {
    * turns, blocks new ones, and reports closing=true — so isTurnIdle()
    * there is structurally false and would keep genuinely abandoned calls
    * pending forever.
+   *
+   * qwen/status/session/transcript is also ungated and can be served while
+   * another request holds the close gate, or after dispose before the
+   * session leaves this.sessions. Pass ignoreClosing so that path samples
+   * hasActiveTurn() rather than isTurnIdle(): a closing session with no
+   * active turn must still finalize abandoned trailing calls. loadUpdates
+   * keeps the isTurnIdle() sample. isTurnIdle() itself is unchanged — it
+   * remains the busy-check for turn admission.
    */
   private finalizeDanglingForRestore(
     session: Session | undefined,
     turnIdleBeforeRead: boolean,
+    options?: { ignoreClosing?: boolean },
   ): boolean {
-    const idleAtReplay = session?.isTurnIdle() ?? true;
+    const idleAtReplay = options?.ignoreClosing
+      ? !(session?.hasActiveTurn() ?? false)
+      : (session?.isTurnIdle() ?? true);
     const finalize = turnIdleBeforeRead && idleAtReplay;
     // Template literal, not printf-style placeholders: createDebugLogger's
     // formatArgs does no util.format substitution, it space-joins the args.
@@ -9050,8 +9061,12 @@ class QwenAgent implements Agent {
             const recording = liveSession
               ?.getConfig()
               .getChatRecordingService();
-            const turnIdleBeforeRead = liveSession?.isTurnIdle() ?? true;
+            const turnIdleBeforeRead = liveSession
+              ? !liveSession.hasActiveTurn()
+              : true;
+            let readAttempted = false;
             const readPersistedPage = async () => {
+              readAttempted = true;
               const reader = new SessionTranscriptReader(cwd);
               return await reader.readPage(sessionId, {
                 ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
@@ -9071,20 +9086,34 @@ class QwenAgent implements Agent {
                 maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
               });
             };
-            // Barrier the request's backward/latest page (#9704). The
-            // request direction, not the resolved page direction, is the
-            // gate. Cursor/anchor pages never consulted writer health.
-            // The barrier still waits for in-flight writes. A recorder
-            // that is only lifecycle-unavailable falls back to a direct
-            // disk read; a latched writeFailure still fails the read.
+            // Barrier the request's backward/latest page so queued
+            // appends drain before the disk read. Request direction,
+            // not the resolved page direction, is the gate.
+            // Cursor/anchor pages never consulted writer health.
+            // The barrier refuses before touching the tail when the
+            // recorder is lifecycle-inactive, so that fallback drains
+            // via flush().catch then reads. A latched writeFailure
+            // still fails the read. The #9704 dangling placeholder is
+            // decided below by finalizeDanglingForRestore (active-turn
+            // sample), not by this drain — tool results are recorded
+            // only after the batch ends.
             const page =
               recording !== undefined && rawDirection === 'backward'
                 ? await recording
                     .runWithWriteBarrier(readPersistedPage)
-                    .catch((error: unknown) => {
-                      if (!isWriterLifecycleUnavailable(recording)) {
+                    .catch(async (error: unknown) => {
+                      if (
+                        readAttempted ||
+                        !isWriterLifecycleUnavailable(recording)
+                      ) {
                         throw error;
                       }
+                      const reason =
+                        error instanceof Error ? error.message : String(error);
+                      debugLogger.debug(
+                        `[ACP] sessionTranscript lifecycle fallback session=${sessionId} error=${reason}`,
+                      );
+                      await recording.flush().catch(() => undefined);
                       return readPersistedPage();
                     })
                 : await readPersistedPage();
@@ -9096,6 +9125,7 @@ class QwenAgent implements Agent {
               finalizeDangling: this.finalizeDanglingForRestore(
                 liveSession,
                 turnIdleBeforeRead,
+                { ignoreClosing: true },
               ),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
