@@ -471,6 +471,7 @@ describe('post-merge push lane', () => {
       'Generate VS Code companion notices',
       'Check VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
+      'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];
@@ -647,6 +648,71 @@ describe('GitHub helper tests', () => {
     expect(helperSteps).not.toHaveLength(0);
     for (const step of helperSteps) {
       expect(String(step.run), step.name).toContain('--test-concurrency=1');
+    }
+  });
+
+  it('keeps the dependency-free fast lane off npm-package suites', () => {
+    // The github_ci_only helper step runs before ANY dependency install (the
+    // setup-node and `npm ci` steps are gated on the full profile), so every
+    // suite it lists must import node: builtins only. These 9 suites import
+    // the `yaml` npm package; letting the fast lane run the full list made an
+    // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
+    // fresh hosted runner (#10548 review R6-1). The full-profile helper step
+    // still runs every suite after `npm ci`, and a push to main always
+    // classifies `full`, so what the fast lane skips is re-checked there.
+    const depFree = String(ci.env.HELPER_TESTS_DEP_FREE).trim();
+    const fullSuites = String(ci.env.HELPER_TESTS).trim().split(/\s+/);
+    expect(depFree).not.toBe('');
+    expect(depFree).not.toBe('undefined');
+    const depFreeSuites = depFree.split(/\s+/);
+    for (const suite of depFreeSuites) {
+      expect(fullSuites, suite).toContain(suite);
+    }
+    const yamlSuites = [
+      '.github/scripts/classify-release-notes.test.mjs',
+      '.github/scripts/resolve-sandbox-image.test.mjs',
+      '.github/scripts/web-shell-visuals-publish.test.mjs',
+      '.github/scripts/qwen-triage-workflow.test.mjs',
+      '.github/scripts/assign-issue-owner.test.mjs',
+      '.github/scripts/auto-minimize-spam.test.mjs',
+      '.github/scripts/ci-runner-routing.test.mjs',
+      '.github/scripts/assign-pr-owner.test.mjs',
+      '.github/scripts/ci-disk-pressure.test.mjs',
+    ];
+    for (const suite of yamlSuites) {
+      expect(depFreeSuites, suite).not.toContain(suite);
+      expect(fullSuites, suite).toContain(suite);
+    }
+    // The fast lane must consume the dep-free list, not the full one. Select
+    // it by its GATE, never by the list it already consumes: a step that
+    // regressed back to env.HELPER_TESTS would drop out of a content-based
+    // filter, and the hole the filter exists to catch would report green
+    // (#10548 review R6-1 — the first version of this assertion filtered on
+    // `HELPER_TESTS_DEP_FREE` and so pinned the incomplete fix in place while
+    // the sibling `lint_and_static` step still ran the full list with nothing
+    // installed).
+    const fastLaneSteps = Object.entries(ci.jobs)
+      .flatMap(([jobName, job]) =>
+        (job.steps ?? []).map((step) => ({ jobName, step })),
+      )
+      .filter(
+        ({ step }) =>
+          String(step.if ?? '').includes("ci_profile == 'github_ci_only'") &&
+          String(step.run ?? '').includes('node --test'),
+      );
+    // One job owns the fast lane; a second copy is duplicated lint bootstrap
+    // and, when it shares the name, a byte-identity break against the shared
+    // prelude guard above.
+    expect(fastLaneSteps).toHaveLength(1);
+    for (const { jobName, step } of fastLaneSteps) {
+      const where = `${jobName}/${step.name}`;
+      expect(String(step.run), where).toContain('env.HELPER_TESTS_DEP_FREE');
+      // Strip the dep-free name first: `env.HELPER_TESTS` is a substring of
+      // `env.HELPER_TESTS_DEP_FREE`, so an unstripped check is vacuous.
+      expect(
+        String(step.run).replaceAll('HELPER_TESTS_DEP_FREE', ''),
+        where,
+      ).not.toContain('env.HELPER_TESTS');
     }
   });
 });
