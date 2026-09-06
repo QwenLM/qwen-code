@@ -234,6 +234,23 @@ describe('applySkillSideEffects', () => {
     });
   });
 
+  it('stays silent for a skill whose hooks block parses to nothing', () => {
+    const { config, addSessionAllowRule } = makeConfig({
+      getHookSystem: () => undefined,
+    });
+    // `parseSkillContent` assigns `{}` for an explicit `hooks: {}` and for a
+    // block whose event names are all unknown, and `{}` is truthy — so this
+    // is the shape a `!skill.hooks` guard alone lets through.
+    const emptyHooks = { ...gatedSkill, hooks: {} } as SkillConfig;
+
+    applySkillSideEffects(config, emptyHooks);
+
+    expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
+  });
+
   it('registers nothing and does not throw when there is no session id', () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getSessionId: () => undefined,

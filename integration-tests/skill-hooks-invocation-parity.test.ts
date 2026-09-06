@@ -25,6 +25,12 @@ import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 
 const GATE_MARKER = 'GATE_BLOCKED_DOWNSTREAM_SESSION_ID_MISSING';
 const EXECUTED_FLAG = 'executed.flag';
+const SKILL_DESCRIPTION =
+  'Calls the downstream CLI using a runtime-injected session ID';
+// Only a loaded skill command can render its own description in the
+// completion menu, which is what the user path polls for. Match on a prefix
+// short enough to survive a narrow terminal truncating the rest.
+const SKILL_DESCRIPTION_PREFIX = 'Calls the downstream CLI';
 
 function installGatedSkill(testDir: string) {
   const skillDir = join(testDir, '.qwen', 'skills', 'gated-skill');
@@ -34,7 +40,7 @@ function installGatedSkill(testDir: string) {
     join(skillDir, 'SKILL.md'),
     `---
 name: gated-skill
-description: Calls the downstream CLI using a runtime-injected session ID
+description: ${SKILL_DESCRIPTION}
 hooks:
   PreToolUse:
     - matcher: Shell
@@ -158,11 +164,17 @@ describe('skill hooks fire on both invocation paths', () => {
     };
 
     if (!options.modelInvokesSkill) {
-      // USER path: start the skill by hand. Wait for the typed command to be
-      // echoed before submitting it, then for its body to be accepted.
+      // USER path: start the skill by hand. Wait for the command to exist,
+      // not merely for the typed text to come back: the echo lands long
+      // before the skill command registry does, and submitting into that gap
+      // gets `Unknown command: /gated-skill` instead of the skill. That
+      // failure is undetectable downstream — the error text contains
+      // `/gated-skill`, so any inclusion check on the typed command matches
+      // it too. The completion menu rendering the skill's own description is
+      // a signal only a registered command can produce.
       ptyProcess.write('/gated-skill');
-      await waitFor('the slash command to echo', () =>
-        output.includes('/gated-skill'),
+      await waitFor('the skill command to be registered', () =>
+        output.includes(SKILL_DESCRIPTION_PREFIX),
       );
       // The body is submitted as a prompt rather than echoed, so the
       // observable signal is the model call it produces.
@@ -172,6 +184,12 @@ describe('skill hooks fire on both invocation paths', () => {
         'the skill body to reach the model',
         () => fakeServer.requests.length > before,
       );
+      // Guards the wait above rather than the CLI: the command was never
+      // submitted before it existed, so this string must never appear.
+      expect(
+        output,
+        'the slash command was submitted before it was registered',
+      ).not.toContain('Unknown command: /gated-skill');
     }
 
     const prompt = 'run the downstream command';
