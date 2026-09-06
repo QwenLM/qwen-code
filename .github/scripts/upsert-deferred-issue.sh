@@ -400,25 +400,32 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   PR_FETCH_OK=1
   PR_JSON="$(gh api "repos/${REPO}/pulls/${PR}" 2> "${GH_ERR:-/dev/null}")" ||
     PR_FETCH_OK=0
-  # Both fields are API-derived content published under the bot identity,
-  # but the two surfaces they land on render differently. The issue TITLE is
-  # stored and rendered as plain text — no markdown pass, no mention filter —
-  # so the entity/@/comment-opener stages protect nothing there and only
-  # corrupt the one human-facing string this change exists to make readable
-  # (an invisible ZWSP inside `@types`, visible `\-\-` backslashes): the
-  # title variant flattens and caps only. The BODY copy renders markdown, so
-  # it keeps the full mention/comment-opener neutralization, same as the
-  # reason rendering. The slice happens in jq (codepoint-safe): a bash byte
-  # slice could cut a UTF-8 sequence on CJK titles under a C locale and
-  # fail the whole create call.
+  # The title is published on ONE surface: the issue TITLE, which GitHub
+  # stores and renders as plain text — no markdown pass, no mention filter —
+  # so it needs no escaping, and escaping it would only corrupt the one
+  # human-facing string this change exists to make readable (an invisible
+  # ZWSP inside `@types`, visible `\-\-` backslashes). Flatten and cap only.
+  #
+  # It deliberately never reaches the markdown-rendered issue BODY, because a
+  # PR title is fully contributor-controlled text and NO enumerated escape
+  # chain closes that surface: `[URGENT](https://evil.example/phish)` and
+  # `![](https://evil.example/beacon.png)` sail through mention/entity/
+  # comment-opener neutralization byte-identical and render as a live link or
+  # an auto-loading beacon inside bot-authored text maintainers read as
+  # trusted automation output. Worse, an unclosed `<details>` makes a real
+  # HTML5 parser nest the findings `<ul>` inside it — the whole human-facing
+  # surface collapses behind an unlabeled fold while the round still prints
+  # its clean success line, and because the dedupe corpus reads the RAW body
+  # the hidden items then count as already tracked and are never re-published.
+  # The body copy bought nothing: `PR #${PR}` below auto-links on its own, and
+  # the enriched issue title already says what the PR was about. Do NOT
+  # re-add it; if a title ever has to appear in the body, put it in a code
+  # span, never in prose.
+  #
+  # The slice happens in jq (codepoint-safe): a bash byte slice could cut a
+  # UTF-8 sequence on CJK titles under a C locale and fail the create call.
   PR_TITLE_RAW="$(jq -r '(.title // "")
     | gsub("[\r\n\t]+"; " ")
-    | .[0:80]' <<< "${PR_JSON}" 2> /dev/null || true)"
-  PR_TITLE="$(jq -r '(.title // "")
-    | gsub("[\r\n\t]+"; " ")
-    | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
-    | gsub("@"; "@\u200b")
-    | gsub("<!--"; "<!\\-\\-")
     | .[0:80]' <<< "${PR_JSON}" 2> /dev/null || true)"
   PR_AUTHOR="$(jq -r '.user.login // ""' <<< "${PR_JSON}" 2> /dev/null || true)"
   # GitHub login charset; anything else (or a failed fetch) reads as absent.
@@ -436,7 +443,7 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   # The gate is "the call failed OR it yielded nothing usable", not the call
   # status alone. This fetch passes no --jq, and gh copies a non-JSON body raw
   # with serverError set only above status 299, so a transparent proxy answering
-  # `200 text/html` on the self-hosted pool exits 0 while all three derivations
+  # `200 text/html` on the self-hosted pool exits 0 while both derivations
   # above come back empty through their `|| true` — the bare title, no cc, no
   # assignee and a clean success line, precisely the degradation this warning
   # exists to name. Keying on BOTH derived strings being empty cannot
@@ -457,8 +464,10 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   # places, or marker-stripped issues stop being adopted.
   CREATE_TITLE="${TITLE}"
   [[ -n "${PR_TITLE_RAW}" ]] && CREATE_TITLE="${TITLE}: ${PR_TITLE_RAW}"
+  # Neither half of this sentence carries contributor-chosen markup: `PR #${PR}`
+  # auto-links in the rendered body on its own, and PR_AUTHOR is charset-
+  # validated above. The title stays out — see the block above the fetch.
   CONTEXT="PR #${PR}"
-  [[ -n "${PR_TITLE}" ]] && CONTEXT="${CONTEXT} (\"${PR_TITLE}\")"
   [[ -n "${PR_AUTHOR}" ]] && CONTEXT="${CONTEXT} by ${PR_AUTHOR}"
   # The assignment below notifies the author only when GitHub accepts it;
   # external contributors are NOT assignable, so also cc them in the body —

@@ -14403,6 +14403,18 @@ exit 1
     expect(badLogin.out).toContain('tracked in new issue #77');
     expect(badLogin.calls).not.toContain('assignees');
     expect(badLogin.calls).not.toContain('cc @');
+    // Title present + author rejected is the ONLY input that distinguishes the
+    // degradation gate's `&&` from an `||` (PR_TITLE_RAW set, PR_AUTHOR empty).
+    // Under `||` this healthy round would print "creating … with the bare
+    // title, no assignee and no cc" while still creating the ENRICHED title
+    // asserted just below — a warning naming a pulls-endpoint failure that did
+    // not happen and a degradation that did not occur, polluting the very
+    // signal the warning exists to protect. Both halves are pinned so flipping
+    // the operator reds this case either way.
+    expect(badLogin.out).not.toContain('could not fetch PR');
+    expect(badLogin.calls).toContain(
+      '-f title=Deferred review findings from PR #5: t',
+    );
     // `@` outside the class: admitting it would publish a mention whose handle
     // is not the login it looks like, under the bot identity.
     const atLogin = runUpsert({
@@ -14412,6 +14424,7 @@ exit 1
     expect(atLogin.out).toContain('tracked in new issue #77');
     expect(atLogin.calls).not.toContain('assignees');
     expect(atLogin.calls).not.toContain('cc @');
+    expect(atLogin.out).not.toContain('could not fetch PR');
     // One past GitHub's 39-char login bound: only the `{1,39}` upper bound
     // rejects this, so widening it to `{1,}` must red this case.
     const longLogin = runUpsert({
@@ -14421,6 +14434,7 @@ exit 1
     expect(longLogin.out).toContain('tracked in new issue #77');
     expect(longLogin.calls).not.toContain('assignees');
     expect(longLogin.calls).not.toContain('cc @');
+    expect(longLogin.out).not.toContain('could not fetch PR');
     // A rejected assignment only warns: by then the findings are already
     // persisted, and the assignment is a SEPARATE idempotent call — never a
     // second create POST. POST /repos/{owner}/{repo}/issues is not idempotent
@@ -14448,35 +14462,57 @@ exit 1
     ).toBe(1);
     expect(assignFailed.calls).toContain('-f assignees[]=someone');
     expect(assignFailed.calls).toContain('- rc:7 `?`: r');
-    // The PR title is API-derived content published under the bot identity,
-    // and the two surfaces it lands on render differently: the issue TITLE
-    // is plain text (no markdown pass, no mention filter), so it carries the
-    // raw title — flatten+cap only; the BODY renders markdown, so its copy
-    // keeps the full mention/comment-opener neutralization, same as reasons.
-    // The assertions are split per call on purpose: asserted over the whole
-    // log, each rendering could be coming from the other site, so dropping
-    // either half of the split derivation would ship green.
+    // The PR title is API-derived content published under the bot identity, on
+    // ONE surface: the issue TITLE, which GitHub stores and renders as plain
+    // text (no markdown pass, no mention filter), so it carries the raw title
+    // — flatten+cap only, and escaping it would just corrupt the one readable
+    // string this enrichment exists to add.
+    //
+    // It must NOT reach the markdown-rendered BODY. A PR title is fully
+    // contributor-controlled and no enumerated escape chain closes that
+    // surface, so this fixture carries the payloads that survive mention /
+    // entity / comment-opener neutralization byte-identical: a markdown link
+    // (a live, clickable, attacker-chosen URL inside bot-authored text that
+    // maintainers read as trusted automation output) and an unclosed
+    // `<details>`, which makes a real HTML5 parser nest the findings `<ul>`
+    // inside it — the whole human-facing surface collapses behind an
+    // unlabeled fold while the round logs clean success, and since the dedupe
+    // corpus reads the RAW body, the hidden items count as already tracked and
+    // are never re-published. Asserted per call on purpose: over the whole
+    // log, a rendering could be coming from the other site.
     const titled = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
-      prJson: '{"title":"fix @foo <!-- x -->","user":{"login":"someone"}}',
+      prJson:
+        '{"title":"[URGENT](https://evil.example/y) <details> fix @foo <!-- x -->","user":{"login":"someone"}}',
     });
     const titledTitle = titled.calls.match(/-f title=(.*?) -f body=/)?.[1];
     expect(titledTitle).toBe(
-      'Deferred review findings from PR #5: fix @foo <!-- x -->',
+      'Deferred review findings from PR #5: [URGENT](https://evil.example/y) <details> fix @foo <!-- x -->',
     );
     const titledBody = titled.calls.split('-f body=')[1] ?? '';
-    expect(titledBody).toContain('@\u200bfoo');
+    // The title reaches the body in NO spelling — raw, neutralized, or capped.
+    // `evil.example` is the sharpest witness, and deliberately not the
+    // `](https://` syntax: the rc deep link is a legitimate
+    // `](https://github.com/…)` in this same body, so a syntax-level assertion
+    // would stay red even with the title correctly absent.
+    expect(titledBody).not.toContain('evil.example');
+    expect(titledBody).not.toContain('URGENT');
+    expect(titledBody).not.toContain('<details>');
     expect(titledBody).not.toContain('fix @foo');
-    expect(titledBody).toContain('<!\\-\\- x -->');
-    // The BODY copy's ENTITY escape needs its own witness — the reason
-    // path's identical copy is pinned by `mentions`, but a PR title is fully
-    // contributor-controlled and GitHub decodes &#64; BEFORE its mention
-    // filter, so an un-escaped entity in the markdown-rendered body is a
-    // live mention published under the bot identity. The issue-TITLE copy is
-    // plain text — no mention filter — so the raw entity is inert there and
-    // escaping it would only corrupt the string. One case pins both
-    // variants: deleting the body chain's entity gsub, the shared
-    // [\r\n\t] flatten, or the .[0:80] slice each reds an assertion below.
+    expect(titledBody).not.toContain('@\u200bfoo');
+    // …while the body keeps everything it is supposed to carry: the finding,
+    // the auto-linking PR number, and the charset-validated author.
+    expect(titledBody).toContain('- rc:7 `?`: r');
+    expect(titledBody).toContain('from PR #5 by someone');
+    // The issue-TITLE surface is plain text — no mention filter — so a raw
+    // entity is inert there and escaping it would only corrupt the string;
+    // what this case pins there is the shared [\r\n\t] flatten and the .[0:80]
+    // codepoint cap (deleting either reds an assertion below). The
+    // markdown-rendered BODY is the opposite: GitHub decodes &#64; BEFORE its
+    // mention filter, so an entity there is a live mention published under the
+    // bot identity — which is why the title is kept OUT of the body entirely
+    // rather than escaped into it (the reason path's identical escape is
+    // pinned separately by `mentions`).
     const paddedTitle = 'A'.repeat(100);
     const entityTitle = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
@@ -14491,14 +14527,14 @@ exit 1
       `Deferred review findings from PR #5: ping &#64;admin &commat;x ${'A'.repeat(54)}`,
     );
     const entityBody = entityTitle.calls.split('-f body=')[1] ?? '';
-    expect(entityBody).toContain('ping &amp;#64;admin &amp;commat;x AAA');
-    // No live entity survives in the body (`&amp;#64;` does not contain
-    // `&#64;`) …
+    // No spelling of the title may appear in the markdown surface: not the raw
+    // entity, not the `&amp;`-escaped form the body copy used to carry, not
+    // the padded tail. Re-adding a title-body copy — escaped or not — reds one
+    // of these.
+    expect(entityBody).not.toContain('ping');
     expect(entityBody).not.toContain('&#64;');
+    expect(entityBody).not.toContain('&amp;#64;');
     expect(entityBody).not.toContain('&commat;');
-    // … and the slice kept the body copy at 80 codepoints: the escaped prefix
-    // is 34 codepoints, so 46 A's remain — 60 in a row means the slice is
-    // gone.
     expect(entityBody).not.toContain('A'.repeat(60));
     // Append path: existing issue found → dedupe against body+comments,
     // then POST an issue COMMENT (append-only; no body PATCH anywhere).
@@ -16340,12 +16376,17 @@ exit 1
     // INSIDE jq, not in a sed afterwards: the rv/ic dedupe identity is the
     // rendered line, so escaping after the corpus comparison meant a reason
     // containing `<!--` never matched its stored form and republished every
-    // round (R10-5). Two sites: the line-builder reason escape, and the
-    // PR-title neutralization at creation — both must carry the canonical
-    // spelling, and the line-builder one must precede the dedupe comparison.
+    // round (R10-5). ONE site remains — the line-builder reason escape, which
+    // must carry the canonical spelling and precede the dedupe comparison.
+    // The second site this census used to count was the PR-title
+    // neutralization at creation. It is gone on purpose: a contributor-
+    // controlled title is no longer copied into the markdown-rendered issue
+    // body at all, because no escape chain closes that surface (see the
+    // comment above the pulls fetch in the script). Re-adding a title-body
+    // copy must raise this count deliberately, not silently.
     const scriptEscapeSites =
       upsertDeferredScript.match(/gsub\("<!--"; "[^"]*"\)/g) ?? [];
-    expect(scriptEscapeSites).toHaveLength(2);
+    expect(scriptEscapeSites).toHaveLength(1);
     for (const site of scriptEscapeSites) {
       expect(site).toBe('gsub("<!--"; "<!\\\\-\\\\-")');
     }
