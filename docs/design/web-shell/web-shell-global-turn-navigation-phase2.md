@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed, 2026-09-04. Builds on
+Phase 2A implemented in [#11054](https://github.com/QwenLM/qwen-code/pull/11054)
+(under review); Phase 2B pending. Original proposal: 2026-09-04. Builds on
 `web-shell-global-turn-navigation.md` (Phase 1 merged as #10751) and the
 page-table model of `web-shell-bounded-transcript-and-subagent-details.md`.
 
@@ -18,8 +19,11 @@ assigns the complete data layer — including those four — to Phase 2 and leav
 Phase 3 as the rail UI. The parent design's delivery plan is updated in the
 same PR so the two documents stop contradicting each other.
 
-Facts about current code were verified against `origin/main` (`80497a74d0`),
-which includes the merged Phase 1.
+The [implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigation-phase2.md)
+supersedes the proposed API names and migration sequence below. Phase 2A adds
+the headless index, isolated historical page table, reconciliation, and hooks;
+Phase 2B migrates legacy sequential pagination. The problem analysis below
+describes `origin/main` at `80497a74d0`, before Phase 2A.
 
 ## Problem
 
@@ -42,9 +46,9 @@ today:
 - The rail (`SessionTimeline`) is derived from the loaded `messages` array, so
   its completeness is coupled to transcript retention.
 
-Phase 2 builds the two stores that remove those couplings and migrates the
-existing sequential prepend pagination onto the new window before any random
-jump is wired (the parent design's delivery order).
+Phase 2A builds the two stores and headless random-read API without changing
+the visible transcript. Phase 2B migrates existing sequential pagination;
+Phase 3 wires the visible random-jump UI.
 
 ## Consumed contract (Phase 1, shipped)
 
@@ -542,8 +546,10 @@ retryable error storm.
 
 ### Migration of existing prepend pagination
 
-Per the parent design, sequential prepend moves onto the window before random
-access:
+The original proposal below put sequential migration before the headless
+random-access API. It is retained as design history, not the delivery order:
+the parent design and implementation plan now place headless reads in Phase
+2A, sequential compatibility in Phase 2B, and visible random access in Phase 3.
 
 1. Introduce the ledger in degenerate form: the initial load page and every
    prepend become ledger entries; eviction stays prefix-only (today's trim).
