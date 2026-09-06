@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,6 +25,7 @@ import {
   IdeClient,
   ToolConfirmationOutcome,
   buildHumanReadableRuleLabel,
+  isEditorAvailable,
 } from '@qwen-code/qwen-code-core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
@@ -73,6 +74,19 @@ export const ToolConfirmationMessage: React.FC<
   const preferredEditor = settings.merged.general?.preferredEditor as
     | EditorType
     | undefined;
+  const hideModify =
+    confirmationDetails.type === 'edit'
+      ? confirmationDetails.hideModify
+      : false;
+  const editorAvailable = useMemo(
+    () =>
+      !compactMode &&
+      confirmationDetails.type === 'edit' &&
+      !hideModify &&
+      preferredEditor !== undefined &&
+      isEditorAvailable(preferredEditor),
+    [compactMode, confirmationDetails.type, hideModify, preferredEditor],
+  );
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
@@ -265,7 +279,7 @@ export const ToolConfirmationMessage: React.FC<
     if (
       !confirmationDetails.hideModify &&
       (!config.getIdeMode() || !isDiffingEnabled) &&
-      preferredEditor
+      editorAvailable
     ) {
       options.push({
         label: t('Modify with external editor'),
