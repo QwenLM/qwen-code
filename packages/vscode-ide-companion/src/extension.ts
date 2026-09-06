@@ -244,6 +244,16 @@ export async function activate(context: vscode.ExtensionContext) {
         diffManager.cancelDiff(doc.uri);
       }
     }),
+    // Closing a permission diff by hand is not a vote. Tell every chat surface
+    // so the one holding that request can show the edit again instead of
+    // leaving the user to approve or reject something they can no longer look
+    // at (#10557).
+    diffManager.onDidClosePermissionDiff(({ permissionRequestId }) => {
+      for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+        []) {
+        provider.notifyPermissionDiffClosed(permissionRequestId);
+      }
+    }),
     vscode.workspace.registerTextDocumentContentProvider(
       DIFF_SCHEME,
       diffContentProvider,

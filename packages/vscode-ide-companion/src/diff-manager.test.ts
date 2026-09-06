@@ -49,6 +49,9 @@ vi.mock('vscode', () => {
     },
     ViewColumn: { Active: -1, Beside: -2 },
     commands: { executeCommand },
+    workspace: {
+      openTextDocument: vi.fn(async () => ({ getText: () => 'new' })),
+    },
     window: {
       activeTextEditor: undefined,
       onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
@@ -175,5 +178,69 @@ describe('DiffManager.showDiff reuse', () => {
       readOnly: true,
     });
     expect(diffOpenCount()).toBe(0);
+  });
+});
+
+describe('DiffManager permission diff dismissal', () => {
+  beforeEach(() => {
+    executeCommand.mockClear();
+  });
+
+  function createManager(): InstanceType<typeof DiffManager> {
+    return new DiffManager(() => {}, new DiffContentProvider());
+  }
+
+  function lastOpenedRightUri(): { toString(): string } {
+    const call = executeCommand.mock.calls.find(
+      ([command]) => command === 'vscode.diff',
+    );
+    if (!call) throw new Error('no diff was opened');
+    return call[2] as { toString(): string };
+  }
+
+  it('reports a permission diff the user closed without voting', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    await manager.cancelDiff(lastOpenedRightUri() as never);
+
+    expect(closed).toHaveBeenCalledWith({
+      permissionRequestId: 'req-1',
+      filePath: '/workspace/foo.ts',
+    });
+  });
+
+  it('stays quiet for a diff that no approval is waiting on', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+    await manager.cancelDiff(lastOpenedRightUri() as never);
+
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it('does not echo a close the chat surface asked for', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+    // closeDiff() drops the entry before the tab closes, so the
+    // onDidCloseTextDocument -> cancelDiff hop that follows finds nothing.
+    await manager.closeDiff('/workspace/foo.ts', false, 'req-1');
+    await manager.cancelDiff(rightUri as never);
+
+    expect(closed).not.toHaveBeenCalled();
   });
 });

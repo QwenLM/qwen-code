@@ -867,3 +867,128 @@ describe('web shell permission decision messages', () => {
     );
   });
 });
+
+describe('EmbeddedApp permission diff dismissal', () => {
+  const permissionBlock = {
+    id: 'perm-write',
+    kind: 'permission',
+    requestId: 'req-write',
+    title: 'Write new.ts',
+    options: [],
+    preview: { kind: 'key_value', rows: [] },
+    toolCall: {
+      content: [
+        {
+          type: 'diff',
+          path: '/workspace/new.ts',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+    },
+  };
+
+  function latestProps(): CapturedProps {
+    const props = mocks.embeddedProps.current;
+    expect(props).not.toBeNull();
+    return props as CapturedProps;
+  }
+
+  async function dismiss(requestId: string): Promise<void> {
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'permissionDiffClosed', data: { requestId } },
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('hands the edit preview back when the user closes the diff unvoted', async () => {
+    const props = await renderApp();
+    expect(props['hostOwnsEditDiffPreview']).toBe(true);
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await dismiss('req-write');
+
+    // The row unlocks and the web shell renders the diff inline, so the user
+    // can still see what they are approving (#10557).
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    // ...and the host does not reopen the tab the user just closed.
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+  });
+
+  it('takes the preview back for the next permission request', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    await dismiss('req-write');
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          ...permissionBlock,
+          id: 'perm-second',
+          requestId: 'req-second',
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/other.ts',
+                oldText: 'x',
+                newText: 'y',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+    const opened = postMessagesOfType('openDiff');
+    expect(opened).toHaveLength(2);
+    expect((opened[1]?.data as { requestId?: string })?.requestId).toBe(
+      'req-second',
+    );
+  });
+
+  it('ignores a dismissal for a request that is not the pending one', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    await dismiss('req-stale');
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+  });
+});

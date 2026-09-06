@@ -80,6 +80,25 @@ export class DiffManager {
   private readonly onDidChangeEmitter =
     new vscode.EventEmitter<JSONRPCNotification>();
   readonly onDidChange = this.onDidChangeEmitter.event;
+
+  private readonly onDidClosePermissionDiffEmitter = new vscode.EventEmitter<{
+    permissionRequestId: string;
+    filePath: string;
+  }>();
+  /**
+   * Fires when a diff opened for a pending permission is closed without a vote.
+   *
+   * `onDidChange` carries `ide/diffClosed` to IDE-mode MCP transports, which no
+   * web-shell host is; a chat surface that opened the diff itself would
+   * otherwise never learn the user closed it, and would keep waiting for a
+   * decision on an edit the user can no longer see (#10557). `qwen.diff.accept`
+   * and `qwen.diff.cancel` do not reach here for a request-bound diff — they
+   * route the vote through `respondToPendingPermission` instead — and
+   * `closeDiffEditor` drops the entry before the tab closes, so a close the
+   * chat surface asked for does not echo back as a dismissal.
+   */
+  readonly onDidClosePermissionDiff =
+    this.onDidClosePermissionDiffEmitter.event;
   private diffDocuments = new Map<string, DiffInfo>();
   private readonly subscriptions: vscode.Disposable[] = [];
   // Dedupe: remember recent showDiff calls keyed by (file+content)
@@ -148,6 +167,7 @@ export class DiffManager {
     for (const subscription of this.subscriptions) {
       subscription.dispose();
     }
+    this.onDidClosePermissionDiffEmitter.dispose();
   }
 
   /**
@@ -452,6 +472,13 @@ export class DiffManager {
         },
       }),
     );
+
+    if (diffInfo.permissionRequestId) {
+      this.onDidClosePermissionDiffEmitter.fire({
+        permissionRequestId: diffInfo.permissionRequestId,
+        filePath: diffInfo.originalFilePath,
+      });
+    }
   }
 
   private async onActiveEditorChange(editor: vscode.TextEditor | undefined) {
