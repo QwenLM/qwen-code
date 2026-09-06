@@ -795,7 +795,7 @@ export async function composePostCompactHistory(
   // Merge every file restoration block AND the image block into a
   // single user Content (Finding 2). Pushing them as separate user
   // Contents produces consecutive same-role entries, which
-  // geminiChat.test.ts:6289 enforces against and which Gemini
+  // llm-chat.test.ts:6289 enforces against and which Gemini
   // providers reject as 400 "consecutive same-role content".
   //
   // Order within the merged user Content:

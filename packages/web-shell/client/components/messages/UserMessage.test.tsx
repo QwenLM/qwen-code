@@ -4,6 +4,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { UserMessage } from './UserMessage';
 
 (
@@ -17,6 +18,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.restoreAllMocks();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -67,6 +69,54 @@ describe('UserMessage', () => {
   it('renders content', () => {
     const container = render(<UserMessage content="hello world" />);
     expect(container.textContent).toContain('hello world');
+  });
+
+  it('does not visually clip an overflowing message in document mode', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(500);
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content="full exported prompt" />
+      </TranscriptRenderModeProvider>,
+    );
+    const content = container.querySelector('[class*="chatContent"]');
+
+    expect(content?.className).not.toContain('chatContentCollapsed');
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.textContent).toContain('full exported prompt');
+  });
+
+  it('renders scheduled-task context as a compact localized card', () => {
+    const renderUserMessageContent = vi.fn(() => <span>custom message</span>);
+    const content =
+      'Scheduled task: Review PRs\n' +
+      'Task ID: task-1\n' +
+      'Schedule: 0 * * * *\n' +
+      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
+      'Trigger: scheduled\n' +
+      'Session: new chat for this run\n\n' +
+      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
+      'review the next PR';
+    const container = render(
+      <I18nProvider language="zh-CN">
+        <WebShellCustomizationProvider value={{ renderUserMessageContent }}>
+          <UserMessage content={content} />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-run-message]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('定时任务运行');
+    expect(container.textContent).toContain('Review PRs');
+    expect(container.textContent).toContain('任务 ID: task-1');
+    expect(container.textContent).toContain('定时触发');
+    expect(container.textContent).toContain('每次新会话');
+    expect(container.textContent).toContain('review the next PR');
+    expect(container.textContent).not.toContain(
+      'Do not create or modify a schedule',
+    );
+    expect(renderUserMessageContent).not.toHaveBeenCalled();
   });
 
   it('renders an accessible retry action for a failed send', () => {
@@ -354,6 +404,31 @@ describe('UserMessage', () => {
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,abc',
       expect.any(String),
+      undefined,
+    );
+  });
+
+  it('keeps uploaded images attachment-backed when opening the preview', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content=""
+        images={[
+          {
+            data: 'abc',
+            mimeType: 'image/png',
+            attachmentId: 'photo.png',
+          },
+        ]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    act(() => container.querySelector('img')?.click());
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,abc',
+      expect.any(String),
+      { kind: 'attachment', attachmentId: 'photo.png' },
     );
   });
 

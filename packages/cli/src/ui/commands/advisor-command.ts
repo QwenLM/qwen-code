@@ -106,7 +106,7 @@ async function askAdvisor(
   const cacheSafeParams = buildBtwCacheSafeParams(config);
   if (
     !cacheSafeParams ||
-    config.getGeminiClient().getHistoryForForkWindow().length === 0
+    config.getLlmClient().getHistoryForForkWindow().length === 0
   ) {
     throw new Error(t('No conversation context available for /advisor'));
   }

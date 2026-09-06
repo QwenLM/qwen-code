@@ -1,4 +1,4 @@
-import type { DaemonTranscriptBlock } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonTranscriptBlock } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   ContentBlock,
   PermissionRequest,
@@ -43,6 +43,7 @@ export function extractPendingPermission(
       title: perm.title,
       toolKind,
       toolName,
+      hasDiffPreview: hasPermissionDiffPreview(toolCallRecord),
       ...(planId && sourceCallId ? { todoPlan: { planId, sourceCallId } } : {}),
       content: getPermissionContent(toolCallRecord, perm.title),
       options: perm.options.map((opt) => ({
@@ -54,6 +55,22 @@ export function extractPendingPermission(
     };
   }
   return null;
+}
+
+function hasPermissionDiffPreview(
+  toolCall: Record<string, unknown> | undefined,
+): boolean {
+  const content = toolCall?.['content'];
+  if (!Array.isArray(content)) return false;
+  return content.some((value) => {
+    const block = getRecord(value);
+    return (
+      block?.['type'] === 'diff' &&
+      typeof block['path'] === 'string' &&
+      (typeof block['oldText'] === 'string' ||
+        typeof block['newText'] === 'string')
+    );
+  });
 }
 
 function getPermissionContent(

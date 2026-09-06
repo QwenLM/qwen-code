@@ -10,6 +10,7 @@ import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import {
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   InvalidSessionMetadataError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
@@ -69,6 +70,30 @@ describe('toRpcError', () => {
     });
   });
 
+  it('maps session initialization timeouts with the public retry contract', () => {
+    const error = new BridgeTimeoutError('newSession', 10_000);
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        httpStatus: 504,
+        retryable: true,
+        retryAfterSeconds: 10,
+        timeoutMs: 10_000,
+      },
+    });
+  });
+
+  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+    expect(toRpcError(new BridgeTimeoutError('initialize', 10_000))).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: 'Internal error',
+      data: { errorKind: 'internal' },
+    });
+  });
+
   it('maps the abandoned-restore fence with its reason and hint', () => {
     // SDK transport negotiation prefers acp-ws and acp-http over REST, so
     // without this mapping the default arm turns a retryable fence into an
@@ -110,21 +135,24 @@ describe('toRpcError', () => {
     });
   });
 
-  it('carries the quarantine backoff hint for a settlement-overdue channel', () => {
-    // Quarantine outlives the fence, and a fresh-id request never reaches the
-    // 409 that carries the real hint — so this payload is the only backoff
-    // signal such a caller gets.
-    const error = new BridgeChannelQuarantinedError(
+  it('carries every quarantine reason and its backoff hint', () => {
+    // A fresh-id request never reaches the same-id 409, so this payload is the
+    // only operation-budget-scale backoff signal such a caller gets.
+    for (const reason of [
+      'restore_cleanup_failed',
       'restore_settlement_overdue',
-      90,
-    );
-    expect(toRpcError(error)).toMatchObject({
-      data: {
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-        httpStatus: 503,
-      },
-    });
+      'new_session_cleanup_failed',
+      'new_session_settlement_overdue',
+    ] as const) {
+      const error = new BridgeChannelQuarantinedError(reason, 90);
+      expect(toRpcError(error)).toMatchObject({
+        data: {
+          reason,
+          retryAfterSeconds: 90,
+          httpStatus: 503,
+        },
+      });
+    }
   });
 
   it('maps invalid session metadata to the REST-equivalent invalid_metadata contract', () => {

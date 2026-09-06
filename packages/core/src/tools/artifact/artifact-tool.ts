@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { PUBLISHED_CONTENT_SHA256_METADATA_KEY } from '../../services/session-artifact-persistence.js';
 import type { Config } from '../../config/config.js';
 import type {
   ToolCallConfirmationDetails,
@@ -255,6 +257,11 @@ class ArtifactToolInvocation extends BaseToolInvocation<
           managedId,
           mimeType: 'text/html',
           sizeBytes: bytes,
+          metadata: {
+            [PUBLISHED_CONTENT_SHA256_METADATA_KEY]: createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
         },
       ],
     };

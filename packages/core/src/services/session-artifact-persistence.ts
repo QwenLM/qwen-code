@@ -11,6 +11,9 @@ export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
+export const WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY =
+  'qwen.workspace.sizeBytes';
+export const PUBLISHED_CONTENT_SHA256_METADATA_KEY = 'qwen.published.sha256';
 const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
@@ -994,8 +997,8 @@ function normalizeMetadata(
       typeof item === 'boolean'
     ) {
       if (
-        isReservedWorkspaceMetadataKey(key) &&
-        !isWorkspaceContentMetadataEntry(key, item)
+        isAdoptableContentFingerprintKey(key) &&
+        !isContentFingerprintMetadataEntry(key, item)
       ) {
         continue;
       }
@@ -1023,7 +1026,15 @@ export function isPrototypeMetadataKey(key: string): boolean {
 export function isReservedWorkspaceMetadataKey(key: string): boolean {
   return (
     key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
+    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY ||
+    key === WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY
+  );
+}
+
+export function isAdoptableContentFingerprintKey(key: string): boolean {
+  return (
+    isReservedWorkspaceMetadataKey(key) ||
+    key === PUBLISHED_CONTENT_SHA256_METADATA_KEY
   );
 }
 
@@ -1063,7 +1074,7 @@ export function metadataBudgetBytes(
   }
   const userMetadata = Object.fromEntries(
     Object.entries(metadata).filter(
-      ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
+      ([key, value]) => !isContentFingerprintMetadataEntry(key, value),
     ),
   );
   return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
@@ -1079,7 +1090,24 @@ export function isWorkspaceContentMetadataEntry(
   if (key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) {
     return typeof value === 'number' && Number.isFinite(value);
   }
+  if (key === WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  }
   return false;
+}
+
+export function isContentFingerprintMetadataEntry(
+  key: string,
+  value: string | number | boolean | null,
+): boolean {
+  if (isWorkspaceContentMetadataEntry(key, value)) {
+    return true;
+  }
+  return (
+    key === PUBLISHED_CONTENT_SHA256_METADATA_KEY &&
+    typeof value === 'string' &&
+    /^[0-9a-f]{64}$/.test(value)
+  );
 }
 
 function normalizeLiteral<T extends string>(

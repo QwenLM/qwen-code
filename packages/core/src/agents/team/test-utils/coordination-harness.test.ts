@@ -2049,6 +2049,33 @@ describe('TeamCoordinationHarness', () => {
       expect(w3.getReceivedMessages()).toHaveLength(1);
       expectTeamMessage(w3.getReceivedMessages()[0], 'w2', 'hello all');
     });
+
+    it('reports zero failures when every delivery lands (#10072)', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('w1');
+      await h.spawnTeammate('w2');
+
+      // Recipients: w2 (member) + leader inbox.
+      const result = await h.teamManager.broadcast('hello all', 'w1');
+
+      expect(result).toEqual({ total: 2, failedRecipients: [] });
+      await h.waitForMessages('w2', 1);
+    });
+
+    it('reports the recipients whose delivery was rejected (#10072)', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('w1');
+      const w2 = await h.spawnTeammate('w2');
+
+      // w2 terminates between the member snapshot and the send: its
+      // queue is dropped, so its delivery rejects while the leader
+      // inbox write still lands.
+      await w2.shutdown();
+
+      const result = await h.teamManager.broadcast('status update', 'w1');
+
+      expect(result).toEqual({ total: 2, failedRecipients: ['w2'] });
+    });
   });
 
   // ─── 6. Concurrent task claiming ──────────────────────────

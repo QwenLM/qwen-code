@@ -5,7 +5,7 @@
  */
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopback-binds.js';
+import { formatHostForAuthority, isLoopbackBind } from './loopback-binds.js';
 import {
   singleTokenCredentials,
   type ListenerScopedCredentials,
@@ -113,6 +113,21 @@ export function parseAllowOriginPatterns(
     origins.add(canonical.toLowerCase());
   }
   return { allowAny, origins };
+}
+
+export function findNonLoopbackHttpOrigin(
+  patterns: ParsedAllowOriginPatterns,
+): string | undefined {
+  for (const origin of patterns.origins) {
+    const parsed = new URL(origin);
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      !isLoopbackBind(parsed.hostname)
+    ) {
+      return origin;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -326,6 +341,7 @@ function buildPrimaryHostGate(
   // is wasted work. Rebuild only when the port changes.
   let cachedPort = -1;
   let cachedAllowed: Set<string> = new Set();
+  const boundHost = formatHostForAuthority(bind);
   const allowedFor = (port: number): Set<string> => {
     if (port === cachedPort) return cachedAllowed;
     cachedPort = port;
@@ -334,6 +350,7 @@ function buildPrimaryHostGate(
       `127.0.0.1:${port}`,
       `[::1]:${port}`,
       `host.docker.internal:${port}`,
+      `${boundHost}:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
     // the URI scheme's default. http → 80, https → 443. Accept the
@@ -345,6 +362,7 @@ function buildPrimaryHostGate(
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');
       cachedAllowed.add('host.docker.internal');
+      cachedAllowed.add(boundHost);
     }
     return cachedAllowed;
   };
@@ -449,9 +467,8 @@ export const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
 /**
  * Whether the request presented credentials that `bearerAuth` verified.
  * NOTE: "open" loopback requests on a no-token daemon pass `bearerAuth`
- * without being authenticated — this helper tells the two apart, which is
- * what the Local Control routes use to decide whether a response may carry
- * the pairing secret (#9106).
+ * without being authenticated. Keep that distinction intact: deployment
+ * authority is evaluated separately by `requestHasOperatorAuthority`.
  */
 export function requestWasAuthenticated(req: Request): boolean {
   return (
@@ -461,34 +478,61 @@ export function requestWasAuthenticated(req: Request): boolean {
   );
 }
 
+export interface TrustedLoopbackModeInput {
+  loopbackBind: boolean;
+  tokenConfigured: boolean;
+  requireAuth: boolean;
+}
+
+/** Whether the primary listener trusts every caller that can reach loopback. */
+export function isTrustedLoopbackMode(
+  input: TrustedLoopbackModeInput,
+): boolean {
+  return input.loopbackBind && !input.tokenConfigured && !input.requireAuth;
+}
+
+/**
+ * Whether a request may act with daemon operator authority.
+ *
+ * Credential authentication and deployment-boundary authorization remain
+ * separate facts: trusted loopback requests are authorized without being
+ * stamped as bearer-authenticated.
+ */
+export function requestHasOperatorAuthority(
+  req: Request,
+  trustedLoopbackMode: boolean,
+): boolean {
+  return (
+    requestWasAuthenticated(req) ||
+    (trustedLoopbackMode && listenerIdentityOf(req).kind === 'primary')
+  );
+}
+
 /**
  * Per-route mutation gate.
  *
  * A single mutation-gating helper so all state-changing routes share one
  * choke point. Routes opt into `strict: true` to enforce
- * "token required even on loopback" without depending on the operator
- * also passing `--require-auth`.
+ * operator authority without changing legacy non-strict behavior.
  *
  * Behavior matrix:
  *
- * | daemon config              | route opts        | result          |
- * | -------------------------- | ----------------- | --------------- |
- * | requireAuth=true           | any               | passthrough (1) |
- * | token configured           | any               | passthrough (2) |
- * | no token (loopback dev)    | strict=false      | passthrough     |
- * | no token, authenticated LAN| strict=true       | passthrough     |
- * | no token, open loopback    | strict=true       | 401 + code      |
+ * | daemon config                  | route opts   | result          |
+ * | ------------------------------ | ------------ | --------------- |
+ * | token configured               | any          | passthrough (1) |
+ * | trusted loopback primary       | any          | passthrough     |
+ * | no token, authenticated LAN    | strict=true  | passthrough     |
+ * | no token, non-trusted request  | strict=true  | 401 + code      |
+ * | no token                       | strict=false | passthrough     |
  *
- * (1) `--require-auth` boots only with a token, so the global
- *     `bearerAuth` middleware already 401'd unauthenticated requests
- *     before they reached this gate.
- * (2) Any token configuration makes the global `bearerAuth` enforce
- *     bearer-required-everywhere; the gate is redundant but harmless.
+ * (1) Any token configuration makes the global `bearerAuth` reject missing
+ *     credentials before a request can reach this gate, so the gate is
+ *     redundant but harmless.
  *
  * The 401 body uses `code: 'token_required'` (distinct from
  * `bearerAuth`'s plain `Unauthorized` shape) so SDK clients can branch
- * on it: surface a "this route needs the daemon to be configured with
- * a token; restart with --require-auth or --token" hint rather than a
+ * on it: surface a "this deployment needs the daemon to be configured with
+ * a token" hint rather than a
  * generic auth failure. Pre-flight via `/capabilities.features.require_auth`
  * still requires a successful unauthenticated `/capabilities` call,
  * which is only possible when the daemon has not enforced auth — so
@@ -497,25 +541,12 @@ export function requestWasAuthenticated(req: Request): boolean {
  */
 export interface MutationGateOptions {
   /**
-   * When true, this route refuses to serve unauthenticated callers even on
-   * loopback no-token defaults, while allowing requests that passed a
-   * listener-scoped pairing credential. Used by mutation routes
-   * (memory, file edit, tool enable, MCP restart, device-flow auth)
-   * that should never be reachable without explicit operator opt-in.
+   * When true, this route requires operator authority: bearer or pairing
+   * credentials, or a primary-listener request in trusted-loopback mode.
+   * Used by high-impact mutation routes (memory, file edit, tool enable,
+   * MCP restart, device-flow auth).
    * Defaults to false so existing routes can adopt the helper without
    * behavior change.
-   *
-   * Resolved caveat (#9106): the pairing credential used to be minted and
-   * read back by any unauthenticated loopback caller through the Local
-   * Control enable/status routes, letting a local process present the
-   * credential on the LAN listener and pass this gate. The Local Control
-   * routes no longer return the pairing URL or QR to unauthenticated
-   * callers (`requestWasAuthenticated` gate in
-   * `routes/workspace-local-control.ts`); on a no-token daemon the pairing
-   * URL is printed to the daemon's own terminal instead. Obtaining the
-   * credential therefore requires the daemon token (or terminal access),
-   * so the strict surface no longer inherits the loopback trust boundary
-   * through these routes.
    */
   strict?: boolean;
 }
@@ -525,6 +556,11 @@ export interface CreateMutationGateDeps {
   tokenConfigured: boolean;
   /** Was `--require-auth` passed at boot? */
   requireAuth: boolean;
+  /**
+   * Does the primary listener trust all loopback callers? Defaults to false so
+   * direct users of this exported helper fail closed until they opt in.
+   */
+  trustedLoopbackMode?: boolean;
 }
 
 /**
@@ -545,7 +581,7 @@ export function createMutationGate(
   deps: CreateMutationGateDeps,
 ): (opts?: MutationGateOptions) => RequestHandler {
   // When the global gate is already enforcing bearer auth (token set
-  // via --token / env, OR --require-auth boot-checked a token), every
+  // via --token / env), every
   // request that reaches the route handler has already passed
   // `bearerAuth`. The mutation gate becomes a passthrough — return a
   // pre-built no-op so we don't allocate one closure per route call.
@@ -554,19 +590,23 @@ export function createMutationGate(
     _res: Response,
     next: NextFunction,
   ) => next();
-  if (deps.requireAuth || deps.tokenConfigured) {
+  if (deps.tokenConfigured) {
     return () => passthrough;
   }
-  // No token configured (loopback developer default). Non-strict
-  // routes preserve the legacy "open on loopback" behavior; strict
-  // routes refuse with a structured 401 the SDK can surface.
+  const trustedLoopbackMode =
+    deps.trustedLoopbackMode === true && deps.requireAuth === false;
+  // Without a configured token, non-strict routes preserve their existing
+  // open behavior. Strict routes accept trusted primary-listener requests and
+  // real listener-scoped credentials, then fail closed everywhere else.
   //
   // Body-parser ordering: the strict 401
   // fires AFTER `express.json()` because the gate is per-route
-  // middleware, not app-level. On no-token loopback defaults a strict
+  // middleware, not app-level. On non-trusted no-token deployments a strict
   // route therefore parses the request body before refusing it —
   // bounded by `express.json({limit: '10mb'})` × `--max-connections`
-  // (256 default). Loopback-only attack surface, so the worst case is
+  // (256 default). Production non-loopback entry points are already bearer
+  // gated before parsing; direct embeds own their listener boundary. The
+  // worst case is
   // ~2.5 GB transient on a fully-saturated listener. The strict routes
   // Wave 4 actually adds (memory writes / file edits / device-flow
   // auth) carry small bodies in legitimate use, so the parsing-cost
@@ -586,7 +626,7 @@ export function createMutationGate(
     res: Response,
     next: NextFunction,
   ) => {
-    if (requestWasAuthenticated(req)) {
+    if (requestHasOperatorAuthority(req, trustedLoopbackMode)) {
       next();
       return;
     }

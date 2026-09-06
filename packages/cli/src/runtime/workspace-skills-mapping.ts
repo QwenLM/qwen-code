@@ -18,12 +18,12 @@ import type { SkillDisablement } from '../config/skill-settings.js';
 export function mapSkillConfigToStatus(
   skill: SkillConfig,
   disablements: ReadonlyMap<string, SkillDisablement> = new Map(),
-  opts: { disabled?: boolean } = {},
+  opts: { disabled?: boolean; enabled?: boolean } = {},
 ): ServeWorkspaceSkillStatus {
   const disablement = disablements.get(skill.name.toLowerCase());
   const disabledReason = opts.disabled
     ? 'inactive_extension'
-    : disablement?.reason;
+    : (disablement?.reason ?? (opts.enabled === false ? 'default' : undefined));
   const modelInvocable = skill.disableModelInvocation !== true;
   return {
     kind: 'skill',
@@ -40,6 +40,11 @@ export function mapSkillConfigToStatus(
     installedPath: skill.filePath,
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     ...(skill.model ? { model: skill.model } : {}),
-    ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
+    ...(skill.level === 'extension' && skill.extensionName
+      ? { extensionName: skill.extensionName }
+      : {}),
+    ...(skill.level === 'extension' && skill.extensionDisplayName
+      ? { extensionDisplayName: skill.extensionDisplayName }
+      : {}),
   };
 }

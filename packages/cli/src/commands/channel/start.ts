@@ -336,6 +336,11 @@ async function startSingle(
       process.cwd(),
       { resolveEnvVars: 'available' },
     );
+    if (config.multiSession) {
+      throw new Error(
+        'multiSession is available only for daemon-managed Channels started by qwen serve.',
+      );
+    }
   } catch (err) {
     writeStderrLine(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
@@ -358,6 +363,7 @@ async function startSingle(
     config.sessionScope,
     sessionsPath(),
   );
+  router.setChannelApprovalMode(name, config.approvalMode);
   const loopStore = cronEnabled
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;
@@ -456,6 +462,11 @@ async function startAll(
       channelsConfig,
       Object.keys(channelsConfig),
     );
+    if (parsed.some(({ config }) => config.multiSession)) {
+      throw new Error(
+        'multiSession is available only for daemon-managed Channels started by qwen serve.',
+      );
+    }
   } catch (err) {
     writeStderrLine(err instanceof Error ? err.message : String(err));
     process.exit(1);
@@ -482,9 +493,10 @@ async function startAll(
   const loopController = loopStore
     ? createChannelLoopController(loopStore)
     : undefined;
-  // Register per-channel scope overrides so each channel uses its own sessionScope
+  // Register per-channel routing overrides.
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
+    router.setChannelApprovalMode(name, config.approvalMode);
   }
   const channels: Map<string, ChannelBase> = new Map();
 

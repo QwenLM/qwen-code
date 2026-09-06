@@ -81,6 +81,29 @@ describe('DWS event process', () => {
     });
   });
 
+  it('reports a clean exit instead of a stale stderr error', async () => {
+    const onLine = vi.fn();
+    const onError = vi.fn();
+    const fixture = fileURLToPath(
+      new URL('./fixtures/dws-event-clean-exit-source.mjs', import.meta.url),
+    );
+    const subscription = await startDwsEventProcess(
+      process.execPath,
+      [fixture],
+      onLine,
+      onError,
+    );
+
+    await subscription.closed;
+
+    expect(onLine).toHaveBeenCalledWith('{"type":"final"}');
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      message: 'DWS event consumer stopped (0).',
+      retryable: undefined,
+    });
+  });
+
   it('preserves a terminal error across stdout buffered after exit', async () => {
     let releaseFirstLine!: () => void;
     const firstLineBlocked = new Promise<void>((resolve) => {

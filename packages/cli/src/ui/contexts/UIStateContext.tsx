@@ -26,6 +26,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
+  OutputStyleDefinition,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
@@ -81,6 +82,8 @@ export interface UIState {
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isEffortDialogOpen: boolean;
+  isOutputStyleDialogOpen: boolean;
+  outputStyleChoices: readonly OutputStyleDefinition[];
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
@@ -97,10 +100,10 @@ export interface UIState {
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
-  geminiMdFileCount: number;
+  memoryFileCount: number;
   streamingState: StreamingState;
   initError: string | null;
-  pendingGeminiHistoryItems: HistoryItemWithoutId[];
+  pendingLlmHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
   shellModeActive: boolean;
   userMessages: string[];

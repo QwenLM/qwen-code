@@ -172,6 +172,8 @@ You can send photos and documents to the bot, not just text.
 
 **Files:** Send a PDF, code file, or any document. The bot downloads it from DingTalk's servers and saves it locally so the agent can read it with its file tools. Audio and video files are also supported. This works with any model.
 
+**Generated files:** Ask the agent explicitly to send a completed local file and it can return the file as a native DingTalk attachment. Files must be non-empty, no larger than 20 MB, and located inside the configured workspace or the system temporary directory. One response can send at most five files. Outbound file attachments are unavailable when `blockStreaming` is set to `"on"`; upload or delivery failures are reported in the final text instead.
+
 ## Forwarded Chat Records
 
 You can merge-forward a run of messages from another chat to the bot (DingTalk's "combined forward"), either as a message of its own or as the message you are replying to. The bot expands the record into text for the agent: the record's title and summary become a header line, and each forwarded message is listed under `[Chat record messages]` as `Sender: message`. A forwarded message whose body is not text is shown as a placeholder — `[image]`, `[file: <name>]`, `[audio]`, `[video]`.
@@ -219,6 +221,6 @@ The multi-line layout above is what the agent sees in a 1:1 chat. In a group the
 
 This means DingTalk didn't include a reply endpoint in the message callback. This can happen if the bot's permissions are misconfigured. Check the bot's settings in the Developer Portal.
 
-### "Sorry, something went wrong processing your message"
+### "Unable to process this message"
 
-This usually means the agent encountered an error. Check the terminal output for details.
+The reply identifies the failure category and suggests a next step. If the problem continues, give the bot administrator the reference shown in the reply; the same reference appears beside the detailed error in the channel process log.

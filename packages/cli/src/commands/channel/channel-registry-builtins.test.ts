@@ -121,10 +121,12 @@ describe('built-in channel registry', () => {
     });
     expect(entry?.fields.map((field) => field.key)).toEqual([
       'settings',
+      'messagePrefix',
       'senderPolicy',
       'allowedUsers',
       'groupPolicy',
       'sessionScope',
+      'multiSession',
     ]);
     expect(
       entry?.fields.find((field) => field.key === 'senderPolicy'),

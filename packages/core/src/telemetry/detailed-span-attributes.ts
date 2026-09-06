@@ -9,7 +9,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
-import { extractGeminiContent, stringifyGenAiJson } from './gen-ai-content.js';
+import { extractLlmContent, stringifyGenAiJson } from './gen-ai-content.js';
 
 const SHORT_TRUNCATION_SUFFIX = '...[TRUNCATED]';
 const debugLogger = createDebugLogger('GEN_AI_CONTENT');
@@ -276,7 +276,7 @@ export function addSystemPromptAttributes(
   systemInstruction: unknown,
 ): void {
   if (!areSensitiveSpanAttributesEnabled(config)) return;
-  const parts = extractGeminiContent({
+  const parts = extractLlmContent({
     config: { systemInstruction },
   }).systemInstructions;
   if (parts !== undefined) {
@@ -301,7 +301,7 @@ export function addToolSchemaAttributes(
   )
     ? tools
     : [{ functionDeclarations: tools }];
-  const definitions = extractGeminiContent({
+  const definitions = extractLlmContent({
     config: { tools: providerTools },
   }).toolDefinitions;
   if (definitions !== undefined) {

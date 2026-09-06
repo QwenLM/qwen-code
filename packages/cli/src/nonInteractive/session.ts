@@ -159,12 +159,12 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
-      // gemini.tsx has already emitted warnings known before stream-json
+      // llm.tsx has already emitted warnings known before stream-json
       // initialization starts. Keep that snapshot so only warnings produced
       // by the deferred initialize() call are written here.
       const emittedWarnings = new Set(this.config.getWarnings());
       // Bracket `config.initialize()` with the same profiler checkpoints
-      // the non-stream-json branch in `gemini.tsx` uses so the
+      // the non-stream-json branch in `llm.tsx` uses so the
       // `config_initialize_dur` derived phase shows up in stream-json
       // startup profiles. `profileCheckpoint` is a no-op when
       // `QWEN_CODE_PROFILE_STARTUP` is unset, so this adds zero overhead
@@ -184,7 +184,7 @@ class Session {
       // MCP servers settle, so we must explicitly await discovery here —
       // otherwise the first prompt would see only built-in tools.
       await this.config.waitForMcpReady();
-      // Surface MCP failures on stderr — same rationale as gemini.tsx's
+      // Surface MCP failures on stderr — same rationale as llm.tsx's
       // non-interactive branch: per-server errors are caught inside
       // `discoverAllMcpToolsIncremental` and never reach a TTY otherwise,
       // so a script using stream-json with broken MCP config would
@@ -203,7 +203,7 @@ class Session {
       }
       // Finalize the startup profile here so `config_initialize_*` and the
       // MCP discovery events captured during init/discovery make it into
-      // the on-disk profile. gemini.tsx's stream-json branch deliberately
+      // the on-disk profile. llm.tsx's stream-json branch deliberately
       // skips finalize because the profiler's `finalized` guard would
       // otherwise suppress every event emitted during the
       // `Session.ensureConfigInitialized` flow above.
@@ -512,15 +512,15 @@ class Session {
       return { accepted: false, interruption: 'none' };
     }
 
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient || !geminiClient.isInitialized()) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: gemini client is not ready',
       );
       return { accepted: false, interruption: 'none' };
     }
 
-    const chat = geminiClient.getChat();
+    const chat = llmClient.getChat();
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);

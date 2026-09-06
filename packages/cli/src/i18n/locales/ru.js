@@ -429,6 +429,7 @@ export default {
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
+  'Show Tool Call Arguments': 'Показывать аргументы вызовов инструментов',
   'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
@@ -1066,6 +1067,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================

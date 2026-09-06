@@ -142,14 +142,13 @@ async function collectAvailableSkillEntriesUncached(
   // matching file path this session. Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
-  const disabledNames = config.getDisabledSkillNames();
-  const isDisabled = (name: string) => disabledNames.has(name.toLowerCase());
+  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
     (s) =>
       !s.disableModelInvocation &&
       skillManager.isSkillActive(s) &&
-      !isDisabled(s.name),
+      isEnabled(s),
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -166,7 +165,7 @@ async function collectAvailableSkillEntriesUncached(
           s.paths &&
           s.paths.length > 0 &&
           !skillManager.isSkillActive(s) &&
-          !isDisabled(s.name),
+          isEnabled(s),
       )
       .map((s) => s.name),
   );
@@ -182,7 +181,7 @@ async function collectAvailableSkillEntriesUncached(
   const allCommands = provider ? provider() : [];
   const fileBasedSkillNames = new Set(
     allSkills
-      .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
+      .filter((s) => !s.disableModelInvocation && isEnabled(s))
       .map((s) => s.name),
   );
   const modelInvocableCommands = allCommands.filter(
@@ -267,6 +266,22 @@ ${escapeXml(entry.description)}
 }
 
 /**
+ * Whether a skill's side effects — `allowedTools` session allow rules and
+ * frontmatter hooks — may be applied. A project skill is discovered from
+ * `<repo>/.qwen/skills/` regardless of folder trust because its body only
+ * influences the model, but its side effects grant tool approvals or run
+ * repo-supplied commands, so they need a trusted folder: the same gate
+ * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * and bundled skills are not repo-controlled and are unaffected.
+ */
+export function canApplySkillSideEffects(
+  skill: Pick<SkillConfig, 'level'>,
+  config: Pick<Config, 'isTrustedFolder'>,
+): boolean {
+  return skill.level !== 'project' || config.isTrustedFolder();
+}
+
+/**
  * Grants a skill's `allowedTools` as session-scoped permission allow rules.
  *
  * Each entry is a permission rule string in the same syntax as `settings.json`
@@ -275,25 +290,34 @@ ${escapeXml(entry.description)}
  * auto-approved for the rest of the session instead of prompting. This is an
  * additive grant only — it never hides or restricts the tools the model sees.
  *
- * Caveat under an active `permissions.allow` registry allowlist (#9827): the
- * grant flips the runtime permission predicate, but it can never REGISTER a
- * tool that the startup allowlist skipped at registration — the registry is
- * built once in `Config.initialize`, so such a tool still fails
- * TOOL_NOT_REGISTERED until the rule is added to settings `permissions.allow`
- * and the session restarts. `PermissionManager.addSessionAllowRule` logs this
- * caveat on the first such grant.
+ * Caveat under an active `settings.tools.eager` allowlist (#9827): the grant
+ * flips the runtime permission predicate, but it can never promote a deferred
+ * tool into the eager model request — the registry is built once in
+ * `Config.initialize`, so such a tool stays deferred (still registered and
+ * loadable via `tool_search`). An eager-by-default tool omitted by
+ * `tools.eager` needs its name added plus a restart; a tool deferred by
+ * default needs `tools.visible` instead. `permissions.allow` itself never
+ * gates registration (#10075).
  *
  * No-ops when there is no permission manager or nothing to grant.
+ *
+ * `trustGated` marks the grants as repository-controlled: a project skill's
+ * rules are honoured only while the folder is trusted, re-checked at every
+ * permission decision, so a trust revoked mid-session suspends them without
+ * a restart. Pass `skill.level === 'project'`.
  */
 export function applySkillAllowedTools(
   permissionManager: PermissionManager | null | undefined,
   allowedTools: string[] | undefined,
+  options?: { trustGated?: boolean },
 ): void {
   if (!permissionManager || !allowedTools?.length) {
     return;
   }
   for (const rule of allowedTools) {
-    permissionManager.addSessionAllowRule(rule);
+    permissionManager.addSessionAllowRule(rule, {
+      trustGated: options?.trustGated === true,
+    });
   }
 }
 

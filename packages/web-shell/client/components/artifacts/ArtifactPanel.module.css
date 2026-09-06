@@ -231,6 +231,14 @@
   padding: 0;
 }
 
+.terminalPane {
+  height: 100%;
+}
+
+.terminalPaneHidden {
+  display: none;
+}
+
 .attachmentPreviewButton {
   position: sticky;
   float: right;

@@ -37,7 +37,7 @@ describe('EditTool', () => {
   let tempDir: string;
   let rootDir: string;
   let mockConfig: Config;
-  let geminiClient: any;
+  let llmClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
   let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
@@ -52,7 +52,7 @@ describe('EditTool', () => {
     mockFileHistoryService = { trackEdit: vi.fn() };
     fsService = new StandardFileSystemService();
 
-    geminiClient = {
+    llmClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
     };
 
@@ -61,7 +61,7 @@ describe('EditTool', () => {
     };
 
     mockConfig = {
-      getGeminiClient: vi.fn().mockReturnValue(geminiClient),
+      getLlmClient: vi.fn().mockReturnValue(llmClient),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getTargetDir: () => rootDir,
       getProjectRoot: () => rootDir,
@@ -83,8 +83,8 @@ describe('EditTool', () => {
       getUserAgent: () => 'test-agent',
       getUserMemory: () => '',
       setUserMemory: vi.fn(),
-      getGeminiMdFileCount: () => 0,
-      setGeminiMdFileCount: vi.fn(),
+      getMemoryFileCount: () => 0,
+      setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
@@ -604,6 +604,10 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+      // `filePath` must carry the full path: UI consumers (e.g. the VSCode
+      // companion) cannot resolve a clickable location from `fileName`
+      // alone once the file is outside the workspace root.
+      expect(display.filePath).toBe(filePath);
       expect(writeSpy).toHaveBeenCalledWith(
         expect.objectContaining({ toolWriteOrigin: 'edit' }),
       );

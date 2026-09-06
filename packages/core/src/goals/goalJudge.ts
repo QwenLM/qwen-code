@@ -200,7 +200,7 @@ export async function judgeGoal(
   const model = config.getFastModel() ?? config.getModel();
 
   try {
-    const client = config.getGeminiClient();
+    const client = config.getLlmClient();
     const response = await client.generateContent(
       transcript,
       {
@@ -256,7 +256,7 @@ function collectTranscript(
   lastAssistantText: string,
 ): Content[] {
   try {
-    const client = config.getGeminiClient();
+    const client = config.getLlmClient();
     if (!client.isInitialized()) return fallbackTranscript(lastAssistantText);
     const full = client.getHistoryTail(TRANSCRIPT_TAIL_MESSAGES);
     const tail = full.map(capContent);

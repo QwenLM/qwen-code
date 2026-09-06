@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { DaemonSessionContextUsageStatus } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { ContextUsageMessage } from './ContextUsageMessage';
 

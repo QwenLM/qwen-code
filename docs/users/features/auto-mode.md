@@ -287,15 +287,21 @@ tightened over time.
 - **Not a substitute for `deny` rules.** The classifier is best-effort.
   For commands you're sure should never run, put them in
   `permissions.deny`.
-- **MCP tools default to conservative blocking.** Third-party MCP tools
-  (`mcp__*`) opt-in to argument forwarding via the
-  `toAutoClassifierInput` override. Tools that have not opted in expose
-  only their name to the classifier — most such calls are
-  conservatively blocked unless you've written an explicit `allow`
-  rule. This is fail-closed by design (credentials and voluminous
-  content do not leak into the classifier LLM). If you trust a
-  specific MCP tool, add `permissions.allow: ["mcp__server__tool"]` so
-  it bypasses the classifier entirely.
+- **MCP tools are judged on their arguments, not verified behaviour.**
+  Third-party MCP tools (`mcp__*`) are never on the fast-path allowlist;
+  every call from a server that is not marked `trust: true` goes to the
+  classifier with the server name, the tool name, the server's
+  self-reported annotations (`readOnlyHint` / `destructiveHint` /
+  `idempotentHint` / `openWorldHint`) and a bounded copy of the
+  arguments. The classifier is told the annotations are unverified. It
+  cannot see what the server actually does with the call, so a
+  misleading tool name plus benign arguments can still pass. If you
+  trust a specific MCP tool, add
+  `permissions.allow: ["mcp__server__tool"]` so it bypasses the
+  classifier entirely; if you want the classifier to see only the tool
+  name (for example when it runs against a different provider than the
+  main model), set `permissions.autoMode.mcp.forwardArguments: false`
+  — most MCP calls are then conservatively blocked.
 
 ## FAQ
 
@@ -312,7 +318,7 @@ projection exposes:
 
 - `read_file` and other read-only tools: not invoked (they're on the
   fast-path allowlist).
-- `edit` / `write_file`: file_path plus the first 80 characters of
+- `edit` / `write_file`: file_path plus a 300-character preview of
   old/new content. Full content is not forwarded.
 - `run_shell_command`: the full command (it has to — that's what the
   classifier judges).
@@ -326,13 +332,24 @@ projection exposes:
 Tool results (the actual content returned by tools) are stripped from
 the classifier transcript entirely.
 
-MCP tools (`mcp__*`) follow a stricter default: their parameters are
-not forwarded unless the MCP tool author explicitly opted in via the
-`toAutoClassifierInput` override. The classifier sees the tool name
-but no arguments, so most MCP calls will be conservatively blocked
-unless the user has written an explicit allow rule. This is fail-
-closed by design — third-party tools should not leak credentials or
-voluminous file content into the classifier LLM without intent.
+MCP tools (`mcp__*`): the server name, the tool name, the server's
+annotations and the call arguments are forwarded. Each string (value
+or key) is cut at 2,000 characters, names at 200, the whole payload
+shares a 16,000 character budget measured on the pretty-printed form
+the classifier receives, and nesting / entry counts are capped; every
+cut is marked in place (`…[truncated N chars]` or `[omitted: …]`) and
+flagged with `arguments_truncated: true` / `name_truncated: true` so
+the classifier never mistakes an omission for an absence. Historical
+actions in the transcript are capped at 4,000 characters each and
+40,000 in total (newest kept first; older ones keep only their tool
+name). The arguments are what the agent is about to
+send to that server — the classifier's data-exfiltration and
+external-write rules can only be applied to them, and they were
+already produced by the main model, so forwarding them to a classifier
+on the same model configuration discloses nothing new. If your
+classifier runs against a different provider, set
+`permissions.autoMode.mcp.forwardArguments: false` to restore the
+name-only projection (expect most MCP calls to be blocked).
 
 **Can I disable the first-time information message?**
 

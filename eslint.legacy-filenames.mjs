@@ -440,7 +440,6 @@ export const legacyFilenames = [
   'useFeedbackDialog',
   'useFocus',
   'useFolderTrust',
-  'useGeminiStream',
   'useGitBranchName',
   'useHistoryManager',
   'useHooksDialog',

@@ -4,6 +4,13 @@
   margin: 0 0 14px;
 }
 
+.editorShell[data-web-shell-compact-composer] {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+}
+
 .editorShellDropdownOpen {
   z-index: 7;
 }
@@ -27,6 +34,12 @@
   --chat-send-button-foreground: #fafafa;
 }
 
+.editorShell[data-web-shell-compact-composer] .container {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 .content {
   position: relative;
   z-index: 2;
@@ -41,6 +54,10 @@
   background: var(--chat-editor-bg-primary);
   opacity: 1;
   padding: 12px;
+}
+
+.editorShell[data-web-shell-compact-composer] .content {
+  padding: 10px;
 }
 
 .container[data-image-drag-active] .content {
@@ -209,6 +226,17 @@
   overflow: hidden;
 }
 
+:global([data-web-shell-slash-menu][data-web-shell-compact-overlay]) {
+  width: min(360px, calc(100vw - 16px));
+  max-width: min(
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 6px;
+}
+
 :global([data-web-shell-slash-detail]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
   width: min(320px, calc(100vw - 24px));
@@ -220,6 +248,26 @@
   width: min(max-content, var(--radix-popover-content-available-width));
   max-height: var(--radix-popover-content-available-height);
   overflow: hidden;
+}
+
+:global(
+    [data-web-shell-toolbar-popover][data-web-shell-compact-overlay]
+  ) {
+  width: min(360px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  padding: 6px;
+}
+
+:global(
+    [data-web-shell-toolbar-popover][data-web-shell-compact-overlay]
+  )
+  .dropdownItemDesc {
+  display: -webkit-box;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 :global([data-web-shell-reasoning-popover]) {
@@ -331,6 +379,44 @@
   column-gap: 0;
 }
 
+:global([data-web-shell-slash-menu][data-web-shell-compact-overlay])
+  .slashItem {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-compact-overlay])
+  .slashDescription {
+  display: none;
+  overflow-wrap: anywhere;
+  text-align: left;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-compact-overlay])
+  .slashItemActive
+  .slashDescription {
+  display: -webkit-box;
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-compact-overlay])
+  .slashCommand {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-compact-overlay])
+  .slashSectionCount {
+  display: none;
+}
+
 .slashItem:hover,
 .slashItemActive {
   background: var(--accent);
@@ -381,6 +467,12 @@
   white-space: nowrap;
 }
 
+.slashArgumentHint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .slashDescription {
   min-width: 0;
   overflow: hidden;
@@ -415,6 +507,29 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
   line-height: 1.35;
+}
+
+.atPanel[data-web-shell-compact-overlay] {
+  width: min(360px, calc(100vw - 16px));
+  padding: 4px;
+}
+
+.atPanel[data-web-shell-compact-overlay] .atItemDescription {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.atPanel[data-web-shell-compact-overlay] .atItemMain {
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 1px;
+}
+
+.atPanel[data-web-shell-compact-overlay] .atItemSubtitle {
+  justify-self: start;
+  overflow-wrap: anywhere;
+  text-align: left;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .atPanelHeaderWrap {
@@ -945,6 +1060,10 @@
   gap: 8px;
 }
 
+.editorShell[data-web-shell-compact-composer] .toolbar {
+  gap: 4px;
+}
+
 .toolbarLeading,
 .toolbarStart,
 .toolbarEnd,
@@ -958,6 +1077,10 @@
 .toolbarLeading {
   margin-left: -5px;
   min-width: 0;
+}
+
+.editorShell[data-web-shell-compact-composer] .toolbarLeading {
+  margin-left: 0;
 }
 
 .toolbar[data-mobile-voice-active='true'] .toolbarLeading,
@@ -1191,6 +1314,27 @@
 .toolbarRight {
   flex-shrink: 0;
   margin-right: -5px;
+}
+
+.editorShell[data-web-shell-compact-composer] .toolbarRight {
+  gap: 0;
+  margin-right: 0;
+}
+
+.editorShell[data-web-shell-compact-composer]
+  .toolbarRight
+  button[data-available] {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+}
+
+.editorShell[data-web-shell-compact-composer]
+  .toolbarRight
+  button
+  svg {
+  width: 16px;
+  height: 16px;
 }
 
 .toolbarRightCustom {
@@ -1538,6 +1682,20 @@
 
 .widthModeBtn {
   flex-shrink: 0;
+}
+
+.addMenuBtn {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.addMenuBtn .toolBtnIcon svg {
+  width: 18px;
+  height: 18px;
 }
 
 .contextUsageBtn {

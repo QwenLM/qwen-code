@@ -3,7 +3,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   DaemonHttpError,
   type DaemonTranscriptStore,
@@ -40,7 +40,7 @@ const sdk = vi.hoisted(() => ({
   ownerVersion: 0,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   consumePendingPromptEvents: vi.fn(),
   getPendingPromptEvents: () => sdk.pendingEvents,
   getPendingPromptVersion: () => 0,

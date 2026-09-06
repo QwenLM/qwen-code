@@ -33,6 +33,13 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
+    key: 'messagePrefix',
+    label: 'Message Prefix',
+    kind: 'string',
+    description:
+      'Only dispatch user messages that start with this exact prefix after any leading @mentions. The prefix is removed before the task runs',
+  },
+  {
     key: 'senderPolicy',
     label: 'Sender Policy',
     kind: 'enum',
@@ -102,6 +109,17 @@ function managementFieldsWithSharedControls(
             description:
               'Controls how conversations share persistent agent sessions',
             options: SESSION_SCOPE_OPTIONS,
+          },
+        ]),
+    ...(declared.has('multiSession')
+      ? []
+      : [
+          {
+            key: 'multiSession',
+            label: 'Named Sessions',
+            kind: 'boolean' as const,
+            description:
+              'Retain an owner-scoped catalog of named tasks in daemon-managed mode',
           },
         ]),
   ];

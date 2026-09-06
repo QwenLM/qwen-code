@@ -117,6 +117,8 @@ Existing TypeScript plugins that explicitly type the adapter constructor or fact
 - **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
 - Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
 
+Daemon-managed named tasks attach an optional delivery-only `sourceLabel` to output-segment contexts and thread delivery. A streaming adapter must render it on the first independently visible chunk of each segment and on a separately visible final response. Keep the raw model text unchanged, parse sentinels or media markers before adding the label, escape the label for the platform's markup dialect, and reserve room for it when splitting platform-sized messages. The example adapter demonstrates this contract without persisting the label in its WebSocket protocol state.
+
 ## Lifecycle status
 
 The mock plugin protocol exposes streamed chunks and final outbound messages only. It does not model typing indicators, reactions, card updates, or any other status surface, so prompt and task lifecycle status are intentionally no-op for this example channel.

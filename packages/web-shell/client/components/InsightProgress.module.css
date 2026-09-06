@@ -57,3 +57,27 @@
   color: var(--muted-foreground);
   font-size: 12px;
 }
+
+.pathButton {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font-family: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.pathButton:hover {
+  color: var(--foreground);
+}
+
+.pathButton:focus-visible {
+  border-radius: 2px;
+  outline: 1px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}

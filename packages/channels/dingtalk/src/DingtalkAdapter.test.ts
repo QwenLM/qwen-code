@@ -10,7 +10,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { inspect } from 'node:util';
+import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
+import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
@@ -33,6 +36,9 @@ const dingtalkSdkMock = vi.hoisted(() => ({
   instances: [] as unknown[],
   nextConnect: undefined as (() => Promise<void>) | undefined,
   rawLog: vi.fn(),
+  // Stands in for the gateway stream ticket that the SDK's ungated connect
+  // logging writes to stdout (dist/client.mjs, getEndpoint).
+  streamTicket: 'stream-ticket-1a2b3c',
 }));
 
 const PNG_DATA = Buffer.from([
@@ -43,6 +49,13 @@ function createTempPng(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-image-'));
   const path = join(dir, 'image.png');
   writeFileSync(path, PNG_DATA);
+  return { dir, path };
+}
+
+function createTempFile(name = 'report.txt'): { dir: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-file-'));
+  const path = join(dir, name);
+  writeFileSync(path, 'report');
   return { dir, path };
 }
 
@@ -85,6 +98,18 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
     );
     send = vi.fn();
     connect = vi.fn(() => {
+      // Reproduces the SDK's ungated getEndpoint() logging (dist/client.mjs):
+      // the resolved config, then the gateway response carrying the ticket.
+      /* eslint-disable no-console -- this is the SDK behaviour under test */
+      console.log({ ...this.options });
+      console.log(
+        'res.data',
+        JSON.stringify({
+          endpoint: 'wss://wss-open-connection.dingtalk.test/connect',
+          ticket: dingtalkSdkMock.streamTicket,
+        }),
+      );
+      /* eslint-enable no-console */
       const connect = dingtalkSdkMock.nextConnect;
       dingtalkSdkMock.nextConnect = undefined;
       return connect?.() ?? Promise.resolve();
@@ -125,7 +150,28 @@ vi.mock('@qwen-code/channel-base', async () => {
       handleInbound = vi.fn().mockResolvedValue(undefined);
       protected preflightInbound = vi.fn().mockResolvedValue(true);
       protected processInbound = vi.fn().mockResolvedValue(undefined);
+      protected async prepareThenHandleInbound(
+        envelope: Envelope,
+        prepare: () => Promise<boolean | void>,
+      ): Promise<void> {
+        if ((await prepare()) === false) return;
+        await this.handleInbound(envelope);
+      }
+      protected processPreflightedInbound = vi.fn(
+        async (_envelope: Envelope, process: () => Promise<void>) => {
+          await process();
+        },
+      );
       onSessionDied(_sessionId: string): void {}
+      protected getResponseSourceLabel(_sessionId: string): undefined {
+        return undefined;
+      }
+      protected getInboundErrorSourceLabel(
+        _envelope: Envelope,
+      ): string | undefined {
+        return (this as unknown as { inboundErrorSourceLabelForTest?: string })
+          .inboundErrorSourceLabelForTest;
+      }
       protected logDebugPayload(platform: string, payload: unknown): void {
         (
           real.ChannelBase.prototype as unknown as {
@@ -144,6 +190,36 @@ vi.mock('@qwen-code/channel-base', async () => {
         _messageIds: string[],
       ): void {}
       protected requestPromptRunCancellation = vi.fn().mockResolvedValue(false);
+      // Real base dispatch flow, delegated like logDebugPayload: the adapter
+      // override under test replaces only the final delivery step.
+      async dispatchBackgroundResponse(
+        sessionId: string,
+        text: string,
+      ): Promise<void> {
+        await (
+          real.ChannelBase.prototype as unknown as {
+            dispatchBackgroundResponse(
+              sessionId: string,
+              text: string,
+            ): Promise<void>;
+          }
+        ).dispatchBackgroundResponse.call(this, sessionId, text);
+      }
+      protected async deliverBackgroundReply(
+        chatId: string,
+        text: string,
+        sessionId: string,
+      ): Promise<void> {
+        await (
+          real.ChannelBase.prototype as unknown as {
+            deliverBackgroundReply(
+              chatId: string,
+              text: string,
+              sessionId: string,
+            ): Promise<void>;
+          }
+        ).deliverBackgroundReply.call(this, chatId, text, sessionId);
+      }
       protected supportsProactiveTarget(target: SessionTarget): boolean {
         return target.threadId === undefined;
       }
@@ -171,6 +247,9 @@ vi.mock('@qwen-code/channel-base', async () => {
     // ship green.
     truncateUtf16Units: real.truncateUtf16Units,
     isTerminalTaskLifecycleType: real.isTerminalTaskLifecycleType,
+    // Real: the block-boundary regression drives blocks through the actual
+    // streamer's trim contract, not a hand-built block shape.
+    BlockStreamer: real.BlockStreamer,
   };
 });
 
@@ -260,7 +339,7 @@ it('rejects a non-boolean useConnectionManager value', () => {
   );
 });
 
-it('adds outbound image instructions without replacing custom instructions', () => {
+it('adds outbound media instructions without replacing custom instructions', () => {
   const channel = createChannel({ instructions: 'Keep the answer concise.' });
   const instructions = (
     channel as unknown as { config: { instructions: string } }
@@ -268,6 +347,16 @@ it('adds outbound image instructions without replacing custom instructions', () 
 
   expect(instructions).toContain('Keep the answer concise.');
   expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
+  expect(instructions).toContain('[FILE: /absolute/path/to/file]');
+});
+
+it('does not advertise file delivery in block streaming', () => {
+  const channel = createChannel({ blockStreaming: 'on' });
+  const instructions = (
+    channel as unknown as { config: { instructions: string } }
+  ).config.instructions;
+
+  expect(instructions).not.toContain('[FILE:');
 });
 
 it('validates interactive card config in the adapter', () => {
@@ -298,6 +387,69 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
     (channel as unknown as { questionCardController?: unknown })
       .questionCardController,
   ).toBeUndefined();
+});
+
+it('refreshes the shared proactive token after a card request returns 401', async () => {
+  let tokenRequests = 0;
+  let cardRequests = 0;
+  const fetchSpy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/gettoken?')) {
+        tokenRequests++;
+        return new Response(
+          JSON.stringify({
+            access_token: tokenRequests === 1 ? 'stale-token' : 'fresh-token',
+            expires_in: 7200,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === 'https://api.dingtalk.com/v1.0/card/instances') {
+        cardRequests++;
+        return cardRequests === 1
+          ? new Response('expired', { status: 401 })
+          : new Response('{}', { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+  const channel = createChannel();
+  const state = channel as unknown as {
+    proactiveToken?: { token: string; expiresAt: number };
+    interactiveCardClient: {
+      options: { invalidateAccessToken(token: string): void };
+      updateInstance(input: {
+        outTrackId: string;
+        cardParamMap: Record<string, unknown>;
+      }): Promise<void>;
+    };
+  };
+  const cardClient = state.interactiveCardClient;
+
+  await cardClient.updateInstance({
+    outTrackId: 'status-1',
+    cardParamMap: {},
+  });
+
+  expect(tokenRequests).toBe(2);
+  expect(cardRequests).toBe(2);
+  expect(
+    fetchSpy.mock.calls
+      .filter(
+        ([input]) =>
+          String(input) === 'https://api.dingtalk.com/v1.0/card/instances',
+      )
+      .map(
+        ([, init]) =>
+          (init?.headers as Record<string, string>)[
+            'x-acs-dingtalk-access-token'
+          ],
+      ),
+  ).toEqual(['stale-token', 'fresh-token']);
+  state.interactiveCardClient.options.invalidateAccessToken('stale-token');
+  expect(state.proactiveToken?.token).toBe('fresh-token');
+  fetchSpy.mockRestore();
 });
 
 function createCallbackResultChannel(
@@ -897,6 +1049,20 @@ function seedMentionTarget(
   (
     channel as unknown as { mentionTargets: Map<string, string> }
   ).mentionTargets.set(messageId, staffId);
+}
+
+function seedSessionTarget(
+  channel: DingtalkChannelInstance,
+  sessionId: string,
+  target: SessionTarget,
+): void {
+  (
+    channel as unknown as {
+      router: { getTarget(sessionId: string): SessionTarget | undefined };
+    }
+  ).router = {
+    getTarget: (id: string) => (id === sessionId ? target : undefined),
+  };
 }
 
 function deferredPromise<T>() {
@@ -1546,6 +1712,16 @@ describe('DingtalkChannel prompt reactions', () => {
 });
 
 describe('DingtalkChannel status cards', () => {
+  it('disposes status-card recovery when disconnected', () => {
+    const channel = createChannel();
+    const dispose = vi.fn();
+    Object.assign(channel, { statusCardController: { dispose } });
+
+    channel.disconnect();
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it('passes the configured model to the status card controller', () => {
     const channel = createChannel({ model: 'qwen3.7-max' });
 
@@ -1670,6 +1846,14 @@ describe('DingtalkChannel status cards', () => {
     };
 
     await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          processPreflightedInbound: ReturnType<typeof vi.fn>;
+        }
+      ).processPreflightedInbound,
+    ).toHaveBeenCalledWith(envelope, expect.any(Function));
 
     expect(
       (
@@ -1824,6 +2008,121 @@ describe('DingtalkChannel status cards', () => {
       segmentId: 'segment-2',
     });
     expect(fetchSpy).toHaveBeenCalledOnce();
+    const fallbackBody = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(fallbackBody.markdown.text).toBe('second');
+  });
+
+  it('falls back to the reply delivery with the projected text when no presenter exists', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const context = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    getChunkHook(channel)(
+      'cid-1',
+      '[FILE: /workspace/a.txt]\npartial answer',
+      'session-1',
+      context,
+    );
+    await getCompleteHook(channel)(
+      'cid-1',
+      'final answer',
+      'session-1',
+      context,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(body.markdown.text).toContain('final answer');
+    expect(body.markdown.text).toContain('[File delivery unavailable]');
+    expect(body.markdown.text).not.toContain('/workspace/a.txt');
+  });
+
+  it('delivers a projected file before finalizing the status card', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const order: string[] = [];
+      const closeOutput = vi.fn(async () => {
+        order.push('finalize');
+        return true;
+      });
+      const appendOutput = vi.fn();
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            appendOutput: typeof appendOutput;
+            closeOutput: typeof closeOutput;
+          };
+        }
+      ).interactionPresenter = { appendOutput, closeOutput };
+      const context = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url = String(input);
+        if (url.includes('/gettoken?')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+            ),
+          );
+        }
+        if (url.includes('/media/upload')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
+            ),
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as { msgtype: string };
+        if (body.msgtype === 'file') order.push('file');
+        return Promise.resolve(new Response('{}'));
+      });
+      const response = `before\n[FILE: ${file.path}]\nafter`;
+
+      getChunkHook(channel)('cid-1', response, 'session-1', context);
+      await getCompleteHook(channel)('cid-1', response, 'session-1', context);
+
+      expect(appendOutput).toHaveBeenCalledWith(context, 'before\n\nafter');
+      expect(closeOutput.mock.calls[0]?.[1]).toBe('before\n\nafter');
+      expect(order).toEqual(['file', 'finalize']);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
   });
 
   it('uploads a final status card image before closing output', async () => {
@@ -1990,6 +2289,10 @@ describe('DingtalkChannel status cards', () => {
 });
 
 describe('DingtalkChannel question cards', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it.each([
     undefined,
     { enabled: false },
@@ -2044,6 +2347,68 @@ describe('DingtalkChannel question cards', () => {
         }
       ).questionCardController,
     ).toBeDefined();
+  });
+
+  it('repeats the source label on every split question fallback', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: { createAndDeliver: ReturnType<typeof vi.fn> };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi
+      .fn()
+      .mockRejectedValue(new Error('card unavailable'));
+    const controller = (
+      channel as unknown as {
+        questionCardController: {
+          present(
+            context: ChannelUserInputRequestContext,
+            target: { chatId: string; isGroup: boolean },
+          ): Promise<unknown>;
+        };
+      }
+    ).questionCardController;
+    const context = {
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      questions: [
+        {
+          answerKey: '0',
+          header: 'Review',
+          question: 'x'.repeat(7600),
+          options: [{ label: 'Continue', description: 'Continue.' }],
+          multiSelect: false,
+        },
+      ],
+      submitOptionId: 'proceed_once',
+      sourceLabel: '[review]',
+      onSettled: () => () => {},
+      respond: vi.fn().mockResolvedValue(true),
+    } as ChannelUserInputRequestContext;
+
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const body of bodies) {
+      expect(body.markdown.text).toMatch(/^\\\[review\\\]\n\n/u);
+      expect(body.markdown.text.length).toBeLessThanOrEqual(3800);
+    }
   });
 
   it('presents through the matching attended run only', async () => {
@@ -2242,6 +2607,250 @@ describe('DingtalkChannel unroutable-message logging', () => {
 });
 
 describe('DingtalkChannel parsed-message logging', () => {
+  it('labels the fallback when a named inbound turn rejects', async () => {
+    const channel = createChannel();
+    const error = new Error('agent unavailable: secret-token');
+    vi.mocked(channel.handleInbound).mockRejectedValueOnce(error);
+    Object.assign(channel, { inboundErrorSourceLabelForTest: '[review]' });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'failed-named-turn',
+        conversationType: '1',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: false,
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'failed-named-turn' },
+    } as unknown as DWClientDownStream;
+
+    try {
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+
+      const body = JSON.parse(
+        String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+      );
+      const reference = body.markdown.text.match(
+        /\*\*Reference:\*\* `([0-9a-f]{8})`/,
+      )?.[1];
+      expect(reference).toBeDefined();
+      expect(body.markdown.text).toBe(
+        '\\[review\\]\n\n**Unable to process this message**\n\n' +
+          '**Status:** Service is temporarily unavailable\n' +
+          '**Next step:** Try again in a moment. If it keeps failing, contact the bot administrator.\n' +
+          `**Reference:** \`${reference}\``,
+      );
+      expect(body.markdown.text).not.toContain('secret-token');
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`ref=${reference}`),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      name: 'configuration failures',
+      error: Object.assign(new Error('request rejected'), { status: 401 }),
+      rawDetail: 'request rejected',
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    },
+    {
+      name: 'cancelled requests',
+      error: new Error('request aborted'),
+      rawDetail: 'request aborted',
+      status: 'Request was cancelled',
+      nextStep: 'Send the request again if you still need it.',
+    },
+    {
+      name: 'timeouts',
+      error: Object.assign(new Error('request aborted after timeout'), {
+        status: 504,
+      }),
+      rawDetail: 'request aborted after timeout',
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    },
+    {
+      name: 'busy agents',
+      error: Object.assign(new Error('request failed'), {
+        body: 'overloaded',
+      }),
+      rawDetail: 'overloaded',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'unexpected failures',
+      error: new Error('provider failed with secret-marker'),
+      rawDetail: 'secret-marker',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'opaque rejections',
+      error: new Proxy(
+        {},
+        {
+          get() {
+            throw new Error('getter secret-marker');
+          },
+        },
+      ),
+      rawDetail: 'secret-marker',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'authentication keyword failures',
+      error: new Error('authentication failed'),
+      rawDetail: 'authentication failed',
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    },
+    {
+      name: 'timeout keyword failures',
+      error: new Error('request timed out'),
+      rawDetail: 'request timed out',
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    },
+    {
+      name: 'connection refused failures',
+      error: new Error('connect ECONNREFUSED 127.0.0.1:443'),
+      rawDetail: '127.0.0.1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'connection timeout failures',
+      error: new Error('connect ETIMEDOUT 10.0.0.1:443'),
+      rawDetail: '10.0.0.1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'fetch failures',
+      error: new Error('fetch failed'),
+      rawDetail: 'fetch failed',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'busy keyword failures',
+      error: new Error('too many requests'),
+      rawDetail: 'too many requests',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'string rejections',
+      error: 'rate limit exceeded',
+      rawDetail: 'rate limit exceeded',
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    },
+    {
+      name: 'vanished daemon sessions',
+      error: { status: 404, body: { code: 'session_not_found' } },
+      rawDetail: 'session_not_found',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'bridge session errors',
+      error: Object.assign(new Error('No session with id "sess-1"'), {
+        name: 'SessionNotFoundError',
+        code: 'session_not_found',
+      }),
+      rawDetail: 'sess-1',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'agent session errors',
+      error: new Error('Session not found: sess-2'),
+      rawDetail: 'sess-2',
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    },
+    {
+      name: 'rejections with non-string messages',
+      error: Object.assign(new Error('x'), { message: Symbol('boom') }),
+      rawDetail: 'boom',
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    },
+  ])('presents $name without exposing raw details', async (testCase) => {
+    const channel = createChannel();
+    vi.mocked(channel.handleInbound).mockRejectedValueOnce(testCase.error);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'failed-classified-turn',
+        conversationType: '1',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: false,
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'failed-classified-turn' },
+    } as unknown as DWClientDownStream;
+
+    try {
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+
+      const body = JSON.parse(
+        String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+      );
+      expect(body.markdown.text).toContain(
+        `**Status:** ${testCase.status}\n**Next step:** ${testCase.nextStep}`,
+      );
+      expect(body.markdown.text).not.toContain(testCase.rawDetail);
+      expect(body.markdown.text).toMatch(/\*\*Reference:\*\* `[0-9a-f]{8}`$/);
+    } finally {
+      stderrSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('forwards the inbound conversation title as the group name', () => {
     const channel = createChannel();
     const downstream = {
@@ -3790,6 +4399,140 @@ describe('DingtalkChannel quoted media', () => {
     ).onMessage(downstream);
   }
 
+  function sendDirectText(
+    channel: DingtalkChannelInstance,
+    content: string,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'direct-text',
+        conversationType: '1',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        msgtype: 'text',
+        text: { content },
+      }),
+      headers: { messageId: 'direct-text' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
+  it('keeps user-authored DingTalk text behind the configured prefix', async () => {
+    // The mirror of the media exemption: text the user typed must never be
+    // exempted, or the configured prefix is defeated for the whole adapter.
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    sendDirectText(channel, '/review inspect this');
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('/review inspect this');
+    expect(envelope.syntheticText).toBeUndefined();
+    expect(envelope.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('exempts a captionless DingTalk media message from the prefix', async () => {
+    mockMediaDownload('image/png', new Uint8Array([1, 2, 3]));
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    sendDirectMedia(channel, 'picture', { downloadCode: 'direct-picture' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.syntheticText).toBe(true);
+  });
+
+  it('marks readable chat records as user text and exempts only the empty placeholder', async () => {
+    const readable = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(readable, 'chatRecord', {
+      chatRecord: [{ senderName: 'Alice', content: 'inspect production' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(readable.handleInbound).toHaveBeenCalledOnce();
+    });
+    const readableEnvelope = vi.mocked(readable.handleInbound).mock
+      .calls[0]![0];
+    expect(readableEnvelope.syntheticText).toBeUndefined();
+
+    const empty = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(empty, 'chatRecord', {});
+
+    await vi.waitFor(() => {
+      expect(empty.handleInbound).toHaveBeenCalledOnce();
+    });
+    const emptyEnvelope = vi.mocked(empty.handleInbound).mock.calls[0]![0];
+    expect(emptyEnvelope.text).toBe('(chat record)');
+    expect(emptyEnvelope.syntheticText).toBe(true);
+  });
+
+  it.each([
+    ['an empty rich-text message', 'richText', { richText: [] }],
+    ['a picture without a download code', 'picture', {}],
+  ])(
+    'does not exempt %s from the configured prefix',
+    async (_label, msgtype, content) => {
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, msgtype, content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      expect(envelope.syntheticText).toBeUndefined();
+    },
+  );
+
+  it.each([
+    {
+      label: 'a transcribed voice message stays gated',
+      content: {
+        downloadCode: 'direct-audio',
+        recognition: 'please review the build failure',
+      },
+      text: 'please review the build failure',
+      synthetic: undefined,
+    },
+    {
+      label: 'an untranscribed voice message runs as media',
+      content: { downloadCode: 'direct-audio' },
+      // The placeholder is cleared once the attachment is downloaded.
+      text: '',
+      synthetic: true,
+    },
+  ])(
+    'under a configured prefix, $label',
+    async ({ content, text, synthetic }) => {
+      // A transcript is the user's own words, so it carries the prefix like
+      // any other message; only the `(audio)` placeholder is adapter text.
+      mockMediaDownload('audio/amr', new Uint8Array([1, 2, 3]));
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, 'audio', content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope.text).toBe(text);
+      expect(envelope.syntheticText).toBe(synthetic);
+    },
+  );
+
   it('downloads every picture in one richText callback', async () => {
     const downloadCodes: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(
@@ -4116,6 +4859,7 @@ describe('DingtalkChannel quoted media', () => {
     expect(envelope).toMatchObject({
       text: '(image)',
       referencedText: '[image]',
+      syntheticText: true,
     });
     expect(envelope.attachments).toHaveLength(2);
     expect(envelope.attachments).toEqual([
@@ -4549,6 +5293,140 @@ describe('DingtalkChannel downstream logging', () => {
     expect(client.onCallback).not.toHaveBeenCalled();
   });
 });
+
+function formatLoggedArgs(calls: unknown[][]): string {
+  return calls
+    .map((call) => call.map((arg) => inspect(arg)).join(' '))
+    .join('\n');
+}
+
+/* eslint-disable no-console -- console.log is the subject of these tests */
+describe('DingtalkChannel connect logging', () => {
+  afterEach(() => {
+    dingtalkSdkMock.nextConnect = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it('keeps clientSecret and the stream ticket off console.log on connect', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await channel.connect();
+    } finally {
+      channel.disconnect();
+    }
+
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).not.toContain('client-secret');
+    expect(logged).not.toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('keeps a connection-manager replacement client silent on reconnect', async () => {
+    const firstIndex = dingtalkSdkMock.instances.length;
+    const channel = createChannel();
+    await channel.connect();
+    const firstClient = mockClientAt(firstIndex);
+
+    const replacementGate = deferredPromise<void>();
+    let replacementConnectStarted = false;
+    dingtalkSdkMock.nextConnect = () => {
+      replacementConnectStarted = true;
+      return replacementGate.promise;
+    };
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      firstClient.onDownStream(
+        JSON.stringify({
+          type: 'SYSTEM',
+          headers: { topic: 'disconnect', messageId: 'system-message' },
+          data: '',
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(replacementConnectStarted).toBe(true);
+      });
+      replacementGate.resolve();
+      await vi.waitFor(() => {
+        expect(firstClient.disconnect).toHaveBeenCalledOnce();
+      });
+    } finally {
+      replacementGate.resolve();
+      channel.disconnect();
+    }
+
+    expect(dingtalkSdkMock.instances.length).toBe(firstIndex + 2);
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).not.toContain('client-secret');
+    expect(logged).not.toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('restores console.log once overlapping connects settle', async () => {
+    createChannel({ useConnectionManager: false });
+    const client = latestMockClient() as { connect(): Promise<void> };
+    const originalConsoleLog = console.log;
+
+    const firstGate = deferredPromise<void>();
+    const secondGate = deferredPromise<void>();
+    dingtalkSdkMock.nextConnect = () => firstGate.promise;
+    const firstConnect = client.connect();
+    dingtalkSdkMock.nextConnect = () => secondGate.promise;
+    const secondConnect = client.connect();
+
+    expect(console.log).not.toBe(originalConsoleLog);
+
+    dingtalkSdkMock.nextConnect = undefined;
+    firstGate.resolve();
+    await firstConnect;
+    // The second connect is still in flight, so logging must stay suppressed:
+    // restoring here would reopen the leak for the remainder of that connect.
+    expect(console.log).not.toBe(originalConsoleLog);
+
+    secondGate.resolve();
+    await secondConnect;
+
+    expect(console.log).toBe(originalConsoleLog);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    console.log('logging works again');
+    expect(logSpy).toHaveBeenCalledWith('logging works again');
+  });
+
+  it('models the ungated SDK connect logging the guards rely on', async () => {
+    // Control for the guard tests above: the mocked SDK client, bypassing the
+    // adapter's wrapping, must leak what the guards assert absent. Without
+    // this, deleting the mock's console.log lines would leave them green
+    // while guarding nothing.
+    const rawClient = new DWClient({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await rawClient.connect();
+
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).toContain('client-secret');
+    expect(logged).toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('restores console.log when connect rejects', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    dingtalkSdkMock.nextConnect = () =>
+      Promise.reject(new Error('gateway down'));
+    const originalConsoleLog = console.log;
+
+    try {
+      await expect(channel.connect()).rejects.toThrow('gateway down');
+    } finally {
+      channel.disconnect();
+    }
+
+    expect(console.log).toBe(originalConsoleLog);
+  });
+});
+/* eslint-enable no-console */
 
 describe('DingtalkChannel sender attribution', () => {
   it('falls back to senderStaffId when senderNick is absent', () => {
@@ -5854,6 +6732,859 @@ describe('DingtalkChannel outbound image delivery', () => {
   });
 });
 
+describe('DingtalkChannel outbound file delivery', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function segment(segmentId = 'segment-1'): ChannelOutputSegmentContext {
+    return {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId,
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    };
+  }
+
+  it('sends a local file attachment and path-free text reply', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation((input) => {
+          const url = String(input);
+          if (url.includes('/gettoken?')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: 'proactive-token',
+                  expires_in: 7200,
+                }),
+              ),
+            );
+          }
+          if (url.includes('/media/upload')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
+              ),
+            );
+          }
+          return Promise.resolve(new Response('{}'));
+        });
+
+      await channel.sendMessage(
+        'cid123',
+        `before\n[FILE: ${file.path}]\nafter`,
+      );
+
+      const webhookCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('/robot/send?'),
+      );
+      expect(webhookCalls).toHaveLength(2);
+      const fileBody = JSON.parse(
+        String((webhookCalls[0]![1] as RequestInit).body),
+      );
+      expect(fileBody).toEqual({
+        msgtype: 'file',
+        file: {
+          mediaId: '@file-media-id',
+          fileName: 'report.txt',
+          fileType: 'txt',
+        },
+      });
+      expect((webhookCalls[0]![1] as RequestInit).redirect).toBe('error');
+      const textBody = JSON.parse(
+        String((webhookCalls[1]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(textBody.markdown.text).toContain('before\n\nafter');
+      expect(textBody.markdown.text).not.toContain('[FILE:');
+      expect(textBody.markdown.text).not.toContain(file.path);
+
+      fetchSpy.mockClear();
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      const pureFileWebhookCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('/robot/send?'),
+      );
+      expect(pureFileWebhookCalls).toHaveLength(1);
+      expect(
+        JSON.parse(String((pureFileWebhookCalls[0]![1] as RequestInit).body)),
+      ).toMatchObject({ msgtype: 'file' });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes the token and retries one expired file upload', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      let uploadCall = 0;
+      let tokenCall = 0;
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation((input) => {
+          const url = String(input);
+          if (url.includes('/gettoken?')) {
+            tokenCall++;
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: `proactive-token-${tokenCall}`,
+                  expires_in: 7200,
+                }),
+              ),
+            );
+          }
+          if (url.includes('/media/upload')) {
+            return Promise.resolve(
+              uploadCall++ === 0
+                ? new Response(
+                    JSON.stringify({
+                      errcode: 42001,
+                      errmsg: 'token expired',
+                    }),
+                  )
+                : new Response(
+                    JSON.stringify({
+                      errcode: 0,
+                      media_id: '@file-media-id',
+                    }),
+                  ),
+            );
+          }
+          return Promise.resolve(new Response('{}'));
+        });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(
+        fetchSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('/media/upload'),
+        ),
+      ).toHaveLength(2);
+      expect(
+        fetchSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('/gettoken?'),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an invalid local file without exposing its path', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await channel.sendMessage('cid123', `[FILE: ${process.execPath}]`);
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(body.markdown.text).toContain('[File delivery failed:');
+    expect(body.markdown.text).not.toContain(process.execPath);
+  });
+
+  it('does not upload a file for an untrusted session webhook', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        'cid123',
+        'https://oapi.dingtalk.com.evil.test/robot/send',
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const prepare = (
+        channel as unknown as {
+          prepareReplyOutput(chatId: string, text: string): Promise<string>;
+        }
+      ).prepareReplyOutput.bind(channel);
+
+      await expect(prepare('cid123', `[FILE: ${file.path}]`)).resolves.toBe(
+        '[File delivery failed: report.txt]',
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['reserved opening', '[FILE:', ''],
+    ['split reserved opening', '[FI', 'LE: '],
+  ])(
+    'keeps paths hidden when block streaming splits the %s',
+    async (_name, first, second) => {
+      const channel = createChannel({ blockStreaming: 'on' });
+      seedWebhook(channel, 'cid123');
+      getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}'));
+      const send = (
+        channel as unknown as {
+          sendResponseMessage(
+            chatId: string,
+            text: string,
+            sessionId: string,
+          ): Promise<void>;
+        }
+      ).sendResponseMessage.bind(channel);
+
+      await send('cid123', first, 'session-1');
+      await send(
+        'cid123',
+        `${second}/workspace/private-report.txt]`,
+        'session-1',
+      );
+
+      expect(JSON.stringify(fetchSpy.mock.calls)).not.toContain(
+        '/workspace/private-report.txt',
+      );
+      expect(JSON.stringify(fetchSpy.mock.calls)).toContain(
+        'File delivery unavailable',
+      );
+      await getOutputSegmentEndHook(channel)(
+        'cid123',
+        'session-1',
+        segment(),
+        'completed',
+      );
+      expect(
+        (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+          .blockFileProjectors.size,
+      ).toBe(1);
+      getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
+      expect(
+        (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+          .blockFileProjectors.size,
+      ).toBe(0);
+    },
+  );
+
+  it('keeps the block projector across a segment reset so split markers stay redacted', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send('cid123', 'Report\n[FILE: /workspace/secret-', 'session-1');
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      segment(),
+      'response_boundary',
+    );
+    await send('cid123', 'report.txt]\nDone', 'session-1');
+
+    const texts = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        (
+          JSON.parse(String((init as RequestInit).body)) as {
+            markdown: { text: string };
+          }
+        ).markdown.text,
+    );
+    expect(texts.join('\n')).not.toContain('report.txt');
+    expect(texts.join('\n')).toContain('File delivery unavailable');
+  });
+
+  it('keeps a reserved line pending across blocks that end on an early "]"', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send('cid123', 'before\n[FILE: /workspace/report [v2]', 'session-1');
+    await send('cid123', '.txt]\nafter', 'session-1');
+
+    const bodies = JSON.stringify(fetchSpy.mock.calls);
+    expect(bodies).not.toContain('.txt]');
+    expect(bodies).not.toContain('[FILE:');
+    expect(bodies).toContain('File delivery unavailable');
+  });
+
+  it('reports the unavailable notice once across later blocks', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send('cid123', '[FILE: /workspace/a.txt]\n', 'session-1');
+    await send('cid123', 'Answer part one\n', 'session-1');
+    await send('cid123', 'Answer part two\n', 'session-1');
+
+    const texts = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        (
+          JSON.parse(String((init as RequestInit).body)) as {
+            markdown: { text: string };
+          }
+        ).markdown.text,
+    );
+    expect(texts.join('\n').match(/File delivery unavailable/g)).toHaveLength(
+      1,
+    );
+  });
+
+  it('keeps the group mention for the answer after a notice-only block', async () => {
+    const channel = createChannel({ atSender: true, blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    const send = getResponseHook(channel);
+
+    await send('cid123', '[FILE: /workspace/a.txt', 'session-1');
+    await send('cid123', ']\nThe answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    ) as Array<{ markdown: { text: string }; at?: { atUserIds: string[] } }>;
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.markdown.text).toBe('[File delivery unavailable]');
+    expect(bodies[0]).not.toHaveProperty('at');
+    expect(bodies[1]!.markdown.text).toContain('@staff-1');
+    expect(bodies[1]!.markdown.text).toContain('The answer');
+    expect(bodies[1]!.at).toEqual({ atUserIds: ['staff-1'] });
+  });
+
+  it('delivers DM background responses without interleaving the block projector', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cid123',
+      isGroup: false,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+
+    await send(
+      'cid123',
+      'Partial answer [FILE: /workspace/report.txt',
+      'session-1',
+    );
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Background notification',
+    );
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    ) as Array<{ markdown: { text: string } }>;
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.markdown.text).toBe('Background notification');
+    expect(JSON.stringify(bodies)).not.toContain('[FILE:');
+    expect(JSON.stringify(bodies)).not.toContain('/workspace/report.txt');
+  });
+
+  it('delivers group background responses proactively, past the block projector', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    await getResponseHook(channel)(
+      'cid123',
+      'Partial [FILE: /workspace/report.txt',
+      'session-1',
+    );
+
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Background notification',
+    );
+
+    expect(pushProactive).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'cidGroup==' }),
+      'Background notification',
+    );
+    // The notification bypassed sendReply entirely; only the turn's own
+    // block reached the webhook, and the held marker stayed in the projector.
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(
+      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+        .blockFileProjectors.size,
+    ).toBe(1);
+  });
+
+  it.each([
+    ['an unknown session', 'other-session', 'test-dingtalk'],
+    ['a foreign-channel target', 'session-1', 'other-channel'],
+  ])(
+    'silently drops a background response for %s',
+    async (_name, seededSession, channelName) => {
+      const channel = createChannel({ blockStreaming: 'on' });
+      seedSessionTarget(channel, seededSession, {
+        channelName,
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}'));
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse(
+        'session-1',
+        'Background notification',
+      );
+
+      expect(pushProactive).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('silently drops an empty background response', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    await channel.dispatchBackgroundResponse('session-1', '   ');
+
+    expect(pushProactive).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('feeds status presentation only projected chunks and final text', async () => {
+    const channel = createChannel();
+    const projected: string[] = [];
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: (_segment: unknown, chunk: string) => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = {
+      appendOutput: (_segment, chunk) => projected.push(chunk),
+      closeOutput,
+    };
+    const context = segment();
+    const chunks = ['before\n[FI', 'LE: /workspace/report.txt]', '\nafter'];
+    for (const chunk of chunks) {
+      getChunkHook(channel)('cid123', chunk, 'session-1', context);
+    }
+    await getCompleteHook(channel)(
+      'cid123',
+      chunks.join(''),
+      'session-1',
+      context,
+    );
+
+    expect(projected.join('')).toBe('before\n\nafter');
+    expect(closeOutput.mock.calls[0]?.[1]).toBe(
+      'before\n\nafter\n[File delivery failed: report.txt]',
+    );
+    expect(JSON.stringify(closeOutput.mock.calls)).not.toContain(
+      '/workspace/report.txt',
+    );
+  });
+
+  it('adds no notice when a marker-free final text differs from the streamed prefix', async () => {
+    // A routine multi-tool turn: visible text streams, a response boundary
+    // resets the bridge's chunk accumulation, and the final text carries only
+    // the post-boundary bytes. The streamed projector saw MORE than the final
+    // text by construction — that alone must not fail closed.
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: () => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = { appendOutput: () => {}, closeOutput };
+    const first = segment('segment-1');
+    getChunkHook(channel)(
+      'cid123',
+      'Sure, let me check that.',
+      'session-1',
+      first,
+    );
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      first,
+      'response_boundary',
+    );
+    const next = { ...first, segmentId: 'segment-2' };
+    getChunkHook(channel)('cid123', 'The answer is 42.', 'session-1', next);
+    await getCompleteHook(channel)(
+      'cid123',
+      'The answer is 42.',
+      'session-1',
+      next,
+    );
+    // Call 0 is the response_boundary close; the final text lands in call 1.
+    expect(closeOutput.mock.calls[1]?.[1]).toBe('The answer is 42.');
+  });
+
+  it('keeps the notice when a streamed marker is absent from the final text', async () => {
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: () => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = { appendOutput: () => {}, closeOutput };
+    const context = segment();
+    getChunkHook(channel)(
+      'cid123',
+      '[FILE: /workspace/a.txt]\nstreamed text',
+      'session-1',
+      context,
+    );
+    await getCompleteHook(channel)(
+      'cid123',
+      'different final text',
+      'session-1',
+      context,
+    );
+    expect(closeOutput.mock.calls[0]?.[1]).toBe(
+      'different final text\n[File delivery unavailable]',
+    );
+    expect(JSON.stringify(closeOutput.mock.calls)).not.toContain(
+      '/workspace/a.txt',
+    );
+  });
+
+  it('discards segment projectors on terminal segment ends', async () => {
+    const channel = createChannel();
+    for (const [index, reason] of (
+      ['cancelled', 'failed'] as const
+    ).entries()) {
+      const ended = segment(`segment-${index + 1}`);
+      getChunkHook(channel)(
+        'cid123',
+        '[FILE: /workspace/a.txt]',
+        'session-1',
+        ended,
+      );
+      await getOutputSegmentEndHook(channel)(
+        'cid123',
+        'session-1',
+        ended,
+        reason,
+      );
+    }
+    expect(
+      (channel as unknown as { fileProjectors: Map<string, unknown> })
+        .fileProjectors.size,
+    ).toBe(0);
+  });
+
+  it('flushes the block projector held tail when the turn ends', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await getResponseHook(channel)('cid123', 'Answer ends here [', 'session-1');
+    getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
+
+    await vi.waitFor(() => {
+      expect(fetchSpy.mock.calls).toHaveLength(2);
+    });
+    const lastBody = JSON.parse(
+      String((fetchSpy.mock.calls[1]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(lastBody.markdown.text).toBe('[');
+    expect(lastBody.markdown.text).not.toContain('File delivery unavailable');
+    expect(
+      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+        .blockFileProjectors.size,
+    ).toBe(0);
+  });
+
+  it('redacts an unfinished marker at turn end instead of leaking a fragment', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await getResponseHook(channel)(
+      'cid123',
+      'Report\n[FILE: /workspace/sec',
+      'session-1',
+    );
+    getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
+
+    // Settle must not emit the held reserved line: the marker never
+    // completed, so nothing may follow it as a standalone message.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchSpy.mock.calls).toHaveLength(1);
+    expect(JSON.stringify(fetchSpy.mock.calls)).not.toContain('/workspace/sec');
+    expect(
+      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+        .blockFileProjectors.size,
+    ).toBe(0);
+  });
+
+  it('keeps the status projector across a mid-turn segment reset', async () => {
+    const channel = createChannel();
+    const projected: string[] = [];
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: (_segment: unknown, chunk: string) => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = {
+      appendOutput: (_segment, chunk) => projected.push(chunk),
+      closeOutput,
+    };
+    const first = segment('segment-1');
+
+    getChunkHook(channel)('cid123', 'before\n[FI', 'session-1', first);
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      first,
+      'response_boundary',
+    );
+    // The base mints a fresh segment UUID after closeOutputSegment, but the
+    // same run continues.
+    const next = { ...first, segmentId: 'segment-2' };
+    getChunkHook(channel)(
+      'cid123',
+      'LE: /workspace/secret.txt]\nafter',
+      'session-1',
+      next,
+    );
+
+    expect(projected.join('')).toBe('before\n\nafter');
+    expect(projected.join('')).not.toContain('secret.txt');
+  });
+
+  it('delivers the line after a marker line ending exactly on a block boundary', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+    const streamer = new BlockStreamer({
+      minChars: 20,
+      maxChars: 1000,
+      idleMs: 0,
+      send: (text) => send('cid123', text, 'session-1'),
+    });
+
+    streamer.push(
+      '[FILE: /workspace/report.txt]\n\nThe answer is 42.\nSecond line',
+    );
+    await streamer.flush();
+
+    const bodies = JSON.stringify(fetchSpy.mock.calls);
+    expect(bodies).toContain('The answer is 42.');
+    expect(bodies).toContain('File delivery unavailable');
+    expect(bodies).not.toContain('/workspace/report.txt');
+  });
+
+  it('drops the block projector when its session dies', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+
+    await getResponseHook(channel)('cid123', 'Answer text', 'session-1');
+    const projectors = (
+      channel as unknown as { blockFileProjectors: Map<string, unknown> }
+    ).blockFileProjectors;
+    expect(projectors.size).toBe(1);
+
+    channel.onSessionDied('session-1');
+    expect(projectors.size).toBe(0);
+  });
+
+  it("keeps other sessions' status projectors when one session dies", () => {
+    const channel = createChannel();
+    const sessionOne = segment('segment-a');
+    const sessionTwo = {
+      ...segment('segment-b'),
+      sessionId: 'session-2',
+      runId: 'run-2',
+    };
+    getChunkHook(channel)('cid123', 'chunk a', 'session-1', sessionOne);
+    getChunkHook(channel)('cid123', 'chunk b', 'session-2', sessionTwo);
+    const projectors = (
+      channel as unknown as {
+        fileProjectors: Map<string, { sessionId: string }>;
+      }
+    ).fileProjectors;
+    expect(projectors.size).toBe(2);
+
+    channel.onSessionDied('session-1');
+    expect(projectors.size).toBe(1);
+    expect([...projectors.values()][0]!.sessionId).toBe('session-2');
+  });
+
+  it('drops the status projector on the terminal lifecycle event', () => {
+    const channel = createChannel();
+    getChunkHook(channel)('cid123', 'streamed', 'session-1', segment());
+    const projectors = (
+      channel as unknown as { fileProjectors: Map<string, unknown> }
+    ).fileProjectors;
+    expect(projectors.size).toBe(1);
+
+    getLifecycleHook(channel)({
+      type: 'completed',
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+    expect(projectors.size).toBe(0);
+  });
+
+  it('keeps file projection when rebuilding image-replaced text', async () => {
+    const channel = createChannel();
+    const prepare = (
+      channel as unknown as {
+        prepareReplyOutput(chatId: string, text: string): Promise<string>;
+      }
+    ).prepareReplyOutput.bind(channel);
+
+    const out = await prepare(
+      'cid123',
+      'before\n[FILE: /workspace/report.txt]\n[IMAGE: /workspace/missing.png]\nafter',
+    );
+
+    expect(out).toContain('[File delivery failed: report.txt]');
+    expect(out).not.toContain('[FILE:');
+    expect(out).not.toContain('/workspace/report.txt');
+    expect(out).toContain('[Image delivery failed: missing.png]');
+  });
+});
+
+describe('DingtalkChannel reply delivery timeout', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('bounds the webhook POST with an abort timeout', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const controller = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      const signal = (init as RequestInit | undefined)?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason));
+      });
+    });
+
+    const send = channel.sendMessage('cid123', 'hello');
+    const outcome = await Promise.race([
+      send.then(
+        () => 'resolved',
+        (err: unknown) =>
+          `rejected: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('pending'), 20),
+      ),
+    ]);
+    expect(outcome).toBe('pending');
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+
+    controller.abort(new Error('reply fetch timed out'));
+    await expect(send).rejects.toThrow('reply fetch timed out');
+  });
+});
+
 describe('DingtalkChannel proactive send', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -6055,6 +7786,66 @@ describe('DingtalkChannel proactive send', () => {
     }
   });
 
+  it.each([
+    ['group', groupTarget],
+    ['direct', directTarget],
+  ])('sends proactive %s files with sampleFile', async (_name, target) => {
+    const file = createTempFile('report.pdf');
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      const { sendCalls, directSendCalls, mediaCalls } = stubProactiveFetch(
+        () =>
+          new Response(JSON.stringify({ processQueryKey: 'message-key' }), {
+            status: 200,
+          }),
+      );
+
+      await channel.pushProactive(target, `[FILE: ${file.path}]`);
+
+      expect(mediaCalls()).toHaveLength(1);
+      expect(String(mediaCalls()[0]![0])).toContain('type=file');
+      const sends = target.isGroup ? sendCalls() : directSendCalls();
+      expect(sends).toHaveLength(1);
+      const body = JSON.parse(String((sends[0]![1] as RequestInit).body)) as {
+        msgKey: string;
+        msgParam: string;
+      };
+      expect(body.msgKey).toBe('sampleFile');
+      expect(JSON.parse(body.msgParam)).toEqual({
+        mediaId: '@lAL-proactive-media-id',
+        fileName: 'report.pdf',
+        fileType: 'pdf',
+      });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['group', groupTarget],
+    ['direct', directTarget],
+  ])(
+    'reports a proactive %s file response without a delivery verdict',
+    async (_name, target) => {
+      const file = createTempFile('report.pdf');
+      try {
+        const channel = proactive(createChannel({ cwd: file.dir }));
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const { sendCalls, directSendCalls } = stubProactiveFetch();
+
+        await channel.pushProactive(target, `[FILE: ${file.path}]`);
+
+        const sends = target.isGroup ? sendCalls() : directSendCalls();
+        expect(sends).toHaveLength(2);
+        expect(msgParamOf(sends[1]!).text).toBe(
+          '[File delivery failed: report.pdf]',
+        );
+      } finally {
+        rmSync(file.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('rejects direct messages when DingTalk reports an invalid recipient', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -6231,22 +8022,49 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(2);
   });
 
-  it('throws when the token endpoint rejects', async () => {
-    const channel = proactive(createChannel());
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    stubProactiveFetch(
-      undefined,
-      () =>
-        new Response(
-          JSON.stringify({ errcode: 40089, errmsg: 'invalid credential' }),
-          { status: 200 },
-        ),
-    );
+  it.each([
+    [40001, 'invalid credential'],
+    [40013, 'invalid appKey'],
+    [40089, 'invalid credential'],
+    [40096, 'invalid appKey or appSecret'],
+    [90002, 'invalid appKey'],
+    [90003, 'app not found'],
+  ])(
+    'classifies gettoken errcode %s as a non-retryable token error',
+    async (errcode, errmsg) => {
+      const channel = proactive(createChannel());
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubProactiveFetch(
+        undefined,
+        () =>
+          new Response(JSON.stringify({ errcode, errmsg }), { status: 200 }),
+      );
 
-    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
-      'gettoken errcode=40089',
-    );
-  });
+      const request = channel.pushProactive(groupTarget, 'hello');
+      await expect(request).rejects.toThrow(`gettoken errcode=${errcode}`);
+      await expect(request).rejects.toMatchObject({ retryable: false });
+    },
+  );
+
+  it.each([
+    [-1, '系统繁忙'],
+    [88, 'throttled'],
+  ])(
+    'classifies gettoken errcode %s as a retryable token error',
+    async (errcode, errmsg) => {
+      const channel = proactive(createChannel());
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubProactiveFetch(
+        undefined,
+        () =>
+          new Response(JSON.stringify({ errcode, errmsg }), { status: 200 }),
+      );
+
+      const request = channel.pushProactive(groupTarget, 'hello');
+      await expect(request).rejects.toThrow(`gettoken errcode=${errcode}`);
+      await expect(request).rejects.toMatchObject({ retryable: true });
+    },
+  );
 
   it('skips blank text without calling the API', async () => {
     const channel = proactive(createChannel());

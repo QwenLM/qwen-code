@@ -69,6 +69,7 @@ export type {
   BridgeSessionLifecycle,
   BridgeSessionLifecycleEvent,
   BridgeOptions,
+  BridgeRuntimeEpochSource,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
@@ -94,6 +95,7 @@ export type {
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
   BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
   BridgeAutoMemoryTopic,
@@ -104,6 +106,7 @@ export type {
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeWorkspaceRuntimeLifecycleSnapshot,
   BridgeShutdownOptions,
   WorkspaceEventPublisher,
   WorkspaceEventBridge,
@@ -132,6 +135,7 @@ export {
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
@@ -148,7 +152,10 @@ export {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
-export { SessionRestoreTimeoutError } from '@qwen-code/acp-bridge/status';
+export {
+  BridgeTimeoutError,
+  SessionRestoreTimeoutError,
+} from '@qwen-code/acp-bridge/status';
 
 export {
   MAX_WORKSPACE_PATH_LENGTH,

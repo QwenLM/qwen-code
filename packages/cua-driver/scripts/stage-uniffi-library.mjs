@@ -18,9 +18,7 @@ if (!existsSync(source)) {
   throw new Error(`missing ${source}; build cua-driver-sdk --release first`)
 }
 
-const destinations = [
-  join(driverRoot, "python", "src", "cua_driver", file),
-]
+const destinations = [join(driverRoot, "python", "src", "cua_driver", file)]
 for (const destination of destinations) {
   mkdirSync(dirname(destination), { recursive: true })
   copyFileSync(source, destination)
@@ -39,6 +37,13 @@ const nativeKey = (() => {
 const localNative = join(driverRoot, "typescript", ".native", nativeKey)
 mkdirSync(localNative, { recursive: true })
 copyFileSync(source, join(localNative, file))
+if (process.platform === "win32") {
+  const workerSource = join(driverRoot, "rust", "target", "release", "cua-driver-uia.exe")
+  if (!existsSync(workerSource)) {
+    throw new Error(`missing ${workerSource}; build cua-driver-uia --release first`)
+  }
+  copyFileSync(workerSource, join(localNative, "qwen-cua-driver-uia.exe"))
+}
 const runtime = join(localNative, "cua_driver_node_runtime.node")
 const runtimeBuild = spawnSync(
   process.execPath,

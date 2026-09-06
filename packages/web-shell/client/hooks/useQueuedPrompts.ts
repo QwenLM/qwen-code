@@ -23,7 +23,7 @@ import {
   type DaemonSessionActions,
   type DaemonStreamingState,
   type DaemonWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonInputAnnotation,
   DaemonMidTurnMessagesResult,
@@ -466,6 +466,7 @@ export function useQueuedPrompts({
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
   const displayedServerPromptIdsRef = useRef<Set<string>>(new Set());
+  const settledServerPromptIdsRef = useRef<Set<string>>(new Set());
   const completionCallbacksRef = useRef<Map<string, () => void>>(new Map());
   const completedPromptIdsRef = useRef<Set<string>>(new Set());
   const completedPromptIdOrderRef = useRef<string[]>([]);
@@ -497,6 +498,37 @@ export function useQueuedPrompts({
         completedPromptIdsRef.current.delete(expiredPromptId);
     }
   }, []);
+
+  const removeDaemonOwnedPrompt = useCallback((promptId: string) => {
+    const next = queuedPromptsRef.current.filter(
+      (prompt) =>
+        prompt.isEditing ||
+        prompt.isRemoving ||
+        (prompt.serverPromptId !== promptId &&
+          prompt.midTurnMessageId !== promptId),
+    );
+    if (next.length === queuedPromptsRef.current.length) return;
+    queuedPromptsRef.current = next;
+    setQueuedPrompts(next);
+  }, []);
+
+  const hideSettledServerPrompt = useCallback(
+    (promptId: string) => {
+      displayedServerPromptIdsRef.current.delete(promptId);
+      settledServerPromptIdsRef.current.add(promptId);
+      while (
+        settledServerPromptIdsRef.current.size > MAX_COMPLETED_PROMPT_IDS
+      ) {
+        const oldestPromptId = settledServerPromptIdsRef.current
+          .values()
+          .next().value;
+        if (typeof oldestPromptId !== 'string') break;
+        settledServerPromptIdsRef.current.delete(oldestPromptId);
+      }
+      removeDaemonOwnedPrompt(promptId);
+    },
+    [removeDaemonOwnedPrompt],
+  );
 
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
@@ -532,13 +564,27 @@ export function useQueuedPrompts({
   const syncServerQueuedPrompts = useCallback(
     (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
       const next = queuedPromptsRef.current.filter((p) => {
+        if (
+          (p.isEditing || p.isRemoving) &&
+          (!p.serverPromptId ||
+            removingServerPromptIdsRef.current.has(p.serverPromptId))
+        ) {
+          return true;
+        }
+        const promptId = p.serverPromptId ?? p.midTurnMessageId;
+        if (promptId && settledServerPromptIdsRef.current.has(promptId)) {
+          return false;
+        }
         if (!p.serverPromptId) return true;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
         );
       });
       for (const serverPrompt of serverQueued) {
-        if (removingServerPromptIdsRef.current.has(serverPrompt.promptId)) {
+        if (
+          removingServerPromptIdsRef.current.has(serverPrompt.promptId) ||
+          settledServerPromptIdsRef.current.has(serverPrompt.promptId)
+        ) {
           continue;
         }
         const existingIndex = next.findIndex(
@@ -560,6 +606,12 @@ export function useQueuedPrompts({
           !contentHasDegradedMedia(serverPrompt.content) &&
           !contentHasUnhydratedMedia(serverPrompt.content);
         if (existingIndex !== -1) {
+          if (
+            next[existingIndex]!.isEditing ||
+            next[existingIndex]!.isRemoving
+          ) {
+            continue;
+          }
           if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
             continue;
@@ -738,7 +790,9 @@ export function useQueuedPrompts({
             prompt.midTurnMessageId !== undefined &&
             !prompt.isEditing &&
             !prompt.isRemoving &&
-            (settledIds.has(prompt.midTurnMessageId) ||
+            (displayedServerPromptIdsRef.current.has(prompt.midTurnMessageId) ||
+              settledServerPromptIdsRef.current.has(prompt.midTurnMessageId) ||
+              settledIds.has(prompt.midTurnMessageId) ||
               (applyPromoted && promotedIds.has(prompt.midTurnMessageId)))
           ),
       );
@@ -800,7 +854,13 @@ export function useQueuedPrompts({
       );
       const restoredRows: QueuedPrompt[] = [];
       for (const message of snapshot.messages) {
-        if (localIds.has(message.messageId)) continue;
+        if (
+          localIds.has(message.messageId) ||
+          displayedServerPromptIdsRef.current.has(message.messageId) ||
+          settledServerPromptIdsRef.current.has(message.messageId)
+        ) {
+          continue;
+        }
         // Prefer the in-memory admission's images; after a refresh only the
         // snapshot's media blocks remain.
         const salvaged = salvagedImages.get(message.messageId);
@@ -1107,6 +1167,7 @@ export function useQueuedPrompts({
     releaseChainRef.current = null;
     removingServerPromptIdsRef.current = new Set();
     displayedServerPromptIdsRef.current = new Set();
+    settledServerPromptIdsRef.current = new Set();
     pendingStartedByPromptIdRef.current = new Map();
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
@@ -1251,9 +1312,15 @@ export function useQueuedPrompts({
             }
           }
         }
+        if (!shouldAppendLocalUserMessage) {
+          displayedServerPromptIdsRef.current.add(promptId);
+        }
+        if (displayedServerPromptIdsRef.current.has(promptId)) {
+          removeDaemonOwnedPrompt(promptId);
+        }
         void refreshPendingPrompts();
       } else if (event.type === 'turn_complete') {
-        displayedServerPromptIdsRef.current.delete(promptId);
+        hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
         if (callback) {
@@ -1265,7 +1332,7 @@ export function useQueuedPrompts({
           rememberCompletedPromptId(promptId);
         }
       } else if (event.type === 'turn_error') {
-        displayedServerPromptIdsRef.current.delete(promptId);
+        hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
         if (callback) callback();
@@ -1274,7 +1341,7 @@ export function useQueuedPrompts({
         event.type === 'pending_prompt_completed' &&
         event.data.state === 'removed'
       ) {
-        displayedServerPromptIdsRef.current.delete(promptId);
+        hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
         if (callback) callback();
@@ -1300,6 +1367,8 @@ export function useQueuedPrompts({
     refreshPendingPrompts,
     settleCompletionCallback,
     rememberCompletedPromptId,
+    hideSettledServerPrompt,
+    removeDaemonOwnedPrompt,
   ]);
 
   /**
