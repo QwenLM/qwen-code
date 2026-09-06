@@ -3,18 +3,10 @@
 name: 'Security Checks'
 
 on:
-  pull_request:
-    branches:
-      - 'main'
-      - 'release/**'
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
-
-concurrency:
-  group: '${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
-  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+  schedule:
+    # Daily at 02:30 UTC, between the monthly Scorecard and nightly CodeQL.
+    - cron: '30 2 * * *'
+  workflow_dispatch: {}
 
 permissions:
   contents: 'read'
@@ -118,25 +110,25 @@ jobs:
           done
           exit "$status"
 
-  secret-scan:
-    name: 'Secret scan (TruffleHog)'
+  track-dependency-cve:
+    name: 'Track dependency audit failure'
+    needs: 'dependency-cve'
+    if: "${{ always() && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure') }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+      issues: 'write'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
-          fetch-depth: 0
 
-      # Incremental gate: the action scans commits introduced by the PR or
-      # push and only fails on secrets TruffleHog could actively verify,
-      # keeping false positives out. Branch-creating pushes have no base
-      # commit to diff from, so they are skipped explicitly.
-      # `version` pins the scanner image; without it the action runs `latest`.
-      - name: 'Scan for verified secrets'
-        if: "github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'"
-        uses: 'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11' # v3.96.0
+      - name: 'Update tracking issue'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          AUDIT_RESULT: '${{ needs.dependency-cve.result }}'
         with:
-          version: '3.96.0'
-          extra_args: '--only-verified'
+          script: |
+            await require('./.github/scripts/update-dependency-audit-issue.cjs')({ github, context });

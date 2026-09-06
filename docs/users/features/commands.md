@@ -36,6 +36,10 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
+> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+
+> [!note]
+>
 > `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
 
 > [!note]
@@ -824,11 +828,26 @@ session, not from its user, and carries none of your authority there:
 the receiving session acts on it only within its own permission settings.
 Its user can choose what happens to incoming messages with
 `agents.crossSessionInbound` (`accept`, `hold`, or `refuse`). When unset,
-a message is delivered if the receiving session still reviews each
-action (default or plan mode), or if both sessions are in a mode that
-applies actions without per-action review; otherwise it is held for
-review. Held messages are listed and released with `/peers` in the
-receiving session, which shows how long each one has left.
+a message is delivered only when both sessions are in the same review
+class: both still review each action (default or plan mode), or both
+are in a mode that applies some actions without per-action review
+(auto-edit, auto, or yolo). A message from a session in the other class,
+or from a sender that does not say which class it is in, is held for
+review — in both directions. A session that reviews each action holds a
+message from one that does not, because that message was written by a
+model nobody was watching, and the per-action prompts guard actions, not
+what the session is being talked into. Held messages are listed and
+released with `/peers` in the receiving session, and a message held
+only because the modes differed is released on its own once they agree.
+
+A repository can make sessions opened in it more cautious, never less:
+a workspace `.qwen/settings.json` may set `agents.crossSessionInbound`
+to `hold` or `refuse`, or `agents.crossSessionMessaging` to `false`, and
+that value wins over a looser one in your user settings. A workspace
+value that would loosen your setting (`accept`, or `true` for the
+switch) is ignored with a warning, and a value the CLI does not
+recognize holds every message whenever it is the effective value.
+System settings override all of this, as they do for every setting.
 
 A hold does not wait forever. A message nobody decides on expires after
 `agents.crossSessionHeldExpiry` — `1m`, `5m`, `10m`, or `never`, five
