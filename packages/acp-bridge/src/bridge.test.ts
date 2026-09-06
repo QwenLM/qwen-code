@@ -1026,6 +1026,9 @@ describe('createAcpSessionBridge', () => {
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
       try {
         vi.useFakeTimers();
         try {
@@ -1068,10 +1071,25 @@ describe('createAcpSessionBridge', () => {
           );
           expect(closeAttempts).toBe(3);
           expect(bridge.sessionCount).toBe(1);
+          // Rung 2, not rung 1 again: the ladder has to grow at bridge level,
+          // not only in the pure unit test, which feeds
+          // `activeWorkCloseRetryDelayMs` its own inputs. Capping the failure
+          // counter at two, or flattening the ladder call to a constant, keeps
+          // the whole package green while a Session the child can never settle
+          // is re-probed every 60s for the daemon's lifetime instead of backing
+          // off toward the ceiling — the bound this PR exists to add.
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `deferring the next probe by ${
+                ACTIVE_WORK_CLOSE_RETRY_BASE_MS * 2
+              }ms after 3 consecutive failures`,
+            ),
+          );
         } finally {
           vi.useRealTimers();
         }
       } finally {
+        stderrSpy.mockRestore();
         await bridge.shutdown();
       }
     });
@@ -1378,6 +1396,104 @@ describe('createAcpSessionBridge', () => {
       }
 
       await bridge.shutdown();
+    });
+
+    it('clears the failure run on a refusal answer, not only on a grant', async () => {
+      // The hoisted reset is documented as covering an answer "granted or
+      // refused", but its other witness drives the granted side only — a close
+      // the child grants whose local teardown then fails. Narrowing the reset
+      // back inside the `closed === true` branch keeps the whole package green,
+      // and a Session whose wedge demonstrably cleared then carries a stale
+      // count: its next single failure skips a rung and defers by 120s instead
+      // of retrying at once. `probes again at once once the child reports held
+      // work` does not cover this, because it clears the run through the
+      // snapshot hold-report branch in `applyActiveWorkSnapshot` and never
+      // through a refusal answer to the probe itself.
+      let closeAttempts = 0;
+      let refuseWithHold = false;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          closeAttempts++;
+          if (refuseWithHold) {
+            return { closed: false, holds: [agentHold('a1')] };
+          }
+          throw new Error('Session close timed out after 8000ms');
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        vi.useFakeTimers();
+        try {
+          // Two unanswered probes arm the first rung.
+          await sendActiveWorkSnapshot(handle, 1, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          const detached = bridge.detachClient(
+            session.sessionId,
+            session.clientId,
+          );
+          await vi.advanceTimersByTimeAsync(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000,
+          );
+          await detached;
+          await sendActiveWorkSnapshot(handle, 2, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          await vi.advanceTimersByTimeAsync(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000,
+          );
+          expect(closeAttempts).toBe(2);
+
+          // Past the rung the child answers with a definitive refusal carrying
+          // a hold. That is an answer, so the run of unanswered probes is over.
+          refuseWithHold = true;
+          await vi.advanceTimersByTimeAsync(
+            ACTIVE_WORK_CLOSE_RETRY_BASE_MS + 1_000,
+          );
+          await sendActiveWorkSnapshot(handle, 3, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          await vi.advanceTimersByTimeAsync(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000,
+          );
+          expect(closeAttempts).toBe(3);
+
+          // The hold then clears on a snapshot that still names the Session, so
+          // it takes the `child_idle` path, which deliberately does not reset.
+          // The wedge is back and the next failure must be the first of a new
+          // run, not the third of the old one.
+          refuseWithHold = false;
+          await sendActiveWorkSnapshot(handle, 4, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          await vi.advanceTimersByTimeAsync(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000,
+          );
+          expect(closeAttempts).toBe(4);
+          expect(stderrSpy).not.toHaveBeenCalledWith(
+            expect.stringContaining('after 3 consecutive failures'),
+          );
+          expect(bridge.sessionCount).toBe(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      } finally {
+        stderrSpy.mockRestore();
+        await bridge.shutdown();
+      }
     });
 
     it('still reclaims through a condemned channel while a deferral is armed', async () => {

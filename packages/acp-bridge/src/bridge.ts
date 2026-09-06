@@ -3176,7 +3176,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const capability = owner?.activeWork;
     if (
       capability &&
-      !channelIsCondemned(owner) &&
+      childCloseNeedsRoundTrip(owner) &&
       ACTIVE_WORK_HOLD_CATEGORIES.some(
         (category) => !capability.categories.includes(category),
       )
@@ -3194,16 +3194,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // deferral rather than being stranded. One that resolves silently is
     // re-probed when the delay expires, bounded by the ladder's ceiling.
     //
-    // A condemned channel is exempt, and so is one that reports no active-work
-    // capability — both are cases where `confirmChildUnheld` authorizes the
-    // close locally without any child round trip, because that teardown is the
-    // only thing that can release a request nobody is going to answer. There
-    // is no probe to back off from, and deferring would leave the escape hatch
-    // unreachable while the retained Session keeps the channel non-empty, so a
-    // channel already given up on could never drain.
+    // A channel that needs no round trip is exempt: there is no probe to back
+    // off from, and deferring would leave the escape hatch unreachable while
+    // the retained Session keeps the channel non-empty, so a channel already
+    // given up on could never drain.
     if (
-      capability &&
-      !channelIsCondemned(owner) &&
+      childCloseNeedsRoundTrip(owner) &&
       entry.activeWorkCloseRetryAt !== null &&
       Date.now() < entry.activeWorkCloseRetryAt
     ) {
@@ -3858,6 +3854,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.overdueAbandonedRestores.size > 0 ||
       ci.newSessionCleanupFailed ||
       ci.overdueAbandonedNewSessions.size > 0
+    );
+  }
+
+  /**
+   * Whether a conditional close on this channel has to ask the child at all.
+   *
+   * The mirror of `confirmChildUnheld`'s two authorize-locally short-circuits:
+   * a channel that never negotiated active-work, and one the session lifecycle
+   * has condemned, are both closed locally with no round trip. Guards that back
+   * off a *probe* must consult this rather than re-derive the pair by hand, or
+   * they keep deferring an entry whose teardown needs nobody's permission — and
+   * for a condemned channel that teardown is the only thing that can release a
+   * request nobody is going to answer, while the retained Session is what keeps
+   * the channel non-empty and its drain from ever completing.
+   *
+   * `confirmChildUnheld`'s third non-round-trip exit, `isDying`, deliberately
+   * does not belong here: it retains the Session rather than authorizing its
+   * close, and it sits ahead of the condemned check, so folding it in would
+   * flip a dying-and-condemned channel from retain to authorize.
+   */
+  function childCloseNeedsRoundTrip(owner: ChannelInfo | undefined): boolean {
+    return (
+      owner !== undefined &&
+      owner.activeWork !== undefined &&
+      !channelIsCondemned(owner)
     );
   }
 
