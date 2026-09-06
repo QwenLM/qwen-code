@@ -169,14 +169,19 @@ function OpenTuiEntryApp({
   const setUpdateInfo = useCallback((info: UpdateObject | null) => {
     setUpdateNotice(info?.message ?? null);
   }, []);
+  const updateHandlerRef = useRef<ReturnType<typeof setUpdateHandler> | null>(
+    null,
+  );
   useEffect(() => {
-    const { cleanup } = setUpdateHandler(
-      addUpdateItem,
-      setUpdateInfo,
-      isIdleRef,
-    );
-    return cleanup;
+    const handler = setUpdateHandler(addUpdateItem, setUpdateInfo, isIdleRef);
+    updateHandlerRef.current = handler;
+    return handler.cleanup;
   }, [addUpdateItem, setUpdateInfo]);
+  // ink flushes update notifications deferred mid-turn once the turn returns
+  // to idle (AppContainer); flush is the only drain of pendingNotifications.
+  useEffect(() => {
+    if (!live.streaming) updateHandlerRef.current?.flush();
+  }, [live.streaming]);
 
   // --- two-press exit guard (ink useDoublePress parity) ---------------------
   const [exitHint, setExitHint] = useState<string | null>(null);

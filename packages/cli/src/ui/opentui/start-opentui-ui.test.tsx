@@ -96,7 +96,7 @@ vi.mock('./live-turn.js', () => ({
   }),
 }));
 vi.mock('../handleAutoUpdate.js', () => ({
-  setUpdateHandler: () => ({ cleanup: () => {} }),
+  setUpdateHandler: () => ({ cleanup: () => {}, flush: () => {} }),
 }));
 vi.mock('../hooks/useLogger.js', () => ({ useLogger: () => null }));
 vi.mock('../../startup/startup-prefetch.js', () => ({

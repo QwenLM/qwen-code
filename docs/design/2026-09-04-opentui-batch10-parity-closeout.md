@@ -191,9 +191,9 @@ per-item height distribution itself stays open as transcript-region work.
 
 ## The nine ledger items (to be recorded as they land)
 
-U-6/G-1 (auth auto-open trigger), U-7/G-2 (follow-up suggestions),
-U-9 (settings sub-dialog routing + `fillInput` owner), G-3 (update-check
-wiring), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (steer
+U-6/G-1 (landed — Decision 8), U-7/G-2 (follow-up suggestions),
+U-9 (settings sub-dialog routing + `fillInput` owner), G-3 (landed —
+Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (steer
 recording), U-11 (queue separator decision), U-13 (landed — Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
 
@@ -227,6 +227,30 @@ auto-open) are pinned by asserting the rendered element tree in
 `start-opentui-ui.test.tsx` — 70 tests across the five touched files, plus
 typecheck and eslint clean. No real-terminal boot scenario was exercised;
 the dialog's own flows are covered by the existing dialogs-auth suite.
+
+## Decision 9 — G-3: update wiring was mostly there; the gap was flush-on-idle
+
+The ledger's "update-check wiring" gap shrank on inspection. Most of the
+chain was already in place on main: the check bootstrap is renderer-neutral
+(`startPostRenderPrefetches`' `update_check` task, gated on
+`enableAutoUpdate` / skip / sandbox env, called by the OpenTUI entry), the
+entry registers `setUpdateHandler` with an idle ref synced from
+`live.streaming` and maps its item types onto the transcript, and the shell
+renders the banner slot (suppressed while a dialog, modal, or tool call is
+active). The actual delta vs ink was the drain: `handleAutoUpdate` defers
+notifications that arrive mid-turn into `pendingNotifications`, and `flush`
+is the only drain — ink calls it when the turn returns to `Idle`
+(AppContainer), but the OpenTUI entry destructured only `{ cleanup }`, so a
+mid-turn update notice would sit queued forever. The entry now holds
+`{ cleanup, flush }` in a ref and flushes when `live.streaming` flips false.
+
+Coverage: the deferral/flush mechanism itself is pinned by
+`handleAutoUpdate.test.ts` (deferred-then-flushed, ordering, empty queue).
+Both the entry-side registration and the flush-on-idle effect cannot execute
+in the entry harness (`root.render` is mocked, so React never runs and no
+effect fires — the same boundary as Decision 8); they are review-pinned
+against AppContainer's idle effect. Entry suite, typecheck, and eslint
+clean.
 
 ## Coverage boundary
 
