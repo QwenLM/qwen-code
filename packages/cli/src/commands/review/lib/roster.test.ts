@@ -181,6 +181,20 @@ describe('requiredAgents — Step 3A', () => {
     expect(
       keys({ ...PR, files: [{ path: '.qwen/review-rules.md' }] }),
     ).toContain('prose-exec');
+    // A references-only diff in a skill bundle owes it too: the directory
+    // marker, not the SKILL.md filename, is what rosters the audit — a PR
+    // changing only `references/posting.md` (the recipe behind the
+    // pipeline's one sanctioned write to a pull request) got none before.
+    expect(
+      keys({
+        ...PR,
+        files: [
+          {
+            path: 'packages/core/src/skills/bundled/review/references/persistence.md',
+          },
+        ],
+      }),
+    ).toContain('prose-exec');
     // But never without a tree to run the repository's tooling in.
     expect(
       keys({
@@ -692,6 +706,18 @@ describe('isPromptPath — the instruction-file detector', () => {
     // bakes them into every brief, so a rules-only diff owes the audit —
     // the pre-merge review is the only gate that can execute the change.
     ['.qwen/review-rules.md', true],
+    // Skill bundles, by the loader's own marker: everything prose in the
+    // directory holding a SKILL.md is read AND followed (SKILL.md says so
+    // of `references/posting.md` and `references/persistence.md`), so the
+    // `skills/` segment rosters the audit — not one more filename. Code and
+    // the bundle's own unit tests under the same segment do not: the tests
+    // pin the prose, they are not followed as it.
+    ['packages/core/src/skills/bundled/review/references/posting.md', true],
+    ['packages/core/src/skills/bundled/review/references/persistence.md', true],
+    ['.qwen/skills/triage/references/pr-workflow.md', true],
+    ['packages/core/src/skills/skill-manager.ts', false],
+    ['packages/core/src/skills/skill-manager.test.ts', false],
+    ['packages/core/src/skills/bundled/review/SKILL.test.ts', false],
     // Singular and embedded tokens — the alternation's both halves (a
     // `briefs`-only or `prompt`-only mutant flips one of these).
     ['docs/brief.md', true],

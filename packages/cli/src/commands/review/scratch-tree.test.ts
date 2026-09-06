@@ -46,6 +46,7 @@ import {
 } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 
 describe('runScratchTree', () => {
   let repo: string;
@@ -120,6 +121,25 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.smudge');
     expect(run().available).toBe(true);
+  });
+
+  it('refuses a filter reached through include.path — the same plant, one indirection away', () => {
+    // A `--file` read lists the include directive and not what it delivers;
+    // the screen follows it (measured executing during a checkout when it
+    // did not). The payload sits in a file the PR itself could commit.
+    const pwned = join(repo, 'PWNED-included-smudge');
+    writeFileSync(
+      join(repo, 'innocuous.cfg'),
+      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+    );
+    git(worktree, 'config', 'include.path', join(repo, 'innocuous.cfg'));
+    writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
@@ -1208,7 +1228,16 @@ describe('runScratchTree --standalone', () => {
     expect(r.note).toContain('die with the tree — the STATE does');
     expect(r.note).toContain('core.hooksPath');
     expect(r.note).toContain('executes at your next git command in the tree');
-    expect(r.note).toContain('git config --local --list');
+    expect(r.note).toContain('git config --local --list --includes');
+    // And the premise of the containment — the tree's own `.git` — is
+    // conditional, because the tree sits inside the user's checkout: the
+    // note names the ceiling that makes a `.git`-less tree fail loudly
+    // instead of re-parenting onto the user's repository, with the exact
+    // directory, and calls a step that removes `.git` leaving the tree.
+    expect(r.note).toContain(
+      `GIT_CEILING_DIRECTORIES=${shellQuotePath(dirname(r.path!))}`,
+    );
+    expect(r.note).toContain('removes or replaces `.git` as leaving the tree');
   });
 
   it('keeps a config, hook or ref write inside the tree from reaching the user’s repository', () => {

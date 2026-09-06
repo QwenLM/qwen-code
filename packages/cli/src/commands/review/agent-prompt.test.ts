@@ -162,6 +162,7 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(p).toContain(
       "(the author's frame spans every territory — a dedicated whole-diff agent owns it)",
     );
+    expect(p).toContain('where the run owes it, a dedicated agent runs it');
   });
 
   it('tells the agent to page a truncated read', () => {
@@ -3256,8 +3257,24 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // what dies with the copy is the STATE, and a command-valued key written
     // there runs at the copy's next git command (R14-1).
     expect(p).toContain('contains the state, not the execution');
+    // `--includes`: a `--local --list` without it shows the include
+    // directive and not the command-valued key it delivers (R14-1, round
+    // 15), so the flag is pinned, not just the read.
     expect(p).toContain(
-      'read `git config --local --list` there before any git step',
+      'read `git config --local --list --includes` there before any git step',
+    );
+    expect(p).toContain('`includeIf.<cond>.path`');
+    // And the premise of the containment is conditional: the copy sits
+    // inside the user's checkout, so a `.git`-less copy re-parents every
+    // later git command onto the user's repository (R15-2). The weld names
+    // the ceiling that makes that fail loudly, the toplevel re-check, and
+    // the class of step that is leaving the copy.
+    expect(p).toContain(
+      '`GIT_CEILING_DIRECTORIES` set to the directory above `path`',
+    );
+    expect(p).toContain('`git rev-parse --show-toplevel` is still `path`');
+    expect(p).toContain(
+      "a step that removes, renames or replaces the copy's `.git` is leaving the copy",
     );
     expect(p).not.toContain(
       "nothing you do through its git reaches the user's",
@@ -3866,6 +3883,27 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // value executes at the user's own next git operations. The classes now
     // classify reach, with the preflights that make reach knowable.
     const pp = buildRoleBrief(PR_PLAN, 'prose-exec');
+    // The BRIEF alone, for the phrases the weld repeats: `pp` carries the
+    // scratch-tree weld too, and a pin on `pp` for a phrase both hold went
+    // green with the brief's copy deleted (measured — the `--includes` pin
+    // survived exactly that mutant).
+    const bare = buildRoleBrief(
+      { ...PR_PLAN, worktreePath: undefined },
+      'prose-exec',
+    );
+    expect(bare).not.toContain(
+      'Your disposable copy — where every write-producing recipe step runs',
+    );
+    // And the local-mode paragraph that replaces the weld there: the brief
+    // sends write-producing steps to a copy, and a local review has none —
+    // without the paragraph every such step came back not-executed and
+    // the whiff check blocked the Approve on every local review touching
+    // an instruction file.
+    expect(bare).toContain('No disposable copy is welded on this review');
+    expect(bare).toContain(
+      'not executed — no disposable copy on a local review',
+    );
+    expect(pp).not.toContain('No disposable copy is welded on this review');
     // The reach rule…
     expect(pp).toContain('decided by what the command REACHES');
     // …and the symlink preflight it drives: enumerate, resolve, and treat an
@@ -3907,10 +3945,32 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // AND the tripping step by it.
     expect(pp).toContain('contains the STATE, not the execution');
     expect(pp).toContain('core.hooksPath');
-    expect(pp).toContain('git config --local --list');
+    // The read expands includes, and names the include keys as the
+    // indirection that delivers every other key — resolved against the
+    // config file's own directory (R14-1, round 15).
+    expect(bare).toContain('git config --local --list --includes');
+    expect(bare).toContain('`include.path` and `includeIf.<cond>.path`');
+    expect(bare).toContain(
+      "resolves against the config file's own directory, not your cwd",
+    );
     expect(pp).toContain(
       'judge both the step that WRITES such a key and the step that TRIPS it',
     );
+    // The containment's premise is the copy's own `.git`, and the copy sits
+    // inside the user's checkout (R15-2): a step that removes or replaces
+    // it IS leaving the copy, the ceiling makes a `.git`-less copy fail
+    // loudly, and the toplevel is re-established before each git step.
+    expect(pp).toContain(
+      "removes, renames, replaces or re-creates the copy's `.git`",
+    );
+    expect(bare).toContain('IS leaving the copy');
+    expect(bare).toContain('GIT_CEILING_DIRECTORIES');
+    expect(bare).toContain('`git rev-parse --show-toplevel` prints the copy');
+    // Step 2's scenario lives inside the copy when there is one, and the
+    // floor names the temp-dir scaffold as its one sanctioned exception —
+    // before, step 2 mandated a write the floor's own wording banned.
+    expect(pp).toContain('inside your disposable copy when the run welds one');
+    expect(pp).toContain('the one sanctioned exception');
     // And the install allowance stays bounded by the egress ban: installs go
     // through the environment's own dependency configuration, never through
     // a registry redirect the PR commits or a step adds to the copy.

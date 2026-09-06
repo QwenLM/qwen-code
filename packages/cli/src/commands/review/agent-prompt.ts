@@ -1823,8 +1823,17 @@ export function buildRoleBrief(
           "into the copy's config (`core.hooksPath`, `core.fsmonitor`, `filter.*`, " +
           '`alias.*`, `core.pager`, `credential.helper`, …) runs whatever it names ' +
           'at your next git command in the copy, as you — read `git config ' +
-          '--local --list` there before any git step and judge the step by that ' +
-          'reach, as your brief says. And it ' +
+          '--local --list --includes` there before any git step (an `include.path` ' +
+          'or `includeIf.<cond>.path` delivers every other key, so the read must ' +
+          'expand it and you must read the file it names) and judge the step by ' +
+          "that reach, as your brief says. And the copy sits INSIDE the user's " +
+          "checkout: a step that removes, renames or replaces the copy's `.git` " +
+          "is leaving the copy — git's upward discovery then answers every later " +
+          "command, that read included, with the user's repository — so run every " +
+          'git command there with `GIT_CEILING_DIRECTORIES` set to the directory ' +
+          'above `path` (a copy whose `.git` is gone then fails loudly instead of ' +
+          're-parenting), re-check that `git rev-parse --show-toplevel` is still ' +
+          '`path` before each git step, and quote, never run, such a step. And it ' +
           'is isolation of what you write INSIDE the copy, not a sandbox: git ' +
           'aimed at any other path (`git -C`, `git push <path>`) or at your ' +
           'global config is outside it — and every such step is in a ' +
@@ -1859,6 +1868,30 @@ export function buildRoleBrief(
           'one the step just produced. That is the harness, not the prose: ' +
           'attribute such a failure (or a false success) to the environment and ' +
           'say so, rather than filing it as a divergence.',
+      );
+    } else {
+      // A local-diff or file-path review welds no copy, and says so: the
+      // tree under review is the user's own checkout carrying the
+      // uncommitted changes that ARE the diff, and a copy checked out from
+      // HEAD would not hold them. Without this paragraph the brief pointed
+      // at a command "below" that was not there, every write-producing
+      // step came back not-executed, and the orchestrator's whiff check
+      // read a return with no executed step as a whiff — relaunch, then
+      // `unreviewedDimensions`, then no Approve — on every local review
+      // that touched an instruction file.
+      parts.push(
+        '',
+        '**No disposable copy is welded on this review.** This is a local or ' +
+          "file review: the tree under review is the user's own checkout, " +
+          'carrying the uncommitted changes that ARE the diff, and a copy ' +
+          'checked out from HEAD would not hold them — so there is nothing ' +
+          'to copy. Run only the steps that write nothing, in place, and ' +
+          'report every write-producing step (a build, an install, a ' +
+          'generated file) as `not executed — no disposable copy on a local ' +
+          'review`, quoting it. That return is complete, not a whiff: the ' +
+          "orchestrator's whiff check reads it as the documented local-mode " +
+          'receipt. Never hand-roll a copy and never write in the tree under ' +
+          'review to get a step to run.',
       );
     }
   }

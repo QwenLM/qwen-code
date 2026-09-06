@@ -206,6 +206,15 @@ export function isPromptPath(path: string): boolean {
   // followed as instructions under ANY name (FileCommandLoader globs
   // **/*.md with no test filter), so a `.test.` basename must not hide it.
   if (/\.(test|spec)\./.test(base)) return false;
+  // Skill bundles, by the loader's own marker — the `skills/` segment above
+  // a SKILL.md — rather than by one more filename: everything prose in a
+  // bundle is read AND followed (SKILL.md says so of `references/posting.md`
+  // and `references/persistence.md` verbatim), and a hand-listed set has no
+  // last corner (this file grew `.qwen/review-rules.md` for exactly that
+  // reason). After the test guard on purpose: a bundle's unit tests pin its
+  // prose, they are not followed as it, and the reserved-directory override
+  // above is licensed only by FileCommandLoader's untested glob.
+  if (/(^|\/)skills\//.test(path)) return /\.(md|ya?ml|txt)$/i.test(base);
   const stem = base.replace(/\.[^.]+$/, '');
   return stem
     .split(/[-_.]/)

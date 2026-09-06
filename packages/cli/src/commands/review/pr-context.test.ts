@@ -3633,7 +3633,29 @@ describe('runPrContext identity failure (handler level)', () => {
         String(c[0]).endsWith('.tmp'),
     );
     expect(tmpWrite).toBeDefined();
+    // The temp name embeds this process's pid, so two concurrent runs at
+    // the same --out cannot rename each other's half-written file.
+    expect(String(tmpWrite?.[0])).toBe(`/tmp/ctx.md.${process.pid}.tmp`);
     expect(renameSyncMock).toHaveBeenCalledWith(tmpWrite?.[0], '/tmp/ctx.md');
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a failed rename removes the tmp debris and re-throws', async () => {
+    // The other half of the same catch: the temp write succeeded and the
+    // commit point failed (EXDEV, EACCES on --out's directory). The debris
+    // is removed and the failure propagates; --out was never written.
+    currentUserMock.mockReturnValue('someone');
+    renameSyncMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+    await expect(run()).rejects.toThrow('EACCES');
+    expect(rmSyncMock).toHaveBeenCalledWith(`/tmp/ctx.md.${process.pid}.tmp`, {
+      force: true,
+    });
     expect(
       writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
     ).toBe(false);

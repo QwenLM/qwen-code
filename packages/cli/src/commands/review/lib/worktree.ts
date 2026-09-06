@@ -18,13 +18,15 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  constants,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
-  mkdirSync,
-  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -32,7 +34,7 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
@@ -195,31 +197,103 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** git's own ceiling on nested includes (`MAX_INCLUDE_DEPTH` in config.c). */
+const MAX_INCLUDE_DEPTH = 10;
+
+/**
+ * How many config files the include walk reads before it refuses. The
+ * fan-out is the planter's to write — N `include.path` lines are N spawns,
+ * and 2 000 of them held the walk for 29 seconds (measured) — and the walk
+ * runs before every launch wave. A repository whose repo-local config
+ * genuinely fans out past this is a repository this screen reports rather
+ * than reads.
+ */
+const MAX_INCLUDE_FILES = 64;
+
+/** How many screen hits a refusal message names before it counts the rest. */
+const FILTER_SCREEN_NAMED = 12;
+
+/**
+ * One read per file: the filter commands it defines and the includes it
+ * carries, in file order. `--get-regexp` matches canonical key names, so
+ * `includeIf` arrives as `includeif.<cond>.path`.
+ */
+const SCREEN_KEYS =
+  '^filter\\..*\\.(smudge|clean|process)$|^include\\.path$|^includeif\\..*\\.path$';
+
+/** What `filterCommandsIn` found, and what it could not read. */
+export interface FilterScreen {
+  /**
+   * Every `filter.<name>.smudge|clean|process` key the repo-local config
+   * files define, canonical, in discovery order — the names a caller can
+   * blank on its own git invocation (`filterBlankEnv`) or refuse on.
+   */
+  filters: string[];
+  /**
+   * Every file the walk could NOT read to the bottom, each with its reason:
+   * a dangling include, another user's `~user/`, a target that is not a
+   * regular file, a parse failure, a nesting past git's limit, a fan-out
+   * past this screen's. A filter behind one of these is a filter the
+   * caller cannot see and therefore cannot blank — so each is a refusal.
+   */
+  unread: string[];
+}
+
 /**
  * The repo-local `filter.<name>.smudge|clean|process` commands defined in the
  * config files git reads for a tree whose common dir is `commonDir` and whose
- * admin dir is `gitDir`, when any are.
+ * admin dir is `gitDir` — followed through every `include.path` and
+ * `includeIf.<cond>.path` those files carry — and the files it could not
+ * read. Empty on both counts means: every candidate was read to the bottom
+ * and none defines a filter command.
  *
  * Two git invocations in this pipeline EXECUTE these — hooks and fsmonitor
- * are blanked by key name, filters cannot be, because their key carries a
- * name of the planter's choosing. The scratch-tree checkouts run the smudge
- * side of an attributed file; the residue `status` runs the clean side (or
- * the `process` filter that serves both) when a stat-stale attributed file
- * refreshes the index — measured live through the exact residue invocation
- * on git 2.43 and 2.47, and the tree still reported clean. The planting
- * surface is two plain writes into the common dir the scratch-tree report
- * calls shared: `git config filter.evil.clean CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The local config files
- * are read with `--file` rather than merged config because filters in the
- * user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is
- * a refusal in the caller, not a cleanup here. And it is a one-shot read of
- * same-user-writable state, like every gate in this file: cost, not closure.
+ * are blanked by key name, filters cannot be blanked BLIND, because their
+ * key carries a name of the planter's choosing. The scratch-tree checkouts
+ * run the smudge side of an attributed file; the residue `status` runs the
+ * clean side (or the `process` filter that serves both) when a stat-stale
+ * attributed file refreshes the index — measured live through the exact
+ * residue invocation on git 2.43 and 2.47, and the tree still reported
+ * clean. The planting surface is two plain writes into the common dir the
+ * scratch-tree report calls shared: `git config filter.evil.clean CMD` and
+ * one line appended to `$(git rev-parse --git-path info/attributes)`.
+ * discard and cleanup never wipe the common dir, so a filter planted while
+ * reviewing one PR fires on every later matching checkout of the user's OWN
+ * repository — persistence planted by reviewing a malicious PR, measured
+ * live. The local config files are read with `--file` rather than merged
+ * config because filters in the user's global config (git-lfs is the common
+ * one) are the user's own contract, exactly like any git command they run —
+ * while a probe's planting surface is the repo-local files. The state cannot
+ * be told apart from a filter the user set deliberately, and cannot be
+ * safely wiped, so what the caller does with a hit is the caller's: the
+ * scratch-tree checkouts refuse, the residue measurement blanks the names
+ * it was handed. And it is a one-shot read of same-user-writable state, like
+ * every gate in this file: cost, not closure.
+ *
+ * Includes are followed by hand because `--file` does not expand them, and
+ * an include is the one indirection that delivers every other key: a
+ * planter commits `[filter "evil"] clean = …` in an innocuous file and adds
+ * one `include.path` line to the repo-local config, and a `--file` read
+ * lists the directive while the `status` refresh runs the command
+ * (measured). Each target is resolved the way git resolves it — `~/`
+ * against `$HOME`, a relative path against the directory of the path git
+ * OPENED for the including file (its spelled path, not its realpath: a
+ * symlinked `.git/config` includes beside the link, measured) — and read
+ * with the same single spawn, recursively, under a visited set keyed by
+ * realpath, git's own nesting limit, and this screen's file cap. An
+ * `includeIf` is followed whether or not its condition holds today: the
+ * screen answers what the file can deliver, not what it delivers this
+ * minute. Every spawn runs with the common dir as cwd, so a target that
+ * lives outside the repository never makes git discover a repository in a
+ * foreign directory (a dangling gitfile there exits 128 — measured — and
+ * would read as a file this screen could not read).
+ *
+ * Bounded like the other planter-sized reads here: the listing's size is
+ * the config file's, which is the planter's to write, and past Node's 1 MiB
+ * default `spawnSync` answers ENOBUFS with no stdout — a `continue` on that
+ * read the file as filter-free while the refresh ran the planted command
+ * (measured at 1.01 MiB). So the spawn carries the house `maxBuffer`, and a
+ * read that fails for ANY reason lands in `unread`, never in "no filters".
  *
  * Every linked worktree's per-worktree config is a candidate too, not only
  * the two files git reads for THIS tree: the scratch-tree screen runs
@@ -230,7 +304,10 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
  * clean. The admin directory is one `readdir`, and a filter in any of these
  * is a plant whichever tree carries it.
  */
-export function filterCommandsIn(commonDir: string, gitDir: string): string[] {
+export function filterCommandsIn(
+  commonDir: string,
+  gitDir: string,
+): FilterScreen {
   const candidates = [
     join(commonDir, 'config'),
     join(gitDir, 'config.worktree'),
@@ -242,49 +319,205 @@ export function filterCommandsIn(commonDir: string, gitDir: string): string[] {
   } catch {
     // No linked worktrees registered: the two candidates above are all of it.
   }
-  const found: string[] = [];
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
+  const filters = new Set<string>();
+  const unread = new Set<string>();
+  const visited = new Set<string>();
+  // `-z`: one `key\nvalue\0` record per hit, so a value holding a newline
+  // (a path can) still parses — the key never holds one. Exit 1 is "no key
+  // matched"; any other failure, ENOBUFS included, is a file not read.
+  const read = (
+    file: string,
+  ): { records: Array<[string, string]> } | { unreadable: string } => {
     const r = spawnSync(
       'git',
-      [
-        'config',
-        '--file',
-        file,
-        '--get-regexp',
-        '^filter\\..*\\.(smudge|clean|process)$',
-      ],
-      { cwd: dirname(file), encoding: 'utf8', env: sanitizedGitEnv() },
+      ['config', '--file', file, '-z', '--get-regexp', SCREEN_KEYS],
+      {
+        cwd: commonDir,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedGitEnv(),
+      },
     );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
+    if (r.error) {
+      return {
+        unreadable: (r.error as NodeJS.ErrnoException).code ?? r.error.message,
+      };
     }
-  }
-  return found;
+    if ((r.status !== 0 && r.status !== 1) || typeof r.stdout !== 'string') {
+      return { unreadable: `git config exited ${r.status}` };
+    }
+    const records: Array<[string, string]> = [];
+    for (const rec of r.stdout.split('\0')) {
+      if (!rec) continue;
+      const nl = rec.indexOf('\n');
+      records.push(
+        nl === -1 ? [rec, ''] : [rec.slice(0, nl), rec.slice(nl + 1)],
+      );
+    }
+    return { records };
+  };
+  const visit = (file: string, depth: number, via: string | null): void => {
+    let real: string;
+    try {
+      real = realpathSync(file);
+    } catch {
+      // A candidate that is not there is the normal case (no per-worktree
+      // config, no linked worktrees); an include target that is not there
+      // is the dangling include git ignores and this screen refuses.
+      if (via !== null) {
+        unread.add(
+          `${via} -> ${file} (missing — git ignores a dangling include; this screen refuses it)`,
+        );
+      }
+      return;
+    }
+    if (visited.has(real)) return;
+    if (visited.size >= MAX_INCLUDE_FILES) {
+      unread.add(
+        `${via ?? file} -> ${file} (include fan-out past ${MAX_INCLUDE_FILES} files — not screened)`,
+      );
+      return;
+    }
+    visited.add(real);
+    // What git would open: a regular file this process can read. Anything
+    // else git answers with exit 1 and a `warning: unable to access` —
+    // the status of an empty match (measured on a directory target) — so
+    // the check is made here, before the read, and refuses.
+    try {
+      if (!statSync(real).isFile()) {
+        unread.add(
+          `${via ?? file} -> ${file} (not a regular file — not screened)`,
+        );
+        return;
+      }
+      accessSync(real, constants.R_OK);
+    } catch {
+      unread.add(`${via ?? file} -> ${file} (could not be read)`);
+      return;
+    }
+    if (depth > MAX_INCLUDE_DEPTH) {
+      unread.add(
+        `${via} -> ${file} (nested past git's include limit — not screened)`,
+      );
+      return;
+    }
+    // Read by the path git would open, and resolve includes against ITS
+    // directory: git resolves a relative include against the path it opened,
+    // so a symlinked `.git/config` includes beside the link, not beside the
+    // link's target (measured). The realpath is the visited-set key only.
+    const r = read(file);
+    if ('unreadable' in r) {
+      unread.add(`${file} (could not be read: ${r.unreadable})`);
+      return;
+    }
+    for (const [key, value] of r.records) {
+      if (key.startsWith('filter.')) {
+        filters.add(key);
+        continue;
+      }
+      let target: string;
+      if (value.startsWith('~/')) {
+        // git expands `~` from $HOME (expand_user_path), not from passwd;
+        // the fallback is for an environment with no HOME at all.
+        target = join(process.env['HOME'] || homedir(), value.slice(2));
+      } else if (value.startsWith('~')) {
+        unread.add(
+          `${key} -> ${value} (another user's home — not resolved here)`,
+        );
+        continue;
+      } else {
+        target = resolve(dirname(file), value);
+      }
+      visit(target, depth + 1, `${key} (in ${file})`);
+    }
+  };
+  for (const candidate of candidates) visit(candidate, 0, null);
+  return { filters: [...filters], unread: [...unread] };
 }
 
 /**
- * `filterCommandsIn` for a tree path: resolves the common and admin dirs
- * through git's own discovery. The scratch-tree command screens the review
- * worktree this way before any checkout; `worktreeResidue` screens the
- * identity it has already pinned and calls `filterCommandsIn` directly.
+ * The screen's hits as a refusal message names them: the first few
+ * verbatim, the rest counted. A planter can pad the config with thousands
+ * of keys, and a message that joined every one of them is its own overflow.
+ */
+export function describeFilterScreen(hits: string[]): string {
+  const named = hits.slice(0, FILTER_SCREEN_NAMED);
+  const rest = hits.length - named.length;
+  return rest > 0 ? `${named.join(', ')}, and ${rest} more` : named.join(', ');
+}
+
+/**
+ * The environment that blanks, for ONE git invocation, every content filter
+ * the screen named: `filter.<name>.clean|smudge|process` emptied and
+ * `filter.<name>.required` false, so the invocation neither runs the
+ * command nor fails for want of it (git-lfs marks its filter required, and
+ * an emptied required filter fails the command instead of skipping it —
+ * measured). git's convert code skips a filter whose command is empty, so
+ * the file's bytes are compared as they are; that is the measurement the
+ * residue probe wants — a stat-stale attributed file that differs from its
+ * index blob only by the filter is reported, and the note already tells a
+ * reader to check a surprising path against `git show HEAD:` first.
+ *
+ * Through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, not
+ * `-c`: `-c` splits its argument at the FIRST `=`, so a filter a planter
+ * named `a=b` cannot be blanked by it, while the env pair carries any name
+ * the config parser accepts. Applied over `sanitizedGitEnv()`, which has
+ * already dropped whatever pairs the caller's shell exported.
+ */
+export function filterBlankEnv(filterKeys: string[]): NodeJS.ProcessEnv {
+  const names = new Set<string>();
+  for (const key of filterKeys) {
+    const m = /^filter\.(.+)\.(?:smudge|clean|process)$/.exec(key);
+    if (m) names.add(m[1]);
+  }
+  const env: NodeJS.ProcessEnv = {};
+  let n = 0;
+  for (const name of names) {
+    for (const [key, value] of [
+      ['clean', ''],
+      ['smudge', ''],
+      ['process', ''],
+      ['required', 'false'],
+    ]) {
+      env[`GIT_CONFIG_KEY_${n}`] = `filter.${name}.${key}`;
+      env[`GIT_CONFIG_VALUE_${n}`] = value;
+      n++;
+    }
+  }
+  if (n > 0) env['GIT_CONFIG_COUNT'] = String(n);
+  return env;
+}
+
+/**
+ * `filterCommandsIn` for a tree path, flattened for a caller that refuses on
+ * any hit: the scratch-tree command screens the review worktree this way
+ * before any checkout. Discovery is per flag and absolute, as
+ * `worktreeResidue`'s is — a combined newline-delimited answer mis-pairs
+ * under a directory whose name holds a newline — and a discovery that
+ * fails is itself a hit: a repository whose git dirs cannot be resolved is
+ * not one this screen can call filter-free.
  */
 export function localFilterCommands(worktree: string): string[] {
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+  const discover = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      return null;
+    }
+    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+  };
+  const commonDir = discover('--git-common-dir');
+  const gitDir = discover('--git-dir');
+  if (commonDir === null || gitDir === null) {
+    return [
+      "the repository's git directories could not be resolved (git rev-parse failed) — not screened",
+    ];
   }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
-  return filterCommandsIn(
-    resolve(worktree, commonDir),
-    resolve(worktree, gitDir),
-  );
+  const screen = filterCommandsIn(commonDir, gitDir);
+  return [...screen.filters, ...screen.unread];
 }
 
 /**
@@ -824,6 +1057,7 @@ export function worktreeResidue(
   const commonDir = discover('--git-common-dir');
   let isWorktree = false;
   let anchor: string[] = [];
+  let filterBlanks: NodeJS.ProcessEnv = {};
   try {
     if (
       toplevel !== null &&
@@ -1005,23 +1239,30 @@ export function worktreeResidue(
       // `filter.evil.clean` executed under the exact invocation below and
       // the tree still measured clean (git 2.43 and 2.47, live). The `-c`
       // blanks on that invocation close the two channels a fixed key names;
-      // a filter's key carries an arbitrary name, so it cannot be blanked
-      // and is screened the way the scratch-tree checkouts screen it: read
-      // the repo-local config files of the identity pinned above, and when
-      // any defines one, refuse to measure — unmeasured, never clean.
-      const filters = filterCommandsIn(commonDir, realpathSync(gitDir));
-      if (filters.length > 0) {
+      // a filter's key carries a name of the planter's choosing, so the
+      // names are READ first — from the repo-local config files of the
+      // identity pinned above, includes followed — and every name found is
+      // blanked on the measurement itself (`filterBlankEnv`), the way the
+      // fixed keys are: a repository whose own config defines a filter
+      // (git-lfs `--local`, git-crypt) keeps its residue measurement, where
+      // a refusal would have left it unmeasured for good. What is refused is
+      // a config the screen could not read to the bottom: a filter it cannot
+      // see it cannot blank.
+      const screen = filterCommandsIn(commonDir, realpathSync(gitDir));
+      if (screen.unread.length > 0) {
         return {
           paths: [],
           total: 0,
           unmeasured:
-            'the residue measurement would execute the repo-local content ' +
-            `filter command(s) ${filters.join(', ')} — \`status\` refreshes ` +
-            'the index, and a stat-stale attributed file refreshes through ' +
-            'the filter; remove the filter config, or the attributes that ' +
-            'select it, if it is not yours',
+            'the residue measurement would run under repo-local config ' +
+            'this screen could not read to the bottom: ' +
+            `${describeFilterScreen(screen.unread)} — a content filter ` +
+            'reached that way would execute on the index refresh, and a ' +
+            'filter the screen cannot see it cannot blank; remove the ' +
+            'include, or the file it names, if it is not yours',
         };
       }
+      filterBlanks = filterBlankEnv(screen.filters);
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.
@@ -1051,9 +1292,10 @@ export function worktreeResidue(
       // (measured live on git 2.43), so the hook directory is blanked here the
       // way the checkouts blank it. Those are the two channels a FIXED key
       // names; the refresh's third channel, a content filter's `clean` or
-      // `process` command, lives under a key of the planter's naming and is
-      // closed by the `filterCommandsIn` screen above instead — a refusal,
-      // because there is no `-c` that blanks a name one does not know.
+      // `process` command, lives under a key of the planter's naming, so its
+      // names come from the `filterCommandsIn` read above and are blanked
+      // through `filterBlanks` in this spawn's environment — and when that
+      // read could not finish, the measurement was refused above instead.
       '-c',
       'core.fsmonitor=',
       '-c',
@@ -1067,7 +1309,7 @@ export function worktreeResidue(
       cwd,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
-      env: sanitizedGitEnv(),
+      env: { ...sanitizedGitEnv(), ...filterBlanks },
     },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {

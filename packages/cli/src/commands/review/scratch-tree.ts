@@ -99,6 +99,7 @@ import {
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   RESIDUE_PATH_CAP,
+  describeFilterScreen,
   discardWorktree,
   exposeDependencies,
   localFilterCommands,
@@ -643,11 +644,16 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         '`filter.*`, `alias.*`, `core.pager`, `credential.helper`) executes ' +
         'at your next git command in the tree, as you, so a git step there ' +
         "is judged by what it reaches (your brief's `git config --local " +
-        "--list` rule), never by its text. Its object store is the user's " +
+        "--list --includes` rule), never by its text. Its object store is the user's " +
         "repository's, read through an alternates pointer — so this isolates " +
         'what you write INSIDE the tree, and nothing more: git aimed at ' +
         'another path (`git -C`, `git push <path>`) or at your global config ' +
-        'is outside it, and outside your brief. Every call rebuilds it from ' +
+        'is outside it, and outside your brief. And this tree sits INSIDE ' +
+        "the user's checkout: remove or replace its `.git` and every later " +
+        'git command here answers for THEIR repository through upward ' +
+        `discovery — run your git commands with GIT_CEILING_DIRECTORIES=${shellQuotePath(dirname(tree))} ` +
+        'so that fails loudly instead, and treat a step that removes or ' +
+        'replaces `.git` as leaving the tree. Every call rebuilds it from ' +
         'the commit under review: what you wrote last time is gone. Run the ' +
         'writing steps there; the review worktree stays read-only, and this ' +
         'shape did not measure whether it is clean. `cleanup` sweeps this at ' +
@@ -661,14 +667,17 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   const filters = localFilterCommands(worktree);
   if (filters.length > 0) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters
-        .map(inertPath)
-        .join(', ')} — ` +
+      "the repository's local config defines content filter(s), or includes " +
+        `config this screen could not read to the bottom: ${describeFilterScreen(
+          filters.map(inertPath),
+        )} — ` +
         'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
         'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
+        'enough to plant both the filter and the attributes that select it — or ' +
+        'one `include.path` line that delivers a filter from a file the PR ' +
+        'commits. Remove the filter config, the attributes file that uses it, or ' +
+        'the include, if it is not yours; until then no scratch tree is safe to ' +
+        'create or reset.',
     );
   }
 
