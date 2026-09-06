@@ -474,6 +474,52 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
       message: 'run the tests',
     });
   });
+
+  it('pushes the U-34 command cards structurally', () => {
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    } as never;
+    const recap = foldLiveEvent([], { type: 'away-recap', text: 'did X' });
+    expect(recap).toMatchObject([{ kind: 'away-recap', text: 'did X' }]);
+
+    const advisor = foldLiveEvent([], {
+      type: 'advisor',
+      text: 'Looks good',
+      model: 'qwen3-max',
+    });
+    expect(advisor).toMatchObject([
+      { kind: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+    ]);
+
+    const arenaAgent = foldLiveEvent([], { type: 'arena-agent', agent });
+    expect(arenaAgent).toMatchObject([{ kind: 'arena-agent', agent }]);
+
+    const arenaSession = foldLiveEvent([], {
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
+    expect(arenaSession).toMatchObject([
+      {
+        kind: 'arena-session',
+        sessionStatus: 'completed',
+        task: 'do it',
+        totalDurationMs: 2000,
+        agents: [agent],
+      },
+    ]);
+  });
 });
 
 describe('foldLiveEvent tool-output', () => {

@@ -193,8 +193,9 @@ per-item height distribution itself stays open as transcript-region work.
 
 U-6/G-1 (landed — Decision 8), U-7/G-2 (landed — Decision 11),
 U-9 (landed — Decision 10), G-3 (landed —
-Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (landed
-— Decision 12), U-11 (landed — Decision 13), U-13 (landed — Decision 5).
+Decision 9), U-33 (the `!` shell row), U-34 (landed — Decision 14), U-32
+(landed — Decision 12), U-11 (landed — Decision 13), U-13 (landed —
+Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
 
 ## Decision 8 — U-6/G-1: the auth auto-open trigger
@@ -366,6 +367,53 @@ re-scope: every text eventually replays, nothing is dropped.
 
 Coverage: the existing `live-turn.test.ts` Esc-restore test pins the new
 separator (restored batch + queued text, joined with blank lines).
+
+## Decision 14 — U-34: the four command cards get structural rows, not info rows
+
+Four history kinds written by slash commands (`advisor`, `away_recap`,
+`arena_agent_complete`, `arena_session_complete`) projected to `null` in
+OpenTUI — the commands ran, their output vanished. The ledger explicitly
+rejected bare info rows as a fix ("pre-empts the design"), so each kind gets
+the full dedicated chain, mirroring the goal/compaction/stop-hook precedent:
+a structured stream event (item-projection) → a `LiveHistoryItem` kind
+(live-session-model fold, settling a streaming assistant first) → a
+transcript row component (transcript-view). Payloads stay structured
+(`ArenaAgentCardData`) so rows can color status, not flattened strings.
+
+Ink shapes mirrored per kind: away_recap → `AwayRecapMessage` (`※` gutter,
+bold `recap:`, italic body, all secondary — attributes 1/4 on sibling text
+nodes, since `<span>` has only an `fg` precedent); advisor →
+`AdvisorMessage` (`/advisor` bold header + ` · model`, markdown body under
+`paddingLeft={2}` — the ink round border is dropped, the transcript
+separates cards by indentation); arena_agent_complete → `ArenaAgentCard`
+(status line colored by status, dim Tokens/Tool Calls lines, ✓ count green
+/ ✕ count red, optional red error line); arena_session_complete →
+`ArenaSessionCard` (title branches Comparison Summary/Cancelled/Failed, the
+four comparison sections only for idle|completed, `├─`/`└─` branches, the
+4-file cap with `+N more`, hint with `/arena select` accented). The ink
+component's module-private helpers are mirrored locally (`arenaDiffStats`,
+`arenaAgentFiles`, `arenaFileList`, `arenaFileGroups`).
+
+Status colors: `getArenaStatusLabel` returns ink theme hexes, which would
+not track the OpenTUI theme swap (`applyThemeMode` mutates `C`), so the rows
+map the core `AgentStatus` enum onto the live palette locally
+(`arenaStatusColor`: idle/completed → green, cancelled → yellow, failed →
+red, else dim) while still reusing the helper's icon/label text.
+
+Still no-ops, each for a stated reason: `tool_use_summary` (written only by
+ink's use-llm-stream — no OpenTUI producer), `diff_stats` (file-history
+rewind flow, no OpenTUI seam), `notification`/`user_shell` (no writer yet;
+user_shell is U-33).
+
+Resume consistency: arena items are recorded via `recordSlashCommand`
+outputHistoryItems but `transcribeSession` never replays them on either
+renderer — a live-only projection keeps parity with ink.
+
+Coverage: unit-level only — `item-projection.test.ts` pins each kind's
+structural event payload, `live-session-model.test.ts` pins the fold, and
+the former no-op test list shrinks by exactly the four kinds. No e2e leg
+drives these rows (they need real `/advisor`//`arena`//`recap` command
+runs); `npm run typecheck` and eslint clean on the touched files.
 
 ## Coverage boundary
 

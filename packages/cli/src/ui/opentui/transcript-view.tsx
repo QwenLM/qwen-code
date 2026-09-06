@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
   AnsiRows,
@@ -46,12 +47,16 @@ import {
   type LiveGoalLegacyData,
   type LiveHistoryItem,
   type LiveToolItem,
+  type LiveArenaSessionItem,
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
+import { formatDuration } from '../utils/formatters.js';
+import { getArenaStatusLabel } from '../utils/displayUtils.js';
+import type { ArenaAgentCardData } from '../types.js';
 
 const GOAL_COLOR: Record<GoalCardColor, string> = {
   secondary: C.dim,
@@ -148,6 +153,14 @@ function TranscriptItem({
       return <StopHookRow message={item.message} />;
     case 'goal':
       return <GoalCard item={item} />;
+    case 'away-recap':
+      return <AwayRecapRow text={item.text} />;
+    case 'advisor':
+      return <AdvisorRow text={item.text} model={item.model} />;
+    case 'arena-agent':
+      return <ArenaAgentRow agent={item.agent} />;
+    case 'arena-session':
+      return <ArenaSessionRow item={item} />;
     default: {
       const exhaustive: never = item;
       return exhaustive;
@@ -529,6 +542,246 @@ function LegacyGoalCard({ legacy }: { legacy: LiveGoalLegacyData }) {
       <text fg={C.dim}>{`  ${sanitizeTerminalText(view.condition)}`}</text>
       {view.lastCheck ? (
         <text fg={C.dim}>{`  ${sanitizeTerminalText(view.lastCheck)}`}</text>
+      ) : null}
+    </box>
+  );
+}
+
+// ink AwayRecapMessage parity: `※` gutter + "recap:" label, all dim; the
+// recap scrolls with the conversation instead of pinning above the input.
+function AwayRecapRow({ text }: { text: string }) {
+  return (
+    <box flexDirection="row">
+      <text fg={C.dim}>{`${ICON.REFERENCE} `}</text>
+      <text fg={C.dim} attributes={1}>
+        {'recap: '}
+      </text>
+      <text fg={C.dim} attributes={4} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+      </text>
+    </box>
+  );
+}
+
+// ink AdvisorMessage parity: `/advisor · model` header + the review body as
+// markdown. The ink card's border is dropped — the transcript's other cards
+// separate with indentation, not boxes.
+function AdvisorRow({ text, model }: { text: string; model: string }) {
+  return (
+    <box flexDirection="column">
+      <box flexDirection="row">
+        <text fg={C.accent} attributes={1}>
+          {'/advisor'}
+        </text>
+        <text fg={C.accent}>{` · ${sanitizeTerminalText(model)}`}</text>
+      </box>
+      <box paddingLeft={2}>
+        <markdown
+          content={sanitizeTerminalText(text)}
+          syntaxStyle={SYNTAX}
+          streaming={false}
+        />
+      </box>
+    </box>
+  );
+}
+
+// ink getArenaStatusLabel colors mapped onto the live palette (the helper
+// returns ink theme hexes, which would not track the OpenTUI theme swap).
+function arenaStatusColor(status: AgentStatus): string {
+  switch (status) {
+    case AgentStatus.IDLE:
+    case AgentStatus.COMPLETED:
+      return C.green;
+    case AgentStatus.CANCELLED:
+      return C.yellow;
+    case AgentStatus.FAILED:
+      return C.red;
+    default:
+      return C.dim;
+  }
+}
+
+// ink ArenaAgentCard parity: status line + tokens + tool calls (+ error).
+function ArenaAgentRow({ agent }: { agent: ArenaAgentCardData }) {
+  const { icon, text } = getArenaStatusLabel(agent.status);
+  const failed = agent.failedToolCalls > 0;
+  return (
+    <box flexDirection="column">
+      <text fg={arenaStatusColor(agent.status)}>
+        {`${icon} ${sanitizeTerminalText(agent.label)} · ${text} · ${formatDuration(agent.durationMs)}`}
+      </text>
+      <text fg={C.dim}>
+        {`  Tokens: ${agent.totalTokens.toLocaleString()} (in ${agent.inputTokens.toLocaleString()}, out ${agent.outputTokens.toLocaleString()})`}
+      </text>
+      <text fg={C.dim}>
+        {`  Tool Calls: ${agent.toolCalls}`}
+        {failed ? ' (' : null}
+        {failed ? (
+          <span fg={C.green}>{`✓ ${agent.successfulToolCalls}`}</span>
+        ) : null}
+        {failed ? (
+          <span fg={C.red}>{` ✕ ${agent.failedToolCalls}`}</span>
+        ) : null}
+        {failed ? ')' : null}
+      </text>
+      {agent.error ? (
+        <text fg={C.red}>{`  ${sanitizeTerminalText(agent.error)}`}</text>
+      ) : null}
+    </box>
+  );
+}
+
+// ink ArenaSessionCard parity, mirrored helpers (the ink component keeps
+// them module-private): diff counts, file lists, and the common/label-only
+// file groups compared across agents.
+function arenaDiffStats(agent: ArenaAgentCardData): {
+  additions: number;
+  deletions: number;
+} {
+  if (agent.diffSummary) {
+    return {
+      additions: agent.diffSummary.additions,
+      deletions: agent.diffSummary.deletions,
+    };
+  }
+  if (!agent.diff) return { additions: 0, deletions: 0 };
+  let additions = 0;
+  let deletions = 0;
+  for (const line of agent.diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+    else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+  }
+  return { additions, deletions };
+}
+
+function arenaAgentFiles(agent: ArenaAgentCardData): string[] {
+  return (
+    agent.modifiedFiles ?? agent.diffSummary?.files.map((f) => f.path) ?? []
+  );
+}
+
+const ARENA_MAX_FILE_ITEMS = 4;
+
+function arenaFileList(files: string[]): string {
+  if (files.length === 0) return 'none';
+  const visible = files.slice(0, ARENA_MAX_FILE_ITEMS);
+  const suffix =
+    files.length > ARENA_MAX_FILE_ITEMS
+      ? `, +${files.length - ARENA_MAX_FILE_ITEMS} more`
+      : '';
+  return `${visible.join(', ')}${suffix}`;
+}
+
+function arenaFileGroups(
+  agents: ArenaAgentCardData[],
+): Array<{ label: string; files: string[] }> {
+  const counts = new Map<string, number>();
+  for (const agent of agents) {
+    for (const file of new Set(arenaAgentFiles(agent))) {
+      counts.set(file, (counts.get(file) ?? 0) + 1);
+    }
+  }
+  const common = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([file]) => file)
+    .sort();
+  const groups = [{ label: 'common', files: common }];
+  for (const agent of agents) {
+    const unique = arenaAgentFiles(agent)
+      .filter((file) => counts.get(file) === 1)
+      .sort();
+    if (unique.length > 0) {
+      groups.push({ label: `${agent.label}-only`, files: unique });
+    }
+  }
+  return groups;
+}
+
+function ArenaSessionRow({ item }: { item: LiveArenaSessionItem }) {
+  const { sessionStatus, agents } = item;
+  const comparing = sessionStatus === 'idle' || sessionStatus === 'completed';
+  const title = comparing
+    ? 'Arena Comparison Summary'
+    : sessionStatus === 'cancelled'
+      ? 'Arena Cancelled'
+      : 'Arena Failed';
+  const branch = (index: number, total: number) =>
+    index === total - 1 ? '└─' : '├─';
+  return (
+    <box flexDirection="column">
+      <text fg={C.text} attributes={1}>
+        {title}
+      </text>
+      {comparing ? (
+        <>
+          <text fg={C.text} attributes={1}>
+            {'Status Summary:'}
+          </text>
+          {agents.map((agent, index) => {
+            const { text } = getArenaStatusLabel(agent.status);
+            return (
+              <text key={agent.label} fg={C.dim}>
+                {`  ${branch(index, agents.length)} ${sanitizeTerminalText(agent.label)}: `}
+                <span fg={arenaStatusColor(agent.status)}>{text}</span>
+              </text>
+            );
+          })}
+          <text fg={C.text} attributes={1}>
+            {'Files Modified:'}
+          </text>
+          {arenaFileGroups(agents).map((group, index, groups) => (
+            <text key={group.label} fg={C.dim}>
+              {`  ${branch(index, groups.length)} ${group.label}: `}
+              <span fg={C.text}>{arenaFileList(group.files)}</span>
+            </text>
+          ))}
+          <text fg={C.text} attributes={1}>
+            {'Approach Summary:'}
+          </text>
+          {agents.map((agent, index) => {
+            const stats = arenaDiffStats(agent);
+            const files = arenaAgentFiles(agent).length;
+            const summary =
+              agent.approachSummary ?? 'No approach summary available.';
+            return (
+              <text key={agent.label} fg={C.text}>
+                {`  ${branch(index, agents.length)} ${sanitizeTerminalText(agent.label)}: ${sanitizeTerminalText(summary)} `}
+                <span fg={C.dim}>
+                  {`(${files} ${files === 1 ? 'file' : 'files'}, `}
+                </span>
+                <span fg={C.green}>{`+${stats.additions}`}</span>
+                <span fg={C.dim}> </span>
+                <span fg={C.red}>{`-${stats.deletions}`}</span>
+                <span fg={C.dim}>{' lines, '}</span>
+                <span fg={C.accent}>{agent.toolCalls}</span>
+                <span fg={C.dim}>
+                  {agent.toolCalls === 1 ? ' tool call)' : ' tool calls)'}
+                </span>
+              </text>
+            );
+          })}
+          <text fg={C.text} attributes={1}>
+            {'Token Efficiency:'}
+          </text>
+          {agents.map((agent, index) => (
+            <text key={agent.label} fg={C.dim}>
+              {`  ${branch(index, agents.length)} ${sanitizeTerminalText(agent.label)}: `}
+              <span fg={C.text}>
+                {`${agent.outputTokens.toLocaleString()} tokens · runtime ${formatDuration(agent.durationMs)}`}
+              </span>
+            </text>
+          ))}
+        </>
+      ) : null}
+      {comparing ? (
+        <text fg={C.dim}>
+          {'Run '}
+          <span fg={C.accent}>{'/arena select'}</span>
+          {sessionStatus === 'idle'
+            ? ' to view detailed diff or pick a winner.'
+            : ' to pick a winner.'}
+        </text>
       ) : null}
     </box>
   );

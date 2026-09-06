@@ -849,15 +849,62 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       { type: 'help', timestamp: new Date() },
       { type: 'notification', text: 'n' },
       { type: 'user_shell', text: 'u' },
-      { type: 'advisor', text: 'a' },
-      { type: 'arena_agent_complete', text: 'a' },
-      { type: 'arena_session_complete', text: 'a' },
-      { type: 'away_recap', text: 'a' },
       { type: 'tool_use_summary', text: 't' },
       { type: 'diff_stats', text: 'd' },
     ] as unknown as HistoryItemWithoutId[];
     for (const item of noOps) {
       expect(projectItemToStreamEvent(item, ctx)).toBeNull();
     }
+  });
+
+  it('carries the four dedicated-component kinds structurally (U-34)', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'away_recap', text: ' Recap body ' },
+        ctx,
+      ),
+    ).toEqual({ type: 'away-recap', text: ' Recap body ' });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+        ctx,
+      ),
+    ).toEqual({ type: 'advisor', text: 'Looks good', model: 'qwen3-max' });
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    };
+    expect(
+      projectItemToStreamEvent(
+        { type: 'arena_agent_complete', agent } as never,
+        ctx,
+      ),
+    ).toEqual({ type: 'arena-agent', agent });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'arena_session_complete',
+          sessionStatus: 'completed',
+          task: 'do it',
+          totalDurationMs: 2000,
+          agents: [agent],
+        } as never,
+        ctx,
+      ),
+    ).toEqual({
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
   });
 });

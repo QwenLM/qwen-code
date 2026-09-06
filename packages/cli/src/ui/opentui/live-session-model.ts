@@ -16,7 +16,7 @@ import type { HistoryItem } from '../model/streaming-model.js';
 import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import type { CompressionProps } from '../types.js';
+import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
 
@@ -116,6 +116,39 @@ export type LiveStopHookItem = {
   message: string;
 };
 
+/** Away-summary recap (ink away_recap → AwayRecapMessage). */
+export type LiveAwayRecapItem = {
+  kind: 'away-recap';
+  id: string;
+  text: string;
+};
+
+/** Advisor review card (ink advisor → AdvisorMessage). */
+export type LiveAdvisorItem = {
+  kind: 'advisor';
+  id: string;
+  text: string;
+  model: string;
+};
+
+/** Arena agent card (ink arena_agent_complete → ArenaAgentCard). */
+export type LiveArenaAgentItem = {
+  kind: 'arena-agent';
+  id: string;
+  agent: ArenaAgentCardData;
+};
+
+/** Arena session summary card (ink arena_session_complete →
+ * ArenaSessionCard). */
+export type LiveArenaSessionItem = {
+  kind: 'arena-session';
+  id: string;
+  sessionStatus: string;
+  task: string;
+  totalDurationMs: number;
+  agents: ArenaAgentCardData[];
+};
+
 /** Goal lifecycle card (ink goal_state → GoalStatusMessage/GoalStateCard).
  * `snapshot` is the v2 stream form; `legacy` is the /goal command's
  * goal_status kind form — both render through the describe* helpers. */
@@ -147,6 +180,10 @@ export type LiveHistoryItem =
   | LiveWarningItem
   | LiveRetryItem
   | LiveStopHookItem
+  | LiveAwayRecapItem
+  | LiveAdvisorItem
+  | LiveArenaAgentItem
+  | LiveArenaSessionItem
   | LiveGoalItem;
 
 let uid = 0;
@@ -495,6 +532,42 @@ export function foldLiveEvent(
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({ kind: 'stop-hook', id: nid('shk'), message: ev.message });
+      return items;
+    }
+    case 'away-recap': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({ kind: 'away-recap', id: nid('recap'), text: ev.text });
+      return items;
+    }
+    case 'advisor': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({
+        kind: 'advisor',
+        id: nid('advisor'),
+        text: ev.text,
+        model: ev.model,
+      });
+      return items;
+    }
+    case 'arena-agent': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({ kind: 'arena-agent', id: nid('arena'), agent: ev.agent });
+      return items;
+    }
+    case 'arena-session': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({
+        kind: 'arena-session',
+        id: nid('arena'),
+        sessionStatus: ev.sessionStatus,
+        task: ev.task,
+        totalDurationMs: ev.totalDurationMs,
+        agents: ev.agents,
+      });
       return items;
     }
     case 'segment-end': {

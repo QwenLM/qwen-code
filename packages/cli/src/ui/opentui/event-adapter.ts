@@ -29,7 +29,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { CompressionProps } from '../types.js';
+import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
@@ -125,6 +125,24 @@ export type OpenTuiStreamEvent =
       iterations?: number;
       durationMs?: number;
       lastReason?: string;
+    }
+  /** Away-summary recap (ink away_recap → AwayRecapMessage): `※` gutter +
+   * bold "recap:" label, all secondary-colored. */
+  | { type: 'away-recap'; text: string }
+  /** Advisor review card (ink advisor → AdvisorMessage): header with the
+   * resolved model + the review body as markdown. */
+  | { type: 'advisor'; text: string; model: string }
+  /** Arena agent card (ink arena_agent_complete → ArenaAgentCard):
+   * structured agent result carried so the row can color the status. */
+  | { type: 'arena-agent'; agent: ArenaAgentCardData }
+  /** Arena session summary card (ink arena_session_complete →
+   * ArenaSessionCard): structured cross-agent comparison. */
+  | {
+      type: 'arena-session';
+      sessionStatus: string;
+      task: string;
+      totalDurationMs: number;
+      agents: ArenaAgentCardData[];
     }
   /**
    * Turn segmentation marker (core `finished` / one-shot notices): closes
