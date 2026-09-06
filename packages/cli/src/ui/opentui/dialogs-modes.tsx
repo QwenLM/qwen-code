@@ -195,14 +195,26 @@ export function OpenTuiEffortDialog(props: {
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
   const initialIndex = Math.max(0, configuredIndex);
   const [sel, setSel] = useState(initialIndex);
+  // "Just looking" must be read from the user's movement, not the cursor's
+  // position: arrowing away and back lands on initialIndex again, where a
+  // position test would re-arm the guard against a deliberate pick. A
+  // boundary-clamped arrow leaves sel unchanged, so it never arms this.
+  const movedOffInitial = useRef(false);
+  useEffect(() => {
+    if (sel !== initialIndex) movedOffInitial.current = true;
+  }, [sel, initialIndex]);
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
     // On a forced cursor, confirming without moving is the "just looking"
     // gesture: close without persisting a tier the user never chose over the
-    // stored global value (ink EffortDialog parity).
+    // stored global value (ink EffortDialog parity). A single-row list has
+    // no "just looking" gesture to distinguish, so it confirms its row.
     const forcedCursor =
-      currentEffort && configuredIndex === -1 && sel === initialIndex;
+      currentEffort &&
+      configuredIndex === -1 &&
+      tiers.length > 1 &&
+      !movedOffInitial.current;
     if (effort && !forcedCursor) {
       try {
         // Apply at runtime (next turn) and persist for future sessions;

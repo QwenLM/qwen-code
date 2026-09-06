@@ -30,6 +30,12 @@ export interface BaseSelectionListProps<
   initialIndex?: number;
   onSelect: (value: T) => void;
   onHighlight?: (value: T) => void;
+  /**
+   * Fires when the user performs an explicit selection gesture (clicking a
+   * row), before the selection itself dispatches. Lets owners tell a
+   * deliberate pick apart from passive highlight moves such as hover.
+   */
+  onSelectIntent?: () => void;
   isFocused?: boolean;
   showNumbers?: boolean;
   showScrollArrows?: boolean;
@@ -72,6 +78,7 @@ export function BaseSelectionList<
   initialIndex = 0,
   onSelect,
   onHighlight,
+  onSelectIntent,
   isFocused = true,
   showNumbers = true,
   showScrollArrows = false,
@@ -133,7 +140,12 @@ export function BaseSelectionList<
           scrollOffset={scrollOffset}
           isDisabled={(index) => !!items[index]?.disabled}
           onHoverIndex={setActiveIndex}
-          onSelectIndex={selectIndex}
+          onSelectIndex={(index) => {
+            // A click is an explicit selection gesture — unlike hover, which
+            // only moves the highlight.
+            onSelectIntent?.();
+            selectIndex(index);
+          }}
         />
       )}
       {/* Use conditional coloring instead of conditional rendering */}

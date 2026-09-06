@@ -600,14 +600,17 @@ describe('OpenTuiEffortDialog', () => {
     disableField: 'thinking',
   } as const;
 
-  function renderEffortDialog(reasoningEffort: string | undefined) {
+  function renderEffortDialog(
+    reasoningEffort: string | undefined,
+    declared: unknown = capability,
+  ) {
     const config = {
       getModel: () => 'deepseek-v4-pro',
       getAuthType: () => 'openai',
       getReasoningEffort: () => reasoningEffort,
       setReasoningEffort: vi.fn(),
       getResolvedModelConfig: () => ({
-        capabilities: { reasoning: capability },
+        capabilities: { reasoning: declared },
       }),
     } as unknown as Config;
     const setValue = vi.fn();
@@ -672,6 +675,38 @@ describe('OpenTuiEffortDialog', () => {
       SettingScope.User,
       'model.reasoningEffort',
       'max',
+    );
+  });
+
+  it('persists the pick after navigating away from and back to the forced cursor', () => {
+    // Moving off and back lands the cursor on the same row it started on;
+    // the movement, not the position, is the explicit choice.
+    const setValue = renderEffortDialog('xhigh');
+
+    press('down');
+    press('up');
+    press('return');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+    );
+  });
+
+  it('confirms the only row of a single-tier list instead of closing silently', () => {
+    // A one-row picker has no "just looking" gesture to distinguish.
+    const setValue = renderEffortDialog('low', {
+      ...capability,
+      efforts: ['high'],
+    });
+
+    press('return');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
     );
   });
 

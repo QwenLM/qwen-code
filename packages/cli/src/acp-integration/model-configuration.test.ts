@@ -12,6 +12,7 @@ import {
   buildModelReasoningConfigPreview,
   getConfiguredModelReasoning,
   getModelConfiguration,
+  getReasoningEffortsForConfig,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
@@ -56,6 +57,68 @@ describe('model configuration manifest', () => {
         },
       )?.options,
     ).toMatchObject([{ value: 'high' }, { value: 'max' }]);
+  });
+
+  it('resolves a declared capability when an override repoints the live endpoint', () => {
+    // OPENAI_BASE_URL / --openaiBaseUrl / security.auth.baseUrl point the
+    // live endpoint away from the registry entry that declares the
+    // capability. Keying the lookup on that live endpoint misses the entry,
+    // while the preview surfaces read it — key on the registry base URL
+    // instead; a null registry base URL falls back to the unscoped scan.
+    const reasoning = {
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    } as const;
+    const config = {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getContentGeneratorConfig: () => ({
+        model: 'deepseek-v4-pro',
+        authType: 'openai',
+        baseUrl: 'https://api.deepseek.com/v1',
+      }),
+      getCurrentModelRegistryBaseUrl: () => null,
+      getResolvedModelConfig: (
+        _authType: string,
+        _modelId: string,
+        baseUrl?: string,
+      ) =>
+        baseUrl === undefined ? { capabilities: { reasoning } } : undefined,
+    } as unknown as Config;
+
+    expect(getReasoningEffortsForConfig(config)).toEqual(['high', 'max']);
+  });
+
+  it('falls back to the unscoped lookup when the registry key is stale', () => {
+    // A registry base URL that no longer matches the entry (stale after an
+    // endpoint override) must not hide the declaration: the unscoped
+    // fallback still finds it by id.
+    const reasoning = {
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    } as const;
+    const config = {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getContentGeneratorConfig: () => ({
+        model: 'deepseek-v4-pro',
+        authType: 'openai',
+        baseUrl: 'https://api.deepseek.com/v1',
+      }),
+      getCurrentModelRegistryBaseUrl: () => 'https://api.openai.com/v1',
+      getResolvedModelConfig: (
+        _authType: string,
+        _modelId: string,
+        baseUrl?: string,
+      ) =>
+        baseUrl === undefined ? { capabilities: { reasoning } } : undefined,
+    } as unknown as Config;
+
+    expect(getReasoningEffortsForConfig(config)).toEqual(['high', 'max']);
   });
 
   it('ignores an incomplete user-provided reasoning capability', () => {

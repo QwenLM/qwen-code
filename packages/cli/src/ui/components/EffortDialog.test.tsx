@@ -17,6 +17,16 @@ vi.mock('../hooks/useKeypress.js', () => ({
 }));
 const mockedUseKeypress = vi.mocked(useKeypress);
 
+// Mirror KeypressContext.broadcast: the key reaches the dialog's own handler
+// (first registered call — the parent never re-renders here) and the
+// selection list's current handler (last registered call). Driving only
+// calls.at(-1) never reaches the component's own handler.
+function broadcastKey(key: { name: string; sequence?: string }) {
+  const calls = mockedUseKeypress.mock.calls;
+  calls[0]![0](key as never);
+  calls.at(-1)![0](key as never);
+}
+
 describe('EffortDialog', () => {
   beforeEach(() => {
     mockedUseKeypress.mockClear();
@@ -118,15 +128,57 @@ describe('EffortDialog', () => {
     );
 
     act(() => {
-      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'down' } as never);
+      broadcastKey({ name: 'down' });
     });
     await act(async () => {
-      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'return' } as never);
+      broadcastKey({ name: 'return' });
       await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(onSelect).toHaveBeenCalledWith('max');
+  });
+
+  it('persists a digit quick-select of the forced row', async () => {
+    // The stored tier is not in this model's list, so the cursor is forced to
+    // row 0 and a digit pick of that row never moves the highlight. It is
+    // still an explicit choice and must persist, not cancel.
+    const onSelect = vi.fn();
+    renderWithProviders(
+      <EffortDialog
+        onSelect={onSelect}
+        currentEffort="xhigh"
+        efforts={['high', 'max']}
+      />,
+    );
+
+    await act(async () => {
+      broadcastKey({ name: '1', sequence: '1' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onSelect).toHaveBeenCalledWith('high');
+  });
+
+  it('confirms the only row of a single-tier list instead of cancelling', async () => {
+    // A one-row picker has no "just looking" gesture to distinguish.
+    const onSelect = vi.fn();
+    renderWithProviders(
+      <EffortDialog
+        onSelect={onSelect}
+        currentEffort="low"
+        efforts={['high']}
+      />,
+    );
+
+    await act(async () => {
+      broadcastKey({ name: 'return' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onSelect).toHaveBeenCalledWith('high');
   });
 
   it('still persists the highlighted tier when nothing is configured', async () => {
