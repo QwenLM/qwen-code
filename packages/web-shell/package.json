@@ -13,6 +13,10 @@
     "./daemon-react-sdk": {
       "types": "./dist/types/daemon-react-sdk.d.ts",
       "import": "./dist/daemon-react-sdk.js"
+    },
+    "./transcript": {
+      "types": "./dist/types/transcript.d.ts",
+      "import": "./dist/transcript.js"
     }
   },
   "files": [
@@ -21,7 +25,7 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
+    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
