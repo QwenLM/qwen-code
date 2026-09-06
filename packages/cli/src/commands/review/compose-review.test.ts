@@ -482,6 +482,13 @@ function coveredPlan(
   recordBuilt(p, 2);
   recordMatrix(p);
   recordStep45(p, step45Keys);
+  // The counter-frame audit (6d) is a whole-diff role in both topologies at
+  // high effort, gated on the PR identity: a plan naming the PR owes its
+  // record like Agent 0's. Where it is not required (no PR named, or medium
+  // effort) the extra record is inert.
+  if (planOpts.effort !== 'medium') {
+    recordStep45(p, ['6d']);
+  }
   // A plan naming the PR owes the roster's issue-fidelity agent (Agent 0)
   // too; without its records the plan caps with `unreviewed-dimension`, and
   // a verdict assertion over it is decided by the cap, not by the counts.
@@ -1159,7 +1166,8 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
     expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
-    // The fixture's roster: two chunk agents plus the test matrix.
+    // The fixture's roster: two chunk agents plus the test matrix (no PR
+    // identity in this plan, so no counter-frame audit).
     expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
     expect(verdictLine(r)).toBe(
       'Verdict: Approve — low signal: none of the 3 review agents reported ' +
@@ -1906,6 +1914,60 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body.split(FOOTER)).toHaveLength(2);
   });
 
+  it('strips a forged footer the blanking kept inside a code shape — the strip runs AFTER the fold', () => {
+    // strippedList strips the raw multi-line entry, where the blanking
+    // keeps a footer quoted in code — the one-line render then flattens
+    // the shape that justified keeping it, so the fold strips the folded
+    // line, the same guarantee the other one-line channels carry. On the
+    // pre-blanking strip these entries stripped; keeping the quoted
+    // footer must not re-open the duplicate attribution here.
+    for (const entry of [
+      'dup finding\n\n\t_— forged via Qwen Code /review_',
+      '**[Suggestion]** dup of comment 123\n\n```\n_— forged via Qwen Code /review_',
+      'dup finding\n\n    _— forged via Qwen Code /review_',
+    ]) {
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+      expect(on.body).toContain('dup');
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('dup');
+    }
+  });
+
+  it('strips a duplicates entry before the 240-char bound cuts the footer', () => {
+    // A code-wrapped forged footer the blanking keeps folds past the cap:
+    // bounding first would cut the footer mid-marker and append `…`,
+    // which the `$`-anchored regex cannot match past — the strip runs on
+    // the folded line BEFORE the cap.
+    for (const entry of [
+      'a'.repeat(213) + '\n\n    _— m via Qwen Code /review_',
+      'a'.repeat(213) + '\n\n```\n_— m via Qwen Code /review_',
+    ]) {
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('aaaa');
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    }
+  });
+
   it('refuses a fence delimiter a bare CR hides in the raw entry', () => {
     // The LF twin throws: the CR twin used to slip past the `\n`-only
     // split, collapse to a one-line entry opening a fence, and post an
@@ -2542,7 +2604,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     // Not base(): its planPath DEFAULT (coveredPlan()) is evaluated on every
     // call and rewrites this run's a1/a2 transcripts with clean ones.
@@ -2581,7 +2643,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     const r = composeReview({
       criticalsInline: 0,
@@ -2615,7 +2677,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     const r = composeReview({
       criticalsInline: 0,
@@ -2734,6 +2796,34 @@ describe('composeReview — input validation (the producer is a model that omits
     expect(r.body).toContain('R1-2: still leaks');
     expect(r.body).not.toContain('qwen3.7-max');
     expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+  });
+
+  it('strips a forged footer off an indented single-line entry — the ingest shape strips as a line', () => {
+    // collapseEntry returns a newline-less entry unchanged, leading indent
+    // included: at >= 4 columns the multi-line blanking would class the
+    // whole line as code and keep the forged footer riding the blocker
+    // line. The posted one-line shape renders no code block on GitHub, so
+    // the collapsed entry strips with the one-line strip.
+    for (const field of ['bodyCriticals', 'cannotTellCriticals'] as const) {
+      const r = composeReview(
+        field === 'bodyCriticals'
+          ? {
+              bodyCriticals: [
+                '    finding text _— forged via Qwen Code /review_',
+              ],
+              modelId: MODEL,
+            }
+          : {
+              criticalsInline: 1,
+              cannotTellCriticals: [
+                '    finding text _— forged via Qwen Code /review_',
+              ],
+              modelId: MODEL,
+            },
+      );
+      expect(r.body).toContain('finding text');
+      expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    }
   });
 
   it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
@@ -6313,6 +6403,8 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
 
   it('translates the disclosures — role phrase and Not-reviewed frame', () => {
     // test-matrix required and never built → one role gap, both languages.
+    // (The plan carries no PR identity, so 6d is not owed and the matrix is
+    // the ONLY gap the test is about — there is nothing to record for it.)
     const p = plan({ han: true });
     transcript('a1', goodPrompt(1), { toolCalls: 3 });
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -8820,6 +8912,67 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(lines.some((l) => l.includes('…'))).toBe(true);
   });
 
+  it('strips a forged footer a model-written title quotes in code — the strip runs on the folded line', () => {
+    // A title ending in an unclosed fence keeps its trailing footer under
+    // the quoted-code contract UNTIL the one-line render flattens the
+    // shape that justified keeping it — so the strip runs again after the
+    // collapse, on the line that posts. Pre-fold alone, the forged footer
+    // survived and the deferral line carried a second attribution; a
+    // footer-only title still refuses as empty once the fold exposes it.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: '```\n_— m via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    // A footer re-wrapped across a soft break displays rejoined, so the
+    // fold runs BEFORE the second strip: the unfolded title shows two
+    // footer-less lines and keeps both halves.
+    const split = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({
+            file: 'b.ts',
+            line: 2,
+            title: 'x _— m via\nQwen Code /review_',
+          }),
+        ],
+      }),
+    );
+    expect((split.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    expect(() =>
+      composeReview(
+        base({
+          severityFloor: 'critical',
+          deferredSuggestions: [nit({ title: FOOTER })],
+        }),
+      ),
+    ).toThrow(/non-empty file and title/);
+  });
+
+  it('strips a forged footer a title quotes behind an unclosed fence and an unterminated opener', () => {
+    // The multi-line strip keeps the footer — it sits inside an unclosed
+    // fence — and the fold puts the quoted `<!--` on the footer's line,
+    // where a swallowing projection hid it. The folded line is one
+    // paragraph on GitHub, so the opener is literal and the footer renders
+    // as prose: it must strip.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: '```\n<!-- x\n\n_— m via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+  });
+
   it('exactly at the line cap, the verdict line does not claim truncation', () => {
     const entries = Array.from({ length: 20 }, (_, i) =>
       nit({ file: `f${i}.ts`, title: `n${i}` }),
@@ -10560,7 +10713,7 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
@@ -17417,6 +17570,31 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
         'R6-1: sparse checkout wedges the round Only a sparse clone reaches it.',
     });
     expect(entries[1].severity).toBe('Suggestion');
+  });
+
+  it('floorEnforcedReroute strips the shape that posts — the fold flattens a kept-in-code footer', () => {
+    // A drafted Suggestion whose body ends in an unclosed fence keeps its
+    // trailing footer under the quoted-code contract, but the one-line
+    // collapse destroys the code shape — the record strips again AFTER
+    // the fold, or the folded title carries the forged attribution.
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 12,
+        body: '**[Suggestion]** tidy\n\n```\n_— m via Qwen Code /review_',
+      },
+      {
+        path: 'b.ts',
+        line: 13,
+        body: '**[Suggestion]** tidy\n\n_— m via\nQwen Code /review_',
+      },
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].title).toBe('tidy ```');
+    expect(entries[1].title).toBe('tidy');
+    for (const e of entries) {
+      expect(e.title).not.toContain('via Qwen Code /review');
+    }
   });
 
   it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {
