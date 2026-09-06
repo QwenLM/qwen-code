@@ -21,6 +21,7 @@ import {
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   BridgeConnectivityError,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
@@ -481,11 +482,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true &&
-            content?.type === 'text' &&
-            content.text
+            meta['rewritten'] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, content.text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (
+              content?.type === 'text' &&
+              (content.text || context?.turnComplete)
+            ) {
+              this.emit(
+                'backgroundResponse',
+                sessionId,
+                content.text ?? '',
+                context,
+              );
+            }
           } else if (
             meta['source'] === 'vision_bridge_notice' &&
             content?.type === 'text' &&

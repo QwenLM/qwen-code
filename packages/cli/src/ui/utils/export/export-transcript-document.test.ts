@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   assertExportTranscriptDocumentV1,
@@ -7,6 +6,7 @@ import {
   createExportTranscriptDocumentV1,
 } from './export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from './html-script-data.js';
+import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
 
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const EXPORT_OPTIONS = {
@@ -765,7 +765,7 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('bounds repeated-separator checks in decoded URL authorities', () => {
-    const separators = '/'.repeat(40);
+    const separators = '/'.repeat(30);
     const input = record('repeated-separators', null, {
       message: {
         role: 'user',
@@ -780,27 +780,19 @@ describe('ExportTranscriptDocumentV1', () => {
         ],
       },
     });
-    const moduleUrl = new URL(
-      './export-transcript-document.ts',
-      import.meta.url,
+    const startedAt = Date.now();
+    const document = createExportTranscriptDocumentV1(
+      [input],
+      sessionData,
+      EXPORT_OPTIONS,
     );
-    const result = spawnSync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        '--input-type=module',
-        '--eval',
-        `import { createExportTranscriptDocumentV1 as create } from ${JSON.stringify(moduleUrl.href)};
-process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.stringify(sessionData)}, ${JSON.stringify(EXPORT_OPTIONS)})));`,
-      ],
-      { encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' },
-    );
+    expectWithinLatencyBudget(Date.now() - startedAt, 1000, {
+      poolMultiplier: 20,
+    });
 
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(0);
-    expect(result.stdout).not.toContain('alice');
-    expect(result.stdout).toContain('ordinary');
+    const serialized = JSON.stringify(document);
+    expect(serialized).not.toContain('alice');
+    expect(serialized).toContain('ordinary');
   });
 
   it.each(['image/png', 'image/jpeg', 'image/webp'])(

@@ -14,6 +14,7 @@ export {
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
+  BackgroundResponseContext,
   BridgeSessionInfo,
   ChannelBtwResult,
   ChannelAgentBridge,

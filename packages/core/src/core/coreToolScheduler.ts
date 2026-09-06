@@ -64,6 +64,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './llm-chat.js';
@@ -1546,6 +1547,7 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  private readonly askUserQuestionResponseClaims = new Set<string>();
   private readonly runtimeContentGeneratorViews = new Map<
     string,
     RuntimeContentGeneratorView
@@ -1729,6 +1731,7 @@ export class CoreToolScheduler {
               resultDisplay = {
                 fileDiff: waitingCall.confirmationDetails.fileDiff,
                 fileName: waitingCall.confirmationDetails.fileName,
+                filePath: waitingCall.confirmationDetails.filePath,
                 originalContent:
                   waitingCall.confirmationDetails.originalContent,
                 newContent: waitingCall.confirmationDetails.newContent,
@@ -3096,16 +3099,18 @@ export class CoreToolScheduler {
             // exactly that tail rather than triggering a
             // `structuredClone` of the whole session on every non-
             // fast-path AUTO call.
+            const llmClient = this.config.getLlmClient?.();
             const messages =
-              this.config
-                .getLlmClient?.()
-                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+              llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const trustedUserAnswers =
+              llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
                 ctx: pmCtx,
                 pmForcedAsk,
                 toolParams,
                 messages,
+                trustedUserAnswers,
                 config: this.config,
                 signal,
                 skipClassifierReason: fallback.fallback
@@ -3892,6 +3897,20 @@ export class CoreToolScheduler {
       );
     }
 
+    const claimsAskUserQuestionResponse =
+      toolCall.tool instanceof AskUserQuestionTool &&
+      (toolCall as WaitingToolCall).confirmationDetails.type ===
+        'ask_user_question';
+    if (
+      claimsAskUserQuestionResponse &&
+      this.askUserQuestionResponseClaims.has(callId)
+    ) {
+      return;
+    }
+    if (claimsAskUserQuestionResponse) {
+      this.askUserQuestionResponseClaims.add(callId);
+    }
+
     try {
       await this._handleConfirmationResponseInner(
         callId,
@@ -3962,6 +3981,10 @@ export class CoreToolScheduler {
         `handleConfirmationResponse failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw error;
+    } finally {
+      if (claimsAskUserQuestionResponse) {
+        this.askUserQuestionResponseClaims.delete(callId);
+      }
     }
 
     // Execution runs outside the confirmation catch so each sister tool's
@@ -4112,6 +4135,20 @@ export class CoreToolScheduler {
         } as ToolCallConfirmationDetails);
       }
     } else {
+      const waitingToolCall = toolCall as WaitingToolCall;
+      if (
+        isApproveOutcome(outcome) &&
+        waitingToolCall.tool instanceof AskUserQuestionTool &&
+        waitingToolCall.confirmationDetails.type === 'ask_user_question'
+      ) {
+        this.config
+          .getLlmClient?.()
+          ?.recordTrustedUserAnswers(
+            callId,
+            waitingToolCall.confirmationDetails.questions,
+            payload?.answers,
+          );
+      }
       // If the client provided new content, apply it before scheduling.
       if (payload?.newContent && toolCall) {
         if (
@@ -6525,10 +6562,10 @@ export class CoreToolScheduler {
             this.config,
             actionFingerprint,
           );
+          const llmClient = this.config.getLlmClient?.();
           const messages =
-            this.config
-              .getLlmClient?.()
-              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+          const trustedUserAnswers = llmClient?.getTrustedUserAnswers?.() ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,
             () =>
@@ -6537,6 +6574,7 @@ export class CoreToolScheduler {
                 pmForcedAsk,
                 toolParams,
                 messages,
+                trustedUserAnswers,
                 config: this.config,
                 signal,
                 skipClassifierReason: fallback.fallback
