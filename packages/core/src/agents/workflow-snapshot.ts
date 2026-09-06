@@ -14,10 +14,14 @@
  */
 
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { deleteInlineWorkflowScript } from './runtime/workflow-saved.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import {
+  isActiveWorkflowStatus,
+  isWorkflowRunPersistenceActive,
   isTerminalWorkflowStatus,
   type WorkflowDispatchTrace,
   type WorkflowEvent,
@@ -142,7 +146,7 @@ export async function writeWorkflowSnapshot(
       JSON.stringify(snapshot, null, 2),
       'utf8',
     );
-    await pruneSnapshots(dir);
+    await pruneSnapshots(config, dir);
     return true;
   } catch (e) {
     debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
@@ -185,9 +189,9 @@ export async function listWorkflowSnapshots(
 }
 
 /**
- * Delete one persisted run summary and its resume journal. The run id must be
- * a well-formed workflow run id because both targets live below the project
- * runs dir.
+ * Delete one persisted run summary, resume journal, and generated inline
+ * script. The run id must be well-formed because every target is derived from
+ * it below the project runs dir.
  * Returns true when the safe target is absent after this call.
  */
 export async function deleteWorkflowSnapshot(
@@ -197,7 +201,7 @@ export async function deleteWorkflowSnapshot(
   const storage = config.storage;
   if (!storage || !/^wf_[0-9a-f]+$/.test(runId)) return false;
   try {
-    await fs.rm(`${storage.getWorkflowRunsDir()}/${runId}`, {
+    await fs.rm(path.dirname(storage.getWorkflowRunJournalPath(runId)), {
       recursive: true,
       force: true,
     });
@@ -205,6 +209,7 @@ export async function deleteWorkflowSnapshot(
     debugLogger.warn(`delete workflow journal failed for ${runId}: ${error}`);
     return false;
   }
+  if (!(await deleteInlineWorkflowScript(config, runId))) return false;
   try {
     await fs.unlink(storage.getWorkflowRunSnapshotPath(runId));
   } catch (error) {
@@ -413,7 +418,7 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
 }
 
 /** Remove the oldest snapshots beyond the retention cap. */
-async function pruneSnapshots(dir: string): Promise<void> {
+async function pruneSnapshots(config: Config, dir: string): Promise<void> {
   let files: string[];
   try {
     files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json'));
@@ -434,6 +439,13 @@ async function pruneSnapshots(dir: string): Promise<void> {
   );
   stats.sort((a, b) => a.mtime - b.mtime);
   const toPrune = stats.slice(0, stats.length - MAX_RETAINED_SNAPSHOTS);
+  const registry = config.getWorkflowRunRegistry?.();
+  const protectedRunIds = new Set([
+    ...(registry?.list() ?? [])
+      .filter((entry) => isActiveWorkflowStatus(entry.status))
+      .map((entry) => entry.runId),
+    ...(registry?.listStartingRunIds() ?? []),
+  ]);
   await Promise.all(
     toPrune.map((s) => {
       // Each run also has a sibling `<runId>/journal.jsonl` directory (the
@@ -449,21 +461,29 @@ async function pruneSnapshots(dir: string): Promise<void> {
       // may drive `fs.rm`. The `.json` unlink stays unconditional — it removes
       // exactly that one file, never a directory.
       const isRunDir = /^wf_[0-9a-f]+$/.test(runId);
+      const deleteArtifacts =
+        isRunDir &&
+        !protectedRunIds.has(runId) &&
+        !isWorkflowRunPersistenceActive(config, runId);
       return Promise.all([
         fs
           .unlink(`${dir}/${s.f}`)
           .catch((e) =>
             debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
           ),
-        ...(isRunDir
+        ...(deleteArtifacts
           ? [
               fs
-                .rm(`${dir}/${runId}`, { recursive: true, force: true })
+                .rm(
+                  path.dirname(config.storage.getWorkflowRunJournalPath(runId)),
+                  { recursive: true, force: true },
+                )
                 .catch((e) =>
                   debugLogger.warn(
                     `prune journal dir failed for ${runId}: ${e}`,
                   ),
                 ),
+              deleteInlineWorkflowScript(config, runId),
             ]
           : []),
       ]);
