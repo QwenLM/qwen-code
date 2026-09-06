@@ -124,6 +124,12 @@ jobs:
             #   2. spec sudo   — hk-1/hk-2, exactly the authorized argv
             #   3. runner user — pools with no passwordless sudo at all,
             #                    where that user owns the prefix
+            # A mode is abandoned only when sudo refuses it. Advancing on any
+            # non-zero exit cannot tell that refusal from "npm ran and failed",
+            # and a transient npm failure of mode 1 then reached mode 2 on
+            # hk-4/hk-5, where generic sudoers allows the unpinned argv too: a
+            # root install into the prefix the pool never resolves, on exactly
+            # the failure the retry loop below exists to absorb.
             # Mode 2 has to stay after mode 1: reversing them sends hk-4/hk-5
             # the unpinned argv, which sudo allows there and which installs
             # somewhere the pool never resolves. A probe cannot be more
@@ -144,13 +150,55 @@ jobs:
             install_qwen_named_spec() {
               "$@" npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
             }
+            # Whether the arm that just ran reached npm at all: the only thing
+            # that tells a sudo refusal from an npm failure, since both end in
+            # a non-zero exit. npm prefixes every diagnostic it prints
+            # (`npm error`, `npm warn`, `npm notice`) while sudo prints nothing
+            # on npm's behalf, so the arm's own output answers it without
+            # depending on sudo's wording — which a `sudo -n -l` gate would,
+            # and this step selects no mode by probe.
+            # Residual: an npm killed by a signal prints nothing, so it reads
+            # as a refusal and does advance. On hk-4/hk-5 that lands the
+            # unpinned root install the pin exists to prevent, and
+            # `Verify version` then fails the leg loudly — the pool keeps
+            # resolving /usr/local/bin/qwen, so it cannot pass silently.
+            arm_ran_npm=0
+            run_install_arm() {
+              local out err status
+              out="$(mktemp)"
+              err="$(mktemp)"
+              "$@" >"${out}" 2>"${err}" && status=0 || status=$?
+              cat "${out}"
+              cat "${err}" >&2
+              if grep -q '^npm ' "${out}" "${err}"; then
+                arm_ran_npm=1
+              else
+                arm_ran_npm=0
+              fi
+              rm -f "${out}" "${err}"
+              return "${status}"
+            }
             for attempt in 1 2 3; do
               sudo -n rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              if install_qwen sudo -n env -u NPM_CONFIG_PREFIX ||
-                install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX ||
-                install_qwen env; then
-                exit 0
-              fi
+              for mode in 'pinned' 'named-spec' 'runner'; do
+                case "${mode}" in
+                  pinned)
+                    run_install_arm install_qwen sudo -n env -u NPM_CONFIG_PREFIX
+                    ;;
+                  named-spec)
+                    run_install_arm install_qwen_named_spec sudo -n env -u NPM_CONFIG_PREFIX
+                    ;;
+                  runner)
+                    run_install_arm install_qwen env
+                    ;;
+                esac && exit 0
+                # npm ran, so this pool can install through this mode and the
+                # failure is npm's own — the rename race, a registry blip.
+                # Retry that same mode below; do not escalate to the next one.
+                if (( arm_ran_npm )); then
+                  break
+                fi
+              done
               if [[ "${attempt}" -lt 3 ]]; then
                 echo "::warning::npm install attempt ${attempt} failed; retrying"
                 sleep $((attempt * 10))

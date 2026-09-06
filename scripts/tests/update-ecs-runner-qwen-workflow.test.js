@@ -141,7 +141,7 @@ describe('ECS runner qwen update workflow', () => {
     // The runner-user fallback has to survive: deleting it strands any pool
     // with no passwordless sudo at all, and making every mode sudo strands
     // it the same way.
-    expect(updateCode).toContain('install_qwen env;');
+    expect(updateCode).toContain('install_qwen env');
     // hk-1/hk-2's sudoers names one exact argv and it carries no --prefix,
     // so the pinned line can never be the one that installs there. A second
     // sudo mode running the authorized shape is what keeps those two pools
@@ -159,10 +159,21 @@ describe('ECS runner qwen update workflow', () => {
     // installed as root, which is the regression this step came back from.
     const pinnedAt = updateCode.indexOf('install_qwen sudo -n');
     const namedSpecAt = updateCode.indexOf('install_qwen_named_spec sudo -n');
-    const runnerAt = updateCode.indexOf('install_qwen env;');
+    const runnerAt = updateCode.indexOf('install_qwen env');
     expect(pinnedAt).toBeGreaterThan(-1);
     expect(namedSpecAt).toBeGreaterThan(pinnedAt);
     expect(runnerAt).toBeGreaterThan(namedSpecAt);
+    // The order above is only worth what the advance condition is: a `||`
+    // chain advances on ANY non-zero exit, so a transient npm failure of the
+    // pinned mode falls through to the unpinned arm — which hk-4/hk-5's
+    // generic sudoers allows, turning a retryable npm blip into a root
+    // install into the prefix the pool never resolves. Only a sudo refusal
+    // (npm never ran) may advance; an npm failure goes back to the retry
+    // loop. Asserted here too because the replay arm below is skipped on the
+    // Windows lane.
+    expect(updateCode).not.toContain('NPM_CONFIG_PREFIX ||');
+    expect(updateCode).toContain('arm_ran_npm');
+    expect(updateCode).toContain("grep -q '^npm '");
     // Each install argv appears exactly once: the pin cannot drift between
     // the two modes that share it, and neither mode can lose the registry
     // pin or grow a flag the authorized spec does not name.
@@ -467,6 +478,10 @@ function runVerify({
 //                                 (hk-1/hk-2, the shape that regressed)
 //            'none'             — no passwordless sudo at all
 //   prefixOwner: who can write /usr/local/lib/node_modules
+//   npmFailures: fail this many install invocations with npm's own error
+//                output before letting them succeed — a transient npm failure
+//                (the ENOTEMPTY rename race this step retries through), which
+//                is NOT a sudo refusal and must not advance the mode chain.
 // The npm stub records every install it is asked to run tagged with the
 // effective user, so a test can assert *which mode* installed rather than
 // only that the step exited 0 — a fallback that succeeds after a wasted
@@ -475,11 +490,13 @@ function runUpdate({
   sudoers = 'generic',
   prefixOwner = 'root',
   version = '0.22.3',
+  npmFailures = 0,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ecs-install-'));
   try {
     const calls = join(dir, 'npm-calls');
     writeFileSync(calls, '');
+    const installAttempts = join(dir, 'install-attempts');
 
     const sudoStub = join(dir, 'sudo');
     writeFileSync(
@@ -539,6 +556,15 @@ function runUpdate({
         'echo "${STUB_EFFECTIVE_USER:-runner}|NPM_CONFIG_PREFIX=${NPM_CONFIG_PREFIX:-UNSET}|$*" >> ' +
           calls,
         'if [[ " $* " == *" install -g "* ]]; then',
+        `  install_attempt=$(( $(cat ${installAttempts} 2>/dev/null || echo 0) + 1 ))`,
+        `  echo "$install_attempt" > ${installAttempts}`,
+        '  # npm reached this point, so sudo authorized the argv: the failure',
+        "  # below is npm's own, and npm always says so with its own prefix.",
+        `  if (( install_attempt <= ${npmFailures} )); then`,
+        "    echo 'npm error code ENOTEMPTY' >&2",
+        "    echo 'npm error syscall rename' >&2",
+        '    exit 1',
+        '  fi',
         '  if [[ "${STUB_EFFECTIVE_USER:-runner}" == "root" ]]; then',
         "    echo 'changed 16 packages in 5s'",
         '    exit 0',
@@ -764,6 +790,50 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     expect(updated.calls).toContain('install -g --prefix /usr/local');
     expect(updated.calls).toContain('--registry=https://registry.npmjs.org');
     expect(updated.calls).toContain('NPM_CONFIG_PREFIX=UNSET');
+  });
+
+  it('retries the pinned mode through a transient npm failure instead of escalating', () => {
+    // hk-3/4/5 authorize ANY argv, so the unpinned spec arm is *allowed*
+    // there too and installs into root's custom Node prefix the pool never
+    // resolves. A `||` chain advances on any non-zero exit and cannot tell
+    // that from "npm ran and failed", so one transient npm failure of the
+    // pinned mode — the ENOTEMPTY rename race the retry loop exists for —
+    // used to reach it, as root, on the pool class that needed the pin.
+    const updated = runUpdate({ sudoers: 'generic', npmFailures: 1 });
+    expect(updated.status).toBe(0);
+    expect(updated.modes).toEqual(['root', 'root']);
+    // Both invocations are the pinned argv: the retry stayed in mode 1 and
+    // never handed the pool the unpinned one.
+    const installs = updated.calls.trim().split('\n');
+    expect(installs).toHaveLength(2);
+    for (const install of installs) {
+      expect(install).toContain('install -g --prefix /usr/local');
+    }
+    // The retry loop absorbed it, and says so.
+    expect(updated.stdout).toContain(
+      '::warning::npm install attempt 1 failed; retrying',
+    );
+  });
+
+  it('still advances on a sudo refusal, then retries the authorized spec', () => {
+    // The property the unpinned arm was added for has to survive the advance
+    // condition: hk-1/hk-2 refuse the pinned argv, and that refusal — npm
+    // never ran — is still what moves the chain on to the spec they name.
+    // Once that spec is authorized its own transient npm failure retries
+    // itself instead of dropping the pool to the runner user, which EACCESes
+    // against the root-owned prefix on all three attempts.
+    const updated = runUpdate({ sudoers: 'command-specific', npmFailures: 1 });
+    expect(updated.status).toBe(0);
+    expect(updated.modes).toEqual(['root', 'root']);
+    const installs = updated.calls.trim().split('\n');
+    expect(installs).toHaveLength(2);
+    for (const install of installs) {
+      expect(install).toContain(
+        'install -g --registry=https://registry.npmjs.org',
+      );
+      expect(install).not.toContain('--prefix');
+    }
+    expect(updated.stderr).not.toContain('EACCES');
   });
 
   it('falls back to the runner user on a pool with no sudo at all', () => {
