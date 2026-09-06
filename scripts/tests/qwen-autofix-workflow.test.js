@@ -14239,9 +14239,10 @@ exit 1
     expect(created.calls).toContain(
       'https://github.com/o/r/pull/5#discussion_r7',
     );
-    // The fetch-failure warning is gated on the CALL status, not on a body
-    // field: this stub's PR_JSON is a title/user object with no `.number`, so
-    // a `jq -e '.number'` gate would warn here on every healthy round.
+    // The fetch-failure warning is gated on the CALL status plus "both derived
+    // strings came back empty" — never on a body FIELD's presence: this stub's
+    // PR_JSON is a title/user object with no `.number`, so a `jq -e '.number'`
+    // gate would warn here on every healthy round.
     expect(created.out).not.toContain('could not fetch PR');
     // A failed PR-context fetch degrades to the bare title and no assignee —
     // the findings themselves are still persisted — and it WARNS, like every
@@ -14268,6 +14269,29 @@ exit 1
     );
     expect(prFetchFailed.calls).not.toContain('assignees');
     expect(prFetchFailed.calls).not.toContain('cc @');
+    // The gate's SECOND half needs its own witness, because `prFetchFailed`
+    // cannot provide one: its stub exits 1, so the first half already fires.
+    // This create path passes no --jq and gh copies a non-JSON body raw with
+    // serverError set only above status 299, so a transparent proxy answering
+    // `200 text/html` exits 0 with nothing usable — every derivation comes back
+    // empty through its `|| true`, and the issue degrades to the bare title /
+    // no cc / no assignee behind a clean success line. Dropping
+    // `( -z "${PR_TITLE_RAW}" && -z "${PR_AUTHOR}" )` from the script's gate
+    // must red the warning assertion below and leave `created` green.
+    const prUnusableBody = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '<!DOCTYPE html><html><body>200 from a transparent proxy</body>',
+    });
+    expect(prUnusableBody.out).toContain('tracked in new issue #77');
+    expect(prUnusableBody.out).toContain(
+      '::warning::could not fetch PR #5 context (the call exited 0 but returned no usable PR object)',
+    );
+    expect(prUnusableBody.out).not.toContain('no stderr captured');
+    expect(prUnusableBody.calls).toContain(
+      '-f title=Deferred review findings from PR #5 -f body=',
+    );
+    expect(prUnusableBody.calls).not.toContain('assignees');
+    expect(prUnusableBody.calls).not.toContain('cc @');
     // A bot-authored PR gets no assignee (the bot never assigns itself).
     const botAuthor = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
@@ -14279,8 +14303,13 @@ exit 1
     // The login-charset guard in the script is the ONLY thing keeping a
     // malformed `.user.login` (a space, an `@`, an over-long string, a
     // non-login shape) out of both the deliberate `cc @…` mention in the
-    // public body and the `assignees[]` argument — deleting or weakening the
-    // regex must red this case.
+    // public body and the `assignees[]` argument — so one fixture per declared
+    // shape. A lone space-bearing login is rejected by ANY bound: on its own it
+    // stays green when `{1,39}` is widened to `{1,}` or `@` is admitted into
+    // the class, and no test asserts the regex literal, so these cases are the
+    // guard's only witnesses. Deleting or weakening the regex must red one of
+    // the three below. (A `{"title":"t"}` fixture with no `.user` would pin
+    // nothing — `jq -r '.user.login // ""'` already yields empty there.)
     const badLogin = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
       prJson: '{"title":"t","user":{"login":"not a login"}}',
@@ -14288,6 +14317,24 @@ exit 1
     expect(badLogin.out).toContain('tracked in new issue #77');
     expect(badLogin.calls).not.toContain('assignees');
     expect(badLogin.calls).not.toContain('cc @');
+    // `@` outside the class: admitting it would publish a mention whose handle
+    // is not the login it looks like, under the bot identity.
+    const atLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"a@b"}}',
+    });
+    expect(atLogin.out).toContain('tracked in new issue #77');
+    expect(atLogin.calls).not.toContain('assignees');
+    expect(atLogin.calls).not.toContain('cc @');
+    // One past GitHub's 39-char login bound: only the `{1,39}` upper bound
+    // rejects this, so widening it to `{1,}` must red this case.
+    const longLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: `{"title":"t","user":{"login":"${'a'.repeat(40)}"}}`,
+    });
+    expect(longLogin.out).toContain('tracked in new issue #77');
+    expect(longLogin.calls).not.toContain('assignees');
+    expect(longLogin.calls).not.toContain('cc @');
     // A rejected assignment only warns: by then the findings are already
     // persisted, and the assignment is a SEPARATE idempotent call — never a
     // second create POST. POST /repos/{owner}/{repo}/issues is not idempotent
@@ -14387,6 +14434,16 @@ exit 1
     expect(appended.calls).not.toContain('- rc:8 ');
     expect(appended.calls).not.toContain('- rc:9 ');
     expect(appended.calls).not.toContain('PATCH');
+    // Negative half: the PR-context fetch is CREATION-only (the script's own
+    // comment, "Creation-only context"). The create-path assertion at the top
+    // of this block is the file's only other `pulls/` witness and it is
+    // positive, so hoisting the 4-line fetch unit (`gh_err_reset` plus
+    // `PR_FETCH_OK`/`PR_JSON`) above the create/append branch shipped green —
+    // and in production that spends an authenticated `GET /pulls/N` against the
+    // bot PAT's rate limit on every steady-state append round, the path that
+    // runs most often, instead of once per tracking issue's lifetime. Hoisting
+    // the fetch must red this.
+    expect(appended.calls).not.toContain('repos/o/r/pulls/');
     expect(appended.out).toContain('appended to issue #42');
     // Free-text mentions do not suppress (line-anchored dedupe), and a PULL
     // REQUEST carrying the marker is never selected as the tracking issue.

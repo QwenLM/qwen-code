@@ -429,13 +429,28 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   # PAT rotated without pull-requests:read, a rate limit, a persistent 404 —
   # reverts every new tracking issue to the bare title / no assignee / no cc
   # while the success line still prints, and a fully degraded round is
-  # indistinguishable from a healthy one in the log. Gated on the CALL status,
-  # not on a body field: a successful fetch of a PR object is not a failure
-  # whatever fields it carries. Non-blocking (persistence must never fail a
-  # round) and read BEFORE that reset, so the create-failure warning below
-  # still reports its own reason.
-  if [[ "${PR_FETCH_OK}" != 1 ]]; then
-    echo "::warning::could not fetch PR #${PR} context ($(gh_reason)); creating the deferred-findings issue with the bare title, no assignee and no cc — the findings themselves are still persisted"
+  # indistinguishable from a healthy one in the log. Non-blocking (persistence
+  # must never fail a round) and read BEFORE that reset, so the create-failure
+  # warning below still reports its own reason.
+  #
+  # The gate is "the call failed OR it yielded nothing usable", not the call
+  # status alone. This fetch passes no --jq, and gh copies a non-JSON body raw
+  # with serverError set only above status 299, so a transparent proxy answering
+  # `200 text/html` on the self-hosted pool exits 0 while all three derivations
+  # above come back empty through their `|| true` — the bare title, no cc, no
+  # assignee and a clean success line, precisely the degradation this warning
+  # exists to name. Keying on BOTH derived strings being empty cannot
+  # false-positive on a real PR object (a whitespace-only title still flattens
+  # to a non-empty " ", a deleted author leaves the title intact), where a
+  # `.number`-presence gate would warn on every healthy round — the stub PR
+  # object the suite passes carries no `.number`.
+  if [[ "${PR_FETCH_OK}" != 1 || ( -z "${PR_TITLE_RAW}" && -z "${PR_AUTHOR}" ) ]]; then
+    PR_CTX_REASON="$(gh_reason)"
+    # The call itself succeeded, so there is no stderr to name — say what the
+    # second half of the gate observed instead of "no stderr captured".
+    [[ "${PR_FETCH_OK}" == 1 ]] &&
+      PR_CTX_REASON='the call exited 0 but returned no usable PR object'
+    echo "::warning::could not fetch PR #${PR} context (${PR_CTX_REASON}); creating the deferred-findings issue with the bare title, no assignee and no cc — the findings themselves are still persisted"
   fi
   # The ": " separator is consumed 220 lines away by the marker-less title
   # fallback in the lookup above (startswith($t + ":")) — restyle it in both
