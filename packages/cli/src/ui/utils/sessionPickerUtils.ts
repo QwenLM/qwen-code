@@ -5,6 +5,11 @@
  */
 
 import type { SessionListItem } from '@qwen-code/qwen-code-core';
+import { getCachedStringWidth } from './textUtils.js';
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
 
 /**
  * State for managing loaded sessions in the session picker.
@@ -24,19 +29,42 @@ export const SESSION_PAGE_SIZE = 20;
  * Truncates text to fit within a given width, adding ellipsis if needed.
  */
 export function truncateText(text: string, maxWidth: number): string {
+  const widthLimit = Math.max(0, Math.floor(maxWidth));
+  if (widthLimit === 0) {
+    return '';
+  }
+
   const firstLine = text.split(/\r?\n/, 1)[0];
-  if (firstLine.length <= maxWidth) {
+  if (getCachedStringWidth(firstLine) <= widthLimit) {
     return firstLine;
   }
-  if (maxWidth <= 3) {
-    return firstLine.slice(0, maxWidth);
+
+  if (widthLimit <= 3) {
+    return truncateToDisplayWidth(firstLine, widthLimit);
   }
-  return firstLine.slice(0, maxWidth - 3) + '...';
+
+  return `${truncateToDisplayWidth(firstLine, widthLimit - 3)}...`;
+}
+
+function truncateToDisplayWidth(text: string, maxWidth: number): string {
+  let width = 0;
+  let result = '';
+
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+
+  return result;
 }
 
 /**
  * Returns true when the session matches the query as a substring on any of:
- * customTitle, first prompt, gitBranch.
+ * customTitle, first prompt, Goal objective, gitBranch.
  *
  * Empty queries match everything. The query is expected pre-normalized —
  * `filterSessions` does the trim+lowercase once before the per-session
@@ -50,6 +78,7 @@ function matchesQuery(
   const haystacks: Array<string | undefined> = [
     session.customTitle,
     session.prompt,
+    session.goalObjective,
     session.gitBranch,
   ];
   for (const h of haystacks) {
@@ -63,8 +92,9 @@ function matchesQuery(
  *
  * Branch filter and query filter compose (AND): when both are active, a
  * session must satisfy both. Query is matched case-insensitively against
- * customTitle, prompt, and gitBranch — branch is included in query matching
- * so users can type a branch name without first toggling branch-filter.
+ * customTitle, prompt, Goal objective, and gitBranch — branch is included in
+ * query matching so users can type a branch name without first toggling
+ * branch-filter.
  */
 export function filterSessions(
   sessions: SessionListItem[],

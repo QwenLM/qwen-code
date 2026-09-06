@@ -89,7 +89,11 @@ class JsonRpcConnection {
     }
     this.disposed = true;
     this.disposePending();
-    this.disposer?.();
+    try {
+      this.disposer?.();
+    } catch (error) {
+      debugLogger.warn('LSP disposer failed:', error);
+    }
   }
 
   private sendRequest(method: string, params: unknown): Promise<unknown> {
@@ -231,7 +235,12 @@ class JsonRpcConnection {
     }
     const json = JSON.stringify(message);
     const header = `Content-Length: ${Buffer.byteLength(json, 'utf8')}\r\n\r\n`;
-    this.writer(header + json);
+    try {
+      this.writer(header + json);
+    } catch (error) {
+      debugLogger.warn('LSP write failed:', error);
+      this.end();
+    }
   }
 
   private disposePending(error?: Error): void {
@@ -317,6 +326,11 @@ export class LspConnectionFactory {
           (payload) => processInstance.stdin?.write(payload),
           () => processInstance.stdin?.end(),
         );
+
+        processInstance.stdin.on('error', (err) => {
+          debugLogger.warn(`LSP stdin stream error for ${command}:`, err);
+          connection.end();
+        });
 
         connection.listen(processInstance.stdout);
         const recordProcessExit = (

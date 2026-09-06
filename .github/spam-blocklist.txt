@@ -1,0 +1,4 @@
+# Users whose comments should be auto-minimized as off-topic.
+# One username per line, case-insensitive. Lines starting with # are comments.
+# Add entries here when a user is blocked at the org level or identified as spam.
+danialzivehdadr

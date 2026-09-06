@@ -15,6 +15,7 @@ export const rewindCommand: SlashCommand = {
     return t('Rewind conversation to a previous turn');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: async (): Promise<SlashCommandActionReturn> => ({
     type: 'dialog',
     dialog: 'rewind',

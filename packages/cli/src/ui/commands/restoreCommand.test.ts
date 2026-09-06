@@ -11,13 +11,13 @@ import * as path from 'node:path';
 import { restoreCommand } from './restoreCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { Config, GitService } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 describe('restoreCommand', () => {
   let mockContext: CommandContext;
   let mockConfig: Config;
-  let mockGitService: GitService;
   let mockSetHistory: ReturnType<typeof vi.fn>;
+  let mockRewind: ReturnType<typeof vi.fn>;
   let testRootDir: string;
   let geminiTempDir: string;
   let checkpointsDir: string;
@@ -33,17 +33,18 @@ describe('restoreCommand', () => {
     await fs.mkdir(checkpointsDir, { recursive: true });
 
     mockSetHistory = vi.fn().mockResolvedValue(undefined);
-    mockGitService = {
-      restoreProjectFromSnapshot: vi.fn().mockResolvedValue(undefined),
-    } as unknown as GitService;
+    mockRewind = vi
+      .fn()
+      .mockResolvedValue({ filesChanged: [], filesFailed: [] });
 
     mockConfig = {
-      getCheckpointingEnabled: vi.fn().mockReturnValue(true),
+      getFileCheckpointingEnabled: vi.fn().mockReturnValue(true),
+      getFileHistoryService: vi.fn().mockReturnValue({ rewind: mockRewind }),
       storage: {
         getProjectTempCheckpointsDir: vi.fn().mockReturnValue(checkpointsDir),
         getProjectTempDir: vi.fn().mockReturnValue(geminiTempDir),
       },
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         setHistory: mockSetHistory,
       }),
     } as unknown as Config;
@@ -51,9 +52,9 @@ describe('restoreCommand', () => {
     mockContext = createMockCommandContext({
       services: {
         config: mockConfig,
-        git: mockGitService,
       },
     });
+    mockContext.ui.clearPendingState = vi.fn();
   });
 
   afterEach(async () => {
@@ -62,7 +63,7 @@ describe('restoreCommand', () => {
   });
 
   it('should return null if checkpointing is not enabled', () => {
-    vi.mocked(mockConfig.getCheckpointingEnabled).mockReturnValue(false);
+    vi.mocked(mockConfig.getFileCheckpointingEnabled).mockReturnValue(false);
 
     expect(restoreCommand(mockConfig)).toBeNull();
   });
@@ -153,7 +154,7 @@ describe('restoreCommand', () => {
       const toolCallData = {
         history: [{ type: 'user', text: 'do a thing' }],
         clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
-        commitHash: 'abcdef123',
+        promptId: 'prompt-abc123',
         toolCall: { name: 'run_shell_command', args: 'ls' },
       };
       await fs.writeFile(
@@ -170,14 +171,13 @@ describe('restoreCommand', () => {
       expect(mockContext.ui.loadHistory).toHaveBeenCalledWith(
         toolCallData.history,
       );
+      expect(mockContext.ui.clearPendingState).toHaveBeenCalledTimes(1);
       expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
-      expect(mockGitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
-        toolCallData.commitHash,
-      );
+      expect(mockRewind).toHaveBeenCalledWith(toolCallData.promptId, true);
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: 'info',
-          text: 'Restored project to the state before the tool call.',
+          text: 'Restored project to the state at the start of this turn.',
         },
         expect.any(Number),
       );
@@ -202,24 +202,106 @@ describe('restoreCommand', () => {
 
       expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
       expect(mockSetHistory).not.toHaveBeenCalled();
-      expect(mockGitService.restoreProjectFromSnapshot).not.toHaveBeenCalled();
+      expect(mockRewind).not.toHaveBeenCalled();
     });
   });
 
-  it('should return an error for a checkpoint file missing the toolCall property', async () => {
+  it('should reject legacy checkpoint format with commitHash', async () => {
+    const toolCallData = {
+      commitHash: 'abc123',
+      toolCall: { name: 'run_shell_command', args: 'ls' },
+    };
+    await fs.writeFile(
+      path.join(checkpointsDir, 'legacy.json'),
+      JSON.stringify(toolCallData),
+    );
+    const command = restoreCommand(mockConfig);
+
+    expect(await command?.action?.(mockContext, 'legacy')).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('legacy format'),
+    });
+    expect(mockRewind).not.toHaveBeenCalled();
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it('should abort tool replay when rewind has partial failures', async () => {
+    mockRewind.mockResolvedValue({
+      filesChanged: ['a.ts'],
+      filesFailed: ['b.ts'],
+    });
+    const toolCallData = {
+      promptId: 'prompt-abc',
+      toolCall: { name: 'edit', args: { file_path: 'a.ts' } },
+    };
+    await fs.writeFile(
+      path.join(checkpointsDir, 'partial.json'),
+      JSON.stringify(toolCallData),
+    );
+    const command = restoreCommand(mockConfig);
+
+    const result = await command?.action?.(mockContext, 'partial');
+    expect(result).toBeUndefined();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'warning',
+        text: expect.stringContaining('Partially restored'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it('should abort tool replay when rewind throws', async () => {
+    mockRewind.mockRejectedValue(
+      new Error('The selected snapshot was not found'),
+    );
+    const toolCallData = {
+      promptId: 'prompt-missing',
+      toolCall: { name: 'edit', args: { file_path: 'a.ts' } },
+    };
+    await fs.writeFile(
+      path.join(checkpointsDir, 'missing-snapshot.json'),
+      JSON.stringify(toolCallData),
+    );
+    const command = restoreCommand(mockConfig);
+
+    const result = await command?.action?.(mockContext, 'missing-snapshot');
+    expect(result).toBeUndefined();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'warning',
+        text: expect.stringContaining('Could not restore files'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it('should not mutate state for a checkpoint file missing the toolCall property', async () => {
     const checkpointName = 'missing-toolcall';
+    const toolCallData = {
+      history: [{ type: 'user', text: 'do a thing' }],
+      clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
+      promptId: 'prompt-abc123',
+    };
     await fs.writeFile(
       path.join(checkpointsDir, `${checkpointName}.json`),
-      JSON.stringify({ history: [] }), // An object that is valid JSON but missing the 'toolCall' property
+      JSON.stringify(toolCallData),
     );
     const command = restoreCommand(mockConfig);
 
     expect(await command?.action?.(mockContext, checkpointName)).toEqual({
       type: 'message',
       messageType: 'error',
-      // A more specific error message would be ideal, but for now, we can assert the current behavior.
-      content: expect.stringContaining('Could not read restorable tool calls.'),
+      content: expect.stringContaining(
+        'Checkpoint is missing a valid toolCall.',
+      ),
     });
+    expect(mockRewind).not.toHaveBeenCalled();
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+    expect(mockSetHistory).not.toHaveBeenCalled();
   });
 
   describe('completion', () => {

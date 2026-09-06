@@ -94,17 +94,19 @@ describe('formatters', () => {
     });
   });
 
+  // The implementation and its full case table live in core
+  // (`packages/core/src/utils/formatters.test.ts`); this module only
+  // re-exports it. These pin the re-export itself, including the unit
+  // rollover that used to differ between the copies.
   describe('formatMemoryUsage', () => {
-    it('should format bytes into KB', () => {
-      expect(formatMemoryUsage(12345)).toBe('12.1 KB');
-    });
-
-    it('should format bytes into MB', () => {
-      expect(formatMemoryUsage(12345678)).toBe('11.8 MB');
-    });
-
-    it('should format bytes into GB', () => {
-      expect(formatMemoryUsage(12345678901)).toBe('11.50 GB');
+    it.each([
+      [12345, '12.1 KB'],
+      [12345678, '11.8 MB'],
+      [12345678901, '11.50 GB'],
+      [1024 * 1024 - 1, '1.0 MB'],
+      [1024 * 1024 * 1024 - 1, '1.00 GB'],
+    ])('formats %d as %s', (bytes, expected) => {
+      expect(formatMemoryUsage(bytes)).toBe(expected);
     });
   });
 
@@ -153,6 +155,16 @@ describe('formatters', () => {
 
     it('should handle negative durations', () => {
       expect(formatDuration(-100)).toBe('0s');
+    });
+
+    it('should roll a sub-minute value up to "1m" when it rounds to 60s', () => {
+      // 59.95s and up round to "60.0" at one decimal, which is not a valid
+      // sub-minute reading; it should render as the minute it rounds to,
+      // matching formatDuration(60000) === '1m'.
+      expect(formatDuration(59949)).toBe('59.9s');
+      expect(formatDuration(59950)).toBe('1m');
+      expect(formatDuration(59999)).toBe('1m');
+      expect(formatDuration(59950, { hideTrailingZeros: true })).toBe('1m');
     });
 
     describe('with hideTrailingZeros', () => {

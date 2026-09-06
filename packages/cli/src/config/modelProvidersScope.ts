@@ -46,3 +46,31 @@ export function getPersistScopeForModelSelection(
 ): SettingScope {
   return getModelProvidersOwnerScope(settings) ?? SettingScope.User;
 }
+
+/**
+ * The writable scopes that contribute to the effective (merged) config, highest
+ * precedence first. Workspace is only writable/honored when trusted.
+ */
+export function getWritableScopes(settings: LoadedSettings): SettingScope[] {
+  return settings.isTrusted
+    ? [SettingScope.Workspace, SettingScope.User]
+    : [SettingScope.User];
+}
+
+/**
+ * Returns the highest-precedence writable scope that explicitly owns `key`
+ * (top-level settings key), or `undefined` when no writable scope sets it.
+ * Used to persist an edit to a key back to the same scope it lives in, since
+ * keys like `modelFallbacks` / `model` are independently scoped from
+ * `modelProviders`.
+ */
+export function getOwnKeyScope(
+  settings: LoadedSettings,
+  key: string,
+): SettingScope | undefined {
+  for (const scope of getWritableScopes(settings)) {
+    const obj = settings.forScope(scope).settings as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(obj, key)) return scope;
+  }
+  return undefined;
+}

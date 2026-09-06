@@ -25,10 +25,13 @@ export interface WriteWithBackupOptions {
  * 3. Renaming the temporary file to the target path
  *
  * If any step fails, an error is thrown and no partial changes are left on disk.
- * The backup file (if created) can be used for manual recovery.
+ * The backup acts as an in-flight safety net: if the final rename fails the
+ * original is restored from it. On success the backup is removed so it does not
+ * linger next to the target file (which would pollute the user's project).
  *
- * Note: This is not 100% atomic but provides good protection. In the worst case,
- * a .orig backup file remains that can be manually restored.
+ * Note: This is not 100% atomic but provides good protection. In the worst case
+ * (a crash between the backup rename and the final rename), a .orig file remains
+ * holding the last good content and can be manually restored.
  *
  * @param targetPath - The path to write to
  * @param content - The content to write
@@ -38,7 +41,7 @@ export interface WriteWithBackupOptions {
  * @example
  * ```typescript
  * await writeWithBackup('/path/to/settings.json', JSON.stringify(settings, null, 2));
- * // If /path/to/settings.json existed, it's now backed up to /path/to/settings.json.orig
+ * // On success only /path/to/settings.json exists; the .orig backup is cleaned up.
  * ```
  */
 export async function writeWithBackup(
@@ -66,6 +69,7 @@ export function writeWithBackupSync(
   const { backupSuffix = '.orig', encoding = 'utf-8' } = options;
   const tempPath = `${targetPath}.tmp`;
   const backupPath = `${targetPath}${backupSuffix}`;
+  let backupCreated = false;
 
   // Clean up any existing temp file from previous failed attempts
   try {
@@ -98,6 +102,7 @@ export function writeWithBackupSync(
 
       try {
         fs.renameSync(targetPath, backupPath);
+        backupCreated = true;
       } catch (backupError) {
         // Clean up temp file before throwing
         try {
@@ -114,6 +119,16 @@ export function writeWithBackupSync(
     // Step 3: Rename temp file to target
     try {
       fs.renameSync(tempPath, targetPath);
+
+      // Step 4: Write succeeded — the backup was only an in-flight safety net,
+      // so remove it instead of leaving a .orig file behind in the user's dir.
+      if (backupCreated) {
+        try {
+          fs.unlinkSync(backupPath);
+        } catch (_e) {
+          // Best-effort cleanup; a stray backup is harmless and non-fatal.
+        }
+      }
     } catch (renameError) {
       let restoreFailedMessage: string | undefined;
       let backupExisted = false;

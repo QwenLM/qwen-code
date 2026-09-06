@@ -17,7 +17,9 @@
  * Keep these two files in sync when the encoding evolves.
  */
 
-const RUNTIME_PREFIX = '$runtime|';
+// Local copy of core's RUNTIME_SNAPSHOT_PREFIX: the webview bundle marks core
+// external (see esbuild.js), so it can't import it. A test pins them equal.
+export const RUNTIME_PREFIX = '$runtime|';
 
 /** Auth type marker for the (now-discontinued) Qwen OAuth free tier. */
 export const QWEN_OAUTH_AUTH_TYPE = 'qwen-oauth';

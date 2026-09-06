@@ -20,8 +20,11 @@ export interface ModelSpec {
   id: string;
   contextWindowSize?: number;
   enableThinking?: boolean;
+  thinkingMandatory?: boolean;
   modalities?: InputModalities;
   description?: string;
+  supportsImageGeneration?: boolean;
+  imageOnly?: boolean;
 }
 
 export interface BaseUrlOption {
@@ -64,6 +67,9 @@ export interface ProviderConfig {
    */
   modelsEditable?: boolean;
 
+  /** Load the account's current model recommendations from `/models`. */
+  supportsModelDiscovery?: boolean;
+
   /** Display name prefix for model entries, or a function of baseUrl. */
   modelNamePrefix: string | ((baseUrl: string) => string);
 
@@ -82,6 +88,14 @@ export interface ProviderConfig {
   /** API key input placeholder. */
   apiKeyPlaceholder?: string;
 
+  /**
+   * Custom HTTP headers to send with every request to this provider.
+   * Used for attribution headers (e.g. `HTTP-Referer`, `X-Title`) that
+   * gateways like OpenRouter and Requesty expect. Merged into each model's
+   * `generationConfig.customHeaders` at install time.
+   */
+  customHeaders?: Record<string, string>;
+
   /** Documentation URL for the provider. */
   documentationUrl?: string | ((baseUrl: string) => string);
 
@@ -91,6 +105,14 @@ export interface ProviderConfig {
    * Only needed for providers with function-typed envKey/prefix or non-standard logic.
    */
   ownsModel?: (model: ProviderModelConfig) => boolean;
+
+  /**
+   * Install-time merge behavior. When true, installs replace only incoming
+   * model identities (id + baseUrl) instead of every model matched by
+   * ownsModel. Useful for user-defined providers where multiple endpoints and
+   * model IDs can coexist under one provider config.
+   */
+  mergeModelsByIdentity?: boolean;
 
   /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.
@@ -152,6 +174,7 @@ export interface ProviderInstallPlan {
   };
   modelSelection?: {
     modelId: string;
+    baseUrl?: string;
   };
   modelProviders?: ProviderModelProvidersPatch[];
   providerState?: ProviderInstallState;

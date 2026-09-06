@@ -1,0 +1,235 @@
+name: 'Release Java SDK'
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Verify the release without publishing, tagging, or creating a GitHub Release.'
+        required: true
+        type: 'boolean'
+        default: true
+
+concurrency:
+  group: 'release-sdk-java-0.1.0-alpha'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 60
+    environment:
+      name: "${{ inputs.dry_run && 'sdk-java-dry-run' || 'production-release' }}"
+      url: '${{ github.server_url }}/${{ github.repository }}/releases'
+    permissions:
+      contents: 'write'
+    env:
+      SDK_DIRECTORY: 'packages/sdk-java/qwencode'
+      SDK_VERSION: '0.1.0-alpha'
+      RELEASE_TAG: 'sdk-java-v0.1.0-alpha'
+    steps:
+      - name: 'Require protected main'
+        env:
+          WORKFLOW_REF: '${{ github.ref }}'
+        run: |-
+          if [[ "${WORKFLOW_REF}" != "refs/heads/main" ]]; then
+            echo 'The Java SDK release workflow must run from main.' >&2
+            exit 1
+          fi
+
+      - name: 'Checkout main'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: 'main'
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 'Validate release version and tag'
+        id: 'preflight'
+        env:
+          CURRENT_SHA: '${{ github.sha }}'
+          DRY_RUN: '${{ inputs.dry_run }}'
+        run: |-
+          set -euo pipefail
+          checked_out_sha=$(git rev-parse HEAD)
+          if [[ "${checked_out_sha}" != "${CURRENT_SHA}" ]]; then
+            echo "Checked-out main ${checked_out_sha} does not match workflow SHA ${CURRENT_SHA}." >&2
+            exit 1
+          fi
+
+          tag_state='new'
+          direct_tag=$(git ls-remote --refs --tags origin "refs/tags/${RELEASE_TAG}" | cut -f1)
+          peeled_tag=$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}^{}" | cut -f1)
+          if [[ -n "${direct_tag}" ]]; then
+            if [[ -z "${peeled_tag}" ]]; then
+              echo "${RELEASE_TAG} is not an annotated release tag." >&2
+              exit 1
+            fi
+            tag_commit=${peeled_tag}
+            if ! git merge-base --is-ancestor "${tag_commit}" "${checked_out_sha}"; then
+              echo "${RELEASE_TAG} does not point to a commit in protected main history." >&2
+              exit 1
+            fi
+            git checkout --detach "${tag_commit}"
+            tag_state='resume'
+          fi
+
+          actual_version=$(mvn --batch-mode --no-transfer-progress -f "${SDK_DIRECTORY}/pom.xml" help:evaluate -Dexpression=project.version -q -DforceStdout)
+          if [[ "${actual_version}" != "${SDK_VERSION}" ]]; then
+            echo "Expected ${SDK_VERSION}, found ${actual_version}." >&2
+            exit 1
+          fi
+          artifact_url="https://repo1.maven.org/maven2/com/alibaba/qwencode-sdk/${SDK_VERSION}/qwencode-sdk-${SDK_VERSION}.pom"
+          probe_artifact() {
+            local status=''
+            for attempt in 1 2 3; do
+              if status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 30 --output /dev/null --write-out '%{http_code}' "${artifact_url}"); then
+                if [[ "${status}" == '200' ]]; then
+                  echo 'published'
+                  return 0
+                fi
+                if [[ "${status}" == '404' ]]; then
+                  echo 'missing'
+                  return 0
+                fi
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                sleep 5
+              fi
+            done
+            echo "Maven Central probe was inconclusive (last HTTP status: ${status:-transport_error})." >&2
+            return 1
+          }
+          artifact_state=$(probe_artifact)
+          if [[ "${tag_state}" == 'new' && "${artifact_state}" == 'published' ]]; then
+            echo "${SDK_VERSION} is already published without ${RELEASE_TAG}; manual recovery is required." >&2
+            exit 1
+          fi
+          if [[ "${DRY_RUN}" == 'false' && "${tag_state}" == 'resume' && "${artifact_state}" == 'missing' ]]; then
+            echo 'Matching tag already exists; Maven publication will resume from that immutable source commit.'
+          elif [[ "${DRY_RUN}" == 'false' && "${tag_state}" == 'resume' ]]; then
+            echo 'Matching tag and artifact already exist; GitHub Release creation will resume.'
+          fi
+          echo "tag_state=${tag_state}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_state=${artifact_state}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Require publishing credentials'
+        if: "${{ !inputs.dry_run && steps.preflight.outputs.artifact_state == 'missing' }}"
+        env:
+          CENTRAL_USERNAME: '${{ secrets.CENTRAL_USERNAME }}'
+          CENTRAL_PASSWORD: '${{ secrets.CENTRAL_PASSWORD }}'
+          MAVEN_GPG_PRIVATE_KEY: '${{ secrets.MAVEN_GPG_PRIVATE_KEY }}'
+          MAVEN_GPG_PASSPHRASE: '${{ secrets.MAVEN_GPG_PASSPHRASE }}'
+        run: |-
+          set -euo pipefail
+          missing=()
+          [[ -n "${CENTRAL_USERNAME}" ]] || missing+=('CENTRAL_USERNAME')
+          [[ -n "${CENTRAL_PASSWORD}" ]] || missing+=('CENTRAL_PASSWORD')
+          [[ -n "${MAVEN_GPG_PRIVATE_KEY}" ]] || missing+=('MAVEN_GPG_PRIVATE_KEY')
+          [[ -n "${MAVEN_GPG_PASSPHRASE}" ]] || missing+=('MAVEN_GPG_PASSPHRASE')
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing production-release environment secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+      - name: 'Verify release build'
+        working-directory: '${{ env.SDK_DIRECTORY }}'
+        run: 'mvn --batch-mode --no-transfer-progress clean verify -Dgpg.skip=true'
+
+      - name: 'Install Node.js dependencies'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      - name: 'Build Qwen Code'
+        run: 'npm run build'
+
+      - name: 'Bundle Qwen Code'
+        run: 'npm run bundle'
+
+      - name: 'Run Java daemon E2E'
+        run: 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'
+
+      - name: 'Require an unchanged source tree'
+        run: |-
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git status --short
+            echo 'Release verification changed or created source files.' >&2
+            exit 1
+          fi
+
+      - name: 'Create and push release tag'
+        if: "${{ !inputs.dry_run && steps.preflight.outputs.tag_state == 'new' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "${RELEASE_TAG}" -m "Java SDK ${SDK_VERSION}"
+          gh auth setup-git
+          git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: 'Configure Maven Central publishing'
+        if: "${{ !inputs.dry_run && steps.preflight.outputs.artifact_state == 'missing' }}"
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+          server-id: 'central'
+          server-username: 'MAVEN_USERNAME'
+          server-password: 'MAVEN_PASSWORD'
+          gpg-private-key: '${{ secrets.MAVEN_GPG_PRIVATE_KEY }}'
+          gpg-passphrase: 'MAVEN_GPG_PASSPHRASE'
+
+      - name: 'Publish signed artifacts to Maven Central'
+        if: "${{ !inputs.dry_run && steps.preflight.outputs.artifact_state == 'missing' }}"
+        working-directory: '${{ env.SDK_DIRECTORY }}'
+        env:
+          MAVEN_GPG_PASSPHRASE: '${{ secrets.MAVEN_GPG_PASSPHRASE }}'
+          MAVEN_USERNAME: '${{ secrets.CENTRAL_USERNAME }}'
+          MAVEN_PASSWORD: '${{ secrets.CENTRAL_PASSWORD }}'
+        run: 'mvn --batch-mode --no-transfer-progress -DskipTests deploy'
+
+      - name: 'Verify Maven Central availability'
+        if: '${{ !inputs.dry_run }}'
+        run: |-
+          set -euo pipefail
+          artifact_url="https://repo1.maven.org/maven2/com/alibaba/qwencode-sdk/${SDK_VERSION}/qwencode-sdk-${SDK_VERSION}.pom"
+          for attempt in {1..40}; do
+            if curl --fail --silent --show-error --location --connect-timeout 10 --max-time 10 --output /dev/null "${artifact_url}"; then
+              exit 0
+            fi
+            if [[ "${attempt}" -lt 40 ]]; then
+              sleep 30
+            fi
+          done
+          echo "Published artifact is not available at ${artifact_url}." >&2
+          exit 1
+
+      - name: 'Create GitHub Release'
+        if: '${{ !inputs.dry_run }}'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          git fetch origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" --force
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "GitHub Release ${RELEASE_TAG} already exists."
+            exit 0
+          fi
+          gh release create "${RELEASE_TAG}" --verify-tag --title "Java SDK ${SDK_VERSION}" --generate-notes

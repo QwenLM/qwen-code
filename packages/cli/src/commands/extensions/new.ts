@@ -7,7 +7,7 @@
 import { access, cp, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import type { CommandModule } from 'yargs';
-import { resolveBundleDir } from '@qwen-code/qwen-code-core';
+import { isNodeError, resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -81,18 +81,39 @@ async function handleNew(args: NewArgs) {
   }
 }
 
-async function getBoilerplateChoices() {
-  const entries = await readdir(EXAMPLES_PATH, { withFileTypes: true });
-  return entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name);
+async function getBoilerplateChoices(): Promise<{
+  choices: string[];
+  readFailed: boolean;
+}> {
+  // The examples directory may be absent from a given install (e.g. a package
+  // built without bundled assets). Degrade to "no templates" so the
+  // template-less `new <path>` form keeps working — but warn on unexpected
+  // errors (EACCES, EMFILE, ...) so a broken install doesn't silently
+  // masquerade as a template-less one.
+  try {
+    const entries = await readdir(EXAMPLES_PATH, { withFileTypes: true });
+    return {
+      choices: entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name),
+      readFailed: false,
+    };
+  } catch (e) {
+    const isMissing = isNodeError(e) && e.code === 'ENOENT';
+    if (!isMissing) {
+      writeStderrLine(
+        `Warning: failed to read extension templates: ${getErrorMessage(e)}`,
+      );
+    }
+    return { choices: [], readFailed: !isMissing };
+  }
 }
 
 export const newCommand: CommandModule = {
   command: 'new <path> [template]',
   describe: 'Create a new extension from a boilerplate example.',
   builder: async (yargs) => {
-    const choices = await getBoilerplateChoices();
+    const { choices, readFailed } = await getBoilerplateChoices();
     return yargs
       .positional('path', {
         describe: 'The path to create the extension in.',
@@ -101,7 +122,24 @@ export const newCommand: CommandModule = {
       .positional('template', {
         describe: 'The boilerplate template to use.',
         type: 'string',
-        choices,
+        // An empty choices list would reject every value with a blank
+        // "Choices:" hint; yargs treats undefined as "no constraint".
+        choices: choices.length > 0 ? choices : undefined,
+      })
+      .check((argv) => {
+        // With no templates available the positional is unconstrained, so an
+        // arbitrary value would otherwise reach the copy step — creating the
+        // destination directory before failing on a raw ENOENT (or escaping
+        // EXAMPLES_PATH via a ".."-laden value). When templates exist, the
+        // `choices` constraint above already validates membership.
+        if (argv['template'] && choices.length === 0) {
+          throw new Error(
+            readFailed
+              ? 'Extension templates could not be read in this installation.'
+              : 'No boilerplate templates are available in this installation.',
+          );
+        }
+        return true;
       });
   },
   handler: async (args) => {

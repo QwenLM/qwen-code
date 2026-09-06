@@ -1,0 +1,340 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue',
+    sans-serif;
+  color: #f7f8ff;
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+#app {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 12px;
+}
+
+.voice-surface {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-bottom: 18px;
+  -webkit-app-region: drag;
+}
+
+.voice-stage {
+  position: relative;
+  width: 224px;
+  height: 122px;
+  flex: 0 0 auto;
+  -webkit-app-region: drag;
+}
+
+.voice-stage.has-status {
+  height: 174px;
+}
+
+.voice-orb {
+  position: absolute;
+  top: 10px;
+  left: 56px;
+  width: 112px;
+  height: 112px;
+  flex: 0 0 auto;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 46% 54% 48% 52% / 53% 47% 53% 47%;
+  background:
+    radial-gradient(circle at 35% 28%, rgb(255 255 255 / 76%), transparent 19%),
+    radial-gradient(circle at 65% 62%, #a98cff, transparent 54%),
+    linear-gradient(145deg, #77d8ff, #7656e8 68%, #c56df0);
+  box-shadow:
+    0 14px 38px rgb(27 17 68 / 48%),
+    inset 0 0 24px rgb(255 255 255 / 24%);
+  cursor: default;
+  opacity: 0.94;
+  transition: filter 140ms ease;
+  -webkit-app-region: no-drag;
+}
+
+.voice-orb:hover {
+  filter: brightness(1.08);
+}
+
+.voice-orb::after {
+  position: absolute;
+  inset: -7px;
+  border: 1px solid rgb(151 123 255 / 32%);
+  border-radius: inherit;
+  content: '';
+  opacity: 0;
+}
+
+.voice-orb.listening::after,
+.voice-orb.thinking::after,
+.voice-orb.speaking::after,
+.voice-orb.starting::after {
+  animation: breathe 1.4s ease-in-out infinite;
+  opacity: 1;
+}
+
+.voice-orb.speaking {
+  animation: speak 760ms ease-in-out infinite alternate;
+}
+
+.voice-orb.thinking,
+.voice-orb.starting,
+.voice-orb.stopping {
+  filter: saturate(0.75);
+}
+
+@keyframes breathe {
+  50% {
+    transform: scale(1.08);
+    opacity: 0.28;
+  }
+}
+
+@keyframes speak {
+  to {
+    transform: scale(1.035) rotate(1deg);
+  }
+}
+
+.voice-caption {
+  width: min(224px, 100%);
+  min-height: 52px;
+  padding: 10px 12px;
+  max-height: 68px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 24px;
+  background: rgb(25 27 37 / 83%);
+  box-shadow: 0 10px 26px rgb(0 0 0 / 26%);
+  color: #eceef8;
+  font-size: 13px;
+  font-style: italic;
+  line-height: 16px;
+  text-align: left;
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-app-region: no-drag;
+}
+
+.voice-status,
+.web-shell-permission {
+  position: absolute;
+  top: 134px;
+  left: 50%;
+  z-index: 2;
+  max-width: 210px;
+  padding: 8px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 14.5px;
+  color: #f2f3f8;
+  background: rgb(25 27 37 / 83%);
+  box-shadow: 0 8px 18px rgb(0 0 0 / 22%);
+  font-size: 8.5px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-app-region: no-drag;
+}
+
+.web-shell-permission {
+  padding-inline: 12px;
+  color: #f7f3ff;
+  border-color: rgb(163 139 255 / 55%);
+  background: rgb(78 61 142 / 88%);
+}
+
+.voice-controls {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+button {
+  border: 1px solid rgb(255 255 255 / 14%);
+  background: rgb(32 34 45 / 88%);
+  color: #f6f7ff;
+  font: inherit;
+  cursor: default;
+}
+
+button:hover:not(:disabled) {
+  background: rgb(53 55 70 / 94%);
+}
+
+button:disabled {
+  opacity: 0.36;
+}
+
+.control-button {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 12px;
+  line-height: 22px;
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  transform: translateY(-8px) scale(0.45);
+  transition:
+    opacity 140ms ease,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.voice-surface:hover .control-button,
+.voice-surface:focus-within .control-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.control-button:first-child {
+  top: -7px;
+  left: 69px;
+}
+
+.control-button:nth-child(2) {
+  top: -7px;
+  left: 131px;
+}
+
+.control-button:last-child {
+  top: -14px;
+  left: 100px;
+}
+
+.control-icon {
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
+}
+
+.control-button.primary {
+  border-color: rgb(163 139 255 / 68%);
+  background: #7658dd;
+}
+
+.setup-panel {
+  display: flex;
+  width: 100%;
+  max-height: 300px;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 18px;
+  background: rgb(20 22 31 / 92%);
+  box-shadow: 0 16px 44px rgb(0 0 0 / 38%);
+  backdrop-filter: blur(22px) saturate(145%);
+}
+
+.setup-header,
+.permission,
+.microphone-picker {
+  display: flex;
+  align-items: center;
+}
+
+.setup-header {
+  gap: 8px;
+  -webkit-app-region: drag;
+}
+
+.setup-header strong {
+  font-size: 14px;
+}
+
+.setup-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ff716b;
+  box-shadow: 0 0 0 4px rgb(255 113 107 / 16%);
+}
+
+.setup-dot.connecting {
+  background: #72b7ff;
+}
+
+.shortcut {
+  margin-left: auto;
+  color: #aab0c1;
+  font-size: 11px;
+}
+
+.blocker {
+  color: #ffaaa5;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.microphone-picker {
+  justify-content: space-between;
+  gap: 8px;
+  color: #cbd0de;
+  font-size: 11px;
+}
+
+.microphone-picker select {
+  min-width: 0;
+  max-width: 255px;
+  border: 1px solid rgb(255 255 255 / 13%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 8%);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+}
+
+.permissions {
+  display: grid;
+  gap: 7px;
+  overflow: auto;
+}
+
+.permission {
+  justify-content: space-between;
+  gap: 8px;
+  color: #cbd0de;
+  font-size: 11px;
+}
+
+.permission button {
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.granted {
+  color: #67dda7;
+}

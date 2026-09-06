@@ -15,6 +15,16 @@ walks three layers in order:
 
 1. **acceptEdits fast-path** — Edit / Write whose target path is inside
    the workspace is auto-approved without invoking the classifier.
+   **Exception:** writes to Qwen Code's own self-modification surfaces
+   (`.qwen/settings*.json`, `QWEN.md`, `AGENTS.md`, `QWEN.local.md`,
+   configured context filenames, `.qwen/rules/`, `.qwen/commands/`,
+   `.qwen/agents/`, `.qwen/skills/`, `.qwen/hooks/`, `.mcp.json`) and
+   persistence surfaces (`.git/`, `.husky/`, `package.json`, `.npmrc`,
+   `Makefile`, `.github/workflows/`, etc.) route through the classifier
+   even when they are inside the workspace. Symlinks targeting protected
+   paths are resolved and rejected too. Shell commands that reach these
+   paths via `cd && bash -lc '...'` or other wrappers go through the
+   classifier as well.
 2. **Safe-tool allowlist** — Read-only and metadata-only built-in tools
    (Read, Grep, Glob, LS, LSP, TodoWrite, AskUserQuestion, etc.) are
    auto-approved without invoking the classifier.
@@ -33,6 +43,14 @@ The classifier uses your configured fast model
 (`/model --fast`). If no fast model is configured, the main session
 model is used instead.
 
+> [!tip]
+>
+> Shell commands that the permission system detects as read-only (e.g.
+> `ls`, `cat`, `git log`) are auto-approved before reaching the
+> classifier. Set `permissions.autoMode.classifyAllShell: true` to
+> override this and route all shell commands through the classifier —
+> see [Classify all shell commands](#classify-all-shell-commands) below.
+
 ## Hard rules still win
 
 Auto Mode does **not** replace hard permission rules. Before the classifier
@@ -42,7 +60,12 @@ runs:
   classifier never sees it.
 - `permissions.allow` rules with specific specifiers (e.g.
   `Bash(git status)`, `Read(./docs/**)`) still auto-allow without the
-  classifier.
+  classifier — **except** when the call resolves to a write at a
+  protected self-modification or persistence path (see the list under
+  "How it works"). In that case Auto Mode re-checks the call through
+  the classifier so an allow rule on `Bash(*)` cannot silently turn
+  into permission to rewrite Qwen Code settings, commands, hooks,
+  skills, or MCP servers.
 - `permissions.ask` rules force manual confirmation even in Auto Mode.
 
 ## Over-broad allow rules are stripped while in Auto Mode
@@ -69,6 +92,19 @@ entries are natural-language descriptions, not rule patterns — they are
 injected additively into the classifier's system prompt alongside the
 built-in defaults.
 
+There are three hint categories plus an environment list:
+
+- **`allow`** — actions the classifier should auto-approve.
+- **`softDeny`** — destructive or irreversible actions the classifier
+  should block **unless the user's most recent explicit request asked
+  for that exact action and scope**. Soft denies can be cleared by
+  user intent; a generic "yes do whatever" doesn't count.
+- **`hardDeny`** — security-boundary actions the classifier must block
+  in Auto Mode regardless of `autoMode.hints.allow` or recent user
+  intent. This is classifier policy, not a deterministic permission
+  rule: it does not override `permissions.allow`. Use `permissions.deny`
+  for actions that must never be allowed by the permission manager.
+
 ```json
 {
   "permissions": {
@@ -79,10 +115,13 @@ built-in defaults.
           "Cleaning build artifacts under ./dist or ./build",
           "Reading any file under /Users/me/code/"
         ],
-        "deny": [
-          "Any network call to intranet.example.com endpoints",
-          "Modifying anything under ~/.ssh or ~/.aws",
+        "softDeny": [
+          "Editing Qwen Code settings unless I explicitly ask for the exact change",
           "Running migration scripts that touch the production DB"
+        ],
+        "hardDeny": [
+          "Sending secrets or .env contents to any network endpoint",
+          "Modifying anything under ~/.ssh or ~/.aws"
         ]
       },
       "environment": [
@@ -94,13 +133,18 @@ built-in defaults.
 }
 ```
 
+`hints.deny` is still accepted for backward compatibility and is treated
+as `softDeny`. Mixing both is fine — entries are concatenated, `softDeny`
+first.
+
 ### Length and count limits
 
 To keep the classifier system prompt small:
 
 - Each entry is capped at 200 characters (longer entries are truncated
   with a warning).
-- `hints.allow` and `hints.deny` accept up to 50 entries each.
+- `hints.allow`, `hints.softDeny`, and `hints.hardDeny` accept up to 50
+  entries each.
 - `environment` accepts up to 20 entries.
 
 ### Layering across settings files
@@ -109,20 +153,56 @@ To keep the classifier system prompt small:
 way other permission settings are: arrays are concatenated and
 de-duplicated.
 
+### Classify all shell commands
+
+By default, read-only shell commands (`ls`, `cat`, `git status`, …) are
+auto-approved without invoking the classifier — the permission system
+detects them as safe at layer 3 and skips the classifier entirely. Set
+`classifyAllShell` to `true` to force **every** shell command through
+the classifier, including read-only ones:
+
+```json
+{
+  "permissions": {
+    "autoMode": {
+      "classifyAllShell": true
+    }
+  }
+}
+```
+
+This is useful for production or high-security environments where you
+want defense-in-depth: even seemingly harmless commands are reviewed by
+the classifier before execution. The trade-off is added latency (~300ms
+per read-only shell call) and reliance on classifier availability — if
+the classifier API is unreachable, read-only shell commands will also require
+manual approval.
+
+> [!note]
+>
+> `classifyAllShell` only affects shell commands (`run_shell_command` and
+> `monitor`). Built-in read-only tools (`read_file`, `grep_search`,
+> `glob`, `list_directory`, etc.) are unaffected and still use the
+> fast-path allowlist.
+
 ## Reading the decision
 
-When the classifier blocks an action, the tool call fails with one of
-the following error texts:
+When the classifier blocks an action, the tool call fails with:
 
-- **`Blocked by auto mode policy: <reason>`** — the classifier judged
-  the action unsafe. The reason comes from Stage 2 of the classifier.
-- **`Auto mode classifier unavailable; action blocked for safety`** —
-  the classifier API was unreachable, timed out, or returned an
-  un-parseable response. This is fail-closed behavior: when in doubt,
-  block.
+- **`Blocked by auto mode policy: <reason>`** —
+  the classifier judged the action unsafe. The reason comes from Stage
+  2 of the classifier.
 
-The main LLM sees the same message in the tool result and adjusts its
-approach (asks you, switches tactic, gives up).
+This message is followed by a trailing guidance line telling the agent
+that the **denied action specifically** must not be completed through
+another tool, shell indirection, generated script, alias, symlink,
+config change, hook, command file, MCP configuration, encoded payload,
+or equivalent path. **Unrelated safe work and genuinely safer
+alternatives are still allowed** — only attempts to accomplish the same
+denied intent through a different surface are blocked.
+
+If the denied action is genuinely required, the agent should stop and
+ask you for explicit approval rather than route around the denial.
 
 ### Classifier reason language
 
@@ -134,16 +214,24 @@ want non-English reasons, add a hint like
 
 Auto Mode protects you from getting stuck:
 
+- If the classifier API is unreachable, times out, exceeds its context window,
+  or returns an invalid response, the current action immediately falls back to
+  manual approval. The confirmation recommends Default Mode and offers
+  **Switch to Default Mode and allow once** alongside Allow once and Reject.
+  Switching affects only the current runtime session; it does not change your
+  saved settings.
+
 - After **3 consecutive policy blocks** the next tool call falls back to
   the standard manual-approval prompt. This catches the case where the
   agent keeps trying minor variants of a forbidden command.
-- After **2 consecutive unavailable** results (classifier API failures)
-  the next tool call also falls back. This avoids waiting on a broken
-  classifier.
+- After **2 consecutive unavailable** results (classifier API failures),
+  later calls skip the known-broken classifier and go directly to manual
+  approval. The first unavailable result already asks; the threshold avoids
+  repeatedly waiting for classifier retries.
 
-The session itself stays in Auto Mode — only the single fallback call
-goes through manual approval. The counters reset when you approve the
-fallback call or switch modes.
+The session stays in Auto Mode unless you explicitly select the switch option.
+Only the fallback call goes through manual approval. The counters reset when
+you approve the fallback call or switch modes.
 
 If you find yourself constantly hitting fallback, the most likely causes
 are an outage on the classifier API or hints that need tuning. Switch to
@@ -199,15 +287,21 @@ tightened over time.
 - **Not a substitute for `deny` rules.** The classifier is best-effort.
   For commands you're sure should never run, put them in
   `permissions.deny`.
-- **MCP tools default to conservative blocking.** Third-party MCP tools
-  (`mcp__*`) opt-in to argument forwarding via the
-  `toAutoClassifierInput` override. Tools that have not opted in expose
-  only their name to the classifier — most such calls are
-  conservatively blocked unless you've written an explicit `allow`
-  rule. This is fail-closed by design (credentials and voluminous
-  content do not leak into the classifier LLM). If you trust a
-  specific MCP tool, add `permissions.allow: ["mcp__server__tool"]` so
-  it bypasses the classifier entirely.
+- **MCP tools are judged on their arguments, not verified behaviour.**
+  Third-party MCP tools (`mcp__*`) are never on the fast-path allowlist;
+  every call from a server that is not marked `trust: true` goes to the
+  classifier with the server name, the tool name, the server's
+  self-reported annotations (`readOnlyHint` / `destructiveHint` /
+  `idempotentHint` / `openWorldHint`) and a bounded copy of the
+  arguments. The classifier is told the annotations are unverified. It
+  cannot see what the server actually does with the call, so a
+  misleading tool name plus benign arguments can still pass. If you
+  trust a specific MCP tool, add
+  `permissions.allow: ["mcp__server__tool"]` so it bypasses the
+  classifier entirely; if you want the classifier to see only the tool
+  name (for example when it runs against a different provider than the
+  main model), set `permissions.autoMode.mcp.forwardArguments: false`
+  — most MCP calls are then conservatively blocked.
 
 ## FAQ
 
@@ -224,7 +318,7 @@ projection exposes:
 
 - `read_file` and other read-only tools: not invoked (they're on the
   fast-path allowlist).
-- `edit` / `write_file`: file_path plus the first 80 characters of
+- `edit` / `write_file`: file_path plus a 300-character preview of
   old/new content. Full content is not forwarded.
 - `run_shell_command`: the full command (it has to — that's what the
   classifier judges).
@@ -238,13 +332,24 @@ projection exposes:
 Tool results (the actual content returned by tools) are stripped from
 the classifier transcript entirely.
 
-MCP tools (`mcp__*`) follow a stricter default: their parameters are
-not forwarded unless the MCP tool author explicitly opted in via the
-`toAutoClassifierInput` override. The classifier sees the tool name
-but no arguments, so most MCP calls will be conservatively blocked
-unless the user has written an explicit allow rule. This is fail-
-closed by design — third-party tools should not leak credentials or
-voluminous file content into the classifier LLM without intent.
+MCP tools (`mcp__*`): the server name, the tool name, the server's
+annotations and the call arguments are forwarded. Each string (value
+or key) is cut at 2,000 characters, names at 200, the whole payload
+shares a 16,000 character budget measured on the pretty-printed form
+the classifier receives, and nesting / entry counts are capped; every
+cut is marked in place (`…[truncated N chars]` or `[omitted: …]`) and
+flagged with `arguments_truncated: true` / `name_truncated: true` so
+the classifier never mistakes an omission for an absence. Historical
+actions in the transcript are capped at 4,000 characters each and
+40,000 in total (newest kept first; older ones keep only their tool
+name). The arguments are what the agent is about to
+send to that server — the classifier's data-exfiltration and
+external-write rules can only be applied to them, and they were
+already produced by the main model, so forwarding them to a classifier
+on the same model configuration discloses nothing new. If your
+classifier runs against a different provider, set
+`permissions.autoMode.mcp.forwardArguments: false` to restore the
+name-only projection (expect most MCP calls to be blocked).
 
 **Can I disable the first-time information message?**
 

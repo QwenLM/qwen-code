@@ -12,7 +12,11 @@ import {
   parsePriorityField,
   normalizeSkillPriority,
 } from './skill-load.js';
-import { parseModelField, parsePathsField } from './types.js';
+import {
+  parseModelField,
+  parsePathsField,
+  parseUserInvocableField,
+} from './types.js';
 import * as fs from 'fs/promises';
 
 // Mock file system operations
@@ -236,6 +240,27 @@ Body.
       );
 
       expect(config.priority).toBeUndefined();
+    });
+
+    it('should parse user-invocable from frontmatter', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        'user-invocable': false,
+      });
+
+      const markdown = `---
+name: test-skill
+description: A test skill
+user-invocable: false
+---
+
+Skill body.
+`;
+
+      const config = parseSkillContent(markdown, testFilePath);
+
+      expect(config.userInvocable).toBe(false);
     });
 
     it('should throw error for invalid format without frontmatter', () => {
@@ -518,6 +543,28 @@ Symlinked skill body.
     });
   });
 
+  describe('parseUserInvocableField', () => {
+    it('returns undefined when user-invocable is omitted', () => {
+      expect(parseUserInvocableField({})).toBeUndefined();
+    });
+
+    it('parses boolean and string values', () => {
+      expect(parseUserInvocableField({ 'user-invocable': true })).toBe(true);
+      expect(parseUserInvocableField({ 'user-invocable': false })).toBe(false);
+      expect(parseUserInvocableField({ 'user-invocable': 'true' })).toBe(true);
+      expect(parseUserInvocableField({ 'user-invocable': 'false' })).toBe(
+        false,
+      );
+    });
+
+    it('ignores invalid values so the default remains user-invocable', () => {
+      expect(
+        parseUserInvocableField({ 'user-invocable': 'no' }),
+      ).toBeUndefined();
+      expect(parseUserInvocableField({ 'user-invocable': 0 })).toBeUndefined();
+    });
+  });
+
   describe('parsePathsField', () => {
     it('returns the cleaned array for a valid paths frontmatter', () => {
       expect(
@@ -681,6 +728,19 @@ Symlinked skill body.
       );
       expect(config.disableModelInvocation).toBe(true);
       expect(config.paths).toEqual(['src/**/*.ts']);
+    });
+
+    it('extracts user-invocable', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'model-only-helper',
+        description: 'Model-only helper',
+        'user-invocable': false,
+      });
+      const config = parseSkillContent(
+        `---\nname: model-only-helper\ndescription: Model-only helper\nuser-invocable: false\n---\n\nBody.\n`,
+        '/test/extension/skills/model-only-helper/SKILL.md',
+      );
+      expect(config.userInvocable).toBe(false);
     });
 
     it('extracts when_to_use', () => {

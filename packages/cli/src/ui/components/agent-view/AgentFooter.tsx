@@ -12,7 +12,7 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { AutoAcceptIndicator } from '../AutoAcceptIndicator.js';
 import { ContextUsageDisplay } from '../ContextUsageDisplay.js';
 import { theme } from '../../semantic-colors.js';
@@ -30,8 +30,7 @@ export const AgentFooter: React.FC<AgentFooterProps> = ({
   contextWindowSize,
   terminalWidth,
 }) => {
-  const showApproval =
-    approvalMode !== undefined && approvalMode !== ApprovalMode.DEFAULT;
+  const showApproval = approvalMode !== undefined;
   const showContext = promptTokenCount > 0 && contextWindowSize !== undefined;
 
   if (!showApproval && !showContext) {

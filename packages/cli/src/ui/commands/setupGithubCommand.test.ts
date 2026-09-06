@@ -24,10 +24,10 @@ vi.mock('child_process');
 global.fetch = vi.fn();
 
 vi.mock('../../utils/gitUtils.js', () => ({
-  isGitHubRepository: vi.fn(),
-  getGitRepoRoot: vi.fn(),
+  isGitHubRepositoryAsync: vi.fn(),
+  getGitRepoRootAsync: vi.fn(),
   getLatestGitHubRelease: vi.fn(),
-  getGitHubRepoInfo: vi.fn(),
+  getGitHubRepoInfoAsync: vi.fn(),
 }));
 
 vi.mock('../utils/commandUtils.js', () => ({
@@ -49,6 +49,10 @@ describe('setupGithubCommand', async () => {
     if (scratchDir) await fs.rm(scratchDir, { recursive: true });
   });
 
+  it('remains interactive-only', () => {
+    expect(setupGithubCommand.supportedModes).toEqual(['interactive']);
+  });
+
   it('returns a tool action to download github workflows and handles paths', async () => {
     const fakeRepoOwner = 'fake';
     const fakeRepoName = 'repo';
@@ -62,12 +66,12 @@ describe('setupGithubCommand', async () => {
       );
     }
 
-    vi.mocked(gitUtils.isGitHubRepository).mockReturnValueOnce(true);
-    vi.mocked(gitUtils.getGitRepoRoot).mockReturnValueOnce(fakeRepoRoot);
+    vi.mocked(gitUtils.isGitHubRepositoryAsync).mockResolvedValueOnce(true);
+    vi.mocked(gitUtils.getGitRepoRootAsync).mockResolvedValueOnce(fakeRepoRoot);
     vi.mocked(gitUtils.getLatestGitHubRelease).mockResolvedValueOnce(
       fakeReleaseVersion,
     );
-    vi.mocked(gitUtils.getGitHubRepoInfo).mockReturnValue({
+    vi.mocked(gitUtils.getGitHubRepoInfoAsync).mockResolvedValue({
       owner: fakeRepoOwner,
       repo: fakeRepoName,
     });

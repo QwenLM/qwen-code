@@ -201,12 +201,19 @@ export function getContextLengthExceededInfo(
 ): ContextLengthExceededInfo {
   const fragments = uniqueNonEmpty(collectStrings(error, new Set<object>()));
   const message = fragments.join('\n');
-  const isTimeout = TIMEOUT_PATTERNS.some((pattern) => pattern.test(message));
-  const isExceeded =
-    !isTimeout &&
-    fragments.some((fragment) =>
-      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)),
-    );
+  // The timeout veto is applied per fragment, alongside the context-length
+  // test it is vetoing. Testing it against the joined message instead let a
+  // timeout phrase anywhere in the error object suppress detection for the
+  // whole error -- and provider SDKs routinely attach retry/attempt metadata,
+  // so an overflow arriving with `previous attempt: request timed out` in a
+  // sibling field was reported as not-an-overflow and never reached the
+  // compaction path. A fragment counts as evidence only if it names a
+  // context-length failure and is not itself a timeout message.
+  const isExceeded = fragments.some(
+    (fragment) =>
+      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
+      !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
+  );
   const counts = isExceeded ? parseTokenCounts(message) : {};
 
   return {

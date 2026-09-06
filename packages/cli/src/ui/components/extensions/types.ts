@@ -4,7 +4,71 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Extension, Config } from '@qwen-code/qwen-code-core';
+import type {
+  Extension,
+  Config,
+  ExtensionScope,
+} from '@qwen-code/qwen-code-core';
+
+/**
+ * Top-level tabs of the extensions manager dialog, aligned with the Claude Code
+ * `/plugin` command. The Errors tab is intentionally deferred per the spec.
+ */
+export const EXTENSIONS_TABS = {
+  DISCOVER: 'discover',
+  INSTALLED: 'installed',
+  SOURCES: 'sources',
+} as const;
+
+export type ExtensionsTab =
+  (typeof EXTENSIONS_TABS)[keyof typeof EXTENSIONS_TABS];
+
+export interface ExtensionsTabDef {
+  id: ExtensionsTab;
+  label: string;
+}
+
+/**
+ * Scope groups used to organize the Installed tab.
+ */
+export type InstalledGroup = 'favorites' | 'user' | 'project' | 'disabled';
+
+/** Minimal display info for an MCP server shown in the Installed tab. */
+export interface InstalledMcpInfo {
+  name: string;
+  status: string;
+  scope: 'user' | 'project' | 'extension';
+  isDisabled: boolean;
+  transport: string;
+  toolCount: number;
+  /** The server failed to connect because it needs (re-)authentication. */
+  requiresAuth: boolean;
+}
+
+/** A single row in the Installed tab — either a plugin/extension or an MCP. */
+export type InstalledItem =
+  | {
+      kind: 'plugin';
+      key: string;
+      name: string;
+      extension: Extension;
+      isActive: boolean;
+      isFavorite: boolean;
+      scope: ExtensionScope;
+      group: InstalledGroup;
+    }
+  | {
+      kind: 'mcp';
+      key: string;
+      name: string;
+      mcp: InstalledMcpInfo;
+      isActive: boolean;
+      isFavorite: boolean;
+      group: InstalledGroup;
+      /** Set when the MCP server is bundled with an extension; the row is
+       * rendered indented under that extension. */
+      parentExtension?: string;
+    };
 
 /**
  * Management steps for the extensions manager dialog.
@@ -86,4 +150,5 @@ export type ExtensionAction =
 export interface ExtensionsManagerDialogProps {
   onClose: () => void;
   config: Config | null;
+  initialTab?: ExtensionsTab;
 }

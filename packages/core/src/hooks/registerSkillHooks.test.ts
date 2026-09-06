@@ -226,4 +226,190 @@ describe('registerSkillHooks', () => {
     expect(hooks).toHaveLength(1);
     expect(hooks[0].skillRoot).toBe(skillRoot);
   });
+
+  it('should not duplicate hooks when the same skill registers again (skill reload)', () => {
+    // Skill unload (/unskill, eviction sync) never unregisters session hooks,
+    // so a reload must not push duplicate entries — otherwise the hook fires
+    // once per unload/reload cycle.
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo "checking command"',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(1);
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(0);
+
+    const hooks = sessionHooksManager.getHooksForEvent(
+      sessionId,
+      HookEventName.PreToolUse,
+    );
+    expect(hooks).toHaveLength(1);
+  });
+
+  it('still registers a same-command hook from a different skill', () => {
+    const makeSkill = (name: string, root: string): SkillConfig => ({
+      name,
+      description: 'Test skill',
+      level: 'user',
+      filePath: `${root}/SKILL.md`,
+      skillRoot: root,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo "checking command"',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(
+      registerSkillHooks(
+        sessionHooksManager,
+        sessionId,
+        makeSkill('skill-a', '/path/to/a'),
+      ),
+    ).toBe(1);
+    expect(
+      registerSkillHooks(
+        sessionHooksManager,
+        sessionId,
+        makeSkill('skill-b', '/path/to/b'),
+      ),
+    ).toBe(1);
+
+    const hooks = sessionHooksManager.getHooksForEvent(
+      sessionId,
+      HookEventName.PreToolUse,
+    );
+    expect(hooks).toHaveLength(2);
+  });
+
+  it('registers same-command hooks that differ only in timeout (R1-1)', () => {
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo hi',
+                timeout: 10,
+              },
+              {
+                type: HookType.Command,
+                command: 'echo hi',
+                timeout: 30,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(2);
+  });
+
+  it('registers same-URL http hooks that differ only in headers (R1-1)', () => {
+    const skill: SkillConfig = {
+      name: 'test-skill',
+      description: 'Test skill',
+      level: 'user',
+      filePath: '/path/to/skill/SKILL.md',
+      skillRoot,
+      body: 'Test body',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://gw.local/hook',
+                headers: { Authorization: 'Bearer a' },
+              },
+              {
+                type: HookType.Http,
+                url: 'http://gw.local/hook',
+                headers: { Authorization: 'Bearer b' },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(2);
+  });
+});
+
+describe('registerSkillHooks — the trust gate travels with the entry', () => {
+  const hooks: NonNullable<SkillConfig['hooks']> = {
+    [HookEventName.PreToolUse]: [
+      {
+        matcher: 'Bash',
+        hooks: [{ type: HookType.Command, command: './x.sh' }],
+      },
+    ],
+  };
+
+  it("marks a project skill's hooks trust-gated, so the handler re-checks folder trust at fire time", () => {
+    const manager = new SessionHooksManager();
+    registerSkillHooks(manager, 's1', {
+      name: 'repo-skill',
+      description: 'repo',
+      level: 'project',
+      filePath: '/repo/.qwen/skills/repo-skill/SKILL.md',
+      skillRoot: '/repo/.qwen/skills/repo-skill',
+      body: '',
+      hooks,
+    });
+    const [entry] = manager.getHooksForEvent('s1', HookEventName.PreToolUse);
+    expect(entry.trustGated).toBe(true);
+  });
+
+  it("leaves a user skill's hooks ungated — they are not repository-controlled", () => {
+    const manager = new SessionHooksManager();
+    registerSkillHooks(manager, 's1', {
+      name: 'home-skill',
+      description: 'home',
+      level: 'user',
+      filePath: '/home/u/.qwen/skills/home-skill/SKILL.md',
+      skillRoot: '/home/u/.qwen/skills/home-skill',
+      body: '',
+      hooks,
+    });
+    const [entry] = manager.getHooksForEvent('s1', HookEventName.PreToolUse);
+    expect(entry.trustGated).toBeUndefined();
+  });
 });

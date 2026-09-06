@@ -4,6 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stripVTControlCharacters } from 'node:util';
+
+// C0/C1 control chars (incl. DEL) left behind after escape-sequence stripping.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * Strips terminal escape/control sequences from untrusted text: removes ANSI/VT
+ * escape sequences (via Node's `stripVTControlCharacters`) and then any residual
+ * C0/C1 control characters (including DEL).
+ *
+ * Use this for ANY untrusted string that may reach a terminal — marketplace
+ * metadata rendered in the TUI, values interpolated into error messages, etc.
+ * Centralised here so the rule can't drift between call sites: a bypass fixed
+ * here is fixed everywhere instead of leaving a stale near-duplicate vulnerable.
+ */
+export function stripAnsiAndControl(text: string): string {
+  return stripVTControlCharacters(text).replace(CONTROL_CHARS_RE, '');
+}
+
 /**
  * Safely replaces text with literal strings, avoiding ECMAScript GetSubstitution issues.
  * Escapes $ characters to prevent template interpretation.
@@ -72,4 +92,24 @@ export function normalizeContent(content: string): string {
   normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
   return normalized;
+}
+
+/**
+ * Removes HTML comments from text that is about to be injected into a prompt.
+ *
+ * The strip is iterative so adjacent or malformed-looking sequences (e.g.
+ * `<!-- A --><!-- B -->`) fully clear. Any residual unclosed `<!--` marker is
+ * removed too: not a security issue in a system-prompt context (the output is
+ * never rendered as HTML), but leaving it would waste tokens and trip static
+ * analyzers (CodeQL flags "incomplete multi-character sanitization" without
+ * this step).
+ */
+export function stripHtmlComments(content: string): string {
+  let result = content;
+  let prev: string;
+  do {
+    prev = result;
+    result = prev.replace(/<!--[\s\S]*?-->/g, '');
+  } while (result !== prev);
+  return result.replace(/<!--/g, '');
 }

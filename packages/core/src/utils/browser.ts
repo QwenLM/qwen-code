@@ -4,6 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+const browserBlocklist = ['www-browser'];
+
+export function isBrowserCommandBlocked(command: string): boolean {
+  const commandName = command.replace(/\\/g, '/').split('/').pop();
+  return !!commandName && browserBlocklist.includes(commandName);
+}
+
+type BrowserLaunchEnvironmentOptions = {
+  ignoreBrowserBlocklist?: boolean;
+};
+
 /**
  * Determines if we should attempt to launch a browser for authentication
  * based on the user's environment.
@@ -11,12 +22,17 @@
  * This is an adaptation of the logic from the Google Cloud SDK.
  * @returns True if the tool should attempt to launch a browser.
  */
-export function shouldAttemptBrowserLaunch(): boolean {
-  // A list of browser names that indicate we should not attempt to open a
-  // web browser for the user.
-  const browserBlocklist = ['www-browser'];
-  const browserEnv = process.env['BROWSER'];
-  if (browserEnv && browserBlocklist.includes(browserEnv)) {
+export function shouldAttemptBrowserLaunch(
+  options: BrowserLaunchEnvironmentOptions = {},
+): boolean {
+  const browserEnv = process.env['BROWSER']?.trim();
+  const browserCommand = browserEnv?.match(/^\S+/)?.[0];
+  if (
+    !options.ignoreBrowserBlocklist &&
+    process.platform !== 'win32' &&
+    browserCommand &&
+    isBrowserCommandBlocked(browserCommand)
+  ) {
     return false;
   }
   // Common environment variables used in CI/CD or other non-interactive shells.

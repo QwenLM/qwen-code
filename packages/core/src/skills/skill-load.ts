@@ -1,8 +1,10 @@
 import {
   type SkillConfig,
   type SkillValidationResult,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
@@ -26,6 +28,22 @@ export async function loadSkillsFromDir(
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
     for (const entry of entries) {
+      // Skip transient install artifacts (backup / staging dirs left behind
+      // by a crashed reinstall). Without this filter a stale `.backup-*`
+      // sibling with a valid SKILL.md would be loaded as a duplicate skill,
+      // and a "deleted" skill could reappear from its backup sibling.
+      // Match only the actual artifact shape (`.backup-<pid>-<timestamp>` /
+      // `.installing-<pid>-<timestamp>`, anchored at the end of the entry
+      // name) so that legitimate skill dirs whose names merely contain
+      // `.backup-` or `.installing-` (e.g. `db.backup-2024`) are not skipped.
+      if (
+        /\.backup-\d+-\d+$/.test(entry.name) ||
+        /\.installing-\d+-\d+$/.test(entry.name)
+      ) {
+        debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+        continue;
+      }
+
       // Process directories and symlinks that resolve to directories.
       // Plain files are silently skipped (each skill must be a directory).
       const isDirectory = entry.isDirectory();
@@ -132,16 +150,7 @@ export function parseSkillContent(
   const description = String(descriptionRaw);
 
   // Extract optional fields
-  const allowedToolsRaw = frontmatter['allowedTools'] as unknown[] | undefined;
-  let allowedTools: string[] | undefined;
-
-  if (allowedToolsRaw !== undefined) {
-    if (Array.isArray(allowedToolsRaw)) {
-      allowedTools = allowedToolsRaw.map(String);
-    } else {
-      throw new Error('"allowedTools" must be an array');
-    }
-  }
+  const allowedTools = parseAllowedToolsField(frontmatter);
 
   // Extract optional model field
   const model = parseModelField(frontmatter);
@@ -165,6 +174,7 @@ export function parseSkillContent(
     disableModelInvocationRaw === true || disableModelInvocationRaw === 'true'
       ? true
       : undefined;
+  const userInvocable = parseUserInvocableField(frontmatter);
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
@@ -197,6 +207,7 @@ export function parseSkillContent(
     level: 'extension',
     whenToUse,
     disableModelInvocation,
+    userInvocable,
     paths,
     priority,
   };

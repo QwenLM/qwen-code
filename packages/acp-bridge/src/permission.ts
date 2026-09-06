@@ -5,33 +5,32 @@
  */
 
 /**
- * `PermissionMediator` — type-only interface contract for daemon
- * permission flow. **No implementation lives here.** Permission voting
- * still runs inside `BridgeClient.requestPermission` /
- * `respondToPermission` in `packages/cli/src/serve/httpAcpBridge.ts`,
- * hard-coded to `first-responder`. PR 24 (#4175 Wave 5) will move that
- * code behind this interface and add the other three policies.
+ * `PermissionMediator` — interface contract for daemon permission flow.
+ * `MultiClientPermissionMediator` in `permissionMediator.ts` owns the
+ * policy dispatch and pending/resolved permission state used by
+ * `BridgeClient.requestPermission` plus the `respondToPermission` route
+ * in `createHttpAcpBridge`.
  *
- * The four policies are ordered from cheapest to strongest:
+ * The four policy contracts are ordered from cheapest to strongest:
  *
  * - `first-responder` — first valid `POST /permission/:requestId`
  *   wins; later voters get `permission_already_resolved`. Today's
  *   default; preserves the live-collaboration UX.
  * - `designated` — only the `originatorClientId` that started the
  *   prompt may answer; other clients see `permission_forbidden`.
- *   Use case: per-tenant SaaS where a UI surface must own its own
- *   approvals.
- * - `consensus` — N-of-M quorum across pair-token-authenticated
- *   clients before resolving; intermediate `permission_partial_vote`
- *   events let UIs render progress. Use case: enterprise change
- *   review where two operators must agree.
+ *   Prompts with no originator fall back to first-responder. Use case:
+ *   per-tenant SaaS where a UI surface must own its own approvals.
+ * - `consensus` — N-of-M quorum across the session client IDs
+ *   captured when the permission request is issued. Client identity is
+ *   self-declared until pair-token authentication lands; intermediate
+ *   `permission_partial_vote` events let UIs render progress. Use case:
+ *   enterprise change review where two operators must agree.
  * - `local-only` — refuses any HTTP voter; the prompt blocks until
  *   a loopback client (the local TUI super-client) resolves it.
  *   Use case: workstations where remote control should never grant
  *   privilege escalation.
  *
- * See `httpAcpBridge.ts:1096-1106` for the original FIXME that
- * scoped this contract.
+ * See `permissionMediator.ts` for the implementation details.
  */
 export type PermissionPolicy =
   | 'first-responder'
@@ -40,10 +39,7 @@ export type PermissionPolicy =
   | 'local-only';
 
 /**
- * One pending permission tracked by a `PermissionMediator`. The
- * shape mirrors the current `PendingPermission` record in
- * `httpAcpBridge.ts:1003` so PR 24's lift is a structural rename
- * rather than a redesign.
+ * One pending permission tracked by a `PermissionMediator`.
  */
 export interface PermissionRequestRecord {
   /** ACP `RequestPermission` request id, unique per session. */
@@ -52,6 +48,8 @@ export interface PermissionRequestRecord {
    * always per-session — workspace-scoped permission is out of
    * scope for v1. */
   readonly sessionId: string;
+  /** Admitted prompt that produced this permission request, when known. */
+  readonly promptId?: string;
   /**
    * `originatorClientId` that triggered the underlying prompt.
    * `designated` policy votes are only accepted from this id;
@@ -79,7 +77,7 @@ export interface PermissionVote {
   readonly requestId: string;
   readonly sessionId: string;
   /**
-   * Daemon-stamped (PR 7 / #4231) — never client self-declared.
+   * Daemon-stamped (the daemon) — never client self-declared.
    * `local-only` rejects votes whose remote address is not
    * loopback regardless of `clientId`.
    */
@@ -92,6 +90,9 @@ export interface PermissionVote {
   /** True when the request originated on a loopback connection.
    * `local-only` requires this. */
   readonly fromLoopback: boolean;
+  /** Opaque metadata forwarded from the voter's response body to
+   * the resolution (e.g. AskUserQuestion answers). */
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -105,17 +106,34 @@ export type PermissionVoteOutcome =
   | { readonly kind: 'already_resolved'; readonly resolvedOptionId: string }
   | {
       readonly kind: 'forbidden';
+      /**
+       * `designated_mismatch` fires for both:
+       *   - `designated` policy: voter `clientId` is not the prompt
+       *     `originatorClientId`.
+       *   - `consensus` policy: voter `clientId` is undefined OR not
+       *     in the issue-time `votersAtIssue` snapshot. Overloaded
+       *     here to keep the contract closed; future versions may
+       *     widen this union with a more specific reason if SDK
+       *     consumers need to distinguish.
+       *
+       * `remote_not_allowed` fires under `local-only` policy when
+       * `vote.fromLoopback === false`.
+       */
       readonly reason: 'designated_mismatch' | 'remote_not_allowed';
     }
   | { readonly kind: 'unknown_request' };
 
 /**
- * Final resolution shape. PR 24 will produce one per request once
+ * Final resolution shape. The implementation will produce one per request once
  * either a quorum is reached, the originator votes (designated), or
  * a timeout expires.
  */
 export type PermissionResolution =
-  | { readonly kind: 'option'; readonly optionId: string }
+  | {
+      readonly kind: 'option';
+      readonly optionId: string;
+      readonly metadata?: Readonly<Record<string, unknown>>;
+    }
   | {
       readonly kind: 'cancelled';
       readonly reason: 'timeout' | 'session_closed' | 'agent_cancelled';
@@ -123,13 +141,11 @@ export type PermissionResolution =
 
 /**
  * The contract `qwen serve`'s permission route layer talks to.
- * Today there is one implementation (first-responder) wired
- * inline in `BridgeClient`; PR 24 will provide all four behind
- * this surface plus pair-token authentication and an audit log.
+ * `MultiClientPermissionMediator` provides the implementation.
  */
 export interface PermissionMediator {
   /** Active policy. May be reconfigured per session in future
-   * versions, but PR 24 ships with daemon-wide policy only. */
+   * versions, but the current version ships with daemon-wide policy only. */
   readonly policy: PermissionPolicy;
 
   /**

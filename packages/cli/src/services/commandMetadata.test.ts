@@ -297,6 +297,11 @@ describe('formatCommandSourceLabel', () => {
     expect(formatCommandSourceLabel(cmd)).toBe('MCP');
   });
 
+  it('returns Workflow for workflow-command', () => {
+    const cmd = makeCmd({ source: 'workflow-command', sourceLabel: undefined });
+    expect(formatCommandSourceLabel(cmd)).toBe('Workflow');
+  });
+
   it('returns Unknown when source is falsy', () => {
     const cmd = makeCmd({
       source: undefined as unknown as SlashCommand['source'],

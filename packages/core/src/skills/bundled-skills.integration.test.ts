@@ -45,4 +45,33 @@ describe('bundled SKILL.md files', () => {
       expect(Array.isArray(cfg.allowedTools)).toBe(true);
     }
   });
+
+  it('ships dataviz validator and references with the bundled skill', () => {
+    const datavizDir = path.join(bundledDir, 'dataviz');
+
+    expect(fs.existsSync(path.join(datavizDir, 'SKILL.md'))).toBe(true);
+    expect(
+      fs.existsSync(path.join(datavizDir, 'scripts', 'validate_palette.js')),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(datavizDir, 'references', 'palette.md')),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(datavizDir, 'references', 'choosing-a-form.md')),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(datavizDir, 'references', 'anti-patterns.md')),
+    ).toBe(true);
+  });
+
+  it('ships the review verdict-gated reference files with the bundled skill', () => {
+    const reviewDir = path.join(bundledDir, 'review');
+
+    expect(fs.existsSync(path.join(reviewDir, 'SKILL.md'))).toBe(true);
+    for (const name of ['posting.md', 'persistence.md', 'aone.md']) {
+      expect(fs.existsSync(path.join(reviewDir, 'references', name))).toBe(
+        true,
+      );
+    }
+  });
 });

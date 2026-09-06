@@ -10,14 +10,16 @@ import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
+import { pathToFileURL } from 'node:url';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import {
   createDebugLogger,
+  encodeInsightErrorMessage,
   encodeInsightProgressMessage,
   encodeInsightReadyMessage,
+  openBrowserSecurely,
   Storage,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -38,8 +40,8 @@ export const insightCommand: SlashCommand = {
       if (!context.services.config) {
         if (context.executionMode !== 'interactive') {
           return {
-            type: 'message' as const,
-            messageType: 'error' as const,
+            type: 'message',
+            messageType: 'error',
             content: 'Config service is not available.',
           };
         }
@@ -59,16 +61,16 @@ export const insightCommand: SlashCommand = {
             },
           );
           return {
-            type: 'message' as const,
-            messageType: 'info' as const,
+            type: 'message',
+            messageType: 'info',
             content: t('Insight report generated at: {{path}}', {
               path: outputPath,
             }),
           };
         } catch (error) {
           return {
-            type: 'message' as const,
-            messageType: 'error' as const,
+            type: 'message',
+            messageType: 'error',
             content: t('Failed to generate insights: {{error}}', {
               error: (error as Error).message,
             }),
@@ -155,10 +157,15 @@ export const insightCommand: SlashCommand = {
               content: encodeInsightReadyMessage(outputPath),
             });
           } catch (error) {
+            const errorText = (error as Error).message;
+            pushMessage({
+              messageType: 'info',
+              content: encodeInsightErrorMessage(errorText),
+            });
             pushMessage({
               messageType: 'error',
               content: t('Failed to generate insights: {{error}}', {
-                error: (error as Error).message,
+                error: errorText,
               }),
             });
             logger.error('Insight generation error:', error);
@@ -215,33 +222,26 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      try {
-        await open(outputPath);
-
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t('Opening insights in your browser: {{path}}', {
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            'Insights generated at: {{path}}. If the browser does not open automatically, open this file manually.',
+            {
               path: outputPath,
-            }),
-          },
-          Date.now(),
-        );
+            },
+          ),
+        },
+        Date.now(),
+      );
+
+      try {
+        await openBrowserSecurely(pathToFileURL(outputPath).href, {
+          allowFile: true,
+          allowedFilePaths: [outputPath],
+        });
       } catch (browserError) {
         logger.error('Failed to open browser automatically:', browserError);
-
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t(
-              'Insights generated at: {{path}}. Please open this file in your browser.',
-              {
-                path: outputPath,
-              },
-            ),
-          },
-          Date.now(),
-        );
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));
@@ -251,8 +251,8 @@ export const insightCommand: SlashCommand = {
 
       if (context.executionMode !== 'interactive') {
         return {
-          type: 'message' as const,
-          messageType: 'error' as const,
+          type: 'message',
+          messageType: 'error',
           content: `Failed to generate insights: ${(error as Error).message}`,
         };
       }
@@ -270,6 +270,5 @@ export const insightCommand: SlashCommand = {
       logger.error('Insight generation error:', error);
       return;
     }
-    return;
   },
 };

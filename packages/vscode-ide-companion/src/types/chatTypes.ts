@@ -7,6 +7,7 @@ import type {
   ModelInfo,
   AvailableCommand,
   RequestPermissionRequest,
+  SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type {
   AskUserQuestionRequest,
@@ -18,6 +19,17 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  source?: string;
+  /**
+   * The ACP session id that produced this message, if known. The webview
+   * persists messages keyed by the local conversation id, which equals the
+   * ACP session id once a session is bound (see SessionMessageHandler.
+   * updateCurrentConversationId). Forwarding the originating session id with
+   * the message lets receivers attribute it to the conversation that owns
+   * the work even if the user has since switched the active panel to a
+   * different conversation (e.g. for background notification follow-ups).
+   */
+  sessionId?: string;
 }
 
 export interface PlanEntry {
@@ -67,7 +79,7 @@ export interface QwenAgentCallbacks {
   onAskUserQuestion?: (
     request: AskUserQuestionRequest,
   ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
-  onEndTurn?: (reason?: string) => void;
+  onEndTurn?: (reason?: string, source?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
     availableModes?: Array<{
@@ -85,6 +97,11 @@ export interface QwenAgentCallbacks {
   onAvailableModels?: (models: ModelInfo[]) => void;
   onDisconnected?: (code: number | null, signal: string | null) => void;
   onSlashCommandNotification?: (event: SlashCommandNotification) => void;
+  /**
+   * Raw ACP session/update notification, forwarded verbatim for consumers
+   * that reduce the transcript themselves (e.g. the WebShell transcript UI).
+   */
+  onTranscriptUpdate?: (notification: SessionNotification) => void;
 }
 
 export interface ToolCallUpdate {

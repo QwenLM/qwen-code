@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   type ToolAskUserQuestionConfirmationDetails,
@@ -16,11 +16,39 @@ import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { TextInput } from '../shared/TextInput.js';
+import {
+  getCachedStringWidth,
+  truncateToWidth,
+} from '../../utils/textUtils.js';
 import { t } from '../../../i18n/index.js';
+
+// Largest per-chip display width (cells) such that every header, clipped to it,
+// lets the tab row fit within `available`. Headers narrower than the cap keep
+// their full width and their slack is reclaimed for the longer ones (water-
+// filling), so a header is clipped only when the row genuinely cannot fit it.
+// Returns a very large number when every header already fits at natural width.
+export function computeHeaderCap(
+  headerWidths: number[],
+  available: number,
+): number {
+  const ascending = [...headerWidths].sort((a, b) => a - b);
+  let remaining = available;
+  for (let i = 0; i < ascending.length; i++) {
+    const cap = Math.floor(remaining / (ascending.length - i));
+    if (ascending[i] > cap) {
+      return Math.max(0, cap);
+    }
+    remaining -= ascending[i];
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
 
 interface AskUserQuestionDialogProps {
   confirmationDetails: ToolAskUserQuestionConfirmationDetails;
   isFocused?: boolean;
+  /** Width (cells) of the box the dialog is rendered into; sizes the header
+   * tab row. */
+  availableWidth: number;
   onConfirm: (
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
@@ -30,6 +58,7 @@ interface AskUserQuestionDialogProps {
 export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   confirmationDetails,
   isFocused = true,
+  availableWidth,
   onConfirm,
 }) => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -39,6 +68,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   const [customInputValues, setCustomInputValues] = useState<
     Record<number, string>
   >({});
+  const customInputValuesRef = useRef<Record<number, string>>({});
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [multiSelectedOptions, setMultiSelectedOptions] = useState<
     Record<number, string[]>
@@ -67,7 +97,9 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     currentQuestion &&
     selectedIndex === currentQuestion.options.length;
 
-  const currentCustomInputValue = customInputValues[currentQuestionIndex] ?? '';
+  const getCustomInputValue = (idx: number) =>
+    customInputValuesRef.current[idx] ?? customInputValues[idx] ?? '';
+  const currentCustomInputValue = getCustomInputValue(currentQuestionIndex);
   const isCustomInputAnswer =
     !isSubmitTab &&
     currentQuestion &&
@@ -82,7 +114,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     const q = confirmationDetails.questions[idx];
     if (q?.multiSelect) {
       const selections = [...(multiSelectedOptions[idx] ?? [])];
-      const customValue = (customInputValues[idx] ?? '').trim();
+      const customValue = getCustomInputValue(idx).trim();
       if (customInputChecked[idx] && customValue) {
         selections.push(customValue);
       }
@@ -90,6 +122,31 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
     return selectedOptions[idx];
   };
+
+  // Headers render as chips in a horizontal tab row. The 12-char schema limit is
+  // only guidance to the model, so at display time each header is shown in full
+  // whenever the row has room and clipped with an ellipsis only when the headers
+  // would otherwise overflow.
+  const numHeaders = confirmationDetails.questions.length;
+  const answeredHeaders = confirmationDetails.questions.filter(
+    (_, idx) => getAnswerForQuestion(idx) !== undefined,
+  ).length;
+  // Cells the row spends outside the header text, matching what it renders.
+  // Recomputed each render, so answering a question re-fits the row.
+  const dialogPadding = 2;
+  // "▸ " when the Submit tab is active, a single leading space otherwise, plus
+  // the (locale-dependent) label.
+  const submitChipWidth =
+    (isSubmitTab ? 2 : 1) + getCachedStringWidth(t('Submit'));
+  const chipGaps = numHeaders; // gap={1} between each chip and the Submit chip
+  const headerPrefixes = 2 * numHeaders; // "▸ " or "  " before each header
+  const answeredMarks = 2 * answeredHeaders; // " ✓" after answered headers
+  const rowOverhead =
+    dialogPadding + submitChipWidth + chipGaps + headerPrefixes + answeredMarks;
+  const headerCap = computeHeaderCap(
+    confirmationDetails.questions.map((q) => getCachedStringWidth(q.header)),
+    availableWidth - rowOverhead,
+  );
 
   const handleSubmit = async () => {
     const answers: Record<string, string> = {};
@@ -119,28 +176,38 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
   };
 
-  const handleMultiSelectSubmit = () => {
+  const getCurrentMultiSelectAnswer = (
+    includeCustomInput = customInputChecked[currentQuestionIndex],
+    inputValue = currentCustomInputValue,
+  ): string | undefined => {
     if (!currentQuestion) return;
     const selections = [...(multiSelectedOptions[currentQuestionIndex] ?? [])];
-    const customValue = currentCustomInputValue.trim();
-    if (customInputChecked[currentQuestionIndex] && customValue) {
+    const customValue = inputValue.trim();
+    if (includeCustomInput && customValue) {
       selections.push(customValue);
     }
-    if (selections.length === 0) return;
-
-    selectAndAdvance(selections.join(', '));
+    return selections.length > 0 ? selections.join(', ') : undefined;
   };
 
-  const handleCustomInputSubmit = () => {
-    const trimmedValue = currentCustomInputValue.trim();
+  const handleMultiSelectSubmit = () => {
+    const answer = getCurrentMultiSelectAnswer();
+    if (!answer) return;
+
+    selectAndAdvance(answer);
+  };
+
+  const handleCustomInputSubmit = (inputValue = currentCustomInputValue) => {
+    const trimmedValue = inputValue.trim();
 
     if (isMultiSelect) {
-      // Toggle custom input checked state
-      if (!trimmedValue) return;
+      // Toggle custom input checked state, then submit/advance if non-empty
       setCustomInputChecked((prev) => ({
         ...prev,
-        [currentQuestionIndex]: !prev[currentQuestionIndex],
+        [currentQuestionIndex]: trimmedValue.length > 0,
       }));
+      if (trimmedValue) {
+        selectAndAdvance(getCurrentMultiSelectAnswer(true, inputValue)!);
+      }
       return;
     }
 
@@ -170,6 +237,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         }
         if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
           void onConfirm(ToolConfirmationOutcome.Cancel);
+          return;
+        }
+        if (key.name === 'return') {
+          handleCustomInputSubmit();
           return;
         }
         return;
@@ -204,8 +275,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       }
 
       // Number key selection
-      const numKey = parseInt(input || '', 10);
-      if (!isNaN(numKey) && numKey >= 1 && numKey <= totalOptions) {
+      const numKey = input && /^[1-9]\d*$/.test(input) ? Number(input) : NaN;
+      if (Number.isSafeInteger(numKey) && numKey <= totalOptions) {
         const targetIndex = numKey - 1;
         setSelectedIndex(targetIndex);
 
@@ -297,8 +368,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
             return (
               <Box key={idx}>
                 <Text dimColor>
-                  {isAnswered ? '  ' : '  '}
-                  {q.header}
+                  {'  '}
+                  {truncateToWidth(q.header, headerCap)}
                   {isAnswered ? ' ✓' : ''}
                 </Text>
               </Box>
@@ -388,7 +459,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                   dimColor={idx !== currentQuestionIndex}
                 >
                   {idx === currentQuestionIndex ? '▸ ' : '  '}
-                  {q.header}
+                  {truncateToWidth(q.header, headerCap)}
                   {isAnswered ? ' ✓' : ''}
                 </Text>
               </Box>
@@ -470,7 +541,13 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 initialCursorOffset={currentCustomInputValue.length}
                 onChange={(value: string) => {
                   const oldValue =
-                    customInputValues[currentQuestionIndex] ?? '';
+                    customInputValuesRef.current[currentQuestionIndex] ??
+                    customInputValues[currentQuestionIndex] ??
+                    '';
+                  customInputValuesRef.current = {
+                    ...customInputValuesRef.current,
+                    [currentQuestionIndex]: value,
+                  };
                   if (isMultiSelect && value !== oldValue) {
                     setCustomInputChecked((prevChecked) => ({
                       ...prevChecked,

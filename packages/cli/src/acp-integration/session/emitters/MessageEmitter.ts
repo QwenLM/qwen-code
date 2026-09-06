@@ -5,9 +5,75 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
-import type { SubagentMeta } from '../types.js';
-import type { Usage } from '@agentclientprotocol/sdk';
-import { BaseEmitter } from './BaseEmitter.js';
+import { hasFullSessionContext, type SubagentMeta } from '../types.js';
+import {
+  createTranscriptMessageUpdate,
+  createTranscriptUsageUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
+import {
+  apiActivityTracker,
+  getActiveGoal,
+  projectGoalStateToLegacy,
+  type GoalRecord,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type VisionBridgeResult,
+} from '@qwen-code/qwen-code-core';
+import { BaseEmitter } from './base-emitter.js';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import type { HistoryItemGoalStatus } from '../../../ui/types.js';
+
+/**
+ * Build the `goalStatus` card without sending it.
+ *
+ * Split out of {@link MessageEmitter.emitGoalStatus} so the bulk load-replay
+ * path can place the card inside its `LOAD_REPLAY` envelope instead of
+ * streaming it. See `Session.renderRecoveredGoalUpdates`.
+ */
+export function buildGoalStatusUpdate(
+  status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      goalStatus: status,
+    },
+  };
+}
+
+/**
+ * Build the `goalState` card without sending it.
+ *
+ * Split out of {@link MessageEmitter.emitGoalState}; see
+ * {@link buildGoalStatusUpdate} for why the render/send split exists.
+ */
+export function buildGoalStateUpdate(
+  snapshot: GoalSnapshotV2,
+  cause?: GoalStateCause,
+  previousGoal: GoalRecord | null = null,
+): SessionUpdate {
+  const projection = cause
+    ? projectGoalStateToLegacy({ v: 2, cause, snapshot }, previousGoal)
+    : undefined;
+  const goalStatus = projection
+    ? (() => {
+        const { type: _type, ...status } = projection.goalStatus;
+        return status;
+      })()
+    : undefined;
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      goalState: snapshot,
+      ...(goalStatus ? { goalStatus } : {}),
+      ...(projection?.goalTerminal
+        ? { goalTerminal: projection.goalTerminal }
+        : {}),
+    },
+  };
+}
 
 /**
  * Handles emission of text message chunks (user, agent, thought).
@@ -30,6 +96,7 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
+    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -38,10 +105,40 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
+          ...(activeGoal
+            ? {
+                goal: {
+                  condition: activeGoal.condition,
+                  iterations: activeGoal.iterations,
+                  setAt: activeGoal.setAt,
+                  lastReason: activeGoal.lastReason,
+                },
+              }
+            : {}),
         },
       },
     });
   }
+
+  async emitGoalStatus(
+    status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+    goalState?: unknown,
+  ): Promise<void> {
+    const update = buildGoalStatusUpdate(status);
+    if (goalState) {
+      update._meta = { ...update._meta, goalState };
+    }
+    await this.sendUpdate(update);
+  }
+
+  async emitGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = null,
+  ): Promise<void> {
+    await this.sendUpdate(buildGoalStateUpdate(snapshot, cause, previousGoal));
+  }
+
   /**
    * Emits a user message chunk.
    *
@@ -51,13 +148,16 @@ export class MessageEmitter extends BaseEmitter {
   async emitUserMessage(
     text: string,
     timestamp?: string | number,
+    options: { source?: string } = {},
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    await this.sendUpdate({
-      sessionUpdate: 'user_message_chunk',
-      content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
-    });
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'user',
+        text,
+        timestamp,
+        ...(options.source ? { extra: { source: options.source } } : {}),
+      }),
+    );
   }
 
   /**
@@ -69,13 +169,17 @@ export class MessageEmitter extends BaseEmitter {
   async emitAgentThought(
     text: string,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    await this.sendUpdate({
-      sessionUpdate: 'agent_thought_chunk',
-      content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
-    });
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        thought: true,
+        text,
+        timestamp,
+        ...(subagentMeta ? { extra: { ...subagentMeta } } : {}),
+      }),
+    );
   }
 
   /**
@@ -87,12 +191,58 @@ export class MessageEmitter extends BaseEmitter {
   async emitAgentMessage(
     text: string,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
+  ): Promise<void> {
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text,
+        timestamp,
+        ...(subagentMeta ? { extra: { ...subagentMeta } } : {}),
+      }),
+    );
+  }
+
+  async emitVisionBridgeNotice(
+    text: string,
+    result: VisionBridgeResult,
+  ): Promise<void> {
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text,
+        extra: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+          visionBridgeNotice: {
+            status: result.status,
+            convertedCount: result.convertedCount,
+            omittedCount: result.omittedCount,
+            ...(result.modelId
+              ? { modelName: result.modelId.replace(/^[^:]+:/, '') }
+              : {}),
+            ...(result.modelEndpoint
+              ? { modelEndpoint: result.modelEndpoint }
+              : {}),
+            egressOccurred: result.egressOccurred === true,
+          },
+        },
+      }),
+    );
+  }
+
+  async emitSlashCommandOutput(
+    text: string,
+    timestamp?: string | number,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
+      _meta: {
+        source: 'slash_command',
+        ...(epochMs != null ? { timestamp: epochMs } : {}),
+      },
     });
   }
 
@@ -105,23 +255,99 @@ export class MessageEmitter extends BaseEmitter {
     durationMs?: number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const usage: Usage = {
-      inputTokens: usageMetadata.promptTokenCount ?? 0,
-      outputTokens: usageMetadata.candidatesTokenCount ?? 0,
-      totalTokens: usageMetadata.totalTokenCount ?? 0,
-      thoughtTokens: usageMetadata.thoughtsTokenCount,
-      cachedReadTokens: usageMetadata.cachedContentTokenCount,
-    };
+    // ORDERING INVARIANT: this runs before PlanEmitter.emitPlan within a turn —
+    // usage advances the cumulative accumulator, then the plan update snapshots
+    // it. Reordering or batching emissions so a plan is sent before its turn's
+    // usage would zero out that task's per-task stats.
+    //
+    // Only fold in finite values: a NaN/Infinity from a provider (or a NaN that
+    // slips through `?? 0`, since `NaN ?? 0 === NaN`) would poison the running
+    // total forever (`NaN + x === NaN`), so every later snapshot would fail
+    // extractTodoStats's Number.isFinite check and silently show "not captured"
+    // for the rest of the session. apiTimeMs only advances on the live path
+    // (a per-turn duration is present), keeping API time live-only on replay.
+    const cumulative = this.ctx.cumulativeUsage;
+    if (cumulative) {
+      const addFinite = (
+        total: number,
+        value: number | null | undefined,
+      ): number =>
+        typeof value === 'number' && Number.isFinite(value)
+          ? total + value
+          : total;
+      cumulative.promptTokens = addFinite(
+        cumulative.promptTokens,
+        usageMetadata.promptTokenCount,
+      );
+      cumulative.candidateTokens = addFinite(
+        cumulative.candidateTokens,
+        usageMetadata.candidatesTokenCount,
+      );
+      cumulative.cachedTokens = addFinite(
+        cumulative.cachedTokens,
+        usageMetadata.cachedContentTokenCount,
+      );
+      cumulative.apiTimeMs = addFinite(cumulative.apiTimeMs, durationMs);
+    }
 
-    const meta =
-      typeof durationMs === 'number'
-        ? { usage, durationMs, ...subagentMeta }
-        : { usage, ...subagentMeta };
+    // A live model round is discriminated by a present `durationMs` (replay
+    // frames omit it). Only then do we drain the model-API-error / auto-retry
+    // counters onto this frame's `_meta`, so the daemon host's metrics ring
+    // windows the increments alongside token burn and LLM latency. Draining on
+    // a replayed frame would consume real pending counts the bridge ignores for
+    // replay, silently dropping them — hence the `durationMs` guard. Absent /
+    // zero keys keep no-error frames byte-identical to before.
+    let activityMeta: Record<string, unknown> = {};
+    if (typeof durationMs === 'number') {
+      const activity = apiActivityTracker.drain();
+      activityMeta = {
+        ...(activity.errors > 0 ? { apiErrors: activity.errors } : {}),
+        ...(activity.retries > 0 ? { apiRetries: activity.retries } : {}),
+      };
+    }
+
+    await this.sendUpdate(
+      createTranscriptUsageUpdate(usageMetadata, {
+        text,
+        extra: {
+          ...(typeof durationMs === 'number' ? { durationMs } : {}),
+          ...activityMeta,
+          ...subagentMeta,
+        },
+      }),
+    );
+
+    // ACP clients such as JetBrains render context occupancy from the
+    // standard usage_update frame rather than Qwen's private `_meta.usage`.
+    // Emit it only for a live main-session model round: replay frames do not
+    // have a duration, and subagent usage describes a separate context window
+    // that must not replace the parent session's indicator.
+    if (
+      !Number.isFinite(durationMs) ||
+      subagentMeta ||
+      !hasFullSessionContext(this.ctx)
+    ) {
+      return;
+    }
+
+    const used =
+      usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
+    const size = this.ctx.config.getContentGeneratorConfig()?.contextWindowSize;
+    if (
+      typeof used !== 'number' ||
+      !Number.isSafeInteger(used) ||
+      used < 0 ||
+      typeof size !== 'number' ||
+      !Number.isSafeInteger(size) ||
+      size <= 0
+    ) {
+      return;
+    }
 
     await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text },
-      _meta: meta,
+      sessionUpdate: 'usage_update',
+      used,
+      size,
     });
   }
 
@@ -139,12 +365,13 @@ export class MessageEmitter extends BaseEmitter {
     role: 'user' | 'assistant',
     isThought: boolean = false,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
     if (role === 'user') {
       return this.emitUserMessage(text, timestamp);
     }
     return isThought
-      ? this.emitAgentThought(text, timestamp)
-      : this.emitAgentMessage(text, timestamp);
+      ? this.emitAgentThought(text, timestamp, subagentMeta)
+      : this.emitAgentMessage(text, timestamp, subagentMeta);
   }
 }

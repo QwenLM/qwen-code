@@ -8,7 +8,8 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
-  GitService,
+  GoalStateResponse,
+  GoalStateCause,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -25,6 +26,15 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { PeerMessaging } from '../../peerMessaging/peer-messaging.js';
+
+export interface NonInteractiveSlashCommandPolicy {
+  readonly allowSessionReset: boolean;
+  readonly allowWorkspaceSettingsWrite: boolean;
+  readonly persistModelSelection: boolean;
+  readonly blockedBuiltinCommandNames: readonly string[];
+}
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -36,6 +46,7 @@ export interface CommandContext {
    * - acp: ACP/Zed integration mode
    */
   executionMode?: 'interactive' | 'non_interactive' | 'acp';
+  executionPolicy?: NonInteractiveSlashCommandPolicy;
   // Invocation properties for when commands are called.
   invocation?: {
     /** The raw, untrimmed input string from the user. */
@@ -50,15 +61,24 @@ export interface CommandContext {
     // TODO(abhipatel12): Ensure that config is never null.
     config: Config | null;
     settings: LoadedSettings;
-    git: GitService | undefined;
     logger: Logger | null;
+    extensionRefreshState?: ExtensionRefreshState;
+    /**
+     * Present only when cross-session messaging is enabled and its socket
+     * bound; `/peers` treats null as "the feature is off".
+     */
+    peerMessaging?: PeerMessaging | null;
   };
   // UI state and history management
   ui: {
+    /** The current history items. */
+    history: HistoryItem[];
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
     clear: () => void;
+    /** Clears transient assistant output before replacing conversation history. */
+    clearPendingState?: () => void;
     /**
      * Sets the transient debug message displayed in the application footer in debug mode.
      */
@@ -88,8 +108,10 @@ export interface CommandContext {
      * @param history The array of history items to load.
      */
     loadHistory: UseHistoryManagerReturn['loadHistory'];
+    /** Refreshes the static history display in Ink. */
+    refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
-    setGeminiMdFileCount: (count: number) => void;
+    setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
@@ -135,6 +157,21 @@ export interface MessageActionReturn {
   content: string;
 }
 
+export type GoalCommandOperation =
+  | { kind: 'status' }
+  | { kind: 'set'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export interface GoalControlActionReturn {
+  type: 'goal_control';
+  operation: GoalCommandOperation;
+  response: GoalStateResponse;
+  cause?: GoalStateCause;
+}
+
 /**
  * The return type for a command action that streams multiple messages.
  * Used for long-running operations that need to send progress updates.
@@ -163,6 +200,12 @@ export interface OpenDialogActionReturn {
   /** Optional session name for /branch — passed through to handleBranch. */
   name?: string;
 
+  /**
+   * Optional persist scope for model dialog — controls which settings file
+   * the model selection is written to ('workspace' = project, 'user' = global).
+   */
+  persistScope?: 'workspace' | 'user';
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -177,11 +220,18 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'voice-model'
+    | 'vision-model'
+    | 'compaction-model'
+    | 'image-model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
+    | 'effort'
+    | 'output-style'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -189,7 +239,8 @@ export interface OpenDialogActionReturn {
     | 'hooks'
     | 'mcp'
     | 'rewind'
-    | 'diff';
+    | 'diff'
+    | 'stats';
 }
 
 /**
@@ -204,13 +255,22 @@ export interface LoadHistoryActionReturn {
 
 /**
  * The return type for a command action that should immediately submit
- * content as a prompt to the Gemini model.
+ * content as a prompt to the model.
  */
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
+  /**
+   * Optional per-turn model id. When set, this prompt (and any tool-call
+   * continuations it spawns) runs on the given model without changing the
+   * session's selected model or persisting anything; it auto-reverts on the
+   * next user turn.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -245,6 +305,7 @@ export type SlashCommandActionReturn =
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
+  | GoalControlActionReturn
   | ConfirmShellCommandsActionReturn
   | ConfirmActionReturn;
 
@@ -275,9 +336,9 @@ export type CommandSource =
   | 'bundled-skill' // BundledSkillLoader
   | 'skill-dir-command' // FileCommandLoader (user/project, no extensionName)
   | 'plugin-command' // FileCommandLoader (extension, extensionName set)
-  | 'mcp-prompt'; // McpPromptLoader
+  | 'mcp-prompt' // McpPromptLoader
+  | 'workflow-command'; // SavedWorkflowLoader (.qwen/workflows/<name>.js)
 // Reserved for future loaders (not implemented in Phase 1):
-// | 'workflow-command'
 // | 'plugin-skill'
 // | 'dynamic-skill'
 
@@ -343,6 +404,13 @@ export interface SlashCommand {
    */
   supportedModes?: ExecutionMode[];
 
+  /**
+   * Whether the interactive UI may execute this command immediately while a
+   * model response is streaming. Commands opt in only when they do not submit
+   * a model turn or mutate conversation state owned by the active turn.
+   */
+  canRunDuringStreaming?: boolean;
+
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**
    * Whether users can invoke this command via a slash command.
@@ -371,6 +439,19 @@ export interface SlashCommand {
   acceptsInput?: boolean;
 
   /**
+   * When true, accepting this command from the slash auto-completion popup
+   * (e.g. typing `/skil` and pressing Enter on the highlighted `skills`
+   * suggestion) submits `/<name>` immediately rather than just inserting
+   * the text and forcing a second Enter.
+   *
+   * Set this only on commands whose bare action takes no required argument
+   * — typically commands whose action just opens a dialog. Commands with
+   * subCommands or arg-based completion should leave this false so users
+   * can navigate further.
+   */
+  submitOnAccept?: boolean;
+
+  /**
    * Describes when to use this command — injected into the model-visible
    * description for modelInvocable commands.
    */
@@ -384,6 +465,16 @@ export interface SlashCommand {
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];
+
+  /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
+  skillDetail?: {
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+    extensionName?: string;
+  };
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

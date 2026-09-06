@@ -11,14 +11,40 @@ import {
   getPDFPageCount,
   extractPDFText,
   resetPdftotextCache,
+  shouldRequirePDFPageRange,
+  estimatePDFTextOutputTokens,
+  buildLargePDFGuidance,
+  buildPDFTextTooLargeGuidance,
+  renderPDFPagesToImages,
+  resetPdftoppmCache,
+  PDF_RENDER_UNAVAILABLE_MESSAGE,
 } from './pdf.js';
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, tmpdir: vi.fn(() => '/tmp') };
+});
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdtemp: vi.fn(async () => '/tmp/pdf-render-test'),
+    readdir: vi.fn(),
+    readFile: vi.fn(),
+    rm: vi.fn(async () => undefined),
+  };
+});
+
 import { execFile } from 'node:child_process';
+import { readdir, readFile } from 'node:fs/promises';
 const mockExecFile = vi.mocked(execFile);
+const mockReaddir = vi.mocked(readdir);
+const mockReadFile = vi.mocked(readFile);
 
 /**
  * Helper: make mockExecFile resolve with given stdout/stderr/code.
@@ -92,6 +118,92 @@ describe('pdf utilities', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPdftotextCache();
+    resetPdftoppmCache();
+  });
+
+  describe('PDF budget policy helpers', () => {
+    it('requires pages when pdfinfo reports more than the full-text page limit', () => {
+      expect(shouldRequirePDFPageRange(11, 64 * 1024)).toEqual({
+        required: true,
+        effectivePageCount: 11,
+        hadPdfInfo: true,
+      });
+    });
+
+    it('does not require pages for small PDFs', () => {
+      expect(shouldRequirePDFPageRange(10, 2 * 1024 * 1024)).toEqual({
+        required: false,
+        effectivePageCount: 10,
+        hadPdfInfo: true,
+      });
+    });
+
+    it('falls back to a size heuristic when pdfinfo is unavailable', () => {
+      expect(shouldRequirePDFPageRange(null, 2 * 1024 * 1024)).toEqual({
+        required: true,
+        effectivePageCount: 21,
+        hadPdfInfo: false,
+      });
+    });
+
+    it('estimates dense ASCII PDF text output tokens with wrapper allowance', () => {
+      expect(estimatePDFTextOutputTokens('x'.repeat(64_000))).toBe(16_016);
+    });
+
+    it('estimates dense non-ASCII PDF text conservatively', () => {
+      expect(estimatePDFTextOutputTokens('\u4e00'.repeat(45_000))).toBe(49_517);
+    });
+
+    it('builds exact page-range guidance for pdfinfo-backed and heuristic counts', () => {
+      expect(
+        buildLargePDFGuidance('paper.pdf', {
+          required: true,
+          effectivePageCount: 42,
+          hadPdfInfo: true,
+        }),
+      ).toBe(
+        "PDF \"paper.pdf\" has 42 pages, which is too many to read at once. Use the 'pages' parameter to read a specific page range such as '1-5'. Maximum 20 pages per request.",
+      );
+      expect(
+        buildLargePDFGuidance('scan.pdf', {
+          required: true,
+          effectivePageCount: 21,
+          hadPdfInfo: false,
+        }),
+      ).toBe(
+        "PDF \"scan.pdf\" appears to have about 21 pages, which is too many to read at once. Use the 'pages' parameter to read a specific page range such as '1-5'. Maximum 20 pages per request.",
+      );
+    });
+
+    it('builds exact dense-text guidance for range and single-page reads', () => {
+      const defaultRangeGuidance =
+        "PDF text extracted from \"paper.pdf\" is too large to return safely (12345 estimated tokens; limit 12000). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.";
+      const fivePageRangeGuidance =
+        "PDF text extracted from \"paper.pdf\" is too large to return safely (12345 estimated tokens; limit 12000). Use the 'pages' parameter with fewer pages, for example '1-3' or a single page.";
+      const twoPageRangeGuidance =
+        "PDF text extracted from \"paper.pdf\" is too large to return safely (12345 estimated tokens; limit 12000). Use the 'pages' parameter with a single page, for example '1'.";
+      const singlePageGuidance =
+        'PDF text extracted from "paper.pdf" is too large to return safely (12345 estimated tokens; limit 12000). The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.';
+
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345)).toBe(
+        defaultRangeGuidance,
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1-5')).toBe(
+        fivePageRangeGuidance,
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1-2')).toBe(
+        twoPageRangeGuidance,
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1')).toBe(
+        singlePageGuidance,
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1-1')).toBe(
+        singlePageGuidance,
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1 - 1')).toBe(
+        singlePageGuidance,
+      );
+    });
   });
 
   describe('parsePDFPageRange', () => {
@@ -438,7 +550,7 @@ describe('pdf utilities', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.text.length).toBeLessThan(110000);
-        expect(result.text).toContain('text truncated');
+        expect(result.text).toContain('text truncated at 100000 characters');
         expect(result.text).toContain("'pages' parameter");
       }
     });
@@ -463,6 +575,24 @@ describe('pdf utilities', () => {
       if (result.success) {
         expect(result.text.length).toBeLessThan(110000);
         expect(result.text).toContain('text truncated');
+        expect(result.text).toContain("'pages' parameter");
+      }
+    });
+
+    it('should recover maxBuffer overrun when UTF-8 bytes exceed the threshold', async () => {
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      mockMaxBufferExceeded('\u4e00'.repeat(70_000));
+
+      const result = await extractPDFText('/test.pdf');
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.text).toContain('text truncated');
+        expect(result.text).toContain('PDF text buffer limit');
+        expect(result.text).not.toContain('100000 characters');
         expect(result.text).toContain("'pages' parameter");
       }
     });
@@ -584,6 +714,148 @@ describe('pdf utilities', () => {
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.error).toContain('no text output');
+      }
+    });
+  });
+
+  describe('renderPDFPagesToImages', () => {
+    // Queue the `pdftoppm -v` availability probe as successful. It runs once
+    // per render call because resetPdftoppmCache clears the cache each test.
+    const mockAvailable = () =>
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftoppm version 24.02.0',
+        code: 0,
+      });
+    const asEntries = (names: string[]) => names as never;
+
+    it('renders pages to base64 JPEG images, numerically sorted', async () => {
+      mockAvailable();
+      mockExecResult({ stdout: '', stderr: '', code: 0 });
+      // Returned out of order to prove numeric (not lexical) sorting.
+      mockReaddir.mockResolvedValue(asEntries(['page-2.jpg', 'page-1.jpg']));
+      mockReadFile
+        .mockResolvedValueOnce(Buffer.from('page-one-bytes'))
+        .mockResolvedValueOnce(Buffer.from('page-two-bytes'));
+
+      const result = await renderPDFPagesToImages('/test.pdf');
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.images).toEqual([
+          {
+            data: Buffer.from('page-one-bytes').toString('base64'),
+            mimeType: 'image/jpeg',
+          },
+          {
+            data: Buffer.from('page-two-bytes').toString('base64'),
+            mimeType: 'image/jpeg',
+          },
+        ]);
+        expect(result.bytesTruncated).toBe(false);
+      }
+      const renderCall = mockExecFile.mock.calls[1]!;
+      expect(renderCall[0]).toBe('pdftoppm');
+      expect(renderCall[1]).toEqual(
+        expect.arrayContaining(['-jpeg', '-scale-to']),
+      );
+    });
+
+    it('forwards an explicit page range to pdftoppm', async () => {
+      mockAvailable();
+      mockExecResult({ stdout: '', stderr: '', code: 0 });
+      mockReaddir.mockResolvedValue(asEntries(['page-3.jpg']));
+      mockReadFile.mockResolvedValue(Buffer.from('x'));
+
+      await renderPDFPagesToImages('/test.pdf', { firstPage: 3, lastPage: 5 });
+
+      const args = mockExecFile.mock.calls[1]![1] as string[];
+      expect(args[args.indexOf('-f') + 1]).toBe('3');
+      expect(args[args.indexOf('-l') + 1]).toBe('5');
+    });
+
+    it('omits -l for an open-ended (Infinity) last page', async () => {
+      mockAvailable();
+      mockExecResult({ stdout: '', stderr: '', code: 0 });
+      mockReaddir.mockResolvedValue(asEntries(['page-1.jpg']));
+      mockReadFile.mockResolvedValue(Buffer.from('x'));
+
+      await renderPDFPagesToImages('/test.pdf', {
+        firstPage: 1,
+        lastPage: Infinity,
+      });
+
+      const args = mockExecFile.mock.calls[1]![1] as string[];
+      expect(args).toContain('-f');
+      expect(args).not.toContain('-l');
+    });
+
+    it('returns an install hint when pdftoppm is unavailable', async () => {
+      mockExecError(); // `-v` probe fails with ENOENT
+      const result = await renderPDFPagesToImages('/test.pdf');
+      expect(result).toEqual({
+        success: false,
+        error: PDF_RENDER_UNAVAILABLE_MESSAGE,
+      });
+      // Only the availability probe ran; no render invocation followed.
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('maps password-protected PDFs to a clear error', async () => {
+      mockAvailable();
+      mockExecResult({
+        stdout: '',
+        stderr: 'Command Line Error: Incorrect password',
+        code: 1,
+      });
+      const result = await renderPDFPagesToImages('/test.pdf');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('password-protected');
+      }
+    });
+
+    it('maps corrupt PDFs to a clear error', async () => {
+      mockAvailable();
+      mockExecResult({
+        stdout: '',
+        stderr: 'Syntax Error: Document is damaged',
+        code: 1,
+      });
+      const result = await renderPDFPagesToImages('/test.pdf');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('corrupted');
+      }
+    });
+
+    it('errors when pdftoppm produces no images', async () => {
+      mockAvailable();
+      mockExecResult({ stdout: '', stderr: '', code: 0 });
+      mockReaddir.mockResolvedValue(asEntries([]));
+      const result = await renderPDFPagesToImages('/test.pdf');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('no image output');
+      }
+    });
+
+    it('caps total payload size and flags truncation instead of dropping silently', async () => {
+      mockAvailable();
+      mockExecResult({ stdout: '', stderr: '', code: 0 });
+      mockReaddir.mockResolvedValue(asEntries(['page-1.jpg', 'page-2.jpg']));
+      // The first page alone (~27MB base64) already exceeds the 25MB cap, so
+      // the second page is dropped and the result is flagged.
+      mockReadFile
+        .mockResolvedValueOnce(Buffer.alloc(20 * 1024 * 1024))
+        .mockResolvedValueOnce(Buffer.from('second-page'));
+
+      const result = await renderPDFPagesToImages('/test.pdf');
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.images).toHaveLength(1);
+        expect(result.bytesTruncated).toBe(true);
       }
     });
   });

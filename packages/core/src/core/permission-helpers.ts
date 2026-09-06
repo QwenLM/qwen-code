@@ -8,7 +8,7 @@
  * Shared permission-evaluation and persistence helpers.
  *
  * These are used by both `coreToolScheduler` (CLI mode) and the ACP
- * `Session` (VS Code / webui mode) so that the L3→L4→L5 permission flow
+ * `Session` (VS Code / browser mode) so that the L3→L4→L5 permission flow
  * and the "Always Allow" persistence logic stay in sync.
  */
 
@@ -36,6 +36,7 @@ export function buildPermissionCheckContext(
   toolName: string,
   toolParams: Record<string, unknown>,
   targetDir: string,
+  toolAliases?: readonly string[],
 ): PermissionCheckContext {
   const rawCommand =
     'command' in toolParams ? String(toolParams['command']) : undefined;
@@ -77,15 +78,27 @@ export function buildPermissionCheckContext(
     }
   }
 
-  // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
+  // Generic specifier for literal matching (Skill name, Task subagent type,
+  // read_mcp_resource server name, etc.)
   const specifier =
     typeof toolParams['skill'] === 'string'
       ? toolParams['skill']
       : typeof toolParams['subagent_type'] === 'string'
         ? toolParams['subagent_type']
-        : undefined;
+        : typeof toolParams['server_name'] === 'string'
+          ? toolParams['server_name']
+          : undefined;
 
-  return { toolName, command, cwd, filePath, domain, specifier };
+  return {
+    toolName,
+    toolAliases,
+    command,
+    cwd,
+    filePath,
+    domain,
+    specifier,
+    toolParams,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -189,6 +202,13 @@ export async function persistPermissionOutcome(
   pm: PermissionManager | null | undefined,
   payload?: ToolConfirmationPayload,
 ): Promise<void> {
+  if (
+    confirmationDetails.type !== 'exec' &&
+    confirmationDetails.type !== 'mcp' &&
+    confirmationDetails.type !== 'info'
+  ) {
+    return;
+  }
   if (
     outcome !== ToolConfirmationOutcome.ProceedAlways &&
     outcome !== ToolConfirmationOutcome.ProceedAlwaysProject &&

@@ -65,6 +65,27 @@ describe('redactUrlCredentials', () => {
     );
   });
 
+  it('redacts upload identity tokens from sources and messages', () => {
+    expect(
+      redactUrlCredentials(
+        'upload:v1:550e8400-e29b-41d4-a716-446655440000:扩展?#.zip',
+      ),
+    ).toBe('upload:扩展?#.zip');
+    expect(
+      redactUrlCredentials(
+        'untrusted folder at upload:v1:550e8400-e29b-41d4-a716-446655440000:demo.zip',
+      ),
+    ).toBe('untrusted folder at upload:demo.zip');
+  });
+
+  it('keeps upload-like filename content intact when redacting', () => {
+    expect(
+      redactUrlCredentials(
+        'upload:v1:550e8400-e29b-41d4-a716-446655440000:backup-upload:v1:tok:data.zip',
+      ),
+    ).toBe('upload:backup-upload:v1:tok:data.zip');
+  });
+
   it('does not modify URLs without credentials', () => {
     const source = 'https://github.com/owner/repo';
     expect(redactUrlCredentials(source)).toBe(source);

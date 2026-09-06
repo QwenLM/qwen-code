@@ -4,10 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  readPackageUp,
-  type PackageJson as BasePackageJson,
-} from 'read-package-up';
+import type { PackageJson as BasePackageJson } from 'read-package-up';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -27,6 +24,7 @@ export async function getPackageJson(): Promise<PackageJson | undefined> {
     return packageJson;
   }
 
+  const { readPackageUp } = await import('read-package-up');
   const result = await readPackageUp({ cwd: __dirname });
   if (!result) {
     // TODO: Maybe bubble this up as an error.

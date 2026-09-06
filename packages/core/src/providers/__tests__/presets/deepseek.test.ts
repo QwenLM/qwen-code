@@ -5,11 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  AuthType,
-  deepseekProvider,
-  buildInstallPlan,
-} from '@qwen-code/qwen-code-core';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { deepseekProvider } from '../../presets/deepseek.js';
+import { buildInstallPlan } from '../../provider-config.js';
 
 describe('deepseekProvider', () => {
   it('has correct provider config', () => {
@@ -34,7 +32,13 @@ describe('deepseekProvider', () => {
     expect(models?.[0]).toMatchObject({
       id: 'deepseek-v4-flash',
       name: '[DeepSeek] deepseek-v4-flash',
-      generationConfig: { contextWindowSize: 1000000 },
+    });
+    expect(models?.[0]?.generationConfig).toEqual({
+      contextWindowSize: 1000000,
+    });
+    expect(models?.[1]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
     });
   });
 

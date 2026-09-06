@@ -174,6 +174,53 @@ describe('CommandService', () => {
     expect(loader2.loadCommands).toHaveBeenCalledWith(signal);
   });
 
+  it('should exclude non-user-invocable commands from user command modes', async () => {
+    const userCommand = {
+      ...createMockCommand('user-command', CommandKind.FILE),
+      userInvocable: true,
+      modelInvocable: true,
+    };
+    const modelOnlyCommand = {
+      ...createMockCommand('model-only-command', CommandKind.FILE),
+      userInvocable: false,
+      modelInvocable: true,
+    };
+    const service = await CommandService.create(
+      [new MockCommandLoader([userCommand, modelOnlyCommand])],
+      new AbortController().signal,
+    );
+
+    expect(service.getCommands().map((cmd) => cmd.name)).toEqual([
+      'user-command',
+      'model-only-command',
+    ]);
+    expect(
+      service.getCommandsForMode('interactive').map((cmd) => cmd.name),
+    ).toEqual(['user-command']);
+    expect(service.getModelInvocableCommands().map((cmd) => cmd.name)).toEqual([
+      'user-command',
+      'model-only-command',
+    ]);
+  });
+
+  it('should exclude commands that are neither user nor model invocable', async () => {
+    const hiddenCommand = {
+      ...createMockCommand('hidden-command', CommandKind.FILE),
+      userInvocable: false,
+      modelInvocable: false,
+    };
+    const service = await CommandService.create(
+      [new MockCommandLoader([hiddenCommand])],
+      new AbortController().signal,
+    );
+
+    expect(service.getCommands().map((cmd) => cmd.name)).toEqual([
+      'hidden-command',
+    ]);
+    expect(service.getCommandsForMode('interactive')).toEqual([]);
+    expect(service.getModelInvocableCommands()).toEqual([]);
+  });
+
   it('should rename extension commands when they conflict', async () => {
     const builtinCommand = createMockCommand('deploy', CommandKind.BUILT_IN);
     const userCommand = createMockCommand('sync', CommandKind.FILE);

@@ -1,0 +1,15 @@
+.flash {
+  border-radius: 8px;
+  animation: message-locate-flash 1.6s ease-out;
+}
+
+@keyframes message-locate-flash {
+  0%,
+  30% {
+    background: color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
+  }
+
+  100% {
+    background: transparent;
+  }
+}

@@ -32,10 +32,20 @@ export { SubagentError, SubagentErrorCode } from './types.js';
 export {
   BuiltinAgentRegistry,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
+  REVIEW_BUILTIN_SUBAGENT_TYPE,
 } from './builtin-agents.js';
 
 // Validation system
 export { SubagentValidator } from './validation.js';
+
+// NOTE: declarative-agent schema helpers (e.g.
+// claudePermissionModeToApprovalMode, parseMaxTurns, isPermissionMode)
+// live in `agent-frontmatter-schema.ts` and are intentionally NOT
+// re-exported here — they are internal to the `SubagentManager` /
+// `claude-converter` parse paths and locking their names in the
+// package's public API would constrain follow-up schema changes.
+// Re-introduce specific exports here when a cross-package caller actually
+// needs them.
 
 // Main management class
 export { SubagentManager } from './subagent-manager.js';

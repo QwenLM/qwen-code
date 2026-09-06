@@ -49,6 +49,16 @@ function formatAuthDisplayType(
   }
 }
 
+/**
+ * Format the version for display. Real semver releases get a "v" prefix
+ * ("v0.19.4"); a non-semver fallback such as "unknown" (from getCliVersion when
+ * the package version can't be resolved) is shown as-is so we never render a
+ * bogus "vunknown".
+ */
+function formatVersionLabel(version: string): string {
+  return /^\d/.test(version) ? `v${version}` : version;
+}
+
 interface HeaderProps {
   /**
    * Width-aware override for the logo column. Each tier is a sanitized
@@ -88,6 +98,7 @@ export const Header: React.FC<HeaderProps> = ({
   const { columns: terminalWidth } = useTerminalSize();
 
   const formattedAuthType = formatAuthDisplayType(authDisplayType);
+  const versionLabel = formatVersionLabel(version);
 
   // Calculate available space properly:
   // First determine if logo can be shown, then use remaining space for path
@@ -209,7 +220,7 @@ export const Header: React.FC<HeaderProps> = ({
           <Text bold color={theme.text.accent}>
             {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
           </Text>
-          <Text color={theme.text.secondary}> (v{version})</Text>
+          <Text color={theme.text.secondary}> ({versionLabel})</Text>
         </Text>
         {/* Subtitle (when set) replaces the blank spacer row. We always
             emit a row here so the auth/model line stays at the same

@@ -10,11 +10,16 @@ import {
   PreToolUseHookOutput,
   PostToolUseHookOutput,
   PostToolUseFailureHookOutput,
+  UserPromptExpansionHookOutput,
   PostToolBatchHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
+  isToolArtifactLike,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
 
 /**
  * Aggregated result from multiple hook executions
@@ -108,6 +113,7 @@ export class HookAggregator {
       case HookEventName.PostToolBatch:
       case HookEventName.Stop:
       case HookEventName.UserPromptSubmit:
+      case HookEventName.UserPromptExpansion:
       case HookEventName.SubagentStop:
       case HookEventName.TodoCreated:
       case HookEventName.TodoCompleted:
@@ -140,6 +146,7 @@ export class HookAggregator {
     const merged: HookOutput = {};
     const reasons: string[] = [];
     const additionalContexts: string[] = [];
+    const artifacts: unknown[] = [];
     let hasBlock = false;
     let hasContinueFalse = false;
     let stopReason: string | undefined;
@@ -170,7 +177,19 @@ export class HookAggregator {
       // Collect other hookSpecificOutput fields (later values win)
       if (output.hookSpecificOutput) {
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
-          if (key !== 'additionalContext') {
+          if (key === 'artifacts' && Array.isArray(value)) {
+            const validArtifacts = value.filter(isToolArtifactLike);
+            artifacts.push(...validArtifacts);
+            if (validArtifacts.length !== value.length) {
+              debugLogger.warn(
+                'Dropped malformed hookSpecificOutput.artifacts entries',
+              );
+            }
+          } else if (key === 'artifacts') {
+            debugLogger.warn(
+              'Dropped malformed hookSpecificOutput.artifacts; expected array',
+            );
+          } else if (key !== 'additionalContext' && key !== 'artifacts') {
             otherHookSpecificFields[key] = value;
           }
         }
@@ -184,6 +203,9 @@ export class HookAggregator {
         merged.systemMessage = output.systemMessage;
       }
     }
+
+    // Concatenate terminal sequences from all outputs
+    this.mergeTerminalSequences(outputs, merged);
 
     // Set merged decision
     if (hasBlock) {
@@ -211,6 +233,9 @@ export class HookAggregator {
     };
     if (additionalContexts.length > 0) {
       hookSpecificOutput['additionalContext'] = additionalContexts.join('\n');
+    }
+    if (artifacts.length > 0) {
+      hookSpecificOutput['artifacts'] = artifacts;
     }
 
     if (Object.keys(hookSpecificOutput).length > 0) {
@@ -326,6 +351,8 @@ export class HookAggregator {
       decision: mergedDecision,
     };
 
+    this.mergeTerminalSequences(outputs, merged);
+
     return merged;
   }
 
@@ -339,7 +366,10 @@ export class HookAggregator {
     for (const output of outputs) {
       // Collect additionalContext for concatenation
       this.extractAdditionalContext(output, additionalContexts);
-      merged = { ...merged, ...output };
+      // Exclude terminalSequence from spread — it is concatenated below
+      const { terminalSequence: _ts, ...rest } = output;
+      void _ts;
+      merged = { ...merged, ...rest };
     }
 
     // Merge additionalContext with concatenation
@@ -349,6 +379,9 @@ export class HookAggregator {
         additionalContext: additionalContexts.join('\n'),
       };
     }
+
+    // Concatenate all terminalSequence values
+    this.mergeTerminalSequences(outputs, merged);
 
     return merged;
   }
@@ -367,6 +400,8 @@ export class HookAggregator {
         return new PostToolUseHookOutput(output);
       case HookEventName.PostToolUseFailure:
         return new PostToolUseFailureHookOutput(output);
+      case HookEventName.UserPromptExpansion:
+        return new UserPromptExpansionHookOutput(output);
       case HookEventName.PostToolBatch:
         return new PostToolBatchHookOutput(output);
       case HookEventName.Stop:
@@ -376,6 +411,23 @@ export class HookAggregator {
         return new PermissionRequestHookOutput(output);
       default:
         return new DefaultHookOutput(output);
+    }
+  }
+
+  /**
+   * Concatenate terminalSequence values from all outputs into merged.
+   */
+  private mergeTerminalSequences(
+    outputs: HookOutput[],
+    merged: HookOutput,
+  ): void {
+    const sequences = outputs
+      .map((o) => o.terminalSequence)
+      .filter((s): s is string => typeof s === 'string' && s.length > 0);
+    if (sequences.length > 0) {
+      merged.terminalSequence = sequences.join('');
+    } else {
+      delete merged.terminalSequence;
     }
   }
 

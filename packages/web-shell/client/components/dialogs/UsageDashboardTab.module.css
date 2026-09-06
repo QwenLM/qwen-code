@@ -1,0 +1,376 @@
+.usage {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 4px 2px;
+}
+
+/* Summary-period toggle (Today / 7D / 30D) */
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 10px;
+}
+
+.segment {
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 5px 16px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.segment:hover {
+  color: var(--foreground);
+}
+
+.segmentActive,
+.segmentActive:hover {
+  background: color-mix(in srgb, var(--agent-blue-400) 16%, transparent);
+  color: var(--agent-blue-400);
+}
+
+/* Hero */
+.hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 12px;
+  padding: 18px 20px;
+  background: color-mix(in srgb, var(--agent-blue-400) 6%, transparent);
+}
+
+.heroMain {
+  min-width: 0;
+}
+
+.heroLabel {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--agent-blue-400);
+}
+
+.heroNumber {
+  font-family: var(--font-mono, monospace);
+  font-size: 44px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  margin: 4px 0 2px;
+}
+
+.heroSub {
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.refresh {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.refresh:hover {
+  background: color-mix(in srgb, var(--border) 30%, transparent);
+}
+
+.refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Stat row */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+  gap: 10px;
+}
+
+.stat {
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+
+.statValue {
+  font-family: var(--font-mono, monospace);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.statLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+  margin-top: 2px;
+}
+
+/* Sections */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+
+.sectionSub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin-top: -4px;
+}
+
+/* Breakdown */
+.breakdown {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 12px;
+}
+
+.metric {
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.metricHead {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tick {
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.tick_input {
+  background: var(--agent-blue-400);
+}
+
+.tick_output {
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-400) 55%,
+    var(--muted-foreground)
+  );
+}
+
+.tick_cache {
+  background: var(--success-color);
+}
+
+.metricLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+
+.metricValue {
+  font-family: var(--font-mono, monospace);
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  margin: 6px 0 2px;
+}
+
+.metricHint {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* Loading / error / empty */
+.state {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+/* Model share */
+.modelList {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modelRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modelHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.modelRank {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 24px;
+  text-align: center;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.modelMeta {
+  flex: 1;
+  min-width: 0;
+}
+
+.modelName {
+  font-family: var(--font-mono, monospace);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelSub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.modelShare {
+  flex: none;
+  font-family: var(--font-mono, monospace);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.modelTrack {
+  height: 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+  overflow: hidden;
+}
+
+.modelFill {
+  height: 100%;
+  min-width: 3px;
+  border-radius: 5px;
+}
+
+/* Light-green overlay marking the cache-read fraction of the model's tokens. */
+.modelFillCache {
+  height: 100%;
+  border-radius: 5px 0 0 5px;
+  background: color-mix(in srgb, var(--success-color) 45%, var(--background));
+}
+
+/* Skill calls table */
+.skillTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.skillTable th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+  font-weight: 600;
+  padding: 6px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.skillTable td {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--foreground);
+  padding: 8px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+}
+
+.right {
+  text-align: right;
+}
+
+/* Daily sessions bar chart */
+.bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.barsBody {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 120px;
+}
+
+.barCol {
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+}
+
+.bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--agent-blue-400) 45%, transparent),
+    var(--agent-blue-400)
+  );
+}
+
+.barsCaption {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}

@@ -52,14 +52,15 @@ function shouldFireRecap(history: HistoryItem[]): boolean {
   let lastRecapIndex = -1;
   for (let i = 0; i < history.length; i++) {
     const item = history[i];
-    if (item.type === 'user') userMessageCount++;
+    if (item.type === 'user' && item.sentToModel !== false) userMessageCount++;
     if (item.type === 'away_recap') lastRecapIndex = i;
   }
   if (userMessageCount < MIN_USER_MESSAGES_TO_FIRE) return false;
   if (lastRecapIndex === -1) return true;
   let userSinceLast = 0;
   for (let i = lastRecapIndex + 1; i < history.length; i++) {
-    if (history[i].type === 'user') userSinceLast++;
+    const item = history[i];
+    if (item.type === 'user' && item.sentToModel !== false) userSinceLast++;
   }
   return userSinceLast >= MIN_USER_MESSAGES_SINCE_LAST_RECAP;
 }

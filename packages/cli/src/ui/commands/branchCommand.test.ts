@@ -25,7 +25,7 @@ function makeCtx(
         getSessionService: () => sessionService,
       } as unknown as NonNullable<CommandContext['services']['config']>);
   return {
-    services: { config, settings: {} as never, git: undefined, logger: null },
+    services: { config, settings: {} as never, logger: null },
     ui: {
       isIdleRef: { current: overrides.isIdle ?? true },
     } as unknown as CommandContext['ui'],
@@ -70,7 +70,7 @@ describe('branchCommand', () => {
     });
   });
 
-  it('exposes /fork as an alias', () => {
-    expect(branchCommand.altNames).toContain('fork');
+  it('no longer aliases /fork (now a separate background-fork command)', () => {
+    expect(branchCommand.altNames ?? []).not.toContain('fork');
   });
 });

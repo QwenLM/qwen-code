@@ -379,4 +379,58 @@ describe('Migration Framework Integration', () => {
       expect(result2.executedMigrations).toHaveLength(0);
     });
   });
+
+  describe('downgrade: v5 -> v4 (revert of #5089)', () => {
+    it('needsMigration returns true for a $version:5 settings file', () => {
+      expect(
+        needsMigration({
+          $version: 5,
+          modelProviders: {
+            openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+          },
+        }),
+      ).toBe(true);
+    });
+
+    it('needsMigration returns false for a genuinely newer ($version:6) file', () => {
+      expect(needsMigration({ $version: SETTINGS_VERSION + 2 })).toBe(false);
+    });
+
+    it('runMigrations downgrades v5 modelProviders back to v4 arrays', () => {
+      const v5Settings = {
+        $version: 5,
+        modelProviders: {
+          openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+          'vertex-ai': { protocol: 'gemini', models: [{ id: 'gemini-pro' }] },
+        },
+      };
+
+      const result = runMigrations(v5Settings, 'user');
+
+      expect(result.finalVersion).toBe(SETTINGS_VERSION);
+      expect(result.executedMigrations).toEqual([
+        { fromVersion: 5, toVersion: 4 },
+      ]);
+      expect(
+        (result.settings as Record<string, unknown>)['modelProviders'],
+      ).toEqual({
+        openai: [{ id: 'gpt-4o' }],
+        'vertex-ai': [{ id: 'gemini-pro' }],
+      });
+    });
+
+    it('is idempotent — the downgraded result needs no further migration', () => {
+      const v5Settings = {
+        $version: 5,
+        modelProviders: {
+          openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+        },
+      };
+      const downgraded = runMigrations(v5Settings, 'user').settings;
+      expect(needsMigration(downgraded)).toBe(false);
+      expect(runMigrations(downgraded, 'user').executedMigrations).toHaveLength(
+        0,
+      );
+    });
+  });
 });

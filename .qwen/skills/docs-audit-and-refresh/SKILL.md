@@ -70,6 +70,16 @@ Before finishing:
 - Check neighboring pages for conflicting guidance
 - Confirm new pages appear in the right `_meta.ts`
 - Re-read critical examples, commands, and paths against code or tests
+- Verify bundled skill doc indices still match the current `docs/` tree.
+  The `qc-helper` bundled skill
+  (`packages/core/src/skills/bundled/qc-helper/SKILL.md`) maintains a
+  hardcoded table mapping topics to doc file paths. If you added, moved,
+  renamed, or removed a page under `docs/users/`, that table must be updated
+  to match. Check the Features and Configuration tables in the SKILL.md
+  against the actual files in `docs/users/features/` and
+  `docs/users/configuration/`. Other bundled or project skills may also
+  reference doc paths — search for `docs/users/` across `.qwen/skills/` and
+  `packages/core/src/skills/bundled/` to catch them.
 
 ## Audit standards
 

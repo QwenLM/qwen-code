@@ -7,6 +7,7 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { describe, it, expect, vi } from 'vitest';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
+import { Box } from 'ink';
 
 describe('ShellConfirmationDialog', () => {
   const onConfirm = vi.fn();
@@ -15,6 +16,17 @@ describe('ShellConfirmationDialog', () => {
     commands: ['ls -la', 'echo "hello"'],
     onConfirm,
   };
+
+  function frameHeight(frame: string): number {
+    return frame.length === 0 ? 0 : frame.split('\n').length;
+  }
+
+  function manyCommands(): string[] {
+    return Array.from(
+      { length: 10 },
+      (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
+    );
+  }
 
   it('renders correctly', () => {
     const { lastFrame } = renderWithProviders(
@@ -49,5 +61,189 @@ describe('ShellConfirmationDialog', () => {
     const select = lastFrame()!.toString();
     // Simulate selecting the third option
     expect(select).toContain('No (esc)');
+  });
+
+  it('keeps the choices visible when many commands are shown in a small terminal', () => {
+    const availableTerminalHeight = 12;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('following shell commands');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('No (esc)');
+    expect(frame).toMatch(/lines hidden/);
+    expect(frame).toContain('cmd-10');
+    expect(frame).not.toContain('cmd-01');
+  });
+
+  it('keeps choices visible with a hidden-command notice in a very small terminal', () => {
+    const availableTerminalHeight = 10;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+    expect(frame).toContain('shell commands hidden');
+  });
+
+  it('keeps choices visible when wrapped by the constrained layout box', () => {
+    const availableTerminalHeight = 10;
+    const { lastFrame } = renderWithProviders(
+      <Box height={availableTerminalHeight} overflow="hidden">
+        <ShellConfirmationDialog
+          request={{
+            commands: manyCommands(),
+            onConfirm,
+          }}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={80}
+        />
+      </Box>,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+    expect(frame).toContain('shell commands hidden');
+  });
+
+  it('keeps choices visible at the 13-row terminal dialog budget', () => {
+    const availableTerminalHeight = 8;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+    expect(frame).not.toMatch(/lines hidden/);
+    expect(frame).not.toContain('cmd-10');
+    expect(frame).toContain('shell commands hidden');
+  });
+
+  it('uses the compact hidden-command layout at the 9-row boundary', () => {
+    const availableTerminalHeight = 9;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).not.toContain('following shell commands');
+    expect(frame).not.toContain('Do you want to proceed?');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+    expect(frame).toContain('shell commands hidden');
+    expect(frame).not.toContain('cmd-10');
+  });
+
+  it('shows the command preview at the 11-row boundary', () => {
+    const availableTerminalHeight = 11;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('following shell commands');
+    expect(frame).toContain('Do you want to proceed?');
+    expect(frame).toMatch(/lines hidden/);
+    expect(frame).toContain('cmd-10');
+    expect(frame).not.toContain('shell commands hidden');
+  });
+
+  it('requires resizing before approval when hidden commands and approvals cannot both fit', () => {
+    const availableTerminalHeight = 7;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('shell commands hidden');
+    expect(frame).not.toContain('Yes, allow once');
+    expect(frame).not.toContain('Always allow in this project');
+    expect(frame).not.toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+  });
+
+  it('renders shell command text literally without inline markdown formatting', () => {
+    const command = 'echo `danger` *literal*';
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: [command],
+          onConfirm,
+        }}
+      />,
+    );
+
+    expect(lastFrame() ?? '').toContain(command);
   });
 });

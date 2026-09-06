@@ -11,7 +11,6 @@ import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
@@ -22,8 +21,10 @@ import type {
 import {
   SkillError,
   SkillErrorCode,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -35,6 +36,7 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
 import {
   QWEN_DIR,
   SKILL_PROVIDER_CONFIG_DIRS,
@@ -77,7 +79,17 @@ export class SkillManager {
   // so future async listeners get checked instead of relying on the
   // `Promise.resolve().then(listener)` runtime adapter to swallow the
   // mismatch silently.
-  private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
+  private readonly changeListeners: Set<
+    (options?: { throwOnError?: boolean }) => void | Promise<void>
+  > = new Set();
+  // One-shot signal: when true, the *next* `notifyChangeListeners()` run
+  // will tell `slashCommandProcessor`'s reload-listener (and any other
+  // opt-in consumer) that an external reload is about to be redundant —
+  // the dialog has already orchestrated `reloadCommands()` itself, so a
+  // listener-driven second reload would be a wasted CommandService
+  // rebuild. Consumed exactly once. See `notifyConfigChanged` &
+  // `slashCommandProcessor.ts:416`.
+  private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
@@ -105,7 +117,9 @@ export class SkillManager {
    * updated state before continuing.
    * @returns A function to remove the listener.
    */
-  addChangeListener(listener: () => void | Promise<void>): () => void {
+  addChangeListener(
+    listener: (options?: { throwOnError?: boolean }) => void | Promise<void>,
+  ): () => void {
     this.changeListeners.add(listener);
     return () => {
       this.changeListeners.delete(listener);
@@ -113,12 +127,61 @@ export class SkillManager {
   }
 
   /**
+   * Public re-entry into the change-listener pipeline for non-disk events,
+   * specifically when the user toggles `skills.disabled` via the
+   * `/skills` dialog. The underlying
+   * `SKILL.md` files have not changed, so `refreshCache` is unnecessary —
+   * we just need every consumer (`SkillTool.refreshSkills`, the slash
+   * command list reload bridged in `slashCommandProcessor`) to re-read its
+   * derived state with the updated disabled set.
+   *
+   * Returns when every listener has either resolved or hit its 30s
+   * timeout, matching the disk-change path's semantics.
+   */
+  async notifyConfigChanged(): Promise<void> {
+    await this.notifyChangeListeners();
+  }
+
+  /**
+   * Tell the next `notifyChangeListeners()` (typically via
+   * `notifyConfigChanged`) that callers which would otherwise reload the
+   * slash-command surface as a side effect should skip it — the caller has
+   * already done that work explicitly. One-shot: consumed by the next
+   * `consumeSlashReloadSuppression()` and reset to `false`.
+   *
+   * Used by the `/skills` dialog: it calls `reloadCommands()` BEFORE
+   * `notifyConfigChanged()` to enforce the provider-registration ordering
+   * that `SkillTool.refreshSkills` depends on. Without this signal, the
+   * `slashCommandProcessor` change-listener would trigger a second
+   * `reloadCommands()` (one awaited by the dialog, one orphaned by the
+   * fire-and-forget listener), doubling CommandService rebuild cost per
+   * save. Listeners that DON'T reload commands are unaffected — they
+   * still fire normally.
+   */
+  suppressNextSlashReload(): void {
+    this.slashReloadSuppressed = true;
+  }
+
+  /**
+   * Read-and-clear: returns `true` exactly once if the suppression flag
+   * was set, then resets it. Listeners that opt into respecting the
+   * signal call this in their handler.
+   */
+  consumeSlashReloadSuppression(): boolean {
+    if (this.slashReloadSuppressed) {
+      this.slashReloadSuppressed = false;
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Notifies all registered change listeners and awaits any returned
    * promises. Sync listeners resolve immediately; async listeners (e.g.
    * `SkillTool.refreshSkills`) hold the activation pipeline until their
-   * downstream tool descriptions are refreshed, eliminating the race where
-   * a system-reminder announces a skill before the model can actually see
-   * it in `<available_skills>`.
+   * downstream validation state is refreshed, so by the time the inline
+   * activation reminder is appended the runtime already accepts the newly
+   * activated skill.
    *
    * Listeners run in parallel via `Promise.allSettled`. They're
    * independent reads (each rebuilds its own derived state from the
@@ -128,10 +191,12 @@ export class SkillManager {
    * `allSettled` (not `Promise.all`) so a single listener throwing
    * still lets the others finish.
    */
-  private async notifyChangeListeners(): Promise<void> {
+  private async notifyChangeListeners(options?: {
+    throwOnError?: boolean;
+  }): Promise<void> {
     // Cap each listener at 30s. Without this, a hung listener (e.g.
-    // `SkillTool.refreshSkills` → `setTools()` blocked on a network
-    // call inside the gemini client) would permanently stall
+    // `SkillTool.refreshSkills` blocked on a slow skill reload) would
+    // permanently stall
     // `matchAndActivateByPaths` and `refreshCache`. The activation
     // registry itself has already been mutated synchronously in the
     // caller, so dropping a slow listener after the timeout is the
@@ -165,16 +230,25 @@ export class SkillManager {
     };
     const results = await Promise.allSettled(
       Array.from(this.changeListeners).map((listener) =>
-        withTimeout(Promise.resolve().then(listener)),
+        withTimeout(
+          Promise.resolve().then(() =>
+            options ? listener(options) : listener(),
+          ),
+        ),
       ),
     );
+    const errors: unknown[] = [];
     for (const result of results) {
       if (result.status === 'rejected') {
+        errors.push(result.reason);
         debugLogger.warn(
           'Skill change listener threw an error:',
           result.reason,
         );
       }
+    }
+    if (options?.throwOnError && errors.length > 0) {
+      throw new AggregateError(errors, 'Skill change listeners failed.');
     }
   }
 
@@ -196,13 +270,6 @@ export class SkillManager {
     debugLogger.debug(
       `Listing skills${options.level ? ` at level: ${options.level}` : ''}${options.force ? ' (forced refresh)' : ''}`,
     );
-    const skills: SkillConfig[] = [];
-    const seenNames = new Set<string>();
-
-    const levelsToCheck: SkillLevel[] = options.level
-      ? [options.level]
-      : ['project', 'user', 'extension', 'bundled'];
-
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
 
@@ -213,6 +280,30 @@ export class SkillManager {
     } else {
       debugLogger.debug('Using cached skills');
     }
+
+    const skills = this.collectCachedSkills(options.level);
+    debugLogger.info(`Listed ${skills.length} unique skills`);
+    return skills;
+  }
+
+  /**
+   * Returns the currently committed cache without triggering discovery.
+   *
+   * Status and diagnostics callers must use this method instead of
+   * `listSkills()` so a read-only request cannot turn a cold cache into a
+   * filesystem scan. `null` means no refresh has committed yet.
+   */
+  getCachedSkills(level?: SkillLevel): SkillConfig[] | null {
+    if (this.skillsCache === null) return null;
+    return this.collectCachedSkills(level);
+  }
+
+  private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
+    const skills: SkillConfig[] = [];
+    const seenNames = new Set<string>();
+    const levelsToCheck: SkillLevel[] = level
+      ? [level]
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Collect skills from each level (precedence: project > user > extension > bundled)
     for (const level of levelsToCheck) {
@@ -241,8 +332,6 @@ export class SkillManager {
     // programmatic consumers — notably SkillTool's model-facing
     // `<available_skills>` description — are not reordered by priority.
     skills.sort((a, b) => a.name.localeCompare(b.name));
-
-    debugLogger.info(`Listed ${skills.length} unique skills`);
     return skills;
   }
 
@@ -346,12 +435,15 @@ export class SkillManager {
   /**
    * Refreshes the skills cache by loading all skills from disk.
    */
-  async refreshCache(): Promise<void> {
+  async refreshCache(options?: { throwOnError?: boolean }): Promise<void> {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
+    // Safe mode: only load bundled (system) skills
+    const levels: SkillLevel[] = this.config.isSafeMode()
+      ? ['bundled']
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Use allSettled so an unrecoverable error at one level (e.g. a hung
     // FS, a permission denial, an OS-level enoent on a removed config dir)
@@ -367,6 +459,7 @@ export class SkillManager {
     );
 
     let totalSkills = 0;
+    const errors: unknown[] = [];
     for (let i = 0; i < settled.length; i++) {
       const result = settled[i];
       if (result.status === 'fulfilled') {
@@ -374,6 +467,7 @@ export class SkillManager {
         skillsCache.set(level, levelSkills);
         totalSkills += levelSkills.length;
       } else {
+        errors.push(result.reason);
         debugLogger.warn(
           `Failed to load ${levels[i]} level skills:`,
           result.reason,
@@ -433,7 +527,14 @@ export class SkillManager {
       `Skills cache refreshed: ${totalSkills} total skills loaded ` +
         `(${conditional.length} conditional)`,
     );
-    await this.notifyChangeListeners();
+    try {
+      await this.notifyChangeListeners(options);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (options?.throwOnError && errors.length > 0) {
+      throw new AggregateError(errors, 'Skill cache refresh failed.');
+    }
   }
 
   /**
@@ -452,9 +553,9 @@ export class SkillManager {
    * Returns the names of skills newly activated by this call. When at least
    * one skill activates, change listeners are notified and awaited — so by
    * the time this method resolves, downstream consumers (notably
-   * `SkillTool.refreshSkills` updating the model-facing tool description)
-   * have applied the new state. Callers can therefore announce the
-   * activation in the same turn without racing against a stale tool list.
+   * `SkillTool.refreshSkills` updating validation state) have applied the
+   * new state. Callers can therefore announce the activation in the same
+   * turn without racing against stale validation data.
    *
    * The activation registry reference is captured at call entry; if a
    * concurrent `refreshCache` rebuilds the registry mid-call, this
@@ -471,8 +572,7 @@ export class SkillManager {
    * an array of file paths and fire change listeners exactly once across
    * all of them. Used by `coreToolScheduler` so a single tool call that
    * names N paths (e.g. ripGrep with multiple `paths:` entries) does not
-   * trigger N successive `SkillTool.refreshSkills` /
-   * `geminiClient.setTools()` round-trips.
+   * trigger N successive `SkillTool.refreshSkills` listener round-trips.
    */
   async matchAndActivateByPaths(
     filePaths: readonly string[],
@@ -481,7 +581,7 @@ export class SkillManager {
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
-      for (const name of registry.matchAndConsume(filePath)) {
+      for (const name of await registry.matchAndConsume(filePath)) {
         newlyAcrossPaths.add(name);
       }
     }
@@ -631,34 +731,18 @@ export class SkillManager {
       const description = String(descriptionRaw);
 
       // Extract optional fields
-      const allowedToolsRaw = frontmatter['allowedTools'] as
-        | unknown[]
-        | undefined;
-      let allowedTools: string[] | undefined;
-
-      if (allowedToolsRaw !== undefined) {
-        if (Array.isArray(allowedToolsRaw)) {
-          allowedTools = allowedToolsRaw.map(String);
-        } else {
-          throw new Error('"allowedTools" must be an array');
-        }
-      }
+      const allowedTools = parseAllowedToolsField(frontmatter);
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'];
+      if (
+        hooksRaw !== undefined &&
+        typeof hooksRaw === 'object' &&
+        hooksRaw !== null &&
+        !Array.isArray(hooksRaw)
+      ) {
+        hooks = this.parseHooksConfig(hooksRaw as Record<string, unknown>);
       }
 
       // Set skillRoot to the directory containing SKILL.md
@@ -666,7 +750,8 @@ export class SkillManager {
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
-      // Extract argument-hint, when_to_use, and disable-model-invocation
+      // Extract argument-hint, when_to_use, disable-model-invocation, and
+      // user-invocable
       const argumentHint =
         typeof frontmatter['argument-hint'] === 'string'
           ? frontmatter['argument-hint']
@@ -681,6 +766,7 @@ export class SkillManager {
         disableModelInvocationRaw === 'true'
           ? true
           : undefined;
+      const userInvocable = parseUserInvocableField(frontmatter);
 
       // Optional `paths` frontmatter: glob patterns that gate when this skill
       // is offered to the model (conditional skill).
@@ -707,6 +793,7 @@ export class SkillManager {
         body: body.trim(),
         whenToUse,
         disableModelInvocation,
+        userInvocable,
         paths,
         priority,
       };
@@ -853,12 +940,32 @@ export class SkillManager {
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
-      case 'user':
-        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          v === QWEN_DIR
-            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
-            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+      case 'user': {
+        // Resolve the defaults so they compare byte-equal to the path.resolve'd
+        // custom dirs in the dedup below. `project` has no such comparison and
+        // joins onto an already-absolute root, so it deliberately does not.
+        const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+          path.resolve(
+            v === QWEN_DIR
+              ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+              : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          ),
         );
+        for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
+          const homeExpanded = expandHomeDir(customDir);
+          const expanded = path.resolve(homeExpanded);
+          if (!path.isAbsolute(homeExpanded)) {
+            debugLogger.warn(
+              `Custom skill directory "${customDir}" is relative; ` +
+                `resolved to "${expanded}" against the working directory`,
+            );
+          }
+          if (!dirs.includes(expanded)) {
+            dirs.push(expanded);
+          }
+        }
+        return dirs;
+      }
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':
@@ -879,6 +986,11 @@ export class SkillManager {
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
+    if (this.config.getDisabledSkillLevels?.().has(level)) {
+      debugLogger.debug(`Skipping disabled ${level} skill level`);
       return [];
     }
 
@@ -916,6 +1028,7 @@ export class SkillManager {
           skills.push({
             ...skill,
             extensionName: extension.name,
+            extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.
@@ -991,6 +1104,24 @@ export class SkillManager {
       // any ordering assumption (`tools/skill.ts`); preserve that contract.
       const loaded = await Promise.all(
         entries.map(async (entry) => {
+          // Skip transient install artifacts (backup / staging dirs left
+          // behind by a crashed reinstall). Without this filter a stale
+          // `.backup-*` sibling with a valid SKILL.md would be loaded as a
+          // duplicate skill, and a "deleted" skill could reappear from its
+          // backup sibling.
+          // Match only the actual artifact shape
+          // (`.backup-<pid>-<timestamp>` / `.installing-<pid>-<timestamp>`,
+          // anchored at the end of the entry name) so that legitimate skill
+          // dirs whose names merely contain `.backup-` or `.installing-`
+          // (e.g. `db.backup-2024`) are not skipped.
+          if (
+            /\.backup-\d+-\d+$/.test(entry.name) ||
+            /\.installing-\d+-\d+$/.test(entry.name)
+          ) {
+            debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+            return null;
+          }
+
           const isDirectory = entry.isDirectory();
           const isSymlink = entry.isSymbolicLink();
 

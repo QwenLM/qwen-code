@@ -11,10 +11,24 @@ This guide covers setting up a Qwen Code channel on Feishu (飞书) / Lark.
 
 1. Go to the [Feishu Open Platform](https://open.feishu.cn)
 2. Create a new application (or use an existing one)
+
+![](https://gw.alicdn.com/imgextra/i4/O1CN01ORb10i1JM0MQfhnsV_!!6000000001013-2-tps-2219-931.png)
+
 3. Under the application, enable the **Bot** capability (添加应用能力 → 机器人)
+
+![](https://gw.alicdn.com/imgextra/i4/O1CN01bClpxu1FZxyH4kNjJ_!!6000000000502-2-tps-2219-931.png)
+
 4. In **Event Subscriptions** (事件与回调), select **Long Connection** (使用长连接接收事件)
+
+![](https://gw.alicdn.com/imgextra/i1/O1CN01uIwzbl1ph8Kwq7hTI_!!6000000005391-2-tps-2219-1166.png)
+
 5. Add the event `im.message.receive_v1` (接收消息)
+
+![](https://gw.alicdn.com/imgextra/i2/O1CN01n7sZmV28s6WX0aDhw_!!6000000007987-2-tps-2219-1090.png)
+
 6. Note the **App ID** (Client ID) and **App Secret** (Client Secret) from the application credentials page
+
+![](https://gw.alicdn.com/imgextra/i2/O1CN01ag1yBh1DxfEUb4xmE_!!6000000000283-2-tps-2219-1166.png)
 
 ### Required Permissions
 
@@ -24,9 +38,20 @@ Enable the following permissions under **Permissions & Scopes** (权限管理):
 - `im:message:send_as_bot` — Send messages as bot
 - `im:resource` — Access message resources (images, files)
 
+To show user and group names instead of IDs in daemon-discovered contacts,
+optionally enable:
+
+- `contact:user.basic_profile:readonly` — Read user display names
+- `im:chat:readonly` — Read group names
+
+Without these optional permissions, messages still work and discovered contacts
+keep their Feishu user and chat IDs as labels.
+
 ### Publish the Application
 
 After configuring permissions and events, create a version and publish it. The bot won't work until the application is published and approved.
+
+![](https://gw.alicdn.com/imgextra/i1/O1CN01GbNRcj1lVuACnkV6M_!!6000000004825-2-tps-2219-1090.png)
 
 ## Configuration
 
@@ -105,9 +130,10 @@ Then set the request URL in Feishu Open Platform to `http://<your-server>:9321`.
 
 Feishu bots work in both DM and group conversations. To enable group support:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a Feishu group
 3. @mention the bot in the group to trigger a response
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages.
 
@@ -154,7 +180,8 @@ Multiple users can send messages simultaneously in the same group chat. Each mes
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
+- If using `"pairing"`, verify the group's pairing request has been approved
 - Make sure you @mention the bot in the group message
 - Verify the bot has been added to the group
 

@@ -22,11 +22,14 @@ import {
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
 
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
     parseInstallSource: vi.fn(),
   };
 });
@@ -46,6 +49,7 @@ describe('extensionsCommand', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
     mockExtensionManager = createMockExtensionManager();
     mockGetExtensions.mockReturnValue([]);
     mockGetLoadedExtensions.mockReturnValue([]);
@@ -61,6 +65,47 @@ describe('extensionsCommand', () => {
       ui: {
         dispatchExtensionStateUpdate: vi.fn(),
       },
+    });
+  });
+
+  describe('explore', () => {
+    const exploreAction = extensionsCommand.subCommands?.find(
+      (cmd) => cmd.name === 'explore',
+    )?.action;
+
+    if (!exploreAction) {
+      throw new Error('Explore action not found');
+    }
+
+    it('should open the selected extensions gallery through the shared browser helper', async () => {
+      vi.stubEnv('NODE_ENV', 'development');
+      await exploreAction(mockContext, 'Gemini');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Opening extensions page in your browser: https://geminicli.com/extensions/',
+        },
+        expect.any(Number),
+      );
+      expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+        'https://geminicli.com/extensions/',
+      );
+    });
+
+    it('should show the URL when browser launch fails', async () => {
+      vi.stubEnv('NODE_ENV', 'development');
+      mockOpenBrowserSecurely.mockRejectedValue(new Error('no browser'));
+
+      await exploreAction(mockContext, 'ClaudeCode');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Failed to open browser. Check out the extensions gallery at https://claudemarketplaces.com/',
+        },
+        expect.any(Number),
+      );
     });
   });
 
@@ -188,6 +233,35 @@ describe('extensionsCommand', () => {
         {
           type: MessageType.INFO,
           text: 'Extension "test-extension" installed successfully.',
+        },
+        expect.any(Number),
+      );
+      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+    });
+
+    it('shows a warning and reloads commands after a committed install warning', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockRejectedValue(
+        Object.assign(
+          new Error('Extension committed but could not be reloaded.'),
+          {
+            code: 'extension_committed_with_warnings',
+            committed: true,
+            identity: { id: 'test-extension', name: 'test-extension' },
+            warnings: [],
+          },
+        ),
+      );
+
+      await installAction(mockContext, 'https://github.com/test/extension');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Extension was installed but could not be reloaded: Extension committed but could not be reloaded.',
         },
         expect.any(Number),
       );

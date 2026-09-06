@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
@@ -27,6 +28,12 @@ function k(overrides: Partial<Key>): Key {
 describe('isPrintableSearchChar', () => {
   it('accepts a single printable ASCII char', () => {
     expect(isPrintableSearchChar(k({ name: 'a', sequence: 'a' }))).toBe(true);
+  });
+
+  it('accepts one printable emoji grapheme cluster', () => {
+    expect(isPrintableSearchChar(k({ name: '', sequence: '🚀' }))).toBe(true);
+    expect(isPrintableSearchChar(k({ name: '', sequence: '🇨🇳' }))).toBe(true);
+    expect(isPrintableSearchChar(k({ name: '', sequence: '👨‍👩‍👧‍👦' }))).toBe(true);
   });
 
   it('accepts SPACE — caller decides whether to seed it', () => {
@@ -75,6 +82,15 @@ describe('isPrintableSearchChar', () => {
       false,
     );
     expect(isPrintableSearchChar(k({ name: 'escape', sequence: '' }))).toBe(
+      false,
+    );
+  });
+
+  it('rejects C1 control characters', () => {
+    expect(isPrintableSearchChar(k({ name: 'csi', sequence: '\u009b' }))).toBe(
+      false,
+    );
+    expect(isPrintableSearchChar(k({ name: 'nel', sequence: '\u0085' }))).toBe(
       false,
     );
   });
@@ -237,6 +253,40 @@ describe('useSessionSearchInput', () => {
     });
     expect(result.current.searchQuery).toBe('a');
     expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('Backspace removes one whole emoji grapheme', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.setSearchQuery('a🚀');
+    });
+
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'backspace', sequence: '' }));
+    });
+
+    expect(result.current.searchQuery).toBe('a');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('Backspace through the last emoji clears the query AND exits to list', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.setSearchQuery('👨‍👩‍👧‍👦');
+    });
+
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'backspace', sequence: '' }));
+    });
+
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
   });
 
   it('Backspace through the last char clears the query AND exits to list', () => {

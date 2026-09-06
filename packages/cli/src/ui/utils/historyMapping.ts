@@ -6,8 +6,21 @@
 
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
-import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
+import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
+import {
+  CompressionStatus,
+  getStartupContextLength,
+  isApiUserPrompt,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
+
+/**
+ * TUI rewind's binding of the shared user-prompt classifier. Exported so the
+ * OpenTUI parity path counts prompts under the exact same rule.
+ */
+export const TUI_API_USER_PROMPT_OPTIONS: ApiUserPromptOptions = {
+  excludeClearedMediaPlaceholders: true,
+};
 
 /**
  * Returns true when the history item represents a real user prompt that was
@@ -34,32 +47,33 @@ export function isRealUserTurn(
 /**
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
+ *
+ * Thin binding of the shared classifier: TUI rewind excludes microcompaction
+ * media-clear placeholders because a cleared media-only entry never produced
+ * a visible user turn, so counting it would desynchronize the API prompt
+ * count from the UI turn count and truncate one turn early. See
+ * `ApiUserPromptOptions` in core for why that exclusion is an option rather
+ * than part of the shared rule (ACP must keep those entries counted), and for
+ * the exact-match collision this leaves behind — which is what prompt
+ * identity resolves.
  */
-function isUserTextContent(content: Content): boolean {
-  if (content.role !== 'user') return false;
-  if (!content.parts || content.parts.length === 0) return false;
-
-  const hasFunctionResponse = content.parts.some(
-    (part) => 'functionResponse' in part,
-  );
-  if (hasFunctionResponse) return false;
-
-  return content.parts.some((part) => 'text' in part && part.text);
+export function isUserTextContent(content: Content): boolean {
+  return isApiUserPrompt(content, TUI_API_USER_PROMPT_OPTIONS);
 }
 
 /**
- * Detects whether the API history starts with the startup context pair
- * (user env context + model acknowledgment).
+ * Finds the last successful *summarizing* compression marker. Fast
+ * (rule-based) compression markers are excluded: `/compress-fast` removes no
+ * user prompts from the API history and inserts no summary prefix, so its
+ * marker is not a truncation boundary — treating it as one collapses the
+ * rewind anchor and silently drops the pre-marker history.
  */
-function hasStartupContext(apiHistory: Content[]): boolean {
-  if (apiHistory.length < 2) return false;
-  const first = apiHistory[0];
-  const second = apiHistory[1];
-  if (first?.role !== 'user' || second?.role !== 'model') return false;
-  return (
-    second.parts?.some(
-      (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
-    ) ?? false
+function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
+  return history.findLastIndex(
+    (item) =>
+      item.type === 'compression' &&
+      item.compression.compressionStatus === CompressionStatus.COMPRESSED &&
+      item.compression.compressionKind !== 'fast',
   );
 }
 
@@ -68,13 +82,13 @@ function hasStartupContext(apiHistory: Content[]): boolean {
  * to a specific user turn in the UI history.
  *
  * The API history may include:
- * - A startup context pair: [user(env), model(ack)] at the beginning
+ * - A startup context entry at the beginning
  * - User text prompts (corresponding to UI user turns)
  * - Model responses (with optional functionCall parts)
  * - Tool result entries: user(functionResponse) + model(response)
  *
  * This function counts user text Content entries (skipping tool results
- * and the startup context pair) to find the API boundary corresponding
+ * and the startup context entry) to find the API boundary corresponding
  * to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
@@ -93,21 +107,43 @@ export function computeApiTruncationIndex(
   targetUserItemId: number,
   apiHistory: Content[],
 ): number {
+  const targetIndex = uiHistory.findIndex(
+    (item) => item.id === targetUserItemId,
+  );
+  if (targetIndex === -1) return -1;
+
+  const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
+  if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
+
   // Count how many UI user turns exist before the target
   let uiUserTurnCount = 0;
-  for (const item of uiHistory) {
-    if (item.id === targetUserItemId) {
-      break;
-    }
+  for (
+    let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
+    i < targetIndex;
+    i++
+  ) {
+    const item = uiHistory[i]!;
     if (isRealUserTurn(item)) {
       uiUserTurnCount++;
     }
   }
 
   // Determine the starting index in the API history (skip startup context)
-  const startIndex = hasStartupContext(apiHistory) ? 2 : 0;
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
 
   if (uiUserTurnCount === 0) {
+    // Marker-less auto-compaction (entrance 3): the API history carries a
+    // compressed prefix but the UI has no summarizing compression boundary.
+    // Rewinding to the first turn would silently truncate to
+    // [prelude, summary, ack] and drop every real turn — fail loud instead.
+    if (
+      compressionIndex === -1 &&
+      startIndex > getStartupContextLength(apiHistory)
+    ) {
+      return -1;
+    }
     // Rewinding to the first user turn: keep only startup context (if any)
     return startIndex;
   }

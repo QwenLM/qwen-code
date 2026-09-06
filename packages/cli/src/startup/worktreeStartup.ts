@@ -26,6 +26,8 @@ import {
   createDebugLogger,
   GitWorktreeService,
   readWorktreeSession,
+  readWorktreeSessionMarker,
+  isSessionRuntimeActive,
   worktreeBranchForSlug,
   writeWorktreeSession,
   writeWorktreeSessionMarker,
@@ -166,7 +168,14 @@ export async function setupStartupWorktree(
   } else if (trimmed.length === 0) {
     slug = GitWorktreeService.generateAutoSlug();
   } else {
-    const validation = GitWorktreeService.validateUserWorktreeSlug(trimmed);
+    // The reserved `pr-<N>` shape is tolerated HERE so an existing
+    // PR-backed worktree can be re-attached by its literal slug (`qwen
+    // --worktree pr-42` after `--worktree=#42` created it); the re-attach
+    // probe below re-applies the reservation when no such worktree exists,
+    // so a literal `pr-<N>` never creates one.
+    const validation = GitWorktreeService.validateUserWorktreeSlug(trimmed, {
+      allowPrBackedShape: true,
+    });
     if (validation) {
       return { ok: false, error: `--worktree: ${validation}` };
     }
@@ -214,6 +223,18 @@ export async function setupStartupWorktree(
       await service.getRegisteredWorktreeBranch(expectedWorktreePath);
   } catch {
     registered = null;
+  }
+  if (registered === null && !isPullRequest) {
+    // Nothing to re-attach: a user-typed `pr-<N>` would CREATE a worktree
+    // in the reserved shape (binding the session to PR N it never touched)
+    // — the exact case the reservation exists for. Point at the PR form.
+    const reserved = GitWorktreeService.validateUserWorktreeSlug(slug);
+    if (reserved) {
+      return {
+        ok: false,
+        error: `--worktree: ${reserved} Use \`--worktree=#${slug.slice('pr-'.length)}\` to create the worktree for that PR.`,
+      };
+    }
   }
   if (registered !== null) {
     if (registered.branch !== expectedBranch) {
@@ -289,6 +310,7 @@ export async function setupStartupWorktree(
   const baseRef = isPullRequest ? pullRequestHeadSha! : originalBranch;
   const result = await service.createUserWorktree(slug, baseRef, {
     symlinkDirectories: options?.symlinkDirectories,
+    prBacked: isPullRequest,
   });
   if (!result.success || !result.worktree) {
     return {
@@ -391,19 +413,28 @@ export async function persistStartupWorktreeSidecar(
     overriddenSlug = previous.slug;
   }
 
-  // Best-effort marker write — same policy as EnterWorktreeTool: a failure
-  // here does not abort the session, the worktree is usable, ownership
-  // checks just treat the worktree as "owner unknown" for future
-  // exit_worktree calls.
-  //
-  // SKIP on re-attach: the marker was written by whichever session
-  // ORIGINALLY created this worktree. Overwriting with the current
-  // session id would let `exit_worktree action="remove"` succeed across
-  // sessions, bypassing Phase A's cross-session ownership guard. The
-  // existing marker stays so the original owner remains canonical; the
-  // current session can still operate INSIDE the worktree (file ops,
-  // commits) — ownership only governs the destructive remove.
-  if (!context.wasReattached) {
+  // Best-effort marker write. On re-attach, adopt only when the previous
+  // owner is not a live runtime anymore; otherwise keep the old marker so
+  // two active sessions cannot both remove the same worktree.
+  let shouldWriteMarker = !context.wasReattached;
+  if (context.wasReattached) {
+    const owner = await readWorktreeSessionMarker(context.worktreePath);
+    if (owner === null || owner === sessionId) {
+      shouldWriteMarker = true;
+    } else {
+      const ownerActive = await isSessionRuntimeActive(owner, [
+        context.repoRoot,
+        context.worktreePath,
+      ]).catch((error) => {
+        debugLogger.warn(
+          `persistStartupWorktreeSidecar: failed to check owner runtime ${owner}: ${error}`,
+        );
+        return true;
+      });
+      shouldWriteMarker = !ownerActive;
+    }
+  }
+  if (shouldWriteMarker) {
     await writeWorktreeSessionMarker(context.worktreePath, sessionId).catch(
       () => {},
     );
@@ -430,7 +461,7 @@ export async function persistStartupWorktreeSidecar(
  * the first user prompt (TUI: INFO history item + reminder prefix; headless:
  * `<system-reminder>` prefix + JSON event; ACP currently exits before
  * reaching this code path — see the `--worktree` × `--acp` mutex check
- * in `gemini.tsx`).
+ * in `llm.tsx`).
  *
  * Mirrors `restoreWorktreeContext`'s contextMessage shape so resumed-with-
  * worktree and started-with-worktree sessions read identically to the model.

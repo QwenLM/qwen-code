@@ -315,6 +315,22 @@ describe('editor utils', () => {
       });
     });
 
+    it('should escape backslashes and quotes in emacs paths', () => {
+      // Backslashes (Windows separators) and double quotes are both Elisp
+      // string metacharacters; left unescaped they corrupt the (ediff ...)
+      // form. A double quote ends the string early; a backslash is consumed
+      // as an escape, dropping the following path character.
+      const command = getDiffCommand(
+        'C:\\tmp\\a"b.txt',
+        '/tmp/new.txt',
+        'emacs',
+      );
+      expect(command).toEqual({
+        command: 'emacs',
+        args: ['--eval', '(ediff "C:\\\\tmp\\\\a\\"b.txt" "/tmp/new.txt")'],
+      });
+    });
+
     it('should return null for an unsupported editor', () => {
       // @ts-expect-error Testing unsupported editor
       const command = getDiffCommand('old.txt', 'new.txt', 'foobar');

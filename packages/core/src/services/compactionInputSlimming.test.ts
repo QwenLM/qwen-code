@@ -17,6 +17,7 @@ import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
   sanitizeMimeForPlaceholder,
+  SLIM_TEXT_TRUNCATION_MARKER,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 
@@ -123,6 +124,69 @@ describe('compactionInputSlimming', () => {
       expect(t.screenshotTriggerThreshold).toBe(99);
     });
 
+    it('rejects fractional count-like env values', () => {
+      const cases = [
+        {
+          envKey: 'QWEN_COMPACT_MAX_RECENT_FILES',
+          value: '1.5',
+          settings: { maxRecentFilesToRetain: 4 },
+          get: (t: ReturnType<typeof resolveCompactionTuning>) =>
+            t.maxRecentFiles,
+          expected: 4,
+        },
+        {
+          envKey: 'QWEN_COMPACT_MAX_RECENT_IMAGES',
+          value: '2.5',
+          settings: { maxRecentImagesToRetain: 5 },
+          get: (t: ReturnType<typeof resolveCompactionTuning>) =>
+            t.maxRecentImages,
+          expected: 5,
+        },
+        {
+          envKey: 'QWEN_COMPACT_SCREENSHOT_THRESHOLD',
+          value: '9007199254740990.5',
+          settings: { screenshotTriggerThreshold: 6 },
+          get: (t: ReturnType<typeof resolveCompactionTuning>) =>
+            t.screenshotTriggerThreshold,
+          expected: 6,
+        },
+      ] as const;
+
+      for (const c of cases) {
+        for (const k of COMPACTION_ENV_KEYS) delete process.env[k];
+        process.env[c.envKey] = c.value;
+        expect(c.get(resolveCompactionTuning(c.settings))).toBe(c.expected);
+      }
+    });
+
+    it('rejects fractional count-like settings values', () => {
+      const t = resolveCompactionTuning({
+        maxRecentFilesToRetain: 1.5,
+        maxRecentImagesToRetain: 2.5,
+        screenshotTriggerThreshold: 3.5,
+      });
+      expect(t.maxRecentFiles).toBe(DEFAULT_MAX_RECENT_FILES);
+      expect(t.maxRecentImages).toBe(DEFAULT_MAX_RECENT_IMAGES);
+      expect(t.screenshotTriggerThreshold).toBe(
+        DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+      );
+    });
+
+    it('rejects unsafe integer count-like values', () => {
+      process.env['QWEN_COMPACT_MAX_RECENT_FILES'] = String(
+        Number.MAX_SAFE_INTEGER + 1,
+      );
+      const envFallback = resolveCompactionTuning({
+        maxRecentFilesToRetain: 4,
+      });
+      expect(envFallback.maxRecentFiles).toBe(4);
+
+      const settingsFallback = resolveCompactionTuning({
+        maxRecentImagesToRetain: Number.MAX_SAFE_INTEGER + 1,
+      });
+      expect(settingsFallback.maxRecentImages).toBe(DEFAULT_MAX_RECENT_IMAGES);
+    });
+
     it('parses the boolean env both ways and ignores typos', () => {
       process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = 'false';
       expect(resolveCompactionTuning(undefined).enableScreenshotTrigger).toBe(
@@ -184,6 +248,21 @@ describe('compactionInputSlimming', () => {
         functionCall: { name: 'read_file', args: { path: '/a' } },
       };
       expect(estimatePartChars(call, 1600)).toBe(JSON.stringify(call).length);
+    });
+
+    it('counts model-facing function response errors', () => {
+      const error = 'x'.repeat(10_000);
+      expect(
+        estimatePartChars(
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { error },
+            },
+          },
+          1600,
+        ),
+      ).toBe(error.length + 64);
     });
   });
 
@@ -252,6 +331,30 @@ describe('compactionInputSlimming', () => {
       expect(result.stats.documentsStripped).toBe(1);
       expect(result.slimmedHistory[0]!.parts![0]).toEqual({
         text: '[document: application/pdf]',
+      });
+    });
+
+    it('preserves media supported by the target modalities', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/png', data: 'IMAGE' } },
+            { inlineData: { mimeType: 'application/pdf', data: 'PDF' } },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, { pdf: true });
+
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { text: '[image: image/png]' },
+        { inlineData: { mimeType: 'application/pdf', data: 'PDF' } },
+      ]);
+      expect(result.stats).toEqual({
+        imagesStripped: 1,
+        documentsStripped: 0,
+        textPartsTruncated: 0,
       });
     });
 
@@ -495,6 +598,221 @@ describe('compactionInputSlimming', () => {
       // (imageTokenEstimate * 4), NOT close to the 1M JSON-stringify size.
       expect(chars).toBeLessThan(10_000);
       expect(chars).toBeGreaterThanOrEqual(6400);
+    });
+  });
+
+  describe('maxTextChars truncation (payload-overflow compaction, #10380)', () => {
+    const bigText = 'T'.repeat(10_000);
+
+    it('keeps text intact without options (token-driven compactions)', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: bigText }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'a',
+                name: 'run_shell_command',
+                response: { output: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(history);
+      expect(slimmedHistory).toBe(history);
+      expect(stats.textPartsTruncated).toBe(0);
+    });
+
+    it('truncates oversized text parts and tool-result outputs with maxTextChars', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: bigText }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'a',
+                name: 'run_shell_command',
+                response: { output: bigText },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'b',
+                name: 'read_file',
+                response: { error: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+
+      expect(stats.textPartsTruncated).toBe(3);
+      expect(slimmedHistory).not.toBe(history);
+      // Input is never mutated.
+      expect(history[0]!.parts![0]!.text).toBe(bigText);
+
+      const textPart = slimmedHistory[0]!.parts![0]!;
+      expect(textPart.text).toBe('T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER);
+
+      const outputResponse = (
+        slimmedHistory[1]!.parts![0]!.functionResponse as NonNullable<
+          NonNullable<Content['parts']>[number]['functionResponse']
+        >
+      ).response;
+      expect(outputResponse?.['output']).toBe(
+        'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+
+      const errorResponse = (
+        slimmedHistory[2]!.parts![0]!.functionResponse as NonNullable<
+          NonNullable<Content['parts']>[number]['functionResponse']
+        >
+      ).response;
+      expect(errorResponse?.['error']).toBe(
+        'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it('leaves payloads under the cap untouched and preserves identity where possible', () => {
+      const small = 'T'.repeat(400);
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: small }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'a',
+                name: 'run_shell_command',
+                response: { output: small },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+      expect(slimmedHistory).toBe(history);
+      expect(stats.textPartsTruncated).toBe(0);
+    });
+
+    it('preserves sibling properties (thought) on truncated text parts', () => {
+      // Reasoning histories carry `{ text, thought: true }` parts; the
+      // converter pipeline keys off the flag, so truncation must not
+      // relabel a thought part as ordinary content (#10380).
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [{ text: bigText, thought: true }],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+      expect(stats.textPartsTruncated).toBe(1);
+      const part = slimmedHistory[0]!.parts![0]!;
+      expect(part.text).toBe('T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER);
+      expect(part.thought).toBe(true);
+    });
+
+    it('truncates oversized functionCall string args (write_file content carrier)', () => {
+      // write_file/edit place entire file contents in functionCall.args;
+      // estimatePartChars bills them, so the 413 path must slim them too.
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'write_file',
+                args: { file_path: '/tmp/x.txt', content: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+      expect(stats.textPartsTruncated).toBe(1);
+      const fc = slimmedHistory[0]!.parts![0]!.functionCall!;
+      expect(fc.args).toEqual({
+        file_path: '/tmp/x.txt',
+        content: 'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      });
+      // Input is never mutated.
+      expect(history[0]!.parts![0]!.functionCall!.args).toEqual({
+        file_path: '/tmp/x.txt',
+        content: bigText,
+      });
+    });
+
+    it('does not split surrogate pairs when truncating text', () => {
+      const value = 'a'.repeat(499) + '🙂tail';
+      const { slimmedHistory } = slimCompactionInput(
+        [
+          {
+            role: 'user',
+            parts: [
+              { text: value },
+              {
+                functionCall: {
+                  name: 'write_file',
+                  args: { content: value },
+                },
+              },
+              {
+                functionResponse: {
+                  name: 'run_shell_command',
+                  response: { output: value },
+                },
+              },
+            ],
+          },
+        ],
+        undefined,
+        { maxTextChars: 500 },
+      );
+
+      const parts = slimmedHistory[0]!.parts!;
+      const outputs = [
+        parts[0]!.text!,
+        parts[1]!.functionCall!.args!['content'] as string,
+        parts[2]!.functionResponse!.response!['output'] as string,
+      ];
+      for (const output of outputs) {
+        expect(output.charCodeAt(498)).toBe('a'.charCodeAt(0));
+        expect(output.charCodeAt(499)).not.toBeGreaterThanOrEqual(0xd800);
+        expect(output.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
+      }
     });
   });
 });

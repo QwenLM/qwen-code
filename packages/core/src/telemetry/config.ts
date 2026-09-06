@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { TelemetrySettings } from '../config/config.js';
+import type {
+  ResolvedTelemetrySettings,
+  TelemetrySettings,
+} from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
-import { TelemetryTarget } from './index.js';
+import {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  TelemetryTarget,
+  isValidSensitiveSpanAttributeMaxLength,
+} from './index.js';
 import type { ResourceAttributeWarnings } from './resource-attributes.js';
 import {
   coerceStringResourceAttributes,
@@ -40,6 +48,61 @@ export function parseTelemetryTargetValue(
   return undefined;
 }
 
+/**
+ * @throws FatalConfigError when the env var is set but invalid; telemetry
+ * config fails closed instead of silently falling back.
+ */
+function parseSensitiveSpanAttributeMaxLengthEnvValue(
+  envName: string,
+  value: string | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+  if (
+    !/^\d+$/.test(trimmed) ||
+    !isValidSensitiveSpanAttributeMaxLength(parsed)
+  ) {
+    throw new FatalConfigError(
+      `Invalid ${envName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got '${value}'`,
+    );
+  }
+
+  return parsed;
+}
+
+function parseSensitiveSpanAttributeMaxLengthSetting(
+  settingName: string,
+  value: unknown,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'number' ||
+    !isValidSensitiveSpanAttributeMaxLength(value)
+  ) {
+    throw new FatalConfigError(
+      `Invalid ${settingName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
+        value,
+      )}`,
+    );
+  }
+  return value;
+}
+
+function parseTelemetryUserId(
+  source: string,
+  value: unknown,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new FatalConfigError(
+      `Invalid ${source}: must be a string, got ${typeof value}`,
+    );
+  }
+  return value.trim() || undefined;
+}
+
 export interface TelemetryArgOverrides {
   telemetry?: boolean;
   telemetryTarget?: string | TelemetryTarget;
@@ -56,7 +119,7 @@ export async function resolveTelemetrySettings(options: {
   argv?: TelemetryArgOverrides;
   env?: Record<string, string | undefined>;
   settings?: TelemetrySettings;
-}): Promise<TelemetrySettings> {
+}): Promise<ResolvedTelemetrySettings> {
   const argv = options.argv ?? {};
   const env = options.env ?? {};
   const settings = options.settings ?? {};
@@ -105,12 +168,29 @@ export async function resolveTelemetrySettings(options: {
     parseBooleanEnvFlag(env['QWEN_TELEMETRY_LOG_PROMPTS']) ??
     settings.logPrompts;
 
+  const userId =
+    parseTelemetryUserId(
+      'QWEN_TELEMETRY_USER_ID',
+      env['QWEN_TELEMETRY_USER_ID'],
+    ) ?? parseTelemetryUserId('telemetry.userId', settings.userId);
+
   const includeSensitiveSpanAttributes =
     parseBooleanEnvFlag(
       env['QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES'],
     ) ??
     settings.includeSensitiveSpanAttributes ??
     false;
+
+  const sensitiveSpanAttributeMaxLength =
+    parseSensitiveSpanAttributeMaxLengthEnvValue(
+      'QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH',
+      env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'],
+    ) ??
+    parseSensitiveSpanAttributeMaxLengthSetting(
+      'telemetry.sensitiveSpanAttributeMaxLength',
+      settings.sensitiveSpanAttributeMaxLength,
+    ) ??
+    DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
 
   const outfile =
     argv.telemetryOutfile ?? env['QWEN_TELEMETRY_OUTFILE'] ?? settings.outfile;
@@ -184,7 +264,9 @@ export async function resolveTelemetrySettings(options: {
     otlpLogsEndpoint,
     otlpMetricsEndpoint,
     logPrompts,
+    userId,
     includeSensitiveSpanAttributes,
+    sensitiveSpanAttributeMaxLength,
     outfile,
     resourceAttributes,
     metrics: { includeSessionId: metricsIncludeSessionId },

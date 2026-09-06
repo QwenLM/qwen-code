@@ -110,7 +110,7 @@ export function EditOptionsStep({
       {error && (
         <Box flexDirection="column">
           <Text bold color={theme.status.error}>
-            {t('❌ Error:')}
+            {t('✗ Error:')}
           </Text>
           <Box flexDirection="column" padding={1} paddingBottom={0}>
             <Text color={theme.status.error} wrap="wrap">

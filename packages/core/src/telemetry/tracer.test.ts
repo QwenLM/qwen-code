@@ -16,17 +16,12 @@ import { deriveTraceId } from './trace-id-utils.js';
 const mockState = vi.hoisted(() => ({
   getSpanReturn: undefined as unknown,
   lastParentCtx: undefined as unknown,
-  sessionContext: undefined as unknown,
   activeContext: {} as unknown,
   throwOnSetStatus: false,
   throwOnEnd: false,
   nonWritableSetStatus: false,
 }));
 const debugWarnCalls = vi.hoisted((): unknown[][] => []);
-
-vi.mock('./session-context.js', () => ({
-  getSessionContext: () => mockState.sessionContext,
-}));
 
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
@@ -131,7 +126,6 @@ beforeEach(() => {
   spans.length = 0;
   mockState.getSpanReturn = undefined;
   mockState.lastParentCtx = undefined;
-  mockState.sessionContext = undefined;
   mockState.activeContext = {};
   mockState.throwOnSetStatus = false;
   mockState.throwOnEnd = false;
@@ -524,42 +518,29 @@ describe('createSessionRootContext', () => {
 });
 
 describe('parent context selection', () => {
-  it('uses session context as parent when no active span exists', async () => {
-    const sessionCtx = { _sentinel: 'session' };
-    mockState.getSpanReturn = undefined;
-    mockState.sessionContext = sessionCtx;
-
-    await withSpan('test.session-parent', {}, async () => {});
-
-    expect(mockState.lastParentCtx).toBe(sessionCtx);
-  });
-
-  it('prefers active span context over session context', async () => {
-    const sessionCtx = { _sentinel: 'session' };
-    mockState.getSpanReturn = { _sentinel: 'active-span' };
-    mockState.sessionContext = sessionCtx;
+  it('always uses context.active() as parent', async () => {
+    mockState.activeContext = { _sentinel: 'active' };
 
     await withSpan('test.active-parent', {}, async () => {});
 
     expect(mockState.lastParentCtx).toBe(mockState.activeContext);
   });
 
-  it('falls back to active context when neither active span nor session context exists', async () => {
+  it('uses context.active() even when no active span exists', async () => {
+    const activeCtx = { _sentinel: 'empty-context' };
     mockState.getSpanReturn = undefined;
-    mockState.sessionContext = undefined;
+    mockState.activeContext = activeCtx;
 
     await withSpan('test.fallback', {}, async () => {});
 
-    expect(mockState.lastParentCtx).toBe(mockState.activeContext);
+    expect(mockState.lastParentCtx).toBe(activeCtx);
   });
 
   it('applies the same parent context logic for startSpanWithContext', () => {
-    const sessionCtx = { _sentinel: 'session' };
-    mockState.getSpanReturn = undefined;
-    mockState.sessionContext = sessionCtx;
+    mockState.activeContext = { _sentinel: 'active-for-manual' };
 
-    startSpanWithContext('test.manual-session', {});
+    startSpanWithContext('test.manual', {});
 
-    expect(mockState.lastParentCtx).toBe(sessionCtx);
+    expect(mockState.lastParentCtx).toBe(mockState.activeContext);
   });
 });

@@ -58,6 +58,41 @@ describe('FileDiscoveryService', () => {
       const service = new FileDiscoveryService(projectRoot);
 
       expect(service.shouldQwenIgnoreFile('secrets.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('secrets.txt')).toBe(
+        '.qwenignore',
+      );
+      expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
+    });
+
+    it('should load .agentignore and .aiignore patterns', async () => {
+      await createTestFile('.agentignore', 'agent-secret.txt');
+      await createTestFile('.aiignore', 'ai-secret.txt');
+      const service = new FileDiscoveryService(projectRoot);
+
+      expect(service.shouldQwenIgnoreFile('agent-secret.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('agent-secret.txt')).toBe(
+        '.agentignore',
+      );
+      expect(service.shouldQwenIgnoreFile('ai-secret.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('ai-secret.txt')).toBe(
+        '.aiignore',
+      );
+      expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
+    });
+
+    it('should load configured custom qwen ignore file patterns', async () => {
+      await createTestFile('.cursorignore', 'cursor-secret.txt');
+      await createTestFile('.agentignore', 'agent-secret.txt');
+      const service = new FileDiscoveryService(projectRoot, ['.cursorignore']);
+
+      expect(service.getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      expect(service.shouldQwenIgnoreFile('cursor-secret.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('cursor-secret.txt')).toBe(
+        '.cursorignore',
+      );
+      expect(service.shouldQwenIgnoreFile('agent-secret.txt')).toBe(false);
       expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
     });
   });

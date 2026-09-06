@@ -5,13 +5,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { alibabaStandardProvider } from '../../presets/alibaba-standard.js';
 import {
-  AuthType,
-  alibabaStandardProvider,
   buildInstallPlan,
+  getDefaultModelIds,
   resolveBaseUrl,
   providerMatchesCredentials,
-} from '@qwen-code/qwen-code-core';
+} from '../../provider-config.js';
 
 describe('alibabaStandardProvider', () => {
   it('has correct provider config', () => {
@@ -33,6 +34,17 @@ describe('alibabaStandardProvider', () => {
     expect(urls).toContain(
       'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     );
+  });
+
+  it('includes qwen3.7 models in default model IDs', () => {
+    expect(getDefaultModelIds(alibabaStandardProvider)).toEqual([
+      'qwen3.6-plus',
+      'qwen3.7-plus',
+      'qwen3.7-max',
+      'glm-5.1',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+    ]);
   });
 
   it('resolves baseUrl for known region', () => {
@@ -66,6 +78,23 @@ describe('alibabaStandardProvider', () => {
       name: '[ModelStudio Standard] custom-model',
     });
     expect(models?.[1]?.generationConfig).toBeUndefined();
+  });
+
+  it('does not mark DeepSeek models as multimodal', () => {
+    const plan = buildInstallPlan(alibabaStandardProvider, {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'sk-standard',
+      modelIds: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
+    });
+    expect(models?.[1]?.generationConfig).toEqual({
+      contextWindowSize: 1000000,
+    });
   });
 
   it('auto-derives ownership via envKey + prefix', () => {

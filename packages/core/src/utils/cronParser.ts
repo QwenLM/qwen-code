@@ -12,9 +12,9 @@ interface CronFields {
   dayOfMonth: Set<number>;
   month: Set<number>;
   dayOfWeek: Set<number>;
-  /** True when the day-of-month field was literally '*' (unrestricted). */
+  /** True when the day-of-month field starts with '*' (Vixie wildcard flag). */
   domIsWild: boolean;
-  /** True when the day-of-week field was literally '*' (unrestricted). */
+  /** True when the day-of-week field starts with '*' (Vixie wildcard flag). */
   dowIsWild: boolean;
 }
 
@@ -25,6 +25,8 @@ const FIELD_RANGES: Array<[number, number]> = [
   [1, 12], // month
   [0, 7], // day of week (0 and 7 both mean Sunday)
 ];
+
+const INTEGER_TOKEN_RE = /^\d+$/;
 
 /**
  * Parses a single cron field into a set of matching values.
@@ -53,26 +55,40 @@ function parseField(field: string, min: number, max: number): Set<number> {
       rangeStart = min;
       rangeEnd = max;
     } else if (base.includes('-')) {
-      const [startStr, endStr] = base.split('-');
-      rangeStart = parseInt(startStr!, 10);
-      rangeEnd = parseInt(endStr!, 10);
-      if (isNaN(rangeStart) || isNaN(rangeEnd)) {
+      const rangeParts = base.split('-');
+      if (
+        rangeParts.length !== 2 ||
+        !INTEGER_TOKEN_RE.test(rangeParts[0]!) ||
+        !INTEGER_TOKEN_RE.test(rangeParts[1]!)
+      ) {
         throw new Error(`Invalid range: "${base}"`);
       }
+      const [startStr, endStr] = rangeParts;
+      rangeStart = parseInt(startStr!, 10);
+      rangeEnd = parseInt(endStr!, 10);
       if (rangeStart < min || rangeEnd > max || rangeStart > rangeEnd) {
         throw new Error(`Range ${base} out of bounds [${min}-${max}]`);
       }
     } else {
+      if (!INTEGER_TOKEN_RE.test(base)) {
+        throw new Error(`Invalid value: "${base}"`);
+      }
       const val = parseInt(base, 10);
-      if (isNaN(val) || val < min || val > max) {
+      if (val < min || val > max) {
         throw new Error(`Value "${base}" out of bounds [${min}-${max}]`);
       }
       rangeStart = val;
-      rangeEnd = val;
+      // Vixie-cron: a step applied to a single value (`N/step`) means
+      // `N-max/step` — start at N and skip forward to the field maximum, e.g.
+      // `5/15` → 5,20,35,50. Without a step, `N` matches only the value N.
+      rangeEnd = stepParts.length === 2 ? max : val;
     }
 
+    if (stepParts.length === 2 && !INTEGER_TOKEN_RE.test(stepParts[1]!)) {
+      throw new Error(`Invalid step: "${stepParts[1]}"`);
+    }
     const step = stepParts.length === 2 ? parseInt(stepParts[1]!, 10) : 1;
-    if (isNaN(step) || step <= 0) {
+    if (step <= 0) {
       throw new Error(`Invalid step: "${stepParts[1]}"`);
     }
 
@@ -113,17 +129,16 @@ export function parseCron(cronExpr: string): CronFields {
     dayOfMonth: parseField(parts[2]!, FIELD_RANGES[2]![0], FIELD_RANGES[2]![1]),
     month: parseField(parts[3]!, FIELD_RANGES[3]![0], FIELD_RANGES[3]![1]),
     dayOfWeek,
-    domIsWild: parts[2]!.trim() === '*',
-    dowIsWild: parts[4]!.trim() === '*',
+    domIsWild: parts[2]!.trim().startsWith('*'),
+    dowIsWild: parts[4]!.trim().startsWith('*'),
   };
 }
 
 /**
  * Returns true if the given date matches the cron expression.
  *
- * Follows vixie-cron day semantics: when both day-of-month and day-of-week
- * are constrained (neither is `*`), the date matches if EITHER field matches.
- * When only one is constrained, it must match.
+ * Follows vixie-cron day semantics: when neither day field starts with `*`,
+ * the date matches if EITHER field matches. Otherwise, both must match.
  */
 export function matches(cronExpr: string, date: Date): boolean {
   const fields = parseCron(cronExpr);
@@ -139,8 +154,8 @@ export function matches(cronExpr: string, date: Date): boolean {
   const domMatch = fields.dayOfMonth.has(date.getDate());
   const dowMatch = fields.dayOfWeek.has(date.getDay());
 
-  // Vixie-cron: if both day-of-month and day-of-week are restricted,
-  // match if EITHER is satisfied. Otherwise use AND.
+  // Vixie-cron: if neither day field starts with '*', match if EITHER is
+  // satisfied. Otherwise use AND.
   if (!fields.domIsWild && !fields.dowIsWild) {
     return domMatch || dowMatch;
   }
@@ -170,7 +185,8 @@ export function nextFireTime(cronExpr: string, after: Date): Date {
     const domOk = fields.dayOfMonth.has(candidate.getDate());
     const dowOk = fields.dayOfWeek.has(candidate.getDay());
 
-    // Vixie-cron day semantics: OR when both constrained, AND otherwise
+    // Vixie-cron day semantics: OR when neither field starts with '*',
+    // AND otherwise
     const dayOk =
       !fields.domIsWild && !fields.dowIsWild ? domOk || dowOk : domOk && dowOk;
 

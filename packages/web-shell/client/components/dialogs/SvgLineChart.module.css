@@ -1,0 +1,136 @@
+.chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.plot {
+  position: relative;
+  min-width: 0;
+}
+
+.svg {
+  display: block;
+  width: 100%;
+  /* The metrics tab now renders in a full-height panel (not the old 70vh
+     dialog), so give each plot real vertical detail instead of the old 52px
+     sliver — the taller curve is where most of the "use the height" win comes
+     from. (The former fullscreen-only 120px override is gone: the panel layout
+     can't carry `data-dialog-fullscreen`, and 140px is the baseline now.)
+     Exposed as `--chart-height` so a more constrained caller — e.g. a sidebar
+     card — can shrink the plot without forking this rule. */
+  height: var(--chart-height, 140px);
+  overflow: visible;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Vertical hover cursor: the time line the tooltip reads from. */
+.cursor {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* Hover readout: floats above the plot, centered on the cursor, and never
+   intercepts the pointer so moving along the line stays smooth. */
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  z-index: 2;
+  pointer-events: none;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  /* --popover/--card live on the app root; DialogShell portals under
+     document.body where neither is defined, so fall back to --background (which
+     the dialog theme scope does define) to avoid a transparent tooltip. */
+  background: var(--popover, var(--card, var(--background)));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* Flipped variant: near the top of the scroll container the default upward
+   tooltip would clip against DialogShell's overflow-y:auto body, so render it
+   below the cursor instead. */
+.tooltipBelow {
+  bottom: auto;
+  top: calc(100% + 4px);
+}
+
+.tooltipTime {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 3px;
+}
+
+.tooltipRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tooltipLabel {
+  color: var(--muted-foreground);
+}
+
+.tooltipValue {
+  margin-left: auto;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* Baseline: faint so it grounds the line without competing with it. */
+.axis {
+  stroke: color-mix(in srgb, var(--border) 80%, transparent);
+  stroke-width: 1;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.swatch {
+  flex: none;
+  width: 9px;
+  height: 9px;
+}
+
+.legendLabel {
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.legendValue {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Peak marker floats to the row's end as a secondary reference. */
+.peak {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

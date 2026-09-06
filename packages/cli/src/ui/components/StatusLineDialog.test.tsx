@@ -94,13 +94,16 @@ describe('StatusLineDialog', () => {
     expect(frame).toContain('git-branch');
     expect(frame).toContain('context-remaining');
     expect(frame).toContain('current-dir');
+    expect(frame.indexOf('project-name')).toBeLessThan(
+      frame.indexOf('git-branch'),
+    );
+    expect(frame.indexOf('git-branch')).toBeLessThan(
+      frame.indexOf('model-with-reasoning'),
+    );
     expect(frame.indexOf('model-with-reasoning')).toBeLessThan(
       frame.indexOf('model-only'),
     );
     expect(frame.indexOf('model-only')).toBeLessThan(
-      frame.indexOf('git-branch'),
-    );
-    expect(frame.indexOf('git-branch')).toBeLessThan(
       frame.indexOf('context-remaining'),
     );
     expect(frame.indexOf('context-remaining')).toBeLessThan(
@@ -115,11 +118,16 @@ describe('StatusLineDialog', () => {
     const addItem = vi.fn();
     const onClose = vi.fn();
     const onSaved = vi.fn();
+    const recordSlashCommand = vi.fn();
+    const recordingConfig = {
+      ...config,
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
     const { stdin } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <StatusLineDialog
           settings={settings}
-          config={config}
+          config={recordingConfig}
           uiState={uiState}
           addItem={addItem}
           onSaved={onSaved}
@@ -138,10 +146,9 @@ describe('StatusLineDialog', () => {
       type: 'preset',
       useThemeColors: true,
       items: [
-        'model-with-reasoning',
+        'project-name',
         'git-branch',
-        'context-remaining',
-        'current-dir',
+        'model-with-reasoning',
         'context-used',
       ],
     });
@@ -155,6 +162,16 @@ describe('StatusLineDialog', () => {
       },
       expect.any(Number),
     );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/statusline',
+      outputHistoryItems: [
+        {
+          type: MessageType.INFO,
+          text: 'Status line preset saved to user settings.',
+        },
+      ],
+    });
     expect(onSaved).toHaveBeenCalledWith(settings.merged.ui?.statusLine);
     expect(onClose).toHaveBeenCalled();
   });
@@ -188,7 +205,7 @@ describe('StatusLineDialog', () => {
     await press(' ');
 
     expect(lastFrame()).toContain(
-      'Qwen3 Code Plus high | feature/pr-4087-statusline | Context 75% left',
+      '\u279c project · git:(feature/pr-4087-statusline) · Qwen3 Code Plus high · 1.0k Context 25% used',
     );
 
     await press('\r');
@@ -197,34 +214,84 @@ describe('StatusLineDialog', () => {
       type: 'preset',
       useThemeColors: true,
       items: [
-        'model-with-reasoning',
+        'project-name',
         'git-branch',
-        'context-remaining',
-        'current-dir',
+        'model-with-reasoning',
         'context-used',
       ],
     });
   });
 
-  it('saves back to workspace settings when workspace config is effective', async () => {
+  it.each([false, true])(
+    'saves hideContextIndicator=%s back to the effective workspace scope',
+    async (hideContextIndicator) => {
+      const settings = createSettings();
+      settings.workspace.settings.ui = {
+        statusLine: {
+          type: 'preset',
+          useThemeColors: false,
+          items: ['model'],
+          hideContextIndicator,
+        },
+      };
+      settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
+      settings.recomputeMerged();
+      const addItem = vi.fn();
+      const { stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <StatusLineDialog
+            settings={settings}
+            config={config}
+            uiState={uiState}
+            addItem={addItem}
+            onClose={vi.fn()}
+            availableTerminalHeight={18}
+          />
+        </KeypressProvider>,
+      );
+
+      act(() => {
+        stdin.write('\r');
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(settings.forScope(SettingScope.User).settings.ui).toBeUndefined();
+      expect(settings.forScope(SettingScope.Workspace).settings.ui).toEqual({
+        statusLine: {
+          type: 'preset',
+          useThemeColors: false,
+          items: ['model'],
+          hideContextIndicator,
+        },
+      });
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Status line preset saved to workspace settings.',
+        },
+        expect.any(Number),
+      );
+    },
+  );
+
+  it('preserves an explicit command indicator setting when saving a preset', async () => {
     const settings = createSettings();
     settings.workspace.settings.ui = {
       statusLine: {
-        type: 'preset',
-        useThemeColors: false,
-        items: ['model'],
+        type: 'command',
+        command: 'echo status',
+        hideContextIndicator: false,
       },
     };
     settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
     settings.recomputeMerged();
-    const addItem = vi.fn();
     const { stdin } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <StatusLineDialog
           settings={settings}
           config={config}
           uiState={uiState}
-          addItem={addItem}
+          addItem={vi.fn()}
           onClose={vi.fn()}
           availableTerminalHeight={18}
         />
@@ -236,21 +303,51 @@ describe('StatusLineDialog', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(settings.forScope(SettingScope.User).settings.ui).toBeUndefined();
-    expect(settings.forScope(SettingScope.Workspace).settings.ui).toEqual({
+    expect(
+      settings.forScope(SettingScope.Workspace).settings.ui?.statusLine,
+    ).toHaveProperty('hideContextIndicator', false);
+  });
+
+  it('does not copy a user override into workspace settings', async () => {
+    const settings = createSettings();
+    settings.user.settings.ui = {
       statusLine: {
         type: 'preset',
-        useThemeColors: false,
         items: ['model'],
+        hideContextIndicator: true,
       },
-    });
-    expect(addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.INFO,
-        text: 'Status line preset saved to workspace settings.',
+    };
+    settings.workspace.settings.ui = {
+      statusLine: {
+        type: 'preset',
+        items: ['git-branch'],
       },
-      expect.any(Number),
+    };
+    settings.recomputeMerged();
+    const { stdin } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
     );
+
+    act(() => {
+      stdin.write('\r');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(
+      settings.forScope(SettingScope.Workspace).settings.ui?.statusLine,
+    ).not.toHaveProperty('hideContextIndicator');
+    expect(
+      settings.forScope(SettingScope.User).settings.ui?.statusLine,
+    ).toHaveProperty('hideContextIndicator', true);
   });
 
   it('does not append navigation keys to the search query', async () => {

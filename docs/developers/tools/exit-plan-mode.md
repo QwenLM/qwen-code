@@ -10,9 +10,11 @@ The tool is specifically designed for tasks that require planning implementation
 
 ### Arguments
 
-`exit_plan_mode` takes one argument:
+`exit_plan_mode` takes these arguments:
 
 - `plan` (string, required): The implementation plan you want to present to the user for approval. This should be a concise, markdown-formatted plan describing the implementation steps.
+- `originalRequest` (string, optional): The original request, used when a plan-required teammate asks its leader for approval.
+- `researchSummary` (string, optional): Investigation context for a plan-required teammate's leader review.
 
 ## How to use `exit_plan_mode` with Qwen Code
 
@@ -24,6 +26,7 @@ The Exit Plan Mode tool is part of Qwen Code's planning workflow. When you're in
 
 The tool will prompt the user with your plan and provide options to:
 
+- **Restore Previous**: Approve the plan and restore the mode active before Plan mode
 - **Proceed Once**: Approve the plan for this session only
 - **Proceed Always**: Approve the plan and enable auto-approval for future edit operations
 - **Cancel**: Reject the plan and remain in planning mode
@@ -125,7 +128,7 @@ After calling `exit_plan_mode`, the user can respond in several ways:
 - **Proceed Always**: The plan is approved and auto-approval is enabled for subsequent edit operations
 - **Cancel**: The plan is rejected, and the system remains in plan mode for further planning
 
-The tool automatically adjusts the approval mode based on the user's choice, streamlining the implementation process according to user preferences.
+The tool changes the approval mode only after the explicit decision has been accepted and execution begins. Permission rules, automatic approval modes, and permission-allow hooks cannot approve a main-session plan exit on the user's behalf.
 
 ## Important Notes
 
@@ -135,6 +138,7 @@ The tool automatically adjusts the approval mode based on the user's choice, str
 - **Markdown support**: Plans support markdown formatting for better readability
 - **Single use**: The tool should be used once per planning session when ready to proceed
 - **User control**: The final decision to proceed always rests with the user
+- **Fail closed**: Cancellation, stale approvals, host failures, and transition failures remain in Plan mode
 
 ## Integration with Planning Workflow
 

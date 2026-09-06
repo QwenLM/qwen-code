@@ -5,7 +5,62 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { getDiffStat } from './diffOptions.js';
+import { getDiffStat, hasHunks, createPatchSmart } from './diffOptions.js';
+
+describe('hasHunks', () => {
+  it('should return false for empty string', () => {
+    expect(hasHunks('')).toBe(false);
+  });
+
+  it('should return false for header-only patch (no changes)', () => {
+    const headerOnly =
+      'Index: test.txt\n===================================================================\n--- test.txt\tCurrent\n+++ test.txt\tProposed\n';
+    expect(hasHunks(headerOnly)).toBe(false);
+  });
+
+  it('should return true when a hunk header is present', () => {
+    const withHunk =
+      'Index: test.txt\n===================================================================\n--- test.txt\tCurrent\n+++ test.txt\tProposed\n@@ -1,1 +1,1 @@\n-old\n+new\n';
+    expect(hasHunks(withHunk)).toBe(true);
+  });
+});
+
+describe('createPatchSmart', () => {
+  it('should show diff for whitespace-only changes', () => {
+    const patch = createPatchSmart(
+      'test.java',
+      '        foo();\n',
+      '    foo();\n',
+      'Current',
+      'Proposed',
+    );
+    expect(patch).toContain('@@ ');
+    expect(patch).toContain('-        foo();');
+    expect(patch).toContain('+    foo();');
+  });
+
+  it('should show diff for content changes (mixed with whitespace)', () => {
+    const patch = createPatchSmart(
+      'test.java',
+      '    foo();\n',
+      '        bar();\n',
+      'Current',
+      'Proposed',
+    );
+    expect(patch).toContain('@@ ');
+  });
+
+  it('should produce a no-hunk patch when content is identical', () => {
+    const patch = createPatchSmart(
+      'test.java',
+      'foo();\n',
+      'foo();\n',
+      'Current',
+      'Proposed',
+    );
+    expect(hasHunks(patch)).toBe(false);
+  });
+});
 
 describe('getDiffStat', () => {
   const fileName = 'test.txt';
@@ -156,6 +211,23 @@ describe('getDiffStat', () => {
       model_removed_lines: 1,
       model_added_chars: 14,
       model_removed_chars: 11,
+      user_added_lines: 0,
+      user_removed_lines: 0,
+      user_added_chars: 0,
+      user_removed_chars: 0,
+    });
+  });
+
+  it('should count whitespace-only changes', () => {
+    const oldStr = '    foo();\n';
+    const aiStr = '        foo();\n';
+    const userStr = '        foo();\n';
+    const diffStat = getDiffStat(fileName, oldStr, aiStr, userStr);
+    expect(diffStat).toEqual({
+      model_added_lines: 1,
+      model_removed_lines: 1,
+      model_added_chars: expect.any(Number),
+      model_removed_chars: expect.any(Number),
       user_added_lines: 0,
       user_removed_lines: 0,
       user_added_chars: 0,

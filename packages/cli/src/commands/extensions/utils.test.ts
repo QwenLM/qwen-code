@@ -25,6 +25,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 vi.mock('../../config/settings.js', () => ({
+  SettingScope: {
+    User: 'User',
+    Workspace: 'Workspace',
+    System: 'System',
+    SystemDefaults: 'SystemDefaults',
+  },
   loadSettings: vi.fn().mockReturnValue({
     merged: {},
   }),
@@ -138,6 +144,70 @@ describe('extensionToOutputString', () => {
     expect(resultWithoutInline).toEqual(resultWithInlineFalse);
   });
 
+  it('should include description when present', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: 'A helpful test extension',
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Description:');
+    expect(result).toContain('A helpful test extension');
+  });
+
+  it('should strip ANSI escape codes from description', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: '\x1b[31mMalicious\x1b[0m description',
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Malicious description');
+    expect(result).not.toContain('\x1b[31m');
+  });
+
+  it('should handle non-string description gracefully', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: 42,
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).not.toContain('Description:');
+  });
+
+  it('should not include description line when absent', () => {
+    const extension = createMockExtension();
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).not.toContain('Description:');
+  });
+
   it('should redact URL credentials in install source output', () => {
     const extension = createMockExtension({
       installMetadata: {
@@ -158,5 +228,23 @@ describe('extensionToOutputString', () => {
     );
     expect(result).not.toContain('user');
     expect(result).not.toContain('token');
+  });
+
+  it('should display the native Agent Plugins origin', () => {
+    const extension = createMockExtension({
+      installMetadata: {
+        type: 'local',
+        source: '/path/to/portable-plugin',
+        originSource: 'AgentPlugins',
+      },
+    });
+
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Origin: AgentPlugins');
   });
 });

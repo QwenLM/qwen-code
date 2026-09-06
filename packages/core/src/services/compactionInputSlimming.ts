@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -80,19 +81,29 @@ function resolveNumber(
   envValue: string | undefined,
   settingsValue: number | undefined,
   defaultValue: number,
-  { minInclusive }: { minInclusive: number },
+  {
+    integer = false,
+    minInclusive,
+  }: { integer?: boolean; minInclusive: number },
 ): number {
+  const isValid = (value: number) =>
+    Number.isFinite(value) &&
+    (!integer || Number.isSafeInteger(value)) &&
+    value >= minInclusive;
+
   if (envValue !== undefined && envValue !== '') {
-    const parsed = Number(envValue);
-    if (Number.isFinite(parsed) && parsed >= minInclusive) {
+    const trimmed = envValue.trim();
+    if (integer && !/^\d+$/.test(trimmed)) {
+      return settingsValue !== undefined && isValid(settingsValue)
+        ? settingsValue
+        : defaultValue;
+    }
+    const parsed = Number(trimmed);
+    if (isValid(parsed)) {
       return parsed;
     }
   }
-  if (
-    settingsValue !== undefined &&
-    Number.isFinite(settingsValue) &&
-    settingsValue >= minInclusive
-  ) {
+  if (settingsValue !== undefined && isValid(settingsValue)) {
     return settingsValue;
   }
   return defaultValue;
@@ -101,7 +112,8 @@ function resolveNumber(
 export const DEFAULT_MAX_RECENT_FILES = 5;
 export const DEFAULT_MAX_RECENT_IMAGES = 3;
 export const DEFAULT_SCREENSHOT_TRIGGER_ENABLED = true;
-export const DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD = 50;
+export const DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD = 20;
+export const DEFAULT_IMAGE_PAYLOAD_THRESHOLD = 20;
 
 export interface ResolvedCompactionTuning {
   /** Recent files restored after compaction (0 = restore none). */
@@ -112,12 +124,19 @@ export interface ResolvedCompactionTuning {
   enableScreenshotTrigger: boolean;
   /** Tool-image count at or above which the trigger fires (≥ 1). */
   screenshotTriggerThreshold: number;
+  /**
+   * Inline image count at or above which historical image payloads
+   * are replaced with text references and only recent images are
+   * reattached. Below this threshold images stay in-place untouched.
+   */
+  imagePayloadThreshold: number;
 }
 
 /**
  * Resolves the post-compact retention + screenshot-trigger knobs in
- * priority order env > settings > default, reusing the same validation
- * rules as `resolveSlimmingConfig`.
+ * priority order env > settings > default. Count-like fields require
+ * integer values because downstream collectors compare against integer
+ * lengths.
  *
  * The screenshot trigger counts only images nested in
  * `functionResponse.parts` (tool results). Compaction replaces those with
@@ -134,13 +153,13 @@ export function resolveCompactionTuning(
       process.env['QWEN_COMPACT_MAX_RECENT_FILES'],
       settings?.maxRecentFilesToRetain,
       DEFAULT_MAX_RECENT_FILES,
-      { minInclusive: 0 },
+      { integer: true, minInclusive: 0 },
     ),
     maxRecentImages: resolveNumber(
       process.env['QWEN_COMPACT_MAX_RECENT_IMAGES'],
       settings?.maxRecentImagesToRetain,
       DEFAULT_MAX_RECENT_IMAGES,
-      { minInclusive: 0 },
+      { integer: true, minInclusive: 0 },
     ),
     enableScreenshotTrigger: resolveBoolean(
       process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'],
@@ -151,7 +170,13 @@ export function resolveCompactionTuning(
       process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'],
       settings?.screenshotTriggerThreshold,
       DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
-      { minInclusive: 1 },
+      { integer: true, minInclusive: 1 },
+    ),
+    imagePayloadThreshold: resolveNumber(
+      process.env['QWEN_IMAGE_PAYLOAD_THRESHOLD'],
+      settings?.imagePayloadThreshold,
+      DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
+      { integer: true, minInclusive: 1 },
     ),
   };
 }
@@ -199,8 +224,11 @@ export function estimatePartChars(
   if (part.functionResponse) {
     let total = 0;
     const output = part.functionResponse.response?.['output'];
+    const error = part.functionResponse.response?.['error'];
     if (typeof output === 'string') {
       total += output.length;
+    } else if (typeof error === 'string') {
+      total += error.length;
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {
@@ -247,9 +275,26 @@ interface SlimResult {
   stats: SlimStats;
 }
 
+/** Appended to text payloads truncated by `maxTextChars`. */
+export const SLIM_TEXT_TRUNCATION_MARKER = '\n[...truncated for compaction]';
+
+export interface SlimOptions {
+  /**
+   * When set, text payloads larger than this (top-level `text` parts,
+   * tool-result `output`/`error` strings, and `functionCall` string args)
+   * are truncated to this many characters plus an elision marker. Used when
+   * a compaction is triggered by an HTTP 413 request-body overflow: the
+   * side-query must fit under the same gateway byte limit as the request
+   * that was rejected (#10380). Regular (token-driven) compactions pass
+   * nothing and keep text intact.
+   */
+  maxTextChars?: number;
+}
+
 interface SlimStats {
   imagesStripped: number;
   documentsStripped: number;
+  textPartsTruncated: number;
 }
 
 /**
@@ -257,10 +302,15 @@ interface SlimStats {
  * same length and ordering as the input; identity-equal when nothing
  * changed.
  */
-export function slimCompactionInput(history: Content[]): SlimResult {
+export function slimCompactionInput(
+  history: Content[],
+  supportedModalities?: InputModalities,
+  options?: SlimOptions,
+): SlimResult {
   const stats: SlimStats = {
     imagesStripped: 0,
     documentsStripped: 0,
+    textPartsTruncated: 0,
   };
   let anyChange = false;
 
@@ -269,7 +319,12 @@ export function slimCompactionInput(history: Content[]): SlimResult {
 
     let touched = false;
     const newParts: Part[] = content.parts.map((part) => {
-      const replacement = transformPart(part, stats);
+      const replacement = transformPart(
+        part,
+        stats,
+        supportedModalities,
+        options,
+      );
       if (replacement !== part) {
         touched = true;
         return replacement;
@@ -288,29 +343,50 @@ export function slimCompactionInput(history: Content[]): SlimResult {
   };
 }
 
-function transformPart(part: Part, stats: SlimStats): Part {
+function transformPart(
+  part: Part,
+  stats: SlimStats,
+  supportedModalities?: InputModalities,
+  options?: SlimOptions,
+): Part {
   if (part.inlineData) {
+    if (
+      supportsMimeType(part.inlineData.mimeType, supportedModalities) === true
+    ) {
+      return part;
+    }
     return mediaPlaceholderPart(part.inlineData.mimeType, stats);
   }
   if (part.fileData) {
+    if (
+      supportsMimeType(part.fileData.mimeType, supportedModalities) === true
+    ) {
+      return part;
+    }
     return mediaPlaceholderPart(part.fileData.mimeType, stats);
   }
   // Walk into functionResponse.parts (qwen-code's nested-media carrier
   // for tool results — see `coreToolScheduler.createFunctionResponsePart`).
   // Without this, base64 images returned by read_file et al. leak into
   // the side-query payload.
+  let nextPart: Part = part;
   const nested = getFunctionResponseParts(part);
   if (nested) {
     let touched = false;
     const newNested = nested.map((inner) => {
-      const replacement = transformPart(inner, stats);
+      const replacement = transformPart(
+        inner,
+        stats,
+        supportedModalities,
+        options,
+      );
       if (replacement !== inner) {
         touched = true;
       }
       return replacement;
     });
     if (touched) {
-      return {
+      nextPart = {
         ...part,
         functionResponse: {
           ...part.functionResponse!,
@@ -319,7 +395,96 @@ function transformPart(part: Part, stats: SlimStats): Part {
       };
     }
   }
-  return part;
+  // Truncate oversized tool-result text on the payload-overflow compaction
+  // path so the side-query itself fits under the gateway byte limit that
+  // rejected the main request (#10380). Mirrors `estimatePartChars`, which
+  // bills exactly these carriers for tool results.
+  const maxTextChars = options?.maxTextChars;
+  const fr = nextPart.functionResponse;
+  if (maxTextChars !== undefined && fr?.response) {
+    const response = fr.response;
+    let touched = false;
+    const newResponse: Record<string, unknown> = { ...response };
+    for (const key of ['output', 'error'] as const) {
+      const value = response[key];
+      if (typeof value === 'string' && value.length > maxTextChars) {
+        newResponse[key] = truncateTextForSlimming(value, maxTextChars);
+        stats.textPartsTruncated++;
+        touched = true;
+      }
+    }
+    if (touched) {
+      nextPart = {
+        ...nextPart,
+        functionResponse: {
+          ...fr,
+          response: newResponse,
+        } as Part['functionResponse'],
+      };
+    }
+  }
+  // Truncate oversized string args on the payload-overflow path as well:
+  // `write_file`/`edit` carry entire file contents in
+  // `functionCall.args.content`, and `estimatePartChars` bills them through
+  // the JSON.stringify fallthrough — left untouched they ride into the
+  // side-query at full size (#10380). Only top-level string values are
+  // walked: that is where every built-in tool places its large payloads.
+  const fc = nextPart.functionCall;
+  if (maxTextChars !== undefined && fc?.args) {
+    const args = fc.args;
+    let argsTouched = false;
+    const newArgs: Record<string, unknown> = { ...args };
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === 'string' && value.length > maxTextChars) {
+        newArgs[key] = truncateTextForSlimming(value, maxTextChars);
+        stats.textPartsTruncated++;
+        argsTouched = true;
+      }
+    }
+    if (argsTouched) {
+      nextPart = {
+        ...nextPart,
+        functionCall: { ...fc, args: newArgs },
+      };
+    }
+  }
+  if (
+    maxTextChars !== undefined &&
+    typeof nextPart.text === 'string' &&
+    nextPart.text.length > maxTextChars
+  ) {
+    stats.textPartsTruncated++;
+    // Spread rather than rebuilding a bare `{ text }` so sibling properties
+    // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
+    // pipeline keys reasoning parts off those flags (#10380).
+    return {
+      ...nextPart,
+      text: truncateTextForSlimming(nextPart.text, maxTextChars),
+    };
+  }
+  return nextPart;
+}
+
+function truncateTextForSlimming(value: string, maxTextChars: number): string {
+  let end = maxTextChars;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end--;
+  }
+  return value.slice(0, end) + SLIM_TEXT_TRUNCATION_MARKER;
+}
+
+function supportsMimeType(
+  mimeType: string | undefined,
+  modalities: InputModalities | undefined,
+): boolean | undefined {
+  if (!modalities) return undefined;
+  const mime = mimeType ?? DEFAULT_MIME;
+  if (mime.startsWith('image/')) return modalities.image;
+  if (mime === 'application/pdf') return modalities.pdf;
+  if (mime.startsWith('audio/')) return modalities.audio;
+  if (mime.startsWith('video/')) return modalities.video;
+  return false;
 }
 
 function mediaPlaceholderPart(

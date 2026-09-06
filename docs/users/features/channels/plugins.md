@@ -11,7 +11,7 @@ Channel plugins are loaded at startup from active extensions. When `qwen channel
 3. Registers the channel type so it can be referenced in `settings.json`
 4. Creates channel instances using the plugin's factory function
 
-Your custom channel gets the full shared pipeline for free: sender gating, group policies, session routing, slash commands, crash recovery, and the ACP bridge to the agent.
+Your custom channel gets the full shared pipeline for free: sender gating, group policies, session routing, slash commands, crash recovery, and an agent bridge. Standalone `qwen channel start` currently supplies `AcpBridge`; plugin adapter code should depend on the adapter-facing `ChannelAgentBridge` contract. Existing TypeScript plugins with an explicit `AcpBridge` bridge parameter should migrate that annotation to `ChannelAgentBridge`; JavaScript plugins are unaffected at runtime.
 
 ## Installing a Custom Channel
 
@@ -46,16 +46,17 @@ The `type` must match a channel type registered by an installed extension. Check
 
 All standard channel options work with custom channels:
 
-| Option         | Description                                    |
-| -------------- | ---------------------------------------------- |
-| `senderPolicy` | `allowlist`, `pairing`, or `open`              |
-| `allowedUsers` | Static allowlist of sender IDs                 |
-| `sessionScope` | `user`, `thread`, or `single`                  |
-| `cwd`          | Working directory for the agent                |
-| `instructions` | Prepended to the first message of each session |
-| `model`        | Model override for the channel                 |
-| `groupPolicy`  | `disabled`, `allowlist`, or `open`             |
-| `groups`       | Per-group settings                             |
+| Option         | Description                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| `senderPolicy` | `allowlist`, `pairing`, or `open`                                                                  |
+| `allowedUsers` | Static allowlist of sender IDs                                                                     |
+| `sessionScope` | `user`, `chat_thread`, or `single`; legacy `thread` remains compatible for existing configurations |
+| `cwd`          | Working directory for the agent                                                                    |
+| `instructions` | Prepended to the first message of each session                                                     |
+| `model`        | Model override for the channel                                                                     |
+| `groupPolicy`  | `disabled`, `allowlist`, `pairing`, or `open`                                                      |
+| `dmPolicy`     | `open` or `disabled`                                                                               |
+| `groups`       | Per-group settings                                                                                 |
 
 See [Overview](./overview) for details on each option.
 
@@ -76,7 +77,7 @@ Custom channels automatically support everything built-in channels do:
 - **Sender policies** — `allowlist`, `pairing`, and `open` access control
 - **Group policies** — Per-group settings with optional @mention gating
 - **Session routing** — Per-user, per-thread, or single shared sessions
-- **DM pairing** — Full pairing code flow for unknown users
+- **DM and group pairing** — Full pairing code flow for unknown users and groups
 - **Slash commands** — `/help`, `/clear`, `/status` work out of the box
 - **Custom instructions** — Prepended to the first message in each session
 - **Crash recovery** — Automatic restart with session preservation
@@ -84,4 +85,4 @@ Custom channels automatically support everything built-in channels do:
 
 ## Building Your Own Channel Plugin
 
-Want to build a channel plugin for a new platform? See the [Channel Plugin Developer Guide](/developers/channel-plugins) for the `ChannelPlugin` interface, the `Envelope` format, and extension points.
+Want to build a channel plugin for a new platform? See the [Channel Plugin Developer Guide](../../../developers/channel-plugins.md) for the `ChannelPlugin` interface, the `Envelope` format, and extension points.

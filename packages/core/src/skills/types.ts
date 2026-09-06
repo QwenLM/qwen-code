@@ -36,8 +36,22 @@ export interface SkillConfig {
   description: string;
 
   /**
-   * Optional list of tool names that this skill is allowed to use.
-   * For v1, this is informational only (no gating).
+   * Optional list of tools to auto-approve while this skill is active.
+   *
+   * Each entry is a permission rule string in the same syntax as
+   * `settings.json` `permissions.allow` — e.g. `Bash(git *)`, `Edit`, `Read`,
+   * `mcp__server__tool`. When the skill is invoked (via the model Skill-tool or
+   * a user `/<skill>` slash command), each entry is added as a session-scoped
+   * allow rule, so matching tool calls are auto-approved instead of prompting.
+   *
+   * This is an additive grant only: it never hides or restricts the tools the
+   * model can see, and since #10075 `permissions.allow` no longer affects
+   * registration at all. A tool the `settings.tools.eager` allowlist omits
+   * stays deferred (registered and loadable via `tool_search`) regardless of
+   * this grant. An eager-by-default tool omitted by `tools.eager` needs its
+   * name added plus a restart; a tool deferred by default needs
+   * `tools.visible` instead (#9827).
+   * Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];
 
@@ -78,9 +92,15 @@ export interface SkillConfig {
   body: string;
 
   /**
-   * For extension-level skills: the name of the providing extension
+   * For extension-level skills: the canonical name of the providing extension
    */
   extensionName?: string;
+
+  /**
+   * For extension-level skills: the localized display name of the providing
+   * extension. Presentation only; never use this field as an identity.
+   */
+  extensionDisplayName?: string;
 
   /**
    * Argument hint shown after the slash command name in completion menus.
@@ -102,6 +122,13 @@ export interface SkillConfig {
    * field in SKILL.md.
    */
   disableModelInvocation?: boolean;
+
+  /**
+   * Whether users can invoke this skill directly via `/<skill-name>`.
+   * Defaults to true. Parsed from the `user-invocable` frontmatter field in
+   * SKILL.md.
+   */
+  userInvocable?: boolean;
 
   /**
    * Optional glob patterns that gate when this skill is offered to the model.
@@ -146,6 +173,28 @@ export function parseModelField(
     return undefined;
   }
   return trimmed;
+}
+
+/**
+ * Parse the `user-invocable` field from skill frontmatter.
+ * Returns `undefined` when omitted or set to an invalid value, preserving the
+ * command-layer default that skills are user-invocable unless explicitly
+ * disabled.
+ */
+export function parseUserInvocableField(
+  frontmatter: Record<string, unknown>,
+): boolean | undefined {
+  const raw = frontmatter['user-invocable'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === true || raw === 'true') {
+    return true;
+  }
+  if (raw === false || raw === 'false') {
+    return false;
+  }
+  return undefined;
 }
 
 /**
@@ -223,6 +272,24 @@ export function parsePathsField(
  * out, which is the actual injection vector this guards against.
  */
 export const SKILL_NAME_PATTERN = /^[\p{L}\p{N}_:.-]+$/u;
+
+/**
+ * Parse the `allowedTools` field from skill frontmatter.
+ * Returns `undefined` when the field is omitted. Throws when the field is
+ * present but not an array.
+ */
+export function parseAllowedToolsField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['allowedTools'];
+  if (raw == null) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('"allowedTools" must be an array');
+  }
+  return raw.map(String);
+}
 
 /**
  * Validate that a skill `name` is safe to embed into prompts and reminders

@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  formatLogArgs,
+  LOG_LEVELS,
+  type LogLevel,
+} from '../../utils/logger.js';
+
 export interface VSCodeAPI {
   postMessage: (message: unknown) => void;
   getState: () => unknown;
@@ -43,6 +49,38 @@ function getVSCodeAPI(): VSCodeAPI {
     },
   };
   return vscodeApiInstance;
+}
+
+export function initializeWebviewLogger(): void {
+  if (typeof acquireVsCodeApi === 'undefined') {
+    return;
+  }
+  const state = globalThis as typeof globalThis & {
+    __qwenWebviewLoggerInitialized?: boolean;
+  };
+  if (state.__qwenWebviewLoggerInitialized) {
+    return;
+  }
+  state.__qwenWebviewLoggerInitialized = true;
+
+  const vscode = getVSCodeAPI();
+  const postLog = (level: LogLevel, args: unknown[]) => {
+    vscode.postMessage({
+      type: 'log',
+      data: { level, message: formatLogArgs(args) },
+    });
+  };
+  for (const level of LOG_LEVELS) {
+    const original = globalThis.console[level].bind(globalThis.console);
+    globalThis.console[level] = (...args: unknown[]) => {
+      original(...args);
+      try {
+        postLog(level, args);
+      } catch {
+        // Logging must not crash the webview caller.
+      }
+    };
+  }
 }
 
 /**

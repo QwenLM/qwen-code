@@ -1,0 +1,221 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from './indexer.js';
+import {
+  clearAutoMemoryRootCache,
+  getTeamAutoMemoryIndexPath,
+  getTeamAutoMemoryRoot,
+  TEAM_AUTO_MEMORY_DIRNAME,
+} from './paths.js';
+
+describe('rebuildTeamAutoMemoryIndex', () => {
+  let projectRoot: string;
+
+  const writeMemory = (rel: string, name: string, description: string) => {
+    const file = path.join(getTeamAutoMemoryRoot(projectRoot), rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      `---\nname: ${name}\ndescription: ${description}\ntype: feedback\n---\nbody`,
+    );
+  };
+
+  beforeEach(() => {
+    clearAutoMemoryRootCache();
+    projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-team-index-'));
+    fs.mkdirSync(path.join(projectRoot, '.git'));
+  });
+
+  afterEach(() => {
+    clearAutoMemoryRootCache();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('returns null and does not create the dir when team memory is absent', async () => {
+    expect(await rebuildTeamAutoMemoryIndex(projectRoot)).toBeNull();
+    expect(fs.existsSync(getTeamAutoMemoryRoot(projectRoot))).toBe(false);
+  });
+
+  it('generates the index from saved files and writes MEMORY.md', async () => {
+    writeMemory('feedback/a.md', 'Alpha', 'desc A');
+    writeMemory('feedback/b.md', 'Bravo', 'desc B');
+
+    const content = await rebuildTeamAutoMemoryIndex(projectRoot);
+
+    expect(content).toContain('- [Alpha](feedback/a.md) — desc A');
+    expect(content).toContain('- [Bravo](feedback/b.md) — desc B');
+    // The index is written to disk, not just returned.
+    expect(
+      fs.readFileSync(getTeamAutoMemoryIndexPath(projectRoot), 'utf-8'),
+    ).toBe(content);
+    // The index file never indexes itself.
+    expect(content).not.toContain('MEMORY.md');
+  });
+
+  it('orders entries by path (deterministic), not by mtime', async () => {
+    // a.md written first (older mtime), b.md second — an mtime-desc sort would
+    // put b before a; the path sort must keep a before b on every machine.
+    writeMemory('feedback/a.md', 'Alpha', 'desc A');
+    writeMemory('feedback/b.md', 'Bravo', 'desc B');
+
+    const content = (await rebuildTeamAutoMemoryIndex(projectRoot)) ?? '';
+    expect(content.indexOf('Alpha')).toBeLessThan(content.indexOf('Bravo'));
+  });
+
+  it('collapses entries with the same description into one line', async () => {
+    // Two users save the same shared fact in their own subtrees.
+    writeMemory(
+      'alice/feedback/db.md',
+      'Use real DB',
+      'Integration tests hit a real database.',
+    );
+    writeMemory(
+      'bob/feedback/db.md',
+      'Real database',
+      'integration tests hit a real database',
+    );
+
+    const content = (await rebuildTeamAutoMemoryIndex(projectRoot)) ?? '';
+    // One canonical line (alice sorts first by path), the other listed as "also".
+    expect(content).toContain('(also: bob/feedback/db.md)');
+    // bob's line is not emitted as its own separate entry.
+    expect(content).not.toContain('- [Real database]');
+    // The primary entry survives.
+    expect(content).toContain('[Use real DB](alice/feedback/db.md)');
+  });
+
+  it('does not group entries with distinct descriptions', async () => {
+    writeMemory('feedback/a.md', 'Alpha', 'first fact');
+    writeMemory('feedback/b.md', 'Bravo', 'second fact');
+
+    const content = (await rebuildTeamAutoMemoryIndex(projectRoot)) ?? '';
+    expect(content).not.toContain('(also:');
+    expect(content).toContain('[Alpha](feedback/a.md)');
+    expect(content).toContain('[Bravo](feedback/b.md)');
+  });
+
+  it('never groups empty descriptions', async () => {
+    writeMemory('feedback/a.md', 'Alpha', '');
+    writeMemory('feedback/b.md', 'Bravo', '');
+
+    const content = (await rebuildTeamAutoMemoryIndex(projectRoot)) ?? '';
+    // Both kept as their own lines, no "also" collapsing.
+    expect(content).not.toContain('(also:');
+    expect(content).toContain('[Alpha](feedback/a.md)');
+    expect(content).toContain('[Bravo](feedback/b.md)');
+  });
+
+  it('refuses to write through a symlinked team root (no write outside the repo)', async () => {
+    // A committed `.qwen/team-memory -> /elsewhere` symlink would otherwise
+    // redirect the generated index outside the repo with no approval.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+      fs.mkdirSync(path.dirname(teamRoot), { recursive: true });
+      fs.symlinkSync(outside, teamRoot, 'dir');
+
+      // A typed SECURITY rejection (not a plain Error): the sync gate keys off
+      // this class to block git add/commit/push of an escaping root.
+      await expect(
+        rebuildTeamAutoMemoryIndex(projectRoot),
+      ).rejects.toBeInstanceOf(TeamMemoryRootSecurityError);
+      await expect(rebuildTeamAutoMemoryIndex(projectRoot)).rejects.toThrow(
+        /symlink/,
+      );
+      // Nothing was written into the symlink target.
+      expect(fs.existsSync(path.join(outside, 'MEMORY.md'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a PARENT-component symlink that escapes the repo (no write outside)', async () => {
+    // `.qwen` itself is a symlink to an outside dir, with a real `team-memory`
+    // dir at the target. lstat(teamRoot) only inspects the LEAF (a real dir) and
+    // would pass — the realpath whole-path check must still reject the escape.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      fs.mkdirSync(path.join(outside, TEAM_AUTO_MEMORY_DIRNAME));
+      const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+      const qwenDir = path.dirname(teamRoot); // <repo>/.qwen
+      fs.symlinkSync(outside, qwenDir, 'dir');
+
+      // The leaf resolves to a real (non-symlink) directory outside the repo,
+      // so the existing leaf-only guard does NOT fire.
+      expect(fs.existsSync(teamRoot)).toBe(true);
+      expect(fs.lstatSync(teamRoot).isSymbolicLink()).toBe(false);
+
+      // Same typed SECURITY rejection for a parent-component symlink escape.
+      await expect(
+        rebuildTeamAutoMemoryIndex(projectRoot),
+      ).rejects.toBeInstanceOf(TeamMemoryRootSecurityError);
+      await expect(rebuildTeamAutoMemoryIndex(projectRoot)).rejects.toThrow(
+        /outside the repository/,
+      );
+      // Nothing was scanned or written into the escaped target.
+      expect(
+        fs.existsSync(
+          path.join(outside, TEAM_AUTO_MEMORY_DIRNAME, 'MEMORY.md'),
+        ),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a symlinked MEMORY.md instead of writing through it', async () => {
+    // MEMORY.md pre-placed as a symlink to an outside file: noFollow must
+    // replace the link with the regular index, leaving the target untouched.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      writeMemory('feedback/a.md', 'Alpha', 'desc A');
+      const target = path.join(outside, 'secret.md');
+      fs.writeFileSync(target, 'SENTINEL — must not be overwritten');
+      const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
+      fs.symlinkSync(target, indexPath, 'file');
+
+      const content = (await rebuildTeamAutoMemoryIndex(projectRoot)) ?? '';
+
+      // The outside target is untouched, and MEMORY.md is now a real file.
+      expect(fs.readFileSync(target, 'utf-8')).toBe(
+        'SENTINEL — must not be overwritten',
+      );
+      expect(fs.lstatSync(indexPath).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(indexPath, 'utf-8')).toBe(content);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('skips the rewrite when the generated index is byte-identical', async () => {
+    writeMemory('feedback/a.md', 'Alpha', 'desc A');
+    const first = await rebuildTeamAutoMemoryIndex(projectRoot);
+    const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
+
+    // Backdate the file so a real rewrite would visibly bump the mtime.
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(indexPath, past, past);
+    const mtimeBefore = fs.statSync(indexPath).mtimeMs;
+
+    const second = await rebuildTeamAutoMemoryIndex(projectRoot);
+    expect(second).toBe(first);
+    // Unchanged mtime proves no no-op write happened.
+    expect(fs.statSync(indexPath).mtimeMs).toBe(mtimeBefore);
+
+    // A real change still rewrites (mtime moves forward).
+    writeMemory('feedback/b.md', 'Bravo', 'desc B');
+    await rebuildTeamAutoMemoryIndex(projectRoot);
+    expect(fs.statSync(indexPath).mtimeMs).toBeGreaterThan(mtimeBefore);
+  });
+});

@@ -5,9 +5,15 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
+  classifyShellCommandSafety,
   initParser,
   isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
   _resetParser,
   _setParserFailedForTesting,
@@ -41,6 +47,104 @@ describe('isShellCommandReadOnlyAST', () => {
 
   it('rejects command substitution', async () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
+  });
+
+  it('rejects the two substitution forms from issue #8582', async () => {
+    for (const command of [
+      'echo "$\\\n(touch /tmp/pwned)"',
+      'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+    }
+  });
+
+  it('keeps literal twins of issue #8582 read-only', async () => {
+    for (const command of [
+      'echo "\\$\\\n(touch /tmp/pwned)"',
+      'echo "$$\\\n(touch /tmp/pwned)"',
+      "echo '$\\\n(touch /tmp/pwned)'",
+      "echo '${two@P}'",
+      'echo "${two@Q}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+    }
+  });
+
+  describe('repository-local Git config (#8575)', () => {
+    const tempDirs: string[] = [];
+    const createRepo = (): string => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'qwen-git-config-'));
+      tempDirs.push(dir);
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      return dir;
+    };
+    const gitConfig = (cwd: string, ...args: string[]): void => {
+      execFileSync('git', ['config', ...args], { cwd });
+    };
+
+    afterEach(() => {
+      for (const dir of tempDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('downgrades only the two reproduced command/config pairs', async () => {
+      const cwd = createRepo();
+      gitConfig(cwd, 'diff.external', 'example-external-diff');
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        false,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+
+      gitConfig(cwd, '--unset', 'diff.external');
+      gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(false);
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+
+      gitConfig(cwd, 'core.fsmonitor', 'false');
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+    });
+
+    it('uses Git include and precedence semantics', async () => {
+      const cwd = createRepo();
+      const included = path.join(cwd, 'included.config');
+      writeFileSync(included, '[diff]\n\texternal = included-driver\n');
+      gitConfig(cwd, 'include.path', included);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory("git 'diff'", cwd),
+      ).toBe(false);
+
+      gitConfig(cwd, 'diff.external', '');
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+    });
+
+    it('fails closed instead of simulating a changed directory', async () => {
+      const cwd = createRepo();
+      const target = createRepo();
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `cd ${JSON.stringify(target)} && git status`,
+          cwd,
+        ),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `git status && cd ${JSON.stringify(target)}`,
+          cwd,
+        ),
+      ).toBe(true);
+    });
   });
 
   // Regression coverage for PR #4386 round 4: the AST walker previously
@@ -100,8 +204,8 @@ describe('isShellCommandReadOnlyAST', () => {
     expect(await isShellCommandReadOnlyAST('   ')).toBe(false);
   });
 
-  it('respects environment prefix followed by allowed command', async () => {
-    expect(await isShellCommandReadOnlyAST('FOO=bar ls')).toBe(true);
+  it('rejects environment prefix followed by allowed command', async () => {
+    expect(await isShellCommandReadOnlyAST('FOO=bar ls')).toBe(false);
   });
 
   describe('multi-command security', () => {
@@ -200,6 +304,15 @@ describe('isShellCommandReadOnlyAST', () => {
       ).toBe(false);
     });
 
+    it('rejects gawk indirect function calls', async () => {
+      for (const command of [
+        'awk \'BEGIN { fn = "system"; @fn("touch /tmp/pwned") }\'',
+        'awk \'BEGIN { fn = "system"; @ fn("touch /tmp/pwned") }\'',
+      ]) {
+        expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+      }
+    });
+
     it('rejects awk with file output redirection', async () => {
       expect(
         await isShellCommandReadOnlyAST(
@@ -246,9 +359,6 @@ describe('isShellCommandReadOnlyAST', () => {
         true,
       );
       expect(await isShellCommandReadOnlyAST("sed -n '1,5p' file.txt")).toBe(
-        true,
-      );
-      expect(await isShellCommandReadOnlyAST("sed '/pattern/d' file.txt")).toBe(
         true,
       );
     });
@@ -303,8 +413,8 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await isShellCommandReadOnlyAST('FOO=bar')).toBe(true);
     });
 
-    it('allows multiple env vars before command', async () => {
-      expect(await isShellCommandReadOnlyAST('A=1 B=2 ls -la')).toBe(true);
+    it('rejects multiple env vars before command', async () => {
+      expect(await isShellCommandReadOnlyAST('A=1 B=2 ls -la')).toBe(false);
     });
 
     it('rejects function definitions', async () => {
@@ -392,6 +502,473 @@ describe('isShellCommandReadOnlyAST', () => {
         false,
       );
     });
+  });
+});
+
+// =========================================================================
+// classifyShellCommandSafety
+// =========================================================================
+
+describe('classifyShellCommandSafety', () => {
+  // Budget for `process.cpuUsage()`, which is process-wide: it sums user +
+  // system across every thread for the window, so V8's background GC and JIT
+  // threads and the parser runtime's own threads are charged to it alongside
+  // the work under test. Measured against the built package on an idle
+  // machine, that reports 2.1-3.1x the wall time of the same commands -- 2.1x
+  // even when they run sequentially, so the inflation is the accounting, not
+  // the `Promise.all` fan-out below. The 1000 this replaces was a wall-clock
+  // number carried over unchanged when the metric changed, which put it below
+  // the floor of what a healthy run reports: ~270 ms here, 1232-1361 ms on
+  // GitHub-hosted runners.
+  //
+  // These tests guard against catastrophic backtracking on 10k-repetition
+  // adversarial inputs, which costs orders of magnitude rather than a small
+  // multiple, so the headroom below does not blunt them.
+  const maxClassificationCpuMs = 4000;
+
+  it.each([
+    'ls -la',
+    'git status --short',
+    'ls | cat && pwd',
+    'FOO=bar',
+    'cd /tmp',
+    '(git status)',
+    '{ ls; pwd; }',
+    'cat < input.txt',
+    'cat <<EOF\nhello\nEOF',
+    'echo 2>&1',
+    'echo >&-',
+    'uniq input.txt',
+    'uniq -- -f',
+    'git branch --list --color=always topic',
+    'git diff -o patch',
+    'git diff -Oorderfile',
+    'git log -p',
+    'git show -p HEAD',
+    'git blame -p file',
+    'git log -- --output=log.out',
+    'sort -- -o output',
+    'tree -- -o output',
+    'rg -- -z file',
+    'sort -- -roout input',
+    'sort -- --output=out',
+    "sed -- 's/a/b/' input",
+    "sed 's/a/*/' file",
+    "sed 's/old/new/' file",
+    "sed 's/hello/world/' file",
+    "sed 's/error/warning/g' file",
+    "sed -n '/needle/p' file",
+    "sed '/pattern/d' file",
+    "sed 's/a/woutput/' file",
+    "sed 's#x#s/a/b/woutput#' file",
+    "sed 's#x#foo;woutput#' file",
+    "sed 'p;d' file",
+    "awk '{ print*2 }' file",
+    "awk -- '{ print }' input",
+    "awk -F : '{ print $1 }' input",
+    'awk \'BEGIN { print "user@example.com" }\'',
+    "printf '%s' value",
+  ])('classifies %j as read-only', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('read-only');
+  });
+
+  it.each([
+    ...[
+      'chgrp',
+      'chmod',
+      'chown',
+      'cp',
+      'install',
+      'ln',
+      'mkdir',
+      'mkfifo',
+      'mknod',
+      'mv',
+      'rename',
+      'rm',
+      'rmdir',
+      'shred',
+      'touch',
+      'truncate',
+      'unlink',
+    ].map((root) => `${root} target`),
+    ...'add am checkout cherry-pick clean clone commit fetch gc init merge mv pull push rebase reset restore revert rm stash switch'
+      .split(' ')
+      .map((subcommand) => `git ${subcommand} target`),
+    'kill 123',
+    'kill -- -0',
+    'kill "$PID"',
+    'pkill -n 0',
+    'pkill -n0 process',
+    'pkill -s0 process',
+    'pkill -s 0 process',
+    'pkill -s "$SESSION" process',
+    'killall -n0 process',
+    'echo > out',
+    '> out',
+    'export FOO=bar > out',
+    'echo >> out',
+    'echo >| out',
+    'echo &> out',
+    'echo &>> out',
+    'echo >& out',
+    '> out echo',
+    'git commit -m message',
+    'git commit -m --help',
+    'git commit -F --help',
+    'git commit -C --help',
+    'git commit -c --help',
+    'git commit --reuse-message --help',
+    'git commit --fixup --help',
+    'git commit -m --dry-run',
+    'git commit -n -m message',
+    "git commit -m '%G?'",
+    'git add -- --help',
+    'git add -- --dry-run',
+    'touch -- --help',
+    'git fetch -n origin',
+    'git branch topic',
+    'git branch -- topic',
+    'git branch --color=always color-topic',
+    'git branch --column column-topic',
+    'git branch --sort=refname sort-topic',
+    "git branch --format='%(refname)' format-topic",
+    'git branch -v verbose-topic',
+    'git branch --delete topic',
+    'git branch -uorigin/main topic',
+    'git branch --format --help -d topic',
+    'git branch --sort --version --delete topic',
+    'git remote set-url origin url',
+    'git remote rm origin',
+    'git remote prune origin',
+    'git diff --output=patch',
+    'git log --output=log.out',
+    'git show --output=show.out HEAD',
+    'git log --output --help',
+    'find . -delete',
+    'find . -fprint matches',
+    'find . -fprint --help',
+    'find . -fls --help',
+    'find . -fprintf --help format',
+    'find . -exec rm {} \\;',
+    'find . -exec echo --help {} \\; -delete',
+    'find . -exec echo --version {} \\; -delete',
+    "sed -i 's/a/b/' file",
+    'sed -f script.sed -i file',
+    'sed --file=script.sed --in-place=.bak file',
+    "sed -- 'wout' input",
+    "sed -- 's/a/b/wout' input",
+    "sed -I .bak 's/a/b/' file",
+    "sed -I.bak 's/a/b/' file",
+    "sed -ni.bak 's/a/b/' file",
+    "sed -nI.bak 's/a/b/' file",
+    "sed 's/a/b/w output' file",
+    "sed -e 's/a/b/' -e 'woutput' file",
+    "sed 's/a/b/woutput' file",
+    "sed 'woutput' file",
+    "sed '1woutput' file",
+    "sed '/pattern/woutput' file",
+    "sed 'W output' file",
+    "sed '1W output' file",
+    "sed 'p;w output' file",
+    "sed 's/a/b/;w output' file",
+    "sed 's/a/;/;w output' file",
+    "sed -l 80 'w output' file",
+    "sed --line-length 80 'w output' file",
+    'awk \'{ print > "output" }\' file',
+    'awk -- \'BEGIN { print > "out" }\'',
+    'awk \'BEGIN { print "x" > "out" }\'',
+    'awk \'BEGIN { printf "%s", "x" > "out" }\'',
+    'awk \'BEGIN { print a[x] > "out" }\'',
+    'awk \'{ print>"output" }\' file',
+    'awk -v mode=1 \'BEGIN { print > "out" }\' input',
+    'awk \'/pattern/ { print > "out" }\' input',
+    'sort -o output input',
+    'sort -o --help input',
+    'tree -o tree.txt',
+    'tree -o --help .',
+    'uniq input output',
+    'uniq - output',
+    'uniq -- -f output',
+    'uniq input -- -f',
+    'tee output',
+    'tee -- -output',
+    'tee -a -- -output',
+    'dd if=input of=output',
+    'echo $(rm target)',
+    'FOO=$(rm target)',
+    'cat <(rm target)',
+    'cat < <(rm target)',
+    '< <(rm target) cat',
+    '! rm target',
+    'cat <<EOF\n$(rm target)\nEOF',
+    'FOO=bar rm target',
+    'python -c pass; touch target',
+    'if true; then rm target; fi',
+    'while false; do rm target; done',
+    'for item in value; do rm target; done',
+  ])('classifies %j as write', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('write');
+  });
+
+  it.each([
+    '',
+    'python -c pass',
+    'node -e pass',
+    'LS -la',
+    'printf -v PATH /tmp',
+    'printf -xv PATH /tmp',
+    'printf "$OPTIONS" value',
+    'printf -v PATH /tmp; ls',
+    'sudo ls',
+    'bash -c ls',
+    '/bin/rm target',
+    'rm --help',
+    'kill -0 123',
+    'kill -n 0 123',
+    'kill -n 00 123',
+    'kill -n0 123',
+    'kill -s0 123',
+    'kill --signal 0 123',
+    'kill -SIG0 123',
+    'kill -s SIG0 123',
+    'kill --signal=SIG0 123',
+    'kill -l',
+    'kill --list=TERM',
+    'kill --table',
+    'kill -V',
+    'killall -help',
+    'killall -s0 process',
+    'killall -sSIG0 process',
+    'pkill -0 process',
+    'pkill -SIG0 process',
+    'pkill --signal 0 process',
+    'pkill --signal SIG0 process',
+    'kill -s "$SIGNAL" 123',
+    'kill -n "$SIGNAL" 123',
+    'kill --signal="$SIGNAL" 123',
+    'git clean --dry-run',
+    'git commit -m -F --help',
+    'git commit -m -F --dry-run',
+    'git commit --message --file --help',
+    'git commit --untracked-files --help',
+    'git --config-env=diff.external=HELPER diff',
+    'git --paginate log',
+    'git -p log',
+    'git --unknown-option status',
+    'git -- status',
+    'git --help commit',
+    'git status --help',
+    'git log --help',
+    'git diff --help',
+    'git log --show-signature -1',
+    'git show --format=%G? HEAD',
+    'GIT_EXTERNAL_DIFF=/tmp/helper git diff',
+    'FOO=bar GIT_EXTERNAL_DIFF=/tmp/helper git diff',
+    "GIT_EXTERNAL_DIFF='touch /tmp/pwned'; git diff",
+    'FOO=bar; ls',
+    'FOO=bar ls',
+    'LD_PRELOAD=/tmp/evil.so ls',
+    'RIPGREP_CONFIG_PATH=/tmp/config rg pattern',
+    'PAGER=helper git log',
+    'git add -n target',
+    'git branch -d topic --help',
+    'git branch --list -- -d',
+    'git branch -- --list',
+    'git branch --sort refname',
+    "git branch --format '%(refname)'",
+    'git branch --sort refname topic',
+    'git branch --format --delete',
+    'git branch --sort -d',
+    'git diff --output=',
+    'git blame --output=blame.out file',
+    'git diff --ext-diff',
+    'git show --textconv HEAD:file',
+    'git grep --open-files-in-pager=less needle',
+    'git grep -Ovim needle',
+    'git cat-file --filters HEAD:file',
+    'git remote prune --dry-run origin',
+    'git remote prune -n origin',
+    'git remote show remove',
+    'git remote get-url prune',
+    'find . -exec echo {} \\;',
+    'find . -exec echo -delete \\;',
+    'find . -fprint --help --help',
+    'find . -name -delete',
+    'find . -printf -delete',
+    'find . -newermt -delete',
+    'find . -samefile -delete',
+    'find . -mtime -delete',
+    'find . -used -delete',
+    'find . -- -delete',
+    'find . -exec rm --help \\;',
+    'sed -f script.sed file',
+    'sed -fscript.sed file',
+    "sed --in-pl=.bak 's/a/b/' file",
+    'sed --f script.sed file',
+    'sed -newout input',
+    'sed -nEewout input',
+    'sed "$SCRIPT" file',
+    'sed -e "$SCRIPT" file',
+    'sed s/a/*/ file',
+    'sed \'s/a/b/\' "$FILE"',
+    "sed -i 's/a/b/' --help",
+    'sed -e -i file',
+    'sed -einstall file',
+    'sed -neinstall file',
+    "sed -e '' file",
+    'sed -f -i file',
+    'sed -e-i file',
+    'sed -- -i file',
+    "sed 's/a/b/e' file",
+    "sed 's/a/printf hacked > marker/ep' file",
+    "sed 's#a#printf hacked > marker#pe' file",
+    "sed 'etouch marker' file",
+    "sed '1etouch marker' file",
+    "sed 's/a/b/w' file",
+    "sed 'w' file",
+    "sed '1w' file",
+    "sed 'R input' file",
+    "sed 's/a/b/' 'w file'",
+    "sed 's/a/new value/' file",
+    "sed 's/a/blue sky/' file",
+    "sed 's/a/car value/' file",
+    "sed 's/w /x/' file",
+    "sed '/p;w output/p' file",
+    "sed 's/a/;w output/' file",
+    'awk \'{ system("date") }\'',
+    "awk '{ print > output }' file",
+    'awk \'BEGIN { print("x")|"cat > output" }\'',
+    'awk \'BEGIN { print(1 > "0") }\'',
+    'awk \'BEGIN { printf("%d", 1 > "0") }\'',
+    'awk \'BEGIN { print "print > " "output" }\'',
+    'awk \'BEGIN { print (x) > "out" }\'',
+    'awk \'BEGIN { print +(x > "0") }\'',
+    'awk \'BEGIN { print a[x > "0"] }\'',
+    'awk \'BEGIN { # print > "out"\nprint }\'',
+    'awk \'BEGIN { print /x; print y > "out";/ }\'',
+    'awk \'BEGIN { print x / 2 > "out" }\'',
+    "awk '{ print }' 'print > \"out\"'",
+    'awk -fscript.awk file',
+    'awk -W exec=script.awk file',
+    'awk -Wexec=script.awk file',
+    'awk "$PROGRAM" file',
+    'awk \'@include "library.awk"\' file',
+    'awk \'@namespace "safe"\' file',
+    'awk \'BEGIN { fn = "system"; @fn("touch /tmp/pwned") }\'',
+    'awk \'BEGIN { fn = "system"; @ fn("touch /tmp/pwned") }\'',
+    "awk -e '{ print }' file",
+    "awk --load extension '{ print }' file",
+    "awk --profile=report '{ print }' file",
+    'awk {print*2} file',
+    'awk -v x="$VALUE" \'{ print x }\' file',
+    'awk \'{ print $NF }\' "$FILE"',
+    'uniq *',
+    'uniq "$FILES"',
+    'sort "$OPTIONS" input',
+    'sort {-o,output} input',
+    'sort --out=output input',
+    'sort -roout input',
+    'tree -Cofile .',
+    'sort --co=cat input',
+    'tree --output=tree.txt',
+    'find . "$EXPRESSION"',
+    'rg "$OPTIONS" pattern',
+    'git status "$OPTIONS"',
+    'sort --compress-program gzip input',
+    'sort --output=',
+    'sort -o output --help',
+    'rg --pre cat pattern',
+    'rg --hostname-bin=hostname pattern',
+    'rg -z pattern archive.gz',
+    'ripgrep -iz pattern archive.gz',
+    'rg --search-zip pattern archive.gz',
+    'less file',
+    'more file',
+    'tee',
+    'dd if=input',
+    'echo >& "$target"',
+    'cat <> file',
+    'echo >',
+    'FOO=bar > out',
+    'echo $(git status)',
+    'FOO=$(git status)',
+    'cat <(git status)',
+    'if true; then git status; fi',
+    'fn() { rm target; }',
+  ])('classifies %j as unknown', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('unknown');
+  });
+
+  it.each([
+    'rm target',
+    'python -c pass',
+    'echo $(git status)',
+    'if true; then git status; fi',
+    'fn() { rm target; }',
+    'git push origin main',
+    'git branch --list -- -d',
+    'find . -exec echo {} \\;',
+    "sed 's/a/b/e' file",
+    "sed 's/a/b/' 'w file'",
+    "sed 's/w /x/' file",
+    'awk \'{ system("date") }\'',
+    'git remote show remove',
+  ])('does not widen the compatibility boolean for %j', async (command) => {
+    expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+  });
+
+  it('classifies deeply nested substitutions without repeated traversal', async () => {
+    let command = 'git status';
+    for (let depth = 0; depth < 30; depth++) command = `echo $(${command})`;
+    expect(await classifyShellCommandSafety(command)).toBe('unknown');
+  });
+
+  it('classifies deeply nested redirected substitutions within the CPU budget', async () => {
+    const commands = ['git status', 'git status'];
+    for (let depth = 0; depth < 20; depth++) {
+      commands[0] = `echo $(${commands[0]}) < /dev/null`;
+      commands[1] = `< <(${commands[1]}) cat`;
+    }
+    const startedCpuUsage = process.cpuUsage();
+    await expect(
+      Promise.all(commands.map(classifyShellCommandSafety)),
+    ).resolves.toEqual(['unknown', 'unknown']);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
+  });
+
+  it('classifies adversarial rule inputs within the CPU budget', async () => {
+    const backslashes = '\\'.repeat(10_000);
+    const repeatedSed = 'p;'.repeat(10_000);
+    const repeatedPrint = 'print value; '.repeat(10_000);
+    const repeatedFindExec = '-exec echo \\; '.repeat(10_000);
+    const unmatchedBraces = '\\{'.repeat(10_000);
+    const commands = [
+      `sed 's/${backslashes}a' file`,
+      `sed '${repeatedSed}' file`,
+      `awk 'BEGIN { print "${backslashes} > output }'`,
+      `awk 'BEGIN { ${repeatedPrint} }'`,
+      `find . ${repeatedFindExec}`,
+      `git status ${unmatchedBraces}`,
+    ];
+    const startedCpuUsage = process.cpuUsage();
+    await expect(
+      Promise.all(commands.map(classifyShellCommandSafety)),
+    ).resolves.toEqual([
+      'unknown',
+      'read-only',
+      'unknown',
+      'read-only',
+      'unknown',
+      'read-only',
+    ]);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 });
 
@@ -561,6 +1138,34 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
   });
 
+  it('maps parser unavailability to unknown in the classification API', async () => {
+    _setParserFailedForTesting();
+    expect(await classifyShellCommandSafety('git status')).toBe('unknown');
+    expect(await isShellCommandReadOnlyAST('git status')).toBe(true);
+  });
+
+  it('keeps the Git config gate when the parser is unavailable', async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'qwen-git-fallback-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd });
+      execFileSync('git', ['config', 'core.fsmonitor', 'example-fsmonitor'], {
+        cwd,
+      });
+      _setParserFailedForTesting();
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('treats syntax errors as unknown without widening the boolean API', async () => {
+    expect(isShellCommandReadOnly('ls |')).toBe(false);
+    expect(await classifyShellCommandSafety('ls |')).toBe('unknown');
+    expect(await isShellCommandReadOnlyAST('ls |')).toBe(false);
+  });
+
   it('returns the regex-based result for a mutating command when parser is marked failed', async () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('rm -rf /')).toBe(false);
@@ -689,8 +1294,8 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['ls\n\ngrep foo', true, 'consecutive newlines, all read-only'],
 
     // --- env prefix ---
-    ['FOO=bar ls', true],
-    ['A=1 B=2 ls -la', true],
+    ['FOO=bar ls', false],
+    ['A=1 B=2 ls -la', false],
 
     // --- whitespace ---
     ['   ', false, 'whitespace-only returns false'],

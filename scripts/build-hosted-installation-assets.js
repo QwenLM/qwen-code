@@ -71,6 +71,22 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
       name: '--version parser',
       pattern: /ARG_KEY!"=="--version"|"%~1"=="--version"/,
     },
+    {
+      name: '--repair-path parser',
+      pattern: /if \/i "%~1"=="--repair-path"/,
+    },
+    {
+      name: '--path-scope parser',
+      pattern: /if \/i "!ARG_KEY!"=="--path-scope"/,
+    },
+    {
+      name: 'QWEN_INSTALL_REPAIR_PATH',
+      pattern: /QWEN_INSTALL_REPAIR_PATH/,
+    },
+    {
+      name: 'QWEN_INSTALL_PATH_SCOPE',
+      pattern: /QWEN_INSTALL_PATH_SCOPE/,
+    },
   ],
   'install-qwen-standalone.ps1': [
     {
@@ -111,7 +127,7 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
     },
     {
       name: 'PATH cleanup',
-      pattern: /Remove-UserPathEntry/,
+      pattern: /Remove-PathEntryFromAllScopes/,
     },
     {
       name: 'current cmd shim cleanup',

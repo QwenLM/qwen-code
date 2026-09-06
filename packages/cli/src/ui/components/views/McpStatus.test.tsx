@@ -5,7 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { McpStatus } from './McpStatus.js';
 import { MCPServerStatus } from '@qwen-code/qwen-code-core';
 import { MessageType } from '../../types.js';
@@ -75,12 +75,13 @@ describe('McpStatus', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('renders correctly with a disconnected server', async () => {
-    vi.spyOn(
-      await import('@qwen-code/qwen-code-core'),
-      'getMCPServerStatus',
-    ).mockReturnValue(MCPServerStatus.DISCONNECTED);
-    const { lastFrame } = render(<McpStatus {...baseProps} />);
+  it('renders correctly with a disconnected server', () => {
+    const { lastFrame } = render(
+      <McpStatus
+        {...baseProps}
+        serverStatus={() => MCPServerStatus.DISCONNECTED}
+      />,
+    );
     expect(lastFrame()).toMatchSnapshot();
   });
 
@@ -156,7 +157,11 @@ describe('McpStatus', () => {
 
   it('renders correctly with a connecting server', () => {
     const { lastFrame } = render(
-      <McpStatus {...baseProps} connectingServers={['server-1']} />,
+      <McpStatus
+        {...baseProps}
+        serverStatus={() => MCPServerStatus.CONNECTING}
+        connectingServers={['server-1']}
+      />,
     );
     expect(lastFrame()).toMatchSnapshot();
   });

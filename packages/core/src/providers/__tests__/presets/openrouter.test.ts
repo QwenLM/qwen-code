@@ -61,4 +61,11 @@ describe('openRouterProvider', () => {
       }),
     ).toBe(false);
   });
+
+  it('declares customHeaders for attribution', () => {
+    expect(openRouterProvider.customHeaders).toEqual({
+      'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+      'X-OpenRouter-Title': 'Qwen Code',
+    });
+  });
 });

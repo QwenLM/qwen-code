@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AuthDialog } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
+import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
@@ -14,6 +15,15 @@ import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
+
+const discoverProviderModelsMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(null),
+);
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  discoverProviderModels: discoverProviderModelsMock,
+}));
 
 type UIStateOverrides = Partial<UIState> & Partial<UIState['auth']>;
 
@@ -138,6 +148,18 @@ const waitForSelectedOption = async (
   await vi.waitFor(
     () => {
       expectSelectedOption(lastFrame(), label);
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
+};
+
+const waitForText = async (
+  lastFrame: () => string | undefined,
+  expectedText: string,
+) => {
+  await vi.waitFor(
+    () => {
+      expect(lastFrame()).toContain(expectedText);
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
@@ -1102,6 +1124,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Grok (xAI) API Key');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
       await pressEnterAndWaitFor(
         stdin,
@@ -1233,7 +1256,12 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 1/2 · API Key',
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
       );
 
       await typeText(stdin, 'sk-token-plan');
@@ -1241,8 +1269,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 2/2 · Model IDs',
+        'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
+      await waitForText(lastFrame, 'Enter model IDs directly');
       stdin.write('\r');
       await vi.waitFor(
         () => {
@@ -1250,6 +1279,84 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should pre-fill the Model IDs step with previously saved custom model IDs',
+    async () => {
+      // User previously saved a custom model ID for Token Plan in settings.
+      const savedSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          openai: [
+            {
+              id: 'my-custom-token-model',
+              name: '[ModelStudio Token Plan] my-custom-token-model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+            },
+          ],
+        },
+      } as unknown as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: savedSettings,
+          originalSettings: savedSettings,
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      stdin.write('\r');
+      await waitForSelectedOption(lastFrame, 'Coding Plan');
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
+      );
+
+      await typeText(stdin, 'sk-token-plan');
+
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 3/3 · Model IDs',
+      );
+      await waitForText(lastFrame, 'Enter model IDs directly');
+
+      // The Model IDs input is pre-filled with the saved custom model id
+      // (which only exists in settings, never among the built-in defaults).
+      expect(lastFrame()).toContain('my-custom-token-model');
 
       unmount();
     },
@@ -1300,7 +1407,22 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 1/2 · API Key',
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
+      );
+      stdin.write('\u001b');
+
+      await vi.waitFor(
+        () => {
+          expect(lastFrame()).toContain(
+            'Alibaba ModelStudio · Step 1/3 · Region',
+          );
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
       );
       stdin.write('\u001b');
 

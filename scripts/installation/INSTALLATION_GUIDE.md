@@ -11,7 +11,7 @@ The installers are intentionally lightweight:
 - They try a standalone archive first by default.
 - They do not install Node.js, NVM, or any other Node version manager.
 - They do not edit npm config. Standalone installs may update the shell profile
-  or user PATH so the generated `qwen` shim is discoverable.
+  or user/machine PATH so the generated `qwen` shim is discoverable.
 - They do not start `qwen` automatically after installation.
 - They store source information in `~/.qwen/source.json` or
   `%USERPROFILE%\.qwen\source.json` when `--source` is provided.
@@ -133,13 +133,20 @@ install-qwen-standalone.bat --method standalone
 install-qwen-standalone.bat --method npm
 ```
 
+Repair PATH for an existing standalone Windows install without downloading or
+reinstalling Qwen Code:
+
+```bat
+install-qwen-standalone.bat --repair-path
+install-qwen-standalone.bat --repair-path --path-scope machine
+```
+
 ## Optional Native Modules
 
-The standalone archives bundle Qwen Code and a private Node.js runtime. They do
-not currently install npm optional native modules such as `node-pty` and
-`@teddyzhu/clipboard`. Qwen Code is designed to degrade when these optional
-modules are absent, but terminal pty behavior and clipboard image support may
-not be identical to an npm installation.
+The standalone archives bundle Qwen Code, a private Node.js runtime, and the
+matching `@teddyzhu/clipboard` native package for clipboard image paste. They
+do not currently install every npm optional native module, such as `node-pty`,
+so terminal pty behavior may not be identical to an npm installation.
 
 Use `--method npm` if you specifically need npm to resolve optional native
 modules for the current machine.
@@ -211,6 +218,18 @@ Standalone installs to:
 Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_DIR`, or
 `QWEN_INSTALL_BIN_DIR` when needed.
 
+For self-hosted Windows runners, install under the runner account once, then
+repair machine-level PATH without reinstalling:
+
+```powershell
+$env:QWEN_INSTALL_REPAIR_PATH = '1'
+$env:QWEN_INSTALL_PATH_SCOPE = 'machine'
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
+```
+
+Restart the runner service or machine after updating machine-level PATH so jobs
+inherit the refreshed environment.
+
 Restart the terminal if `qwen` is not immediately available on PATH.
 
 Uninstall a standalone Windows install:
@@ -220,10 +239,11 @@ powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangz
 ```
 
 The uninstaller removes only the standalone runtime, generated `qwen.cmd`
-wrapper, user PATH entry, and the current-session `cmd.exe` shim created by the
-hosted PowerShell installer. It preserves `%USERPROFILE%\.qwen` by default. Set
-`QWEN_UNINSTALL_PURGE=1` to remove `%USERPROFILE%\.qwen\source.json`; other
-config and auth files are still preserved.
+wrapper, user or machine PATH entry, and the current-session `cmd.exe` shim
+created by the hosted PowerShell installer. It preserves `%USERPROFILE%\.qwen`
+by default. Set `QWEN_UNINSTALL_PURGE=1` to remove
+`%USERPROFILE%\.qwen\source.json`; other config and auth files are still
+preserved.
 
 ## Mirrors and Overrides
 
@@ -236,6 +256,8 @@ Options:
 - `--version VERSION`
 - `--registry REGISTRY`
 - `--source SOURCE`
+- `--repair-path`
+- `--path-scope user|machine`
 
 Environment variables:
 
@@ -245,6 +267,8 @@ Environment variables:
 - `QWEN_INSTALL_ARCHIVE`
 - `QWEN_INSTALL_VERSION`
 - `QWEN_NPM_REGISTRY`
+- `QWEN_INSTALL_REPAIR_PATH`
+- `QWEN_INSTALL_PATH_SCOPE`
 
 Use `--base-url` for private mirrors. The URL must contain
 `qwen-code-<target>` archives and `SHA256SUMS` in the same directory. Custom

@@ -39,6 +39,32 @@ export interface ProcessImportsResult {
   importTree: MemoryFile;
 }
 
+export interface ImportedFileNotification {
+  filePath: string;
+  parentFilePath: string;
+}
+
+export interface ProcessImportsOptions {
+  onFileImported?: (
+    notification: ImportedFileNotification,
+  ) => void | Promise<void>;
+}
+
+async function notifyFileImported(
+  options: ProcessImportsOptions | undefined,
+  notification: ImportedFileNotification,
+): Promise<void> {
+  try {
+    await options?.onFileImported?.(notification);
+  } catch (error) {
+    logger.warn(
+      `onFileImported callback failed for ${notification.filePath}: ${
+        hasMessage(error) ? error.message : 'Unknown error'
+      }`,
+    );
+  }
+}
+
 // `findProjectRoot` now lives in `./projectRoot.ts` and is shared with
 // memoryDiscovery. It returns `string | null`; `processImports` below
 // preserves the previous "fall back to startDir" contract at the call
@@ -190,6 +216,7 @@ export async function processImports(
   },
   projectRoot?: string,
   importFormat: 'flat' | 'tree' = 'tree',
+  options: ProcessImportsOptions = {},
 ): Promise<ProcessImportsResult> {
   if (!projectRoot) {
     // Preserve the previous local helper's contract: if no `.git`
@@ -210,10 +237,17 @@ export async function processImports(
 
   // --- FLAT FORMAT LOGIC ---
   if (importFormat === 'flat') {
-    // Use a queue to process files in order of first encounter, and a set to avoid duplicates
+    // Collect files in order of first encounter, deduplicated by the depth map
+    // below rather than by a plain set.
     const flatFiles: Array<{ path: string; content: string }> = [];
-    // Track processed files across the entire operation
-    const processedFiles = new Set<string>();
+    // Track the shallowest depth each file has been expanded at, rather than a
+    // plain "seen" set. Once a depth limit exists the two differ: a file first
+    // reached down a long chain is truncated there, and a later, shallower route
+    // to that same file -- comfortably inside the limit -- would be dismissed as
+    // already seen, so its own imports would never be expanded. Recording the
+    // depth lets the shallower route re-expand it while the file itself is still
+    // emitted only once.
+    const expandedAt = new Map<string, number>();
 
     // Helper to recursively process imports
     async function processFlat(
@@ -225,14 +259,29 @@ export async function processImports(
       // Normalize the file path to ensure consistent comparison
       const normalizedPath = path.normalize(filePath);
 
-      // Skip if already processed
-      if (processedFiles.has(normalizedPath)) return;
+      // Already expanded by an equally shallow or shallower route, so this one
+      // cannot reach anything new. This is also what stops cycles: a repeat
+      // visit always arrives at a greater depth.
+      const seenAt = expandedAt.get(normalizedPath);
+      if (seenAt !== undefined && seenAt <= depth) return;
 
-      // Mark as processed before processing to prevent infinite recursion
-      processedFiles.add(normalizedPath);
+      // Add this file to the flat list, once, however many routes reach it.
+      if (seenAt === undefined) {
+        flatFiles.push({ path: normalizedPath, content: fileContent });
+      }
 
-      // Add this file to the flat list
-      flatFiles.push({ path: normalizedPath, content: fileContent });
+      // Record before recursing to prevent infinite recursion.
+      expandedAt.set(normalizedPath, depth);
+
+      // Stop descending once the depth limit is reached, matching what the tree
+      // path does at the top of processImports: the file sitting at the limit is
+      // still included, its own imports are simply not expanded.
+      if (depth >= importState.maxDepth) {
+        logger.warn(
+          `Maximum import depth (${importState.maxDepth}) reached at ${normalizedPath}. Stopping import processing.`,
+        );
+        return;
+      }
 
       // Find imports in this file
       const codeRegions = findCodeRegions(fileContent);
@@ -262,8 +311,10 @@ export async function processImports(
         const fullPath = path.resolve(fileBasePath, importPath);
         const normalizedFullPath = path.normalize(fullPath);
 
-        // Skip if already processed
-        if (processedFiles.has(normalizedFullPath)) continue;
+        // Skip if already expanded from here or shallower, so the file is not
+        // re-read when the recursion would immediately return anyway.
+        const childSeenAt = expandedAt.get(normalizedFullPath);
+        if (childSeenAt !== undefined && childSeenAt <= depth + 1) continue;
 
         try {
           await fs.access(fullPath);
@@ -276,6 +327,20 @@ export async function processImports(
             normalizedFullPath,
             depth + 1,
           );
+          // Announce a file the first time it is reached, matching the single
+          // copy of it in the flat output. A file first met down a truncated
+          // route is re-expanded when a shallower route reaches it, and that
+          // second pass must not announce it again: nothing downstream
+          // de-duplicates, so the consumer would see one loaded file reported
+          // twice under two different parents. `childSeenAt` is read before
+          // the recursion above, which is what makes it a first-visit test --
+          // afterwards the entry always reads `depth + 1`.
+          if (childSeenAt === undefined) {
+            await notifyFileImported(options, {
+              filePath: normalizedFullPath,
+              parentFilePath: normalizedPath,
+            });
+          }
         } catch (error) {
           // If file doesn't exist, silently skip this import (it's not a real import)
           // Only log warnings for other types of errors
@@ -293,7 +358,12 @@ export async function processImports(
     const rootPath = path.normalize(
       importState.currentFile || path.resolve(basePath),
     );
-    await processFlat(content, basePath, rootPath, 0);
+    // Start from the depth already spent rather than 0, so the two formats
+    // budget from the same origin. Every caller today enters flat mode at
+    // depth 0, which makes this a no-op for them, but a caller arriving with
+    // budget already spent would otherwise get the full limit over again in
+    // flat mode while tree mode gave it only what was left.
+    await processFlat(content, basePath, rootPath, importState.currentDepth);
 
     // Concatenate all unique files in order, Claude-style
     const flatContent = flatFiles
@@ -353,9 +423,14 @@ export async function processImports(
         newImportState,
         projectRoot,
         importFormat,
+        options,
       );
       result += `<!-- Imported from: ${importPath} -->\n${imported.content}\n<!-- End of import from: ${importPath} -->`;
       imports.push(imported.importTree);
+      await notifyFileImported(options, {
+        filePath: fullPath,
+        parentFilePath: importState.currentFile ?? path.resolve(basePath),
+      });
     } catch (err: unknown) {
       // If file doesn't exist, preserve the original @path text (it's not a real import)
       if (isFileNotFoundError(err)) {

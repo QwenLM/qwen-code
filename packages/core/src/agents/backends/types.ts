@@ -12,13 +12,19 @@
  */
 
 import type { Content } from '@google/genai';
+import type { ContentGenerator } from '../../core/contentGenerator.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import type {
+  AgentMessage,
+  AgentStatus,
   PromptConfig,
   ModelConfig,
   RunConfig,
   ToolConfig,
 } from '../runtime/agent-types.js';
+import type { AgentEventEmitter } from '../runtime/agent-events.js';
+import type { ApprovalMode } from '../../config/config.js';
+import type { TeammateIdentity } from '../team/types.js';
 
 /**
  * Canonical display mode values shared across core and CLI.
@@ -76,6 +82,11 @@ export interface InProcessSpawnConfig {
   agentName: string;
   /** Optional initial task to start working on immediately. */
   initialTask?: string;
+  /**
+   * When true, the agent transitions to COMPLETED instead of IDLE when
+   * its message queue empties. Used for team teammates.
+   */
+  completeOnIdle?: boolean;
   /** Runtime configuration for the AgentCore. */
   runtimeConfig: {
     promptConfig: PromptConfig;
@@ -83,6 +94,10 @@ export interface InProcessSpawnConfig {
     runConfig: RunConfig;
     toolConfig?: ToolConfig;
   };
+  /** Optional per-agent approval mode override. */
+  approvalMode?: ApprovalMode;
+  /** Optional teammate identity for in-process team agents. */
+  teammateIdentity?: TeammateIdentity;
   /**
    * Per-agent auth/provider overrides. When present, a dedicated
    * ContentGenerator is created for this agent instead of inheriting
@@ -110,6 +125,33 @@ export type AgentExitCallback = (
   exitCode: number | null,
   signal: number | null,
 ) => void;
+
+/**
+ * Minimal handle a backend can return for an in-process agent.
+ *
+ * Both `AgentInteractive` (real) and `FakeAgent` (tests) satisfy this
+ * shape. PTY-based backends (tmux, iTerm2) don't expose an agent handle
+ * because the agent runs in a subprocess.
+ */
+export interface TeamAgentHandle {
+  getStatus(): AgentStatus;
+  getEventEmitter(): AgentEventEmitter | undefined;
+  enqueueMessage(msg: string): void;
+  abort(): void;
+  /**
+   * Last fatal error, when the agent failed to start or run.
+   * Optional: both AgentInteractive and FakeAgent provide it; future
+   * handles may not.
+   */
+  getError?(): string | undefined;
+  /**
+   * Conversation message history. Optional: in-process handles
+   * (AgentInteractive, FakeAgent) provide it; PTY handles don't.
+   * TeamManager reads it to recover round text emitted before its
+   * event bridge attached.
+   */
+  getMessages?(): readonly AgentMessage[];
+}
 
 /**
  * Backend abstracts the display/pane management layer for multi-agent systems.
@@ -144,6 +186,35 @@ export interface Backend {
    * Stop a specific agent.
    */
   stopAgent(agentId: string): void;
+
+  /**
+   * Get an in-process agent handle by id, when the backend keeps
+   * agents in the current process. PTY-based backends do not expose
+   * a handle and may omit this method.
+   */
+  getAgent?(agentId: string): TeamAgentHandle | undefined;
+
+  /**
+   * Get the dedicated ContentGenerator an in-process agent was spawned
+   * with, when the backend created one for an explicitly requested
+   * per-agent route. Lets spawn callers verify a requested route
+   * actually materialized instead of silently falling back to the
+   * parent's generator. PTY-based backends run each agent in its own
+   * process and may omit this method; note that TeamManager fails the
+   * spawn of a model-selecting definition on a backend that omits it,
+   * because absence makes the route unverifiable.
+   */
+  getAgentContentGenerator?(agentId: string): ContentGenerator | undefined;
+
+  /**
+   * Get why the dedicated ContentGenerator could not be created for an
+   * agent, when the backend swallowed the creation failure and fell
+   * back to the parent's generator. Lets spawn callers surface the
+   * underlying cause (missing API key, bad base URL, ...) instead of a
+   * bare "route did not materialize". PTY-based backends may omit this
+   * method.
+   */
+  getAgentContentGeneratorError?(agentId: string): string | undefined;
 
   /**
    * Stop all running agents.

@@ -70,10 +70,11 @@ Then open your bot in Telegram and send a message. You should see "Working..." a
 
 To use the bot in Telegram groups:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. **Disable privacy mode** in BotFather: `/mybots` → select your bot → Bot Settings → Group Privacy → Turn Off
 3. Add the bot to a group. If it was already in the group, **remove and re-add it** (Telegram caches privacy settings from when the bot joined)
 4. If using `groupPolicy: "allowlist"`, add the group's chat ID to `groups` in your config
+5. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot; `senderPolicy` and `allowedUsers` do not gate members of an approved group.
 
 By default, the bot requires an @mention or a reply to respond in groups. Set `"requireMention": false` for a specific group to make it respond to all messages (useful for dedicated task groups). See [Group Chats](./overview#group-chats) for full details.
 
@@ -105,8 +106,9 @@ The agent's markdown responses are automatically converted to Telegram-compatibl
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
 - If using `"allowlist"`, verify the group's chat ID is in the `groups` config
+- If using `"pairing"`, verify the group's pairing request has been approved
 - Make sure **Group Privacy is turned off** in BotFather — without this, the bot can't see non-command messages in groups
 - If you changed privacy mode after adding the bot to a group, **remove and re-add the bot** to the group
 - By default, the bot requires an @mention or a reply. Send `@yourbotname hello` to test

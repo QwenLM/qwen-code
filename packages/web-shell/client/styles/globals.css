@@ -1,0 +1,156 @@
+@import './preflight.css';
+@import 'tailwindcss/theme.css';
+@import 'tailwindcss/utilities.css';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+) {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --radius: 0.625rem;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+).dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+}
+
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+),
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  * {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/*
+ * Defensive selection-highlight rule for message content. #8214.
+ *
+ * Firefox is suspected of not painting the default selection highlight for
+ * text whose element chain passes through a `display: contents` element (the
+ * `data-user-selectable` wrapper on MessageItem). The logical selection
+ * (copy, selectionchange popup) works fine - only the visual highlight is
+ * missing. An explicit `::selection` background makes Firefox paint the
+ * highlight where the default painting may fail. This is a low-risk
+ * workaround, not a confirmed root-cause fix: the wrapper is shared by user
+ * and assistant rows alike, and the reporter's environment appears to be an
+ * embedding page, so its own CSS may also need adjustment.
+ *
+ * This rule lives in the component-scoped stylesheet (loaded by App.tsx and
+ * WebShellTranscript.tsx) rather than standalone.css so it ships with the
+ * npm package and applies to embedded deployments, not just the standalone
+ * app.
+ */
+[data-user-selectable] ::selection {
+  background: hsl(210 100% 50% / 30%);
+}

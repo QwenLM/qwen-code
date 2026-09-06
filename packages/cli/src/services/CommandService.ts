@@ -131,12 +131,14 @@ export class CommandService {
 
   /**
    * Returns commands available in the specified execution mode.
-   * Hidden commands are excluded.
+   * Hidden and non-user-invocable commands are excluded.
    */
   getCommandsForMode(mode: ExecutionMode): readonly SlashCommand[] {
     return Object.freeze(
       filterCommandsForMode(
-        this.commands.filter((cmd) => !cmd.hidden),
+        this.commands.filter(
+          (cmd) => !cmd.hidden && cmd.userInvocable !== false,
+        ),
         mode,
       ),
     );

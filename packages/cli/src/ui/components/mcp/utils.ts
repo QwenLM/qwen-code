@@ -14,6 +14,10 @@ function getSourceDisplayName(source: string): string {
       return t('User MCPs');
     case 'project':
       return t('Project MCPs');
+    case 'workspace':
+      return t('Workspace Settings');
+    case 'system':
+      return t('System Settings');
     case 'extension':
       return t('Extension MCPs');
     default:

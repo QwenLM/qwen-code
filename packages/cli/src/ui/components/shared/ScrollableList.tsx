@@ -11,6 +11,7 @@ import {
   type VirtualizedListRef,
   type VirtualizedListProps,
 } from './VirtualizedList.js';
+import { useFrameCoalescedFlush } from '../../hooks/use-frame-coalesced-flush.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
@@ -37,6 +38,7 @@ function ScrollableList<T>(
   // latent name collision if VirtualizedList ever adds the same prop.
   const { hasFocus, ...virtualizedListProps } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
+  const isDraggingScrollbar = useRef(false);
 
   useImperativeHandle(
     ref,
@@ -48,6 +50,10 @@ function ScrollableList<T>(
         virtualizedListRef.current?.scrollToIndex(params),
       scrollToItem: (params) =>
         virtualizedListRef.current?.scrollToItem(params),
+      hitTestScrollbar: (location) =>
+        virtualizedListRef.current?.hitTestScrollbar(location) ?? false,
+      scrollToScrollbarRow: (row) =>
+        virtualizedListRef.current?.scrollToScrollbarRow(row),
       getScrollIndex: () => virtualizedListRef.current?.getScrollIndex() ?? 0,
       getScrollState: () =>
         virtualizedListRef.current?.getScrollState() ?? {
@@ -55,6 +61,8 @@ function ScrollableList<T>(
           scrollHeight: 0,
           innerHeight: 0,
         },
+      getViewportRect: () =>
+        virtualizedListRef.current?.getViewportRect() ?? null,
     }),
     [],
   );
@@ -95,30 +103,88 @@ function ScrollableList<T>(
     { isActive: hasFocus },
   );
 
-  // Mouse wheel scrolling. Legacy `<Static>` mode let the host terminal
-  // handle wheel events (they scrolled the native scrollback); in VP mode
-  // we own the visible region, so the terminal hands wheel events to us
-  // via SGR mouse protocol. Without this, opening the VP gate would cost
-  // users the most-felt mouse interaction.
-  //
-  // Hit-testing is intentionally absent: the ScrollableList occupies the
-  // conversation pane between the (small) pinned header and the (small)
-  // input prompt, so any wheel event the terminal forwards is overwhelm-
-  // ingly aimed at scrolling history. Precise per-pane hit-testing (and
-  // scrollbar drag) needs screen-absolute element coordinates which the
-  // stock ink 7 `useBoxMetrics` hook reports relative to the parent — see
-  // V.4 follow-up.
+  // Mouse scrolling. Legacy `<Static>` mode let the host terminal scroll its
+  // native scrollback. In VP mode the list owns the visible region, so route
+  // wheel ticks and scrollbar drags to the virtualized viewport.
   const WHEEL_LINES_PER_TICK = 3;
-  const handleMouseEvent = useCallback((event: MouseEvent) => {
-    if (!virtualizedListRef.current) return;
-    if (event.name === 'scroll-up') {
-      virtualizedListRef.current.scrollBy(-WHEEL_LINES_PER_TICK);
-    } else if (event.name === 'scroll-down') {
-      virtualizedListRef.current.scrollBy(WHEEL_LINES_PER_TICK);
+
+  // Terminal mouse reporting emits one event per row the pointer crosses, so a
+  // brisk wheel spin or scrollbar drag fires a rapid burst. Applying each event
+  // synchronously forced one Ink reflow + terminal flush per event — the source
+  // of the "一顿一顿" stutter. Accumulate the intent in refs and let
+  // useFrameCoalescedFlush apply the latest at most once per frame. A drag is
+  // absolute (snap to the newest row); a wheel burst is relative (sum the
+  // ticks); a drag in the same window wins.
+  const pendingWheelDelta = useRef(0);
+  const pendingDragRow = useRef<number | null>(null);
+
+  const applyPendingScroll = useCallback(() => {
+    const list = virtualizedListRef.current;
+    const dragRow = pendingDragRow.current;
+    const wheelDelta = pendingWheelDelta.current;
+    pendingDragRow.current = null;
+    pendingWheelDelta.current = 0;
+    if (!list) return;
+    if (dragRow !== null) {
+      list.scrollToScrollbarRow(dragRow);
+      return;
+    }
+    if (wheelDelta !== 0) {
+      list.scrollBy(wheelDelta);
     }
   }, []);
 
-  useMouseEvents(handleMouseEvent, { isActive: hasFocus });
+  const { schedule: scheduleScrollFlush, cancel: cancelScrollFlush } =
+    useFrameCoalescedFlush(applyPendingScroll);
+
+  // Discard any queued wheel/drag intent and cancel an in-flight flush. Used
+  // when a scrollbar press takes over: without it, a wheel burst scheduled
+  // moments earlier would still fire and `scrollBy` the view away from the row
+  // the user just clicked.
+  const cancelPendingScroll = useCallback(() => {
+    pendingWheelDelta.current = 0;
+    pendingDragRow.current = null;
+    cancelScrollFlush();
+  }, [cancelScrollFlush]);
+
+  const handleMouseEvent = useCallback(
+    (event: MouseEvent) => {
+      if (!virtualizedListRef.current) return;
+      if (event.name === 'left-release') {
+        isDraggingScrollbar.current = false;
+        return;
+      }
+      if (event.name === 'left-press') {
+        isDraggingScrollbar.current =
+          virtualizedListRef.current.hitTestScrollbar(event);
+        if (isDraggingScrollbar.current) {
+          // A press should feel instant — apply now and drop any queued
+          // wheel/drag intent (and its timer) so a flush scheduled moments
+          // earlier can't yank the view off the clicked row.
+          cancelPendingScroll();
+          virtualizedListRef.current.scrollToScrollbarRow(event.row);
+        }
+        return;
+      }
+      if (event.name === 'move' && isDraggingScrollbar.current) {
+        pendingDragRow.current = event.row;
+        scheduleScrollFlush();
+        return;
+      }
+      if (event.name === 'scroll-up') {
+        pendingWheelDelta.current -= WHEEL_LINES_PER_TICK;
+        scheduleScrollFlush();
+      } else if (event.name === 'scroll-down') {
+        pendingWheelDelta.current += WHEEL_LINES_PER_TICK;
+        scheduleScrollFlush();
+      }
+    },
+    [scheduleScrollFlush, cancelPendingScroll],
+  );
+
+  // The VP viewport owns the wheel (this IS the in-app scroller), so opt out
+  // of the VP gate — though in practice ScrollableList only mounts in VP mode.
+  useMouseEvents(handleMouseEvent, { isActive: hasFocus, bypassVpGate: true });
 
   // ScrollableList is a thin keyboard / mouse wrapper around VirtualizedList.
   // The previous outer <Box flexGrow={1}> wrapper carried a never-read

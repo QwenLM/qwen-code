@@ -33,7 +33,9 @@ export function ArenaStartDialog({
 
   const modelItems = useMemo(() => {
     const allModels = config.getAllConfiguredModels();
-    const selectableModels = allModels.filter((model) => !model.isRuntimeModel);
+    const selectableModels = allModels.filter(
+      (model) => !model.isRuntimeModel && !model.imageOnly,
+    );
 
     return selectableModels.map((model) => {
       const token = `${model.authType}:${model.id}`;

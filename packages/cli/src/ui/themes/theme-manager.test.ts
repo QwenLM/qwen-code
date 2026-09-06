@@ -240,5 +240,18 @@ describe('ThemeManager', () => {
       expect(result).toBe(false);
       expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
     });
+
+    it('should not load a theme from a sibling path with the same home prefix', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockTheme));
+
+      const result = themeManager.setActiveTheme(
+        '/home/user-evil/my-theme.json',
+      );
+
+      expect(result).toBe(false);
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+      expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
+    });
   });
 });

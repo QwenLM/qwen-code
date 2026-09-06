@@ -9,9 +9,17 @@ import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
+import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.js';
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
+  INLINE_CODE_SPAN_PATTERN_SOURCE,
+  mergeInlineMathMatches,
+  unescapeMarkdownBeforeMath,
+  unescapeMarkdownDollars,
+} from './inline-math.js';
+import {
+  BARE_URL_PATTERN,
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -27,8 +35,9 @@ import {
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
 
-/** Maximum number of lines per row before switching to vertical format */
-const MAX_ROW_LINES = 4;
+// MAX_ROW_LINES (the wrap-height threshold that switches a row to the vertical
+// layout) is imported from pending-rendered-height so the renderer and the
+// pending-height estimator can never disagree on the format decision.
 
 /**
  * Below this width the column-aware budget (see `minHorizontalTableWidth`
@@ -40,17 +49,9 @@ const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
-const INLINE_MATH_MAX_CHARS = 1024;
-
-const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
 const INLINE_MARKDOWN_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
-  'g',
-);
-const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN}|<u>.*?<\/u>|https?:\/\/\S+)`,
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
 
@@ -63,6 +64,21 @@ interface TableRendererProps {
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
+  /**
+   * True while THIS table is still streaming its rows (the frontier). The
+   * horizontal-vs-vertical decision is then anchored to the first row so the
+   * format cannot flip as later rows arrive; a completed table (false/undefined)
+   * — committed, or a mid-content table already closed by following text —
+   * measures every row for the most readable layout.
+   */
+  isStreaming?: boolean;
+  /**
+   * Maximum rendered text lines the table may occupy. When set (streaming
+   * preview) and the fully rendered table exceeds it, output is clipped to
+   * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
+   * overflowing the viewport and triggering the scroll-to-top lock.
+   */
+  maxHeight?: number;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -235,21 +251,36 @@ const ansiFmt = {
  * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
  */
 function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
-  const inlineRegex = enableInlineMath
-    ? INLINE_MARKDOWN_WITH_MATH_REGEX
-    : INLINE_MARKDOWN_REGEX;
-  inlineRegex.lastIndex = 0;
-
   // Capability is stable for the duration of one cell render — read it once
   // here instead of per matched token.
   const canHyperlink = supportsHyperlinks();
 
   let result = '';
   let lastIndex = 0;
-  let match;
 
-  while ((match = inlineRegex.exec(text)) !== null) {
-    result += text.slice(lastIndex, match.index);
+  for (const token of mergeInlineMathMatches(
+    text,
+    INLINE_MARKDOWN_REGEX,
+    enableInlineMath,
+  )) {
+    const index =
+      token.kind === 'math' ? token.span.index : (token.match.index ?? 0);
+    const prose = text.slice(lastIndex, index);
+    result +=
+      token.kind === 'math'
+        ? unescapeMarkdownBeforeMath(prose)
+        : unescapeMarkdownDollars(prose);
+
+    if (token.kind === 'math') {
+      result += applyColor(
+        renderInlineLatex(unescapeMarkdownDollars(token.span.content)),
+        theme.text.accent,
+      );
+      lastIndex = index + token.span.raw.length;
+      continue;
+    }
+
+    const match = token.match;
     const fullMatch = match[0]!;
     let rendered: string | null = null;
 
@@ -258,27 +289,31 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       fullMatch.endsWith('**') &&
       fullMatch.length > 4
     ) {
-      rendered = ansiFmt.bold(fullMatch.slice(2, -2));
+      rendered = ansiFmt.bold(unescapeMarkdownDollars(fullMatch.slice(2, -2)));
     } else if (
       fullMatch.length > 2 &&
       ((fullMatch.startsWith('*') && fullMatch.endsWith('*')) ||
         (fullMatch.startsWith('_') && fullMatch.endsWith('_'))) &&
-      !/\w/.test(text.substring(match.index - 1, match.index)) &&
+      !/\w/.test(text.substring(index - 1, index)) &&
       !/\w/.test(
-        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 1),
+        text.substring(index + fullMatch.length, index + fullMatch.length + 1),
       ) &&
-      !/\S[./\\]/.test(text.substring(match.index - 2, match.index)) &&
+      !/\S[./\\]/.test(text.substring(index - 2, index)) &&
       !/[./\\]\S/.test(
-        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 2),
+        text.substring(index + fullMatch.length, index + fullMatch.length + 2),
       )
     ) {
-      rendered = ansiFmt.italic(fullMatch.slice(1, -1));
+      rendered = ansiFmt.italic(
+        unescapeMarkdownDollars(fullMatch.slice(1, -1)),
+      );
     } else if (
       fullMatch.startsWith('~~') &&
       fullMatch.endsWith('~~') &&
       fullMatch.length > 4
     ) {
-      rendered = ansiFmt.strikethrough(fullMatch.slice(2, -2));
+      rendered = ansiFmt.strikethrough(
+        unescapeMarkdownDollars(fullMatch.slice(2, -2)),
+      );
     } else if (
       fullMatch.startsWith('`') &&
       fullMatch.endsWith('`') &&
@@ -295,7 +330,7 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     ) {
       const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
       if (linkMatch) {
-        const labelText = linkMatch[1] ?? '';
+        const labelText = unescapeMarkdownDollars(linkMatch[1] ?? '');
         const url = linkMatch[2] ?? '';
         // When OSC 8 wraps, show only the label — long URLs in narrow
         // table cells were the worst offender for layout cluttering, so
@@ -327,25 +362,20 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
         }
       }
     } else if (
-      enableInlineMath &&
-      fullMatch.startsWith('$') &&
-      fullMatch.endsWith('$') &&
-      fullMatch.length > 2
-    ) {
-      rendered = applyColor(
-        renderInlineLatex(fullMatch.slice(1, -1)),
-        theme.text.accent,
-      );
-    } else if (
       fullMatch.startsWith('<u>') &&
       fullMatch.endsWith('</u>') &&
       fullMatch.length > 7
     ) {
-      rendered = ansiFmt.underline(fullMatch.slice(3, -4));
+      rendered = ansiFmt.underline(
+        unescapeMarkdownDollars(fullMatch.slice(3, -4)),
+      );
     } else if (/^https?:\/\//.test(fullMatch)) {
       const visible = applyColor(fullMatch, theme.text.link);
       if (canHyperlink) {
-        const trimmedUrl = trimTrailingUrlPunctuation(fullMatch);
+        const trimmedUrl = trimTrailingUrlPunctuation(
+          fullMatch,
+          text[index + fullMatch.length],
+        );
         rendered = isSafeOscScheme(trimmedUrl)
           ? `${osc8Open(trimmedUrl)}${visible}${osc8Close()}`
           : visible;
@@ -354,11 +384,11 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       }
     }
 
-    result += rendered ?? fullMatch;
-    lastIndex = inlineRegex.lastIndex;
+    result += rendered ?? unescapeMarkdownDollars(fullMatch);
+    lastIndex = index + fullMatch.length;
   }
 
-  result += text.slice(lastIndex);
+  result += unescapeMarkdownDollars(text.slice(lastIndex));
   return result;
 }
 
@@ -428,6 +458,8 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
+  isStreaming = false,
+  maxHeight,
 }) => {
   const colCount = headers.length;
 
@@ -435,6 +467,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (colCount === 0) {
     return <Box />;
   }
+
+  // Clip the fully-rendered table to `maxHeight` text lines (streaming preview
+  // backstop). Operates on the final joined string so it is exact for wrapped
+  // rows and the vertical fallback alike.
+  const clampToMaxHeight = (text: string): string => {
+    if (maxHeight === undefined) return text;
+    const all = text.split('\n');
+    if (all.length <= maxHeight) return text;
+    const kept = all.slice(0, Math.max(1, maxHeight - 1));
+    kept.push(applyColor('… more rows streaming …', theme.text.secondary));
+    return kept.join('\n');
+  };
 
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
   const computeMetrics = (text: string) => {
@@ -531,20 +575,35 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
+  // While STREAMING (isStreaming), measure only the header + the FIRST data row.
+  // Using every row lets a later, taller row push maxRowLines over the threshold
+  // and flip an already-horizontal table to vertical mid-stream — a visible
+  // format change. The first row is representative for the common case, so
+  // anchoring to it keeps the format stable as rows stream in. A COMPLETED table
+  // (committed, or a mid-content table already closed by text) has all its rows
+  // and no flip concern, so it measures EVERY row for the most readable layout (a
+  // short first row followed by tall rows still goes vertical). Column WIDTHS
+  // always track all rows (redraw-on-wider is unchanged); only the
+  // horizontal-vs-vertical CHOICE is anchored to the first row while streaming.
   function calculateMaxRowLines(): number {
     let maxLines = 1;
+    const rowsToMeasure = isStreaming ? rowMetrics.slice(0, 1) : rowMetrics;
     for (let i = 0; i < colCount; i++) {
-      const wrapped = wrapText(headerMetrics[i]!.rendered, columnWidths[i]!, {
-        hard: needsHardWrap,
-      });
-      maxLines = Math.max(maxLines, wrapped.length);
+      const headerWrapped = wrapText(
+        headerMetrics[i]!.rendered,
+        columnWidths[i]!,
+        {
+          hard: needsHardWrap,
+        },
+      );
+      maxLines = Math.max(maxLines, headerWrapped.length);
     }
-    for (const row of rowMetrics) {
+    for (const row of rowsToMeasure) {
       for (let i = 0; i < colCount; i++) {
-        const wrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
+        const cellWrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
           hard: needsHardWrap,
         });
-        maxLines = Math.max(maxLines, wrapped.length);
+        maxLines = Math.max(maxLines, cellWrapped.length);
       }
     }
     return maxLines;
@@ -561,8 +620,20 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
     colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
   );
+  // The horizontal-vs-vertical decision is the SAME while streaming and once
+  // committed, so a table never flips format mid-stream (which reads as a jump).
+  // A zero-row table is the live streaming header box: never vertical — the
+  // vertical fallback iterates the rows and with none would render an empty
+  // string (a blank box) on a narrow terminal where the width trigger fires.
+  //
+  // The vertical trigger is anchored to the header + first row (see
+  // calculateMaxRowLines) so appending rows does not flip the format. Residual
+  // corner: a very wide later row can force a proportional column shrink that
+  // re-wraps the first row taller; that is rare and only for genuinely
+  // overflowing tables, where vertical is the right call anyway.
   const useVerticalFormat =
-    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
+    rowMetrics.length > 0 &&
+    (contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES);
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>
@@ -690,7 +761,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (useVerticalFormat) {
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -700,29 +771,38 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   const tableLines: string[] = [];
   tableLines.push(renderBorderLine('top'));
   tableLines.push(...renderRowLines(headerRendered, true));
-  tableLines.push(renderBorderLine('middle'));
-  rowMetrics.forEach((row, rowIndex) => {
-    tableLines.push(
-      ...renderRowLines(
-        row.map((m) => m.rendered),
-        false,
-      ),
-    );
-    if (rowIndex < rows.length - 1) {
-      tableLines.push(renderBorderLine('middle'));
-    }
-  });
+  // With no data rows yet (a live table whose first row is still streaming),
+  // skip the header/body divider so the box reads as a clean header — otherwise
+  // the divider stacked directly on the bottom border looks like an empty row.
+  if (rowMetrics.length > 0) {
+    tableLines.push(renderBorderLine('middle'));
+    rowMetrics.forEach((row, rowIndex) => {
+      tableLines.push(
+        ...renderRowLines(
+          row.map((m) => m.rendered),
+          false,
+        ),
+      );
+      if (rowIndex < rows.length - 1) {
+        tableLines.push(renderBorderLine('middle'));
+      }
+    });
+  }
   tableLines.push(renderBorderLine('bottom'));
 
   // ── Safety check: verify no line exceeds content width ──
   const maxLineWidth = Math.max(
     ...tableLines.map((line) => getCachedStringWidth(stripAnsi(line))),
   );
-  if (maxLineWidth > contentWidth - SAFETY_MARGIN) {
-    // Fallback to vertical format to prevent terminal resize flicker
+  if (rowMetrics.length > 0 && maxLineWidth > contentWidth - SAFETY_MARGIN) {
+    // Fallback to vertical format to prevent terminal resize flicker. Skipped
+    // for a zero-row streaming header box: the vertical format iterates the
+    // rows and would render an empty string (a blank box). Better to keep the
+    // horizontal header — even if it slightly overflows a very narrow terminal
+    // — than to make the box the PR draws immediately vanish.
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -730,7 +810,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // Render as a single Text block to prevent Ink wrapping mid-row
   return (
     <Box flexDirection="column" marginY={1}>
-      <Text>{tableLines.join('\n')}</Text>
+      <Text>{clampToMaxHeight(tableLines.join('\n'))}</Text>
     </Box>
   );
 };

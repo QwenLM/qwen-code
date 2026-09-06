@@ -6,7 +6,10 @@
 
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
-import { EVENT_SCHEMA_VERSION, type BridgeEvent } from '../eventBus.js';
+import {
+  EVENT_SCHEMA_VERSION,
+  type BridgeEvent,
+} from '@qwen-code/acp-bridge/eventBus';
 import type { FsErrorKind } from './errors.js';
 import type { Intent, ResolvedPath } from './paths.js';
 
@@ -76,6 +79,13 @@ export interface FsAccessAuditPayload {
   sizeBytes?: number;
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
+  /**
+   * Distinguishes operations that share an `intent` but are not
+   * interchangeable in the audit trail — e.g. `mkdir` records
+   * `intent: 'write'` with `sizeBytes: 0`, exactly like a
+   * zero-byte file upload; the operation name tells them apart.
+   */
+  operation?: string;
   durationMs: number;
   /**
    * Literal glob pattern. Populated only for `intent === 'glob'`,
@@ -253,6 +263,7 @@ export function createAuditPublisher(
       if (record.sizeBytes !== undefined) payload.sizeBytes = record.sizeBytes;
       if (record.truncated) payload.truncated = true;
       if (record.matchedIgnore) payload.matchedIgnore = record.matchedIgnore;
+      if (record.operation !== undefined) payload.operation = record.operation;
       // `pattern` shares the same privacy gate as `relPath` and
       // `message`. Glob patterns commonly embed workspace-relative
       // or absolute path fragments (`src/secrets/*.env`,

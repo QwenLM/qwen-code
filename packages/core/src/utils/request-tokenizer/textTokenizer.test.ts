@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { TextTokenizer } from './textTokenizer.js';
+import {
+  estimateTextTokens,
+  estimateTextTokenUnits,
+  TextTokenizer,
+  TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+} from './textTokenizer.js';
 
 describe('TextTokenizer', () => {
   let tokenizer: TextTokenizer;
@@ -28,6 +33,16 @@ describe('TextTokenizer', () => {
   });
 
   describe('calculateTokens', () => {
+    it('keeps token-unit estimates aligned with token estimates', () => {
+      for (const text of ['', 'Hello', '你好世界', 'Hello 世界']) {
+        expect(
+          Math.ceil(
+            estimateTextTokenUnits(text) / TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+          ),
+        ).toBe(estimateTextTokens(text));
+      }
+    });
+
     it('should return 0 for empty text', async () => {
       const result = await tokenizer.calculateTokens('');
       expect(result).toBe(0);
@@ -259,6 +274,37 @@ describe('TextTokenizer', () => {
       expect(result1).toBe(7); // 6 * 1.1 = 6.6 -> ceil = 7
       expect(result2).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
       expect(result3).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
+    });
+  });
+
+  describe('ASCII/non-ASCII boundary', () => {
+    it('should treat DEL (U+007F) as ASCII and U+0080 as non-ASCII', async () => {
+      // '\x7F' = 1 ASCII char: 1 / 4 = 0.25 -> ceil = 1
+      expect(await tokenizer.calculateTokens('\x7F')).toBe(1);
+      // '\u0080' = 1 non-ASCII char: 1 * 1.1 = 1.1 -> ceil = 2
+      expect(await tokenizer.calculateTokens('\u0080')).toBe(2);
+    });
+
+    it('should count pure-ASCII text of any length as ceil(length / 4)', async () => {
+      for (const len of [1, 3, 4, 5, 4096, 4097]) {
+        const text = 'a'.repeat(len);
+        expect(await tokenizer.calculateTokens(text)).toBe(Math.ceil(len / 4));
+      }
+    });
+
+    it('should stay consistent when a single non-ASCII char joins long ASCII text', async () => {
+      const ascii = 'x'.repeat(1000);
+      // 1000 / 4 = 250
+      expect(await tokenizer.calculateTokens(ascii)).toBe(250);
+      // 1000 / 4 + 1 * 1.1 = 251.1 -> ceil = 252, wherever the char sits
+      expect(await tokenizer.calculateTokens(ascii + '中')).toBe(252);
+      expect(await tokenizer.calculateTokens('中' + ascii)).toBe(252);
+    });
+
+    it('should count surrogate pairs as two non-ASCII units within mixed text', async () => {
+      const text = 'abcd🚀'; // 4 ASCII + 2 UTF-16 units
+      // 4 / 4 + 2 * 1.1 = 3.2 -> ceil = 4
+      expect(await tokenizer.calculateTokens(text)).toBe(4);
     });
   });
 

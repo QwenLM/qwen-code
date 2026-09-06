@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
 import { AsyncFzf } from 'fzf';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
@@ -237,9 +237,17 @@ function compareRankedCommandMatches(
   left: RankedCommandMatch,
   right: RankedCommandMatch,
 ): number {
+  // Name match beats alias match — e.g. /re should prefer `resume` (name)
+  // over `clear` via its `reset` alias, since users type the primary name
+  // more often than obscure alternates.
+  const leftIsName = left.matchedAlias === undefined ? 1 : 0;
+  const rightIsName = right.matchedAlias === undefined ? 1 : 0;
+  const nameVsAlias = rightIsName - leftIsName;
+
   return (
     right.matchStrength - left.matchStrength ||
     right.completionPriority - left.completionPriority ||
+    nameVsAlias ||
     right.recentScore - left.recentScore ||
     right.score - left.score ||
     left.start - right.start ||
@@ -309,6 +317,7 @@ function toCommandSuggestion(
     matchedAlias,
     supportedModes: command.supportedModes,
     modelInvocable: command.modelInvocable,
+    submitOnAccept: command.submitOnAccept,
   };
 }
 
@@ -326,6 +335,17 @@ function useCommandSuggestions(
 ): SuggestionsResult {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+
+  // The context is only consumed by the async argument-completion callback.
+  // Reading it through a ref keeps unrelated context churn (session stats /
+  // pending item updates while a response streams rebuild commandContext)
+  // out of the effect deps below: re-running this effect replaces the
+  // suggestions array, which snaps the user's menu selection back to the
+  // first item (#9494). Same historyRef pattern as slashCommandProcessor.
+  const commandContextRef = useRef(commandContext);
+  useLayoutEffect(() => {
+    commandContextRef.current = commandContext;
+  }, [commandContext]);
 
   useEffect(() => {
     const abortController = new AbortController();
@@ -360,7 +380,7 @@ function useCommandSuggestions(
           const results =
             (await leafCommand.completion(
               {
-                ...commandContext,
+                ...commandContextRef.current,
                 invocation: {
                   raw: `/${rawParts.join(' ')}`,
                   name: leafCommand.name,
@@ -499,13 +519,10 @@ function useCommandSuggestions(
 
     setSuggestions([]);
     return () => abortController.abort();
-  }, [
-    parserResult,
-    commandContext,
-    getFzfForCommands,
-    getPrefixSuggestions,
-    recentCommands,
-  ]);
+    // commandContext is deliberately absent: it is read through
+    // commandContextRef so context-identity churn alone never re-runs the
+    // search and rebuilds the suggestions array (#9494).
+  }, [parserResult, getFzfForCommands, getPrefixSuggestions, recentCommands]);
 
   return { suggestions, isLoading };
 }
@@ -597,6 +614,7 @@ export interface UseSlashCompletionProps {
 export function useSlashCompletion(props: UseSlashCompletionProps): {
   completionStart: number;
   completionEnd: number;
+  isPerfectMatch: boolean;
 } {
   const {
     enabled,
@@ -769,5 +787,6 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
   return {
     completionStart,
     completionEnd,
+    isPerfectMatch,
   };
 }

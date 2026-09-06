@@ -8,15 +8,14 @@ import * as vscode from 'vscode';
 import type { DiffManager } from '../diff-manager.js';
 import type { WebViewProvider } from '../webview/providers/WebViewProvider.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
-import {
-  CHAT_VIEW_ID_SIDEBAR,
-  CHAT_VIEW_ID_SECONDARY,
-} from '../constants/viewIds.js';
+import { shouldResolveAgainstWorkspace } from '../utils/file-path.js';
+import { CHAT_VIEW_ID_SIDEBAR } from '../constants/viewIds.js';
 
 type Logger = (message: string) => void;
 
 export const runQwenCodeCommand = 'qwen-code.runQwenCode';
 export const showDiffCommand = 'qwenCode.showDiff';
+export const closeDiffCommand = 'qwenCode.closeDiff';
 export const openChatCommand = 'qwen-code.openChat';
 export const openNewChatTabCommand = 'qwenCode.openNewChatTab';
 export const authCommand = 'qwen-code.auth';
@@ -25,10 +24,26 @@ export const newConversationCommand = 'qwen-code.newConversation';
 export const showLogsCommand = 'qwen-code.showLogs';
 
 /**
+ * DiffManager keys entries by the normalized absolute path it received from
+ * showDiff, so a closeDiff that arrives with the same workspace-relative
+ * path the daemon sent would never match unless it is resolved the same way.
+ */
+function resolveWorkspaceRelativePath(filePath: string): string {
+  if (!shouldResolveAgainstWorkspace(filePath)) {
+    return filePath;
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    return filePath;
+  }
+  return vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+}
+
+/**
  * Register all Qwen Code chat-related commands.
  *
  * `openChat` and `newConversation` always open an editor tab, while
- * `focusChat` focuses the secondary sidebar (preferred) or primary sidebar.
+ * `focusChat` focuses the Activity Bar chat view.
  *
  * @param context - VS Code extension context for subscription management
  * @param log - Logger function for debug output
@@ -36,7 +51,6 @@ export const showLogsCommand = 'qwen-code.showLogs';
  * @param getWebViewProviders - Returns all active editor-tab WebView providers
  * @param createWebViewProvider - Factory to create a new editor-tab WebView provider
  * @param outputChannel - Optional output channel for the showLogs command
- * @param supportsSecondarySidebar - Whether the running VS Code supports secondary sidebar
  */
 export function registerNewCommands(
   context: vscode.ExtensionContext,
@@ -45,7 +59,6 @@ export function registerNewCommands(
   getWebViewProviders: () => WebViewProvider[],
   createWebViewProvider: () => WebViewProvider,
   outputChannel?: vscode.OutputChannel,
-  supportsSecondarySidebar = true,
 ): void {
   const disposables: vscode.Disposable[] = [];
 
@@ -65,26 +78,38 @@ export function registerNewCommands(
   disposables.push(
     vscode.commands.registerCommand(
       showDiffCommand,
-      async (args: { path: string; oldText: string; newText: string }) => {
+      async (args: {
+        path: string;
+        oldText: string;
+        newText: string;
+        readOnly?: boolean;
+        permissionRequestId?: string;
+      }) => {
         try {
-          let absolutePath = args.path;
-          if (!args.path.startsWith('/') && !args.path.match(/^[a-zA-Z]:/)) {
-            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-            if (workspaceFolder) {
-              absolutePath = vscode.Uri.joinPath(
-                workspaceFolder.uri,
-                args.path,
-              ).fsPath;
-            }
-          }
+          const absolutePath = resolveWorkspaceRelativePath(args.path);
           log(`[Command] Showing diff for ${absolutePath}`);
-          await diffManager.showDiff(absolutePath, args.oldText, args.newText);
+          await diffManager.showDiff(absolutePath, args.oldText, args.newText, {
+            readOnly: args.readOnly === true,
+            permissionRequestId: args.permissionRequestId,
+          });
         } catch (error) {
           const errorMsg = getErrorMessage(error);
           log(`[Command] Error showing diff: ${errorMsg}`);
           vscode.window.showErrorMessage(`Failed to show diff: ${errorMsg}`);
         }
       },
+    ),
+  );
+
+  disposables.push(
+    vscode.commands.registerCommand(
+      closeDiffCommand,
+      async (filePath: string, permissionRequestId?: string) =>
+        diffManager.closeDiff(
+          resolveWorkspaceRelativePath(filePath),
+          true,
+          permissionRequestId,
+        ),
     ),
   );
 
@@ -113,15 +138,10 @@ export function registerNewCommands(
     }),
   );
 
-  // Focus Chat: bring the active chat view to front.
-  // Use secondary sidebar when supported; fall back to primary sidebar.
+  // Focus Chat: bring the Activity Bar chat view to front.
   disposables.push(
     vscode.commands.registerCommand(focusChatCommand, async () => {
-      if (supportsSecondarySidebar) {
-        await vscode.commands.executeCommand(`${CHAT_VIEW_ID_SECONDARY}.focus`);
-      } else {
-        await vscode.commands.executeCommand(`${CHAT_VIEW_ID_SIDEBAR}.focus`);
-      }
+      await vscode.commands.executeCommand(`${CHAT_VIEW_ID_SIDEBAR}.focus`);
     }),
   );
 

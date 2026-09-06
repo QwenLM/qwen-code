@@ -130,6 +130,7 @@ export function useProviderSetupFlow(
       config: ProviderConfig,
       initialProtocol?: AuthType,
       existingEnv?: Record<string, string>,
+      existingModelIds?: string[],
     ) => {
       setProvider(config);
       const steps = getVisibleSteps(config);
@@ -160,7 +161,12 @@ export function useProviderSetupFlow(
       setApiKey(prefillKey);
 
       setApiKeyError(null);
-      setModelIds(getDefaultModelIds(config).join(', '));
+      // Built-in defaults go to the recommended list (checked), user-added
+      // custom IDs go to the input box. The ModelIdsStep component splits
+      // flow.state.modelIds automatically based on config.models.
+      const defaultIds = getDefaultModelIds(config);
+      const customIds = existingModelIds ?? [];
+      setModelIds([...defaultIds, ...customIds].join(', '));
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -305,6 +311,10 @@ export function useProviderSetupFlow(
 
   const changeModelIds = useCallback((value: string) => {
     setModelIds(value);
+    setModelIdsError(null);
+  }, []);
+
+  const clearModelIdsError = useCallback(() => {
     setModelIdsError(null);
   }, []);
 
@@ -506,6 +516,7 @@ export function useProviderSetupFlow(
     changeApiKey,
     submitApiKey,
     changeModelIds,
+    clearModelIdsError,
     submitModelIds,
     moveAdvancedFocusUp,
     moveAdvancedFocusDown,

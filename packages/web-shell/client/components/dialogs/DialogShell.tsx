@@ -1,0 +1,269 @@
+import {
+  createContext,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
+import { Maximize2Icon, Minimize2Icon, XIcon } from 'lucide-react';
+import { useI18n } from '../../i18n';
+import { useTheme, WebShellThemeId } from '../../themeContext';
+import { Button } from '../ui/button';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import styles from './DialogShell.module.css';
+
+type DialogSize = 'sm' | 'md' | 'lg' | 'xl' | 'auto';
+
+interface DialogShellProps {
+  title: string;
+  subtitle?: string;
+  size?: DialogSize;
+  allowFullscreen?: boolean;
+  dismissible?: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}
+
+const sizeClass: Record<DialogSize, string> = {
+  sm: 'sm:max-w-[420px]',
+  md: 'sm:max-w-[560px]',
+  lg: 'sm:max-w-[720px]',
+  xl: 'sm:max-w-[900px]',
+  // Width follows the content instead of a fixed step, for bodies holding
+  // something with a real intrinsic width — the plan DAG lays out fixed 240px
+  // lanes, so a fixed panel scrolls it sideways while the screen still has
+  // room. `w-max` wins over DialogContent's base `w-full` through
+  // tailwind-merge. The floor keeps small graphs from collapsing to a narrow
+  // panel; the ceiling keeps large ones from spanning a wide monitor.
+  auto: 'w-max min-w-[min(100%,560px)] sm:max-w-[min(calc(100vw-2rem),1120px)]',
+};
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]:not([hidden])',
+  'button:not([disabled]):not([hidden])',
+  'input:not([disabled]):not([hidden])',
+  'select:not([disabled]):not([hidden])',
+  'textarea:not([disabled]):not([hidden])',
+  '[tabindex]:not([tabindex="-1"]):not([hidden])',
+].join(',');
+
+function getFocusable(container: HTMLElement | null): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  );
+}
+
+const shellStack: object[] = [];
+
+export const DialogShellIdContext = createContext<object | null>(null);
+
+export function isTopDialogShellId(shellId: object | null): boolean {
+  if (shellId === null) return true;
+  return shellStack[shellStack.length - 1] === shellId;
+}
+
+export function DialogShell({
+  title,
+  subtitle,
+  size = 'md',
+  allowFullscreen = false,
+  dismissible = true,
+  onClose,
+  children,
+}: DialogShellProps) {
+  const { t } = useI18n();
+  const theme = useTheme();
+  const [fullscreen, setFullscreen] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [previouslyFocused] = useState<HTMLElement | null>(() =>
+    typeof document !== 'undefined'
+      ? (document.activeElement as HTMLElement | null)
+      : null,
+  );
+  const backdropPressStartedRef = useRef(false);
+  const backdropPressEndedRef = useRef(false);
+  const shellIdRef = useRef<object | null>(null);
+  if (shellIdRef.current === null) shellIdRef.current = {};
+
+  useEffect(() => {
+    const shellId = shellIdRef.current!;
+    shellStack.push(shellId);
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229) ||
+        !isTopDialogShellId(shellId)
+      ) {
+        return;
+      }
+      // Radix handles Escape on document capture and otherwise prevents the
+      // native IME cancellation. Mask it only for Radix, then restore it before
+      // the event continues to the focused input.
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+      const index = shellStack.indexOf(shellId);
+      if (index >= 0) shellStack.splice(index, 1);
+      if (shellStack.length === 0) {
+        previouslyFocused?.focus?.();
+        return;
+      }
+      const scopes = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-keyboard-scope]'),
+      );
+      const topPanel = scopes[scopes.length - 1];
+      const preferred = getFocusable(topPanel).find(
+        (element) => !element.hasAttribute('data-dialog-close'),
+      );
+      (preferred ?? topPanel)?.focus();
+    };
+  }, [previouslyFocused]);
+
+  const handleBackdropMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+    backdropPressStartedRef.current = event.target === event.currentTarget;
+    backdropPressEndedRef.current = false;
+  };
+
+  const handleBackdropMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
+    backdropPressEndedRef.current = event.target === event.currentTarget;
+  };
+
+  const handleBackdropClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const shouldClose =
+      backdropPressStartedRef.current &&
+      backdropPressEndedRef.current &&
+      event.target === event.currentTarget;
+    backdropPressStartedRef.current = false;
+    backdropPressEndedRef.current = false;
+    if (shouldClose && dismissible) onClose();
+  };
+
+  const themeClass =
+    theme === WebShellThemeId.Light ? styles.themeLight : styles.themeDark;
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && dismissible) onClose();
+      }}
+    >
+      <DialogShellIdContext.Provider value={shellIdRef.current}>
+        <DialogContent
+          ref={panelRef}
+          showCloseButton={false}
+          overlayProps={{
+            onMouseDown: handleBackdropMouseDown,
+            onMouseUp: handleBackdropMouseUp,
+            onClick: handleBackdropClick,
+          }}
+          className={`${themeClass} ${
+            theme === WebShellThemeId.Dark ? 'dark' : ''
+          } flex max-h-[min(80vh,calc(100vh-48px))] flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
+            fullscreen
+              ? 'h-[calc(100vh-32px)] max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
+              : sizeClass[size]
+          }`}
+          aria-label={title}
+          data-keyboard-scope
+          data-web-shell-dialog
+          data-web-shell-dialog-title={title}
+          onPointerDownOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => {
+            if (event.defaultPrevented) return;
+            if (event.isComposing || event.keyCode === 229) {
+              return;
+            }
+            if (!isTopDialogShellId(shellIdRef.current)) {
+              return;
+            }
+            event.preventDefault();
+            if (dismissible) onCloseRef.current();
+          }}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            const preferred = getFocusable(panelRef.current).find(
+              (element) => !element.hasAttribute('data-dialog-close'),
+            );
+            (preferred ?? panelRef.current)?.focus();
+          }}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+        >
+          <DialogHeader className="flex-row items-center gap-2 border-b px-4 py-2.5 text-left">
+            <div className="min-w-0 flex-1">
+              <DialogTitle>{title}</DialogTitle>
+              {subtitle && (
+                <DialogDescription className="mt-0.5 text-xs">
+                  {subtitle}
+                </DialogDescription>
+              )}
+            </div>
+            {allowFullscreen && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setFullscreen((value) => !value)}
+                aria-label={t(
+                  fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+                )}
+                aria-pressed={fullscreen}
+                title={t(
+                  fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+                )}
+              >
+                {fullscreen ? <Minimize2Icon /> : <Maximize2Icon />}
+              </Button>
+            )}
+            {dismissible && (
+              <DialogClose asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t('common.close')}
+                  title={t('common.close')}
+                  data-dialog-close
+                >
+                  <XIcon />
+                </Button>
+              </DialogClose>
+            )}
+          </DialogHeader>
+          <div
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4"
+            data-dialog-fullscreen={fullscreen ? '' : undefined}
+          >
+            {children}
+          </div>
+        </DialogContent>
+      </DialogShellIdContext.Provider>
+    </Dialog>
+  );
+}

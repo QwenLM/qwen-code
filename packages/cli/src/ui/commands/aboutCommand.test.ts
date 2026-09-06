@@ -9,10 +9,10 @@ import { aboutCommand } from './aboutCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
-import * as systemInfoUtils from '../../utils/systemInfo.js';
+import * as systemInfoUtils from '../systemInfo.js';
 import * as sessionPathsUtils from '../../utils/sessionPaths.js';
 
-vi.mock('../../utils/systemInfo.js');
+vi.mock('../systemInfo.js');
 vi.mock('../../utils/sessionPaths.js');
 
 describe('aboutCommand', () => {
@@ -75,6 +75,8 @@ describe('aboutCommand', () => {
     expect(aboutCommand.name).toBe('status');
     expect(aboutCommand.altNames).toEqual(['about']);
     expect(aboutCommand.description).toBe('show version info');
+    expect(aboutCommand.canRunDuringStreaming).toBe(true);
+    expect(aboutCommand.subCommands?.[0]?.canRunDuringStreaming).toBe(true);
   });
 
   it('should call addItem with all version info', async () => {

@@ -4,67 +4,96 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import {
-  TestRig,
-  printDebugInfo,
-  validateModelOutput,
-} from '../test-helper.js';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { runForcedToolCallScenario, TestRig } from '../test-helper.js';
+import { fakeToolCall } from '../fake-openai-server.js';
+
+/**
+ * Drives a fake-server round trip whose first model response calls
+ * `list_directory` on the rig's test directory, and returns the resulting
+ * tool-result content as JSON.
+ */
+async function runListDirectoryScenario(options: {
+  rig: TestRig;
+  finalResponse: string;
+}): Promise<string> {
+  const { rig, finalResponse } = options;
+  const requests = await runForcedToolCallScenario({
+    rig,
+    toolCall: fakeToolCall(
+      'list_directory',
+      { path: rig.testDir! },
+      'list-dir',
+    ),
+    prompt: 'Call the list_directory tool on the current directory.',
+    finalResponse,
+  });
+  const toolResultRequest = requests.find(({ messages }) =>
+    Array.isArray(messages)
+      ? messages.some(
+          (message) =>
+            typeof message === 'object' &&
+            message !== null &&
+            'role' in message &&
+            message.role === 'tool',
+        )
+      : false,
+  );
+  expect(
+    toolResultRequest,
+    'Expected a model request containing the list_directory result',
+  ).toBeDefined();
+  const messages = toolResultRequest?.['messages'] as
+    | Array<{ role?: string; content?: unknown }>
+    | undefined;
+  return JSON.stringify(
+    messages?.find((message) => message.role === 'tool')?.content ?? '',
+  );
+}
 
 describe('list_directory', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('should be able to list a directory', async () => {
     const rig = new TestRig();
-    await rig.setup('should be able to list a directory');
+    await rig.setup('should be able to list a directory', {
+      // list_directory is opt-in (disabled by default).
+      settings: { tools: { listDirectory: { enabled: true } } },
+    });
     rig.createFile('file1.txt', 'file 1 content');
     rig.mkdir('subdir');
-    rig.sync();
 
-    // Poll for filesystem changes to propagate in containers
-    await rig.poll(
-      () => {
-        // Check if the files exist in the test directory
-        const file1Path = join(rig.testDir!, 'file1.txt');
-        const subdirPath = join(rig.testDir!, 'subdir');
-        return existsSync(file1Path) && existsSync(subdirPath);
-      },
-      1000, // 1 second max wait
-      50, // check every 50ms
-    );
-
-    const prompt = `Use the list_directory tool to list the files in the current directory.`;
-
-    const result = await rig.run(prompt);
+    const toolResultContent = await runListDirectoryScenario({
+      rig,
+      finalResponse: 'The directory contains file1.txt and subdir.',
+    });
 
     const foundToolCall = await rig.waitForToolCall('list_directory');
 
-    // Add debugging information
-    if (
-      !foundToolCall ||
-      !result.includes('file1.txt') ||
-      !result.includes('subdir')
-    ) {
-      const allTools = printDebugInfo(rig, result, {
-        'Found tool call': foundToolCall,
-        'Contains file1.txt': result.includes('file1.txt'),
-        'Contains subdir': result.includes('subdir'),
-      });
+    expect(foundToolCall, 'Expected a list_directory tool call').toBe(true);
+    expect(toolResultContent).toContain('file1.txt');
+    expect(toolResultContent).toContain('subdir');
+  });
 
-      console.error(
-        'List directory calls:',
-        allTools
-          .filter((t) => t.toolRequest.name === 'list_directory')
-          .map((t) => t.toolRequest.args),
-      );
-    }
+  it('should not register list_directory when it is not explicitly enabled', async () => {
+    const rig = new TestRig();
+    // No tools.listDirectory.enabled setting: the tool is opt-in.
+    await rig.setup(
+      'should not register list_directory when it is not explicitly enabled',
+    );
+    rig.createFile('file1.txt', 'file 1 content');
 
-    expect(
-      foundToolCall,
-      'Expected to find a list_directory tool call',
-    ).toBeTruthy();
+    const toolResultContent = await runListDirectoryScenario({
+      rig,
+      finalResponse: 'Done.',
+    });
 
-    // Validate model output - will throw if no output, warn if missing expected content
-    validateModelOutput(result, ['file1.txt', 'subdir'], 'List directory test');
+    // The unregistered tool surfaces an error explaining how to enable it,
+    // instead of a listing.
+    expect(toolResultContent).toContain('disabled by default');
+    expect(toolResultContent).toContain('tools.listDirectory.enabled');
+    expect(toolResultContent).not.toContain('file1.txt');
   });
 });

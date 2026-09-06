@@ -19,6 +19,7 @@ import {
   oscKittyNotify,
   oscGhosttyNotify,
 } from '../../utils/osc.js';
+import { emitTerminalSequence } from '../../utils/terminalSequence.js';
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -29,6 +30,8 @@ export interface TerminalNotification {
   notifyKitty: (opts: { message: string; title: string; id: number }) => void;
   notifyGhostty: (opts: { message: string; title: string }) => void;
   notifyBell: () => void;
+  /** Validate and emit a hook-provided terminal escape sequence. */
+  writeTerminalSequence: (sequence: string) => boolean;
 }
 
 // ── Factory (no React context needed) ──────────────────────────────
@@ -58,6 +61,9 @@ export function buildTerminalNotification(
       // Raw BEL — inside tmux this triggers tmux's bell-action (window flag).
       // Wrapping would make it opaque DCS payload and lose that fallback.
       writeRaw(BEL);
+    },
+    writeTerminalSequence(sequence: string) {
+      return emitTerminalSequence(sequence, writeRaw);
     },
   };
 }

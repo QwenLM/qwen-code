@@ -11,14 +11,14 @@
 // glob patterns. This keeps the model's tool description small in large
 // monorepos where most skills are irrelevant to the current task.
 //
-// Mirrors the design of ConditionalRulesRegistry in utils/rulesDiscovery.ts
+// Mirrors the design of ConditionalRulesRegistry in config/rulesDiscovery.ts
 // but returns skill names (not content), because the activation affects which
 // skills are advertised in SkillTool's description rather than injecting text.
 
 import picomatch from 'picomatch';
 import type { SkillConfig } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { resolveProjectRelativePath } from '../utils/projectPath.js';
+import { resolveSymlinkAwareRelativePaths } from '../utils/projectPath.js';
 
 // Re-export so existing consumers (skill-activation.test.ts) keep
 // working through the old import path. The canonical home is now
@@ -124,31 +124,34 @@ export class SkillActivationRegistry {
    * Activate any conditional skills whose `paths` globs match `filePath`.
    * Returns the names of skills newly activated by this call (empty when
    * either no skill matched, or every match was already active).
+   *
+   * Handles symlinked paths by checking both the original path and the
+   * realpath-resolved path, so skills work correctly in git worktrees and
+   * monorepos with symlinked directories.
    */
-  matchAndConsume(filePath: string): string[] {
+  async matchAndConsume(filePath: string): Promise<string[]> {
     if (this.compiled.length === 0) return [];
 
-    // Skip files outside the project root — conditional skills are scoped
-    // to the project, matching ConditionalRulesRegistry's behavior. The
-    // helper handles the Windows cross-drive case (where `path.relative`
-    // returns an absolute string).
-    const relativePath = resolveProjectRelativePath(filePath, this.projectRoot);
-    if (relativePath === null) {
+    // Resolve symlinks and check both original and realpath-resolved paths
+    const relativePaths = await resolveSymlinkAwareRelativePaths(
+      filePath,
+      this.projectRoot,
+    );
+    if (relativePaths.length === 0) {
       debugLogger.debug(
         `Skipping ${filePath}: outside project root or cross-drive`,
       );
       return [];
     }
-    debugLogger.debug(`matchAndConsume ${filePath} → relative=${relativePath}`);
 
     const newlyActivated: string[] = [];
     for (const { skill, matchers } of this.compiled) {
       if (this.activated.has(skill.name)) continue;
-      if (matchers.some((m) => m(relativePath))) {
+      if (relativePaths.some((relPath) => matchers.some((m) => m(relPath)))) {
         this.activated.add(skill.name);
         newlyActivated.push(skill.name);
         debugLogger.info(
-          `Activated skill "${skill.name}" via path "${relativePath}"`,
+          `Activated skill "${skill.name}" via path "${relativePaths.join(' or ')}"`,
         );
       }
     }

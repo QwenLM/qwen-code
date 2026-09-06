@@ -10,6 +10,8 @@ import {
   parseX11MouseEvent,
   parseMouseEvent,
   isIncompleteMouseSequence,
+  enableMouseEvents,
+  disableMouseEvents,
 } from './mouse.js';
 
 const ESC = '\x1b';
@@ -134,5 +136,33 @@ describe('isIncompleteMouseSequence', () => {
   it('treats >50-byte unterminated SGR as not-incomplete (garbage guard)', () => {
     const longGarbage = `${ESC}[<${'1'.repeat(60)}`;
     expect(isIncompleteMouseSequence(longGarbage)).toBe(false);
+  });
+});
+
+describe('enableMouseEvents / disableMouseEvents', () => {
+  function captureWrites() {
+    const writes: string[] = [];
+    const stdout = {
+      write: (s: string) => writes.push(s),
+    } as unknown as NodeJS.WriteStream;
+    return { writes, stdout };
+  }
+
+  it('defaults to button-event tracking (?1002h)', () => {
+    const { writes, stdout } = captureWrites();
+    enableMouseEvents(stdout);
+    expect(writes).toEqual([`${ESC}[?1002h${ESC}[?1006h`]);
+    writes.length = 0;
+    disableMouseEvents(stdout);
+    expect(writes).toEqual([`${ESC}[?1006l${ESC}[?1002l`]);
+  });
+
+  it('uses any-event tracking (?1003h) for hover', () => {
+    const { writes, stdout } = captureWrites();
+    enableMouseEvents(stdout, 'any');
+    expect(writes).toEqual([`${ESC}[?1003h${ESC}[?1006h`]);
+    writes.length = 0;
+    disableMouseEvents(stdout, 'any');
+    expect(writes).toEqual([`${ESC}[?1006l${ESC}[?1003l`]);
   });
 });

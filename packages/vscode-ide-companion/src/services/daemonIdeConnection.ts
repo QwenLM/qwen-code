@@ -9,6 +9,7 @@
  * shape while replacing the local child process with a qwen serve session.
  */
 
+import { logger } from '../utils/logger.js';
 import type {
   ContentBlock,
   RequestPermissionRequest,
@@ -85,7 +86,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isLoopbackHostname(hostname: string): boolean {
   // Keep this client-side policy aligned with
-  // packages/cli/src/serve/loopbackBinds.ts when daemon bind rules change.
+  // packages/cli/src/serve/loopback-binds.ts when daemon bind rules change.
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (normalized === 'localhost' || normalized === '::1') {
     return true;
@@ -187,7 +188,7 @@ export class DaemonIdeConnection {
       } catch (previousError) {
         // Let this connect attempt proceed with its own options after the
         // in-flight attempt reports its failure to its caller.
-        console.debug('[DaemonIdeConnection] Previous connect failed:', {
+        logger.debug('[DaemonIdeConnection] Previous connect failed:', {
           error: toSafeErrorMessage(previousError),
         });
       }
@@ -235,7 +236,7 @@ export class DaemonIdeConnection {
   ): Promise<DaemonIdePromptResult> {
     const session = this.ensureSession();
     const promptBlocks = normalizePrompt(prompt);
-    console.debug('[DaemonIdeConnection] Sending prompt:', {
+    logger.debug('[DaemonIdeConnection] Sending prompt:', {
       sessionId: session.sessionId,
     });
     try {
@@ -243,14 +244,14 @@ export class DaemonIdeConnection {
         { prompt: promptBlocks },
         this.eventController?.signal,
       );
-      console.debug('[DaemonIdeConnection] Prompt completed:', {
+      logger.debug('[DaemonIdeConnection] Prompt completed:', {
         sessionId: session.sessionId,
         stopReason: response.stopReason,
       });
       this.onEndTurn(response.stopReason);
       return response;
     } catch (error) {
-      console.warn('[DaemonIdeConnection] Prompt failed:', {
+      logger.warn('[DaemonIdeConnection] Prompt failed:', {
         sessionId: session.sessionId,
         error: toSafeErrorMessage(error),
       });
@@ -264,7 +265,7 @@ export class DaemonIdeConnection {
   async cancelSession(): Promise<void> {
     const session = this.session;
     if (!session) {
-      console.debug(
+      logger.debug(
         '[DaemonIdeConnection] cancelSession ignored without active session',
       );
       return;
@@ -333,7 +334,7 @@ export class DaemonIdeConnection {
         try {
           shouldAdvanceLastSeenEventId = await this.handleEvent(event, signal);
         } catch (error) {
-          console.warn('[DaemonIdeConnection] Event handler failed:', {
+          logger.warn('[DaemonIdeConnection] Event handler failed:', {
             sessionId: session.sessionId,
             eventType: event.type,
             eventId: event.id,
@@ -350,11 +351,11 @@ export class DaemonIdeConnection {
       }
     } catch (error) {
       if (!signal.aborted) {
-        console.warn(
+        logger.warn(
           '[DaemonIdeConnection] Event stream failed:',
           toSafeErrorMessage(error),
         );
-        console.debug('[DaemonIdeConnection] Event stream session:', {
+        logger.debug('[DaemonIdeConnection] Event stream session:', {
           sessionId: session.sessionId,
         });
         this.eventController?.abort();
@@ -383,7 +384,7 @@ export class DaemonIdeConnection {
         this.handleSessionDied(event.data);
         return true;
       default:
-        console.debug('[DaemonIdeConnection] Ignoring daemon event:', {
+        logger.debug('[DaemonIdeConnection] Ignoring daemon event:', {
           sessionId: this.session?.sessionId,
           eventType: event.type,
           eventId: event.id,
@@ -397,7 +398,7 @@ export class DaemonIdeConnection {
     signal: AbortSignal,
   ): Promise<boolean> {
     if (!isPermissionRequestData(data)) {
-      console.warn('[DaemonIdeConnection] Malformed permission request data');
+      logger.warn('[DaemonIdeConnection] Malformed permission request data');
       return true;
     }
 
@@ -405,7 +406,7 @@ export class DaemonIdeConnection {
     const request = data;
     const session = this.session;
     if (!session) {
-      console.warn(
+      logger.warn(
         '[DaemonIdeConnection] Dropping permission request: not connected',
         { requestId },
       );
@@ -419,7 +420,7 @@ export class DaemonIdeConnection {
       return true;
     }
     if (this.session !== session) {
-      console.warn(
+      logger.warn(
         '[DaemonIdeConnection] Permission response dropped: session changed',
         {
           requestId,
@@ -432,17 +433,17 @@ export class DaemonIdeConnection {
     try {
       const accepted = await session.respondToPermission(requestId, response);
       if (!accepted) {
-        console.warn(
+        logger.warn(
           '[DaemonIdeConnection] Permission response rejected by daemon for request:',
           requestId,
         );
-        console.debug('[DaemonIdeConnection] Permission response session:', {
+        logger.debug('[DaemonIdeConnection] Permission response session:', {
           sessionId: session.sessionId,
         });
       }
       return true;
     } catch (error) {
-      console.warn(
+      logger.warn(
         '[DaemonIdeConnection] Permission response failed:',
         toSafeErrorMessage(error),
       );
@@ -460,7 +461,7 @@ export class DaemonIdeConnection {
 
     const responsePromise = this.resolvePermissionResponse(request).catch(
       (error: unknown) => {
-        console.warn(
+        logger.warn(
           '[DaemonIdeConnection] Permission handler failed:',
           toSafeErrorMessage(error),
         );
@@ -509,7 +510,7 @@ export class DaemonIdeConnection {
         askResponse.optionId,
       );
       if (!optionId) {
-        console.warn(
+        logger.warn(
           '[DaemonIdeConnection] AskUserQuestion option not advertised; cancelling',
           {
             requestId: (request as { requestId?: string }).requestId,
@@ -536,7 +537,7 @@ export class DaemonIdeConnection {
 
     const optionId = this.resolvePermissionOptionId(request, response.optionId);
     if (!optionId) {
-      console.warn(
+      logger.warn(
         '[DaemonIdeConnection] Permission option not advertised; cancelling',
         {
           requestId: (request as { requestId?: string }).requestId,
@@ -560,14 +561,14 @@ export class DaemonIdeConnection {
         ? data['sessionId']
         : undefined;
     if (!this.session) {
-      console.debug(
+      logger.debug(
         '[DaemonIdeConnection] session_died received with no active session',
         { eventSessionId },
       );
       return;
     }
     if (eventSessionId === undefined) {
-      console.warn('[DaemonIdeConnection] Malformed session_died event');
+      logger.warn('[DaemonIdeConnection] Malformed session_died event');
       return;
     }
     if (eventSessionId !== this.session.sessionId) {
@@ -578,7 +579,7 @@ export class DaemonIdeConnection {
       isRecord(data) && typeof data['reason'] === 'string'
         ? data['reason']
         : 'session_died';
-    console.debug('[DaemonIdeConnection] Session died:', {
+    logger.debug('[DaemonIdeConnection] Session died:', {
       sessionId: this.session.sessionId,
       reason,
     });
@@ -615,7 +616,7 @@ export class DaemonIdeConnection {
     if (this.session !== session) {
       return;
     }
-    console.debug('[DaemonIdeConnection] Clearing session:', {
+    logger.debug('[DaemonIdeConnection] Clearing session:', {
       sessionId: session.sessionId,
       reason,
     });

@@ -39,7 +39,7 @@ describe('mcpCommand', () => {
     getMcpServers: ReturnType<typeof vi.fn>;
     getBlockedMcpServers: ReturnType<typeof vi.fn>;
     getPromptRegistry: ReturnType<typeof vi.fn>;
-    getGeminiClient: ReturnType<typeof vi.fn>;
+    getLlmClient: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -65,7 +65,7 @@ describe('mcpCommand', () => {
         getAllPrompts: vi.fn().mockReturnValue([]),
         getPromptsByServer: vi.fn().mockReturnValue([]),
       }),
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
     };
 
     mockContext = createMockCommandContext({
@@ -147,6 +147,50 @@ describe('mcpCommand', () => {
       expect(result).toEqual({
         type: 'dialog',
         dialog: 'mcp',
+      });
+    });
+
+    it('should warn when using the legacy auth argument with a server name', async () => {
+      const result = await mcpCommand.action!(mockContext, 'auth server1');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'warning',
+        content:
+          "MCP OAuth is now managed in the /mcp dialog. Open /mcp, select 'server1', then use the Auth actions there.",
+      });
+    });
+
+    it('should warn when using the legacy auth argument without a server name', async () => {
+      const result = await mcpCommand.action!(mockContext, 'auth');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'warning',
+        content:
+          'MCP OAuth is now managed in the /mcp dialog. Open /mcp, select a server, then use the Auth actions there.',
+      });
+    });
+
+    it('should warn when using the legacy noauth argument with a server name', async () => {
+      const result = await mcpCommand.action!(mockContext, 'noauth server1');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'warning',
+        content:
+          "MCP OAuth is now managed in the /mcp dialog. Open /mcp, select 'server1', then use the Auth actions there.",
+      });
+    });
+
+    it('should warn when using the legacy noauth argument without a server name', async () => {
+      const result = await mcpCommand.action!(mockContext, 'noauth');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'warning',
+        content:
+          'MCP OAuth is now managed in the /mcp dialog. Open /mcp, select a server, then use the Auth actions there.',
       });
     });
   });

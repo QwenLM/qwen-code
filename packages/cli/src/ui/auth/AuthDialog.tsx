@@ -19,6 +19,8 @@ import { t } from '../../i18n/index.js';
 import {
   findProviderById,
   findProviderByCredentials,
+  findExistingProviderModels,
+  getDefaultModelIds,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -171,11 +173,26 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findExistingProviderModels(
+      providerConfig,
+      settings.merged.modelProviders as Record<string, unknown> | undefined,
+    );
+    if (!saved) return [];
+    const builtinIds = new Set(getDefaultModelIds(providerConfig));
+    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+  };
+
   const handleProviderSelect = (providerId: string) => {
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
-    setupFlow.start(providerConfig, undefined, existingEnv);
+    setupFlow.start(
+      providerConfig,
+      undefined,
+      existingEnv,
+      getExistingModelIds(providerConfig),
+    );
     pushView('provider-setup');
   };
 
@@ -228,7 +245,12 @@ export function AuthDialog(): React.JSX.Element {
         pushView('thirdparty-select');
         break;
       case 'CUSTOM_PROVIDER':
-        setupFlow.start(customProvider, undefined, existingEnv);
+        setupFlow.start(
+          customProvider,
+          undefined,
+          existingEnv,
+          getExistingModelIds(customProvider),
+        );
         pushView('provider-setup');
         break;
       default:

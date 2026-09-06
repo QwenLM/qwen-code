@@ -66,7 +66,7 @@ public class AcpClient {
         try {
             transport.start();
         } catch (IOException e) {
-            throw new AgentInitializeException("transport start error")
+            throw new AgentInitializeException("transport start error", e)
                     .addContextValue("initializeRequestParams", initializeRequestParams);
         }
         Validate.notNull(initializeRequestParams, "initializeRequestParams can't be null");
@@ -78,7 +78,7 @@ public class AcpClient {
             initializeResponse = TransportUtils.inputWaitForOneLine(transport, initializeRequest, InitializeResponse.class);
             logger.debug("initialize response: {}", initializeResponse);
         } catch (IOException | ExecutionException | InterruptedException | TimeoutException e) {
-            throw new AgentInitializeException("agent transport error")
+            throw new AgentInitializeException("agent transport error", e)
                     .addContextValue("initializeRequestParams", initializeRequestParams);
         }
         if (initializeResponse.getError() != null) {

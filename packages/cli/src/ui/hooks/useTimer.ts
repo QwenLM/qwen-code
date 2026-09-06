@@ -6,60 +6,106 @@
 
 import { useState, useEffect, useRef } from 'react';
 
+const TIMER_REFRESH_INTERVAL_MS = 500;
+
+function elapsedSeconds(elapsedMs: number): number {
+  return Number((Math.max(0, elapsedMs) / 1000).toFixed(1));
+}
+
+function getRunningElapsedMs(activeSinceMs: number | null): number {
+  if (activeSinceMs === null) {
+    return 0;
+  }
+
+  return Math.max(0, performance.now() - activeSinceMs);
+}
+
 /**
- * Custom hook to manage a timer that increments every second.
+ * Custom hook to manage a wall-clock timer.
  * @param isActive Whether the timer should be running.
  * @param resetKey A key that, when changed, will reset the timer to 0 and restart the interval.
+ * @param isPaused Whether the timer should pause without resetting elapsed time.
  * @returns The elapsed time in seconds.
  */
-export const useTimer = (isActive: boolean, resetKey: unknown) => {
+export const useTimer = (
+  isActive: boolean,
+  resetKey: unknown,
+  isPaused = false,
+) => {
   const [elapsedTime, setElapsedTime] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const activeSinceRef = useRef<number | null>(null);
+  const accumulatedElapsedMsRef = useRef(0);
   const prevResetKeyRef = useRef(resetKey);
   const prevIsActiveRef = useRef(isActive);
 
   useEffect(() => {
-    let shouldResetTime = false;
-
-    if (prevResetKeyRef.current !== resetKey) {
-      shouldResetTime = true;
-      prevResetKeyRef.current = resetKey;
-    }
-
-    if (prevIsActiveRef.current === false && isActive) {
-      // Transitioned from inactive to active
-      shouldResetTime = true;
-    }
-
-    if (shouldResetTime) {
-      setElapsedTime(0);
-    }
-    prevIsActiveRef.current = isActive;
-
-    // Manage interval
-    if (isActive) {
-      // Clear previous interval unconditionally before starting a new one
-      // This handles resetKey changes while active, ensuring a fresh interval start.
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-      timerRef.current = setInterval(() => {
-        setElapsedTime((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    }
-
-    return () => {
+    const clearTimer = () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
     };
-  }, [isActive, resetKey]);
+
+    const publishElapsedTime = (elapsedMs: number) => {
+      setElapsedTime(elapsedSeconds(elapsedMs));
+    };
+
+    const finalizeRunningSegment = () => {
+      if (activeSinceRef.current !== null) {
+        accumulatedElapsedMsRef.current += getRunningElapsedMs(
+          activeSinceRef.current,
+        );
+        activeSinceRef.current = null;
+      }
+      publishElapsedTime(accumulatedElapsedMsRef.current);
+    };
+
+    if (
+      prevResetKeyRef.current !== resetKey ||
+      (!prevIsActiveRef.current && isActive)
+    ) {
+      accumulatedElapsedMsRef.current = 0;
+      activeSinceRef.current = null;
+      setElapsedTime(0);
+      prevResetKeyRef.current = resetKey;
+    }
+
+    if (!isActive) {
+      if (prevIsActiveRef.current) {
+        finalizeRunningSegment();
+      }
+      clearTimer();
+      prevIsActiveRef.current = isActive;
+      return clearTimer;
+    }
+
+    if (isPaused) {
+      finalizeRunningSegment();
+      clearTimer();
+      prevIsActiveRef.current = isActive;
+      return clearTimer;
+    }
+
+    if (activeSinceRef.current === null) {
+      activeSinceRef.current = performance.now();
+    }
+
+    const updateElapsedTime = () => {
+      const runningElapsedMs = getRunningElapsedMs(activeSinceRef.current);
+      publishElapsedTime(accumulatedElapsedMsRef.current + runningElapsedMs);
+    };
+
+    clearTimer();
+    timerRef.current = setInterval(
+      updateElapsedTime,
+      TIMER_REFRESH_INTERVAL_MS,
+    );
+    updateElapsedTime();
+
+    prevIsActiveRef.current = isActive;
+    return clearTimer;
+  }, [isActive, isPaused, resetKey]);
 
   return elapsedTime;
 };

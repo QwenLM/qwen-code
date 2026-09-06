@@ -1,0 +1,21 @@
+name: 'Configure Windows self-hosted runner'
+description: 'Tunes a self-hosted Windows runner for the test gates: exports the Linux gates'' C.UTF-8 locale env (inert on Windows, where Node collates through ICU), redirects TEMP/TMP to RUNNER_TEMP, and puts Git Bash on PATH for bash-shell steps. Runs after actions/checkout because repository-local actions resolve from the workspace; callers turn off autocrlf before the checkout itself. Shared by the Windows merge-queue gate and the runner smoke workflow so both always run an identical configuration.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Configure Windows test environment'
+      # Self-hosted runners have Windows PowerShell, not necessarily pwsh.
+      # Force UTF-8 so GITHUB_ENV/GITHUB_PATH are not written as UTF-16LE.
+      shell: 'powershell'
+      run: |-
+        $ErrorActionPreference = 'Stop'
+        "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        "LC_ALL=C.UTF-8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        $gitBash = 'C:\Program Files\Git\bin'
+        if (!(Test-Path $gitBash)) {
+          Write-Output "::error::Git Bash not found at $gitBash"
+          exit 1
+        }
+        $gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

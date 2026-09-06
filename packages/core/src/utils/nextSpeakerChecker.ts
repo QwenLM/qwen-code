@@ -5,7 +5,7 @@
  */
 
 import type { Content } from '@google/genai';
-import type { GeminiChat } from '../core/geminiChat.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import { isFunctionResponse } from './messageInspectors.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
@@ -43,7 +43,7 @@ export interface NextSpeakerResponse {
 }
 
 export async function checkNextSpeaker(
-  chat: GeminiChat,
+  chat: LlmChat,
   config: Config,
   abortSignal: AbortSignal,
   promptId: string,
@@ -102,10 +102,11 @@ export async function checkNextSpeaker(
       abortSignal,
       promptId,
       purpose: 'next-speaker',
+      skipOutputLanguagePreference: true,
     });
   } catch (error) {
     debugLogger.warn(
-      'Failed to talk to Gemini endpoint when seeing if conversation should continue.',
+      'Failed to talk to the LLM endpoint when checking whether the conversation should continue.',
       error,
     );
     return null;

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { BaseTokenStorage } from './base-token-storage.js';
 import type { OAuthCredentials, OAuthToken } from './types.js';
 
@@ -54,6 +54,10 @@ describe('BaseTokenStorage', () => {
 
   beforeEach(() => {
     storage = new TestTokenStorage('qwen-code-mcp-oauth');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('validateCredentials', () => {
@@ -183,6 +187,42 @@ describe('BaseTokenStorage', () => {
       };
 
       expect(storage.isTokenExpired(credentials)).toBe(true);
+    });
+
+    it('should expire tokens exactly at the 5-minute buffer boundary', () => {
+      const now = new Date('2026-01-01T00:00:00.000Z');
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+
+      const credentials: OAuthCredentials = {
+        serverName: 'test-server',
+        token: {
+          accessToken: 'access-token',
+          tokenType: 'Bearer',
+          expiresAt: now.getTime() + 5 * 60 * 1000,
+        },
+        updatedAt: now.getTime(),
+      };
+
+      expect(storage.isTokenExpired(credentials)).toBe(true);
+    });
+
+    it('should keep tokens valid just outside the 5-minute buffer boundary', () => {
+      const now = new Date('2026-01-01T00:00:00.000Z');
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+
+      const credentials: OAuthCredentials = {
+        serverName: 'test-server',
+        token: {
+          accessToken: 'access-token',
+          tokenType: 'Bearer',
+          expiresAt: now.getTime() + 5 * 60 * 1000 + 1,
+        },
+        updatedAt: now.getTime(),
+      };
+
+      expect(storage.isTokenExpired(credentials)).toBe(false);
     });
   });
 

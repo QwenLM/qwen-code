@@ -28,6 +28,7 @@ export const zaiProvider: ProviderConfig = {
   ],
   envKey: 'ZAI_API_KEY',
   models: [
+    { id: 'GLM-5.2', contextWindowSize: 1000000, enableThinking: true },
     { id: 'GLM-5.1', contextWindowSize: 204800, enableThinking: true },
     { id: 'GLM-5', contextWindowSize: 204800 },
     { id: 'GLM-5-Turbo', contextWindowSize: 204800 },

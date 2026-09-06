@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
+import { ICON } from '../constants.js';
 
 export interface TodoItem {
   id: string;
@@ -19,9 +20,9 @@ interface TodoDisplayProps {
 }
 
 const STATUS_ICONS = {
-  pending: '○',
-  in_progress: '◐',
-  completed: '●',
+  pending: ICON.CIRCLE_EMPTY,
+  in_progress: ICON.CIRCLE_LEFT_HALF,
+  completed: ICON.CIRCLE_FILLED,
 } as const;
 
 export const TodoDisplay: React.FC<TodoDisplayProps> = ({ todos }) => {

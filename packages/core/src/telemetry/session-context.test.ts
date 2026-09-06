@@ -10,6 +10,8 @@ import {
   getSessionContext,
   setSessionContext,
   getCurrentSessionId,
+  getSessionIdFromContext,
+  setSessionIdOnContext,
 } from './session-context.js';
 
 describe('session-context', () => {
@@ -44,6 +46,23 @@ describe('session-context', () => {
     setSessionContext(undefined);
 
     expect(getSessionContext()).toBeUndefined();
+  });
+});
+
+describe('scoped session context', () => {
+  it('returns a new context carrying the session id', () => {
+    const scoped = setSessionIdOnContext(ROOT_CONTEXT, 'session-scoped');
+
+    expect(scoped).not.toBe(ROOT_CONTEXT);
+    expect(getSessionIdFromContext(scoped)).toBe('session-scoped');
+    expect(getSessionIdFromContext(ROOT_CONTEXT)).toBeUndefined();
+  });
+
+  it('ignores an empty session id', () => {
+    const scoped = setSessionIdOnContext(ROOT_CONTEXT, '');
+
+    expect(scoped).toBe(ROOT_CONTEXT);
+    expect(getSessionIdFromContext(scoped)).toBeUndefined();
   });
 });
 

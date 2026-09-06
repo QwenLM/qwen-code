@@ -19,7 +19,6 @@ export const deepseekProvider: ProviderConfig = {
       id: 'deepseek-v4-pro',
       contextWindowSize: 1000000,
       enableThinking: true,
-      modalities: { image: true, video: true },
     },
     { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
   ],

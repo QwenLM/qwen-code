@@ -1,0 +1,227 @@
+import { describe, expect, it } from 'vitest';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTranscriptState,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { extractPendingPermission } from './transcriptAdapter';
+
+function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
+  return {
+    blocks,
+    blockIndexById: Object.fromEntries(
+      blocks.map((block, index) => [block.id, index]),
+    ),
+    activeAssistantBlockByParent: {},
+    activeThoughtBlockByParent: {},
+    toolBlockByCallId: {},
+    trimmedToolNotificationByCallId: {},
+    permissionBlockByRequestId: {},
+    toolProgress: {},
+    nextOrdinal: blocks.length,
+    now: Date.now(),
+    maxBlocks: 1000,
+    awaitingResync: false,
+    resyncRequiredCount: 0,
+  };
+}
+
+describe('extractPendingPermission', () => {
+  it('extracts pending AskUserQuestion options and raw input', () => {
+    const permission = {
+      id: 'perm-1',
+      kind: 'permission',
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      title: 'Ask user 1 question',
+      options: [
+        {
+          optionId: 'proceed_once',
+          label: 'Submit',
+          raw: { kind: 'allow_once', name: 'Submit' },
+        },
+        {
+          optionId: 'cancel',
+          label: 'Cancel',
+          raw: { kind: 'reject_once', name: 'Cancel' },
+        },
+      ],
+      toolCall: {
+        rawInput: {
+          questions: [
+            {
+              header: '姓名',
+              question: '请问学生姓名是什么？',
+              options: [{ label: '张三', description: '示例姓名' }],
+            },
+          ],
+        },
+      },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    expect(extractPendingPermission(state([permission]).blocks)).toMatchObject({
+      id: 'request-1',
+      sessionId: 'session-1',
+      title: 'Ask user 1 question',
+      options: [
+        { id: 'proceed_once', label: 'Submit', kind: 'allow_once' },
+        { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [
+          {
+            header: '姓名',
+            question: '请问学生姓名是什么？',
+            options: [{ label: '张三', description: '示例姓名' }],
+          },
+        ],
+      },
+    });
+  });
+
+  it('extracts toolCallId from toolCall.toolCallId', () => {
+    const permission = {
+      id: 'perm-tc1',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-tc1',
+      resolved: undefined,
+      title: 'Bash: ls',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { toolCallId: 'call-abc', rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolCallId).toBe('call-abc');
+  });
+
+  it('falls back to toolCall.id when toolCallId is absent', () => {
+    const permission = {
+      id: 'perm-tc2',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-tc2',
+      resolved: undefined,
+      title: 'Bash: pwd',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { id: 'call-xyz', rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolCallId).toBe('call-xyz');
+  });
+
+  it('extracts the canonical toolName from toolCall._meta', () => {
+    const permission = {
+      id: 'perm-agent',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-agent',
+      resolved: undefined,
+      title: 'Agent: probe agent kind',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'call-agent',
+        kind: 'other',
+        _meta: { toolName: 'agent' },
+        rawInput: {},
+      },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolName).toBe('agent');
+  });
+
+  it('extracts the plan body from exit-plan permission content', () => {
+    const permission = {
+      id: 'perm-plan',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-plan',
+      title: 'Plan:',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'call-plan',
+        kind: 'switch_mode',
+        _meta: {
+          toolName: 'exit_plan_mode',
+          qwenTodoApproval: {
+            planId: 'plan-1',
+            sourceCallId: 'todo-call-1',
+          },
+        },
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: '1. Prepare\n2. Ship' },
+          },
+        ],
+        rawInput: { plan: '1. Prepare\n2. Ship' },
+      },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    expect(extractPendingPermission(state([permission]).blocks)).toMatchObject({
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      content: [{ type: 'text', text: '1. Prepare\n2. Ship' }],
+    });
+  });
+
+  it('leaves toolName undefined when _meta is absent', () => {
+    const permission = {
+      id: 'perm-no-meta',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-no-meta',
+      resolved: undefined,
+      title: 'Bash: ls',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { toolCallId: 'call-bash', rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolName).toBeUndefined();
+  });
+
+  it('returns undefined toolCallId when toolCall has neither field', () => {
+    const permission = {
+      id: 'perm-tc3',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-tc3',
+      resolved: undefined,
+      title: 'Read: file',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolCallId).toBeUndefined();
+  });
+});

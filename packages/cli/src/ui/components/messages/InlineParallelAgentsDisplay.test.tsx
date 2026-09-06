@@ -219,7 +219,7 @@ describe('<InlineParallelAgentsDisplay />', () => {
           failedToolCalls: 0,
           successRate: 1,
           inputTokens: 0,
-          outputTokens: 0,
+          outputTokens: 800,
           thoughtTokens: 0,
           cachedTokens: 0,
           totalTokens: 2400,
@@ -234,8 +234,8 @@ describe('<InlineParallelAgentsDisplay />', () => {
     const { lastFrame } = renderInline({ toolCalls: [toolCall] });
     const frame = lastFrame() ?? '';
     expect(frame).toContain('12s');
-    // 2400 tokens → "2.4k" per formatTokenCount.
-    expect(frame).toContain('2.4k tok');
+    // outputTokens: 800 → "800" per formatTokenCount (not totalTokens: 2400).
+    expect(frame).toContain('800 tok');
   });
 
   it('ignores non task_execution tool calls in the same group', () => {
@@ -259,5 +259,108 @@ describe('<InlineParallelAgentsDisplay />', () => {
     expect(frame).not.toContain('ls');
     // Tally counts only the agent.
     expect(frame).toContain('0/1 done');
+  });
+
+  describe('height backstop (availableTerminalHeight)', () => {
+    const manyAgents = (n: number): IndividualToolCallDisplay[] =>
+      Array.from({ length: n }, (_, i) =>
+        agentToolCall({
+          callId: `cap-${i}`,
+          subagentName: 'general-purpose',
+          taskDescription: `CapAgent ${i}`,
+          status: 'completed',
+        }),
+      );
+
+    const renderCapped = (
+      toolCalls: IndividualToolCallDisplay[],
+      availableTerminalHeight?: number,
+    ) =>
+      render(
+        <ConfigContext.Provider value={undefined}>
+          <InlineParallelAgentsDisplay
+            toolCalls={toolCalls}
+            contentWidth={120}
+            availableTerminalHeight={availableTerminalHeight}
+          />
+        </ConfigContext.Provider>,
+      );
+
+    it('without a budget, renders every agent (no cap)', () => {
+      const { lastFrame } = renderCapped(manyAgents(10));
+      const frame = lastFrame() ?? '';
+      // header + 10 rows, no overflow indicator.
+      expect(frame.split('\n').length).toBe(11);
+      expect(frame).not.toContain('more agent');
+    });
+
+    it('at the exact-fit budget, renders every agent (backstop is a no-op)', () => {
+      // Budget = rows.length + 1 = 11 pins the `>` boundary precisely:
+      //   11 > 11  = false → correct, no windowing (renders all 10 + header)
+      //   11 >= 11 = true  → a regression to `>=` would fire windowing and emit
+      //                      a "+1 more" indicator even though everything fits.
+      // The `not.toContain('more agent')` assertion is what catches that flip
+      // (the line count alone coincides at 11 in both branches).
+      const { lastFrame } = renderCapped(manyAgents(10), 11);
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBe(11);
+      expect(frame).not.toContain('more agent');
+    });
+
+    it('with a budget, windows to the most recent rows + "+N more" and never exceeds the budget', () => {
+      const budget = 6;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      // The whole non-Static frame must fit the budget, else ink clears the
+      // terminal every repaint (the scroll snap-back this guards against).
+      expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+      // rowBudget = budget - 2 = 4 visible rows → 6 hidden.
+      expect(frame).toContain('+6 more agents');
+      // Windows from the END (most recent), so the last agent shows and the
+      // first does not.
+      expect(frame).toContain('CapAgent 9');
+      expect(frame).not.toContain('CapAgent 0');
+      // Header tally still reflects the full count.
+      expect(frame).toContain('10/10 done');
+    });
+
+    it('at a budget of 3, shows exactly one (most-recent) row + indicator', () => {
+      // The transition point: budget 2 shows zero data rows, budget 3 shows the
+      // first one (rowsFit = budget - 2 = 1). Pins the off-by-one in
+      // `rowsFit = availableTerminalHeight - 2` and in `rows.slice(...)`.
+      const budget = 3;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBe(budget);
+      expect(frame).toContain('+9 more agents');
+      // The single visible row is the most recent agent, not an older one.
+      expect(frame).toContain('CapAgent 9');
+      expect(frame).not.toContain('CapAgent 0');
+      expect(frame).toContain('10/10 done');
+    });
+
+    it('at a budget of 2, keeps the header + indicator only (drops every row)', () => {
+      const budget = 2;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      // header (1) + "+N more" indicator (1) = 2 rows, exactly the budget — no
+      // data row may slip in, or the frame overflows and snaps back.
+      expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+      expect(frame).toContain('+10 more agents');
+      expect(frame).not.toContain('CapAgent');
+      expect(frame).toContain('10/10 done');
+    });
+
+    it('at a budget of 1, keeps only the header (drops rows and the indicator)', () => {
+      const budget = 1;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      // Only the header fits; even the overflow indicator would overflow.
+      expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+      expect(frame).not.toContain('more agent');
+      expect(frame).not.toContain('CapAgent');
+      // The header label still carries the full tally.
+      expect(frame).toContain('10/10 done');
+    });
   });
 });

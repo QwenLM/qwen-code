@@ -347,10 +347,10 @@ This immediately resumes your most recent conversation without any prompts.
 **2. Continue in non-interactive mode**
 
 ```bash
-qwen --continue --p "Continue with my task"
+qwen --continue -p "Continue with my task"
 ```
 
-Use `--print` with `--continue` to resume the most recent conversation in non-interactive mode, perfect for scripts or automation.
+Use `-p` (or `--prompt`) with `--continue` to resume the most recent conversation in non-interactive mode, perfect for scripts or automation.
 
 **3. Show conversation picker**
 
@@ -387,13 +387,13 @@ Use arrow keys to navigate and press Enter to select a conversation. Press Esc t
 > qwen --continue
 >
 > # Continue most recent conversation with a specific prompt
-> qwen --continue --p "Show me our progress"
+> qwen --continue -p "Show me our progress"
 >
 > # Show conversation picker
 > qwen --resume
 >
 > # Continue most recent conversation in non-interactive mode
-> qwen --continue --p "Run the tests again"
+> qwen --continue -p "Run the tests again"
 > ```
 
 ## Run parallel Qwen Code sessions with Git worktrees
@@ -569,3 +569,35 @@ what are the limitations of Qwen Code?
 > - Qwen Code always has access to the latest Qwen Code documentation, regardless of the version you're using
 > - Ask specific questions to get detailed answers
 > - Qwen Code can explain complex features like MCP integration, enterprise configurations, and advanced workflows
+
+## Enforce evidence-based conclusions
+
+When Qwen Code does high-stakes work — code review, incident troubleshooting, audits, or investigating production data — a confident but wrong conclusion costs more than no conclusion at all. You can encode your team's verification policy in QWEN.md (see [Memory](./features/memory.md)) so it applies to every session, without changing anyone's defaults.
+
+The rules below are adapted from a production retrospective of a multi-agent deployment, where confident-but-wrong conclusions repeatedly traced back to the same failure modes: inferring state from code instead of querying it, treating one satisfied condition as proof, and repeating earlier statements as facts.
+
+**1. Add a verification policy to your project QWEN.md**
+
+Put this template in `QWEN.md` at your repository root and commit it, so the policy applies to the whole team:
+
+```markdown
+# Verification policy
+
+Treat these rules as mandatory in investigations, troubleshooting, reviews, and any task that draws conclusions:
+
+1. Verify before concluding. Back claims about data or system state with evidence from the authoritative source (database, API, logs, command output). Conclusions drawn from reading code alone must be labeled "unverified inference".
+2. Verify the full chain. Enumerate the causal chain and check every link; one satisfied necessary condition does not prove a conclusion.
+3. Treat conversation history as leads, not facts. Statements in earlier transcripts — including your own prior assertions — are leads. Re-verify them at the source before repeating them as facts.
+4. Troubleshoot in order: your own recent changes first, then docs and known issues, and only then external dependencies.
+5. 100% evidence rule in reviews. In review and audit tasks, report no conclusion without evidence; attach verifiable evidence (file:line, query result, log excerpt) to every claim.
+```
+
+**2. Choose the right scope**
+
+See [Where to create QWEN.md](./features/memory.md#where-to-create-qwenmd) for which file applies to whom — commit the project-root `QWEN.md` copy so the policy covers the whole team.
+
+> [!tip]
+>
+> - Keep the rules specific and actionable: "back every claim with a query result" works better than "be careful".
+> - Keep the policy short — QWEN.md is followed more reliably when it is concise (see [Memory](./features/memory.md)).
+> - Adapt the rules to your stack: name the actual query tools, dashboards, or log commands your team treats as authoritative sources.

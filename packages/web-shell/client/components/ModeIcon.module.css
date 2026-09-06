@@ -1,0 +1,9 @@
+.icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  background: currentColor;
+  mask: var(--mode-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--mode-icon-url) center / contain no-repeat;
+}

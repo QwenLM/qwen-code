@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
 import { FileMessageHandler } from './FileMessageHandler.js';
+import { registerNewCommands } from '../../commands/index.js';
 import * as vscode from 'vscode';
 
 const shouldIgnoreFileMock = vi.hoisted(() => vi.fn());
@@ -30,9 +31,43 @@ const vscodeMock = vi.hoisted(() => {
     }
   }
 
+  class Position {
+    line: number;
+    character: number;
+    constructor(line: number, character: number) {
+      if (line < 0 || character < 0) {
+        throw new Error('Position line and character must be non-negative');
+      }
+      this.line = line;
+      this.character = character;
+    }
+  }
+
+  class Selection {
+    anchor: Position;
+    active: Position;
+    constructor(anchor: Position, active: Position) {
+      this.anchor = anchor;
+      this.active = active;
+    }
+  }
+
+  class Range {
+    start: Position;
+    end: Position;
+    constructor(start: Position, end: Position) {
+      this.start = start;
+      this.end = end;
+    }
+  }
+
   return {
     Uri,
-    ViewColumn: { One: 1, Two: 2, Three: 3, Beside: -2 },
+    Position,
+    Selection,
+    Range,
+    TextEditorRevealType: { InCenter: 2 },
+    ViewColumn: { Active: -1, One: 1, Two: 2, Three: 3, Beside: -2 },
     workspace: {
       findFiles: vi.fn(),
       getWorkspaceFolder: vi.fn(),
@@ -50,12 +85,17 @@ const vscodeMock = vi.hoisted(() => {
     window: {
       activeTextEditor: undefined,
       showTextDocument: vi.fn(),
+      showErrorMessage: vi.fn(),
       tabGroups: {
         all: [] as Array<{
           tabs: Array<{ input: unknown }>;
           viewColumn: number;
         }>,
       },
+    },
+    commands: {
+      registerCommand: vi.fn(),
+      executeCommand: vi.fn(),
     },
   };
 });
@@ -200,6 +240,94 @@ describe('FileMessageHandler', () => {
     expect(payload.data.requestId).toBe(7);
   });
 
+  it('openFile resolves relative paths against the workspace', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    vscodeMock.workspace.openTextDocument.mockResolvedValue({
+      uri: vscode.Uri.file('/workspace/src/app.ts'),
+    });
+    vscodeMock.window.showTextDocument.mockResolvedValue({});
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openFile',
+      data: { path: 'src/app.ts' },
+    });
+
+    expect(vscodeMock.workspace.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ fsPath: '/workspace/src/app.ts' }),
+    );
+  });
+
+  it('openFile keeps UNC paths absolute', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    vscodeMock.workspace.openTextDocument.mockResolvedValue({
+      uri: vscode.Uri.file('\\\\server\\share\\app.ts'),
+    });
+    vscodeMock.window.showTextDocument.mockResolvedValue({});
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openFile',
+      data: { path: '\\\\server\\share\\app.ts' },
+    });
+
+    expect(vscodeMock.workspace.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ fsPath: '\\\\server\\share\\app.ts' }),
+    );
+  });
+
+  it('openFile clamps zero line and column values to the file start', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    vscodeMock.workspace.openTextDocument.mockResolvedValue({
+      uri: vscode.Uri.file('/workspace/src/app.ts'),
+    });
+    const editor = { selection: undefined, revealRange: vi.fn() };
+    vscodeMock.window.showTextDocument.mockResolvedValue(editor);
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openFile',
+      data: { path: 'src/app.ts:0:0' },
+    });
+
+    expect(vscodeMock.window.showErrorMessage).not.toHaveBeenCalled();
+    expect(editor.selection).toMatchObject({
+      anchor: { line: 0, character: 0 },
+      active: { line: 0, character: 0 },
+    });
+    expect(editor.revealRange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 },
+      }),
+      vscodeMock.TextEditorRevealType.InCenter,
+    );
+  });
+
   describe('createAndOpenTempFile viewColumn selection', () => {
     const chatViewType = 'mainThreadWebview-qwenCode.chat';
 
@@ -278,7 +406,7 @@ describe('FileMessageHandler', () => {
       expect(options.viewColumn).toBe(2);
     });
 
-    it('falls back to ViewColumn.Beside when neither left nor right neighbor exists', async () => {
+    it('falls back to the active group when neither neighbor exists', async () => {
       vscodeMock.window.tabGroups.all = [{ tabs: [chatTab()], viewColumn: 1 }];
 
       const sendToWebView = vi.fn();
@@ -298,7 +426,126 @@ describe('FileMessageHandler', () => {
       const options = vscodeMock.window.showTextDocument.mock.calls[0]?.[1] as {
         viewColumn: number;
       };
-      expect(options.viewColumn).toBe(vscodeMock.ViewColumn.Beside);
+      expect(options.viewColumn).toBe(vscodeMock.ViewColumn.Active);
     });
+  });
+
+  it('closeDiff resolves workspace-relative paths before closing the diff', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    const registeredCommands = new Map<
+      string,
+      (...args: unknown[]) => unknown
+    >();
+    vscodeMock.commands.registerCommand.mockImplementation(
+      (id: string, handler: (...args: unknown[]) => unknown) => {
+        registeredCommands.set(id, handler);
+        return { dispose: vi.fn() };
+      },
+    );
+    vscodeMock.commands.executeCommand.mockImplementation(
+      async (id: string, ...args: unknown[]) =>
+        registeredCommands.get(id)?.(...args),
+    );
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+    registerNewCommands(
+      { subscriptions: [] } as never,
+      vi.fn(),
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'closeDiff',
+      data: { path: 'src/foo.ts' },
+    });
+
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
+  });
+
+  it('maps the web-shell diff source to the readOnly showDiff option', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    const registeredCommands = new Map<
+      string,
+      (...args: unknown[]) => unknown
+    >();
+    vscodeMock.commands.registerCommand.mockImplementation(
+      (id: string, handler: (...args: unknown[]) => unknown) => {
+        registeredCommands.set(id, handler);
+        return { dispose: vi.fn() };
+      },
+    );
+    vscodeMock.commands.executeCommand.mockImplementation(
+      async (id: string, ...args: unknown[]) =>
+        registeredCommands.get(id)?.(...args),
+    );
+    const showDiff = vi.fn().mockResolvedValue(undefined);
+    registerNewCommands(
+      { subscriptions: [] } as never,
+      vi.fn(),
+      { showDiff, closeDiff: vi.fn() } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    // Permission diffs from the web shell cannot round-trip edited content
+    // to the daemon, so they must be opened read-only.
+    await handler.handle({
+      type: 'openDiff',
+      data: {
+        path: 'src/foo.ts',
+        oldText: 'old',
+        newText: 'new',
+        source: 'web-shell',
+      },
+    });
+
+    expect(showDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      'old',
+      'new',
+      {
+        readOnly: true,
+      },
+    );
+
+    showDiff.mockClear();
+
+    // Any other source keeps the writable-in-session behavior.
+    await handler.handle({
+      type: 'openDiff',
+      data: { path: 'src/foo.ts', oldText: 'old', newText: 'new' },
+    });
+
+    expect(showDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      'old',
+      'new',
+      {
+        readOnly: false,
+      },
+    );
   });
 });

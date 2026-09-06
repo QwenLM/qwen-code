@@ -41,7 +41,8 @@ export const lspCommand: SlashCommand = {
     return t('Show LSP server status. Usage: /lsp [status]');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'non_interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (
     context: CommandContext,
     _args?: string,

@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   TraceFlags,
@@ -15,11 +16,19 @@ import {
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 let mockCurrentSessionId: string | undefined = undefined;
+let mockScopedSessionId: string | undefined = undefined;
+let mockIsInNativeSubagentSpan = false;
 
 vi.mock('./session-context.js', () => ({
   getCurrentSessionId: () => mockCurrentSessionId,
+  getSessionIdFromContext: () => mockScopedSessionId,
+}));
+
+vi.mock('./session-tracing.js', () => ({
+  isInNativeSubagentSpan: () => mockIsInNativeSubagentSpan,
 }));
 
 interface ExportedSpan {
@@ -41,6 +50,8 @@ describe('LogToSpanProcessor', () => {
   beforeEach(() => {
     exportedSpans = [];
     mockCurrentSessionId = undefined;
+    mockScopedSessionId = undefined;
+    mockIsInNativeSubagentSpan = false;
     mockExporter = {
       export: vi.fn((spans, cb) => {
         exportedSpans.push(...spans);
@@ -590,6 +601,42 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].status.code).toBe(SpanStatusCode.OK);
   });
 
+  it('keeps cancelled tool calls UNSET even when legacy errors are present', async () => {
+    const logRecord = {
+      body: 'tool call cancelled',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        'event.name': 'qwen-code.tool_call',
+        status: 'cancelled',
+        success: false,
+        error: 'cancelled by user',
+        error_type: 'unhandled_exception',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.UNSET);
+  });
+
+  it('keeps ERROR for cancelled non-tool events that carry an error', async () => {
+    const logRecord = {
+      body: 'auth cancelled with error',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        'event.name': 'qwen-code.auth',
+        status: 'cancelled',
+        error_message: 'auth flow failed',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.ERROR);
+  });
+
   it('does not set ERROR for falsy error attributes', async () => {
     const logRecord = {
       body: 'ok event',
@@ -733,10 +780,51 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].spanContext().traceId).toBe(
       deriveTraceId('session-from-context'),
     );
+    expect(exportedSpans[0].attributes['session.id']).toBe(
+      'session-from-context',
+    );
+  });
+
+  it('prefers and stamps the scoped OTel session over the global fallback', async () => {
+    mockCurrentSessionId = 'stale-session';
+    mockScopedSessionId = 'scoped-session';
+    const logRecord = {
+      body: 'scoped event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord, ROOT_CONTEXT);
+    await processor.forceFlush();
+
+    const { deriveTraceId } = await import('./trace-id-utils.js');
+    expect(exportedSpans[0].attributes['session.id']).toBe('scoped-session');
+    expect(exportedSpans[0].spanContext().traceId).toBe(
+      deriveTraceId('scoped-session'),
+    );
+  });
+
+  it('uses the per-request session before the global fallback', async () => {
+    mockCurrentSessionId = 'stale-session';
+    const logRecord = {
+      body: 'request-scoped event',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    sessionIdContext.run('request-session', () => processor.onEmit(logRecord));
+    await processor.forceFlush();
+
+    const { deriveTraceId } = await import('./trace-id-utils.js');
+    expect(exportedSpans[0].attributes['session.id']).toBe('request-session');
+    expect(exportedSpans[0].spanContext().traceId).toBe(
+      deriveTraceId('request-session'),
+    );
   });
 
   it('prefers log record session.id over getCurrentSessionId', async () => {
     mockCurrentSessionId = 'stale-session';
+    mockScopedSessionId = 'wrong-scoped-session';
     const logRecord = {
       body: 'event with session attr',
       hrTime: [1000, 0] as [number, number],
@@ -750,6 +838,65 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].spanContext().traceId).toBe(
       deriveTraceId('fresh-session'),
     );
+    expect(exportedSpans[0].attributes['session.id']).toBe('fresh-session');
+  });
+
+  describe('bridge skip-list (#3731 Phase 3)', () => {
+    it('skips qwen-code.subagent_execution when native subagent span is active', async () => {
+      mockIsInNativeSubagentSpan = true;
+      const logRecord = {
+        body: 'subagent started',
+        hrTime: [2000, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.subagent_execution',
+          subagent_name: 'Explore',
+          status: 'started',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      expect(exportedSpans).toHaveLength(0);
+      mockIsInNativeSubagentSpan = false;
+    });
+
+    it('bridges subagent_execution when no native span is active (e.g. runForkedAgent)', async () => {
+      mockIsInNativeSubagentSpan = false;
+      const logRecord = {
+        body: 'forked agent started',
+        hrTime: [2500, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.subagent_execution',
+          subagent_name: 'dreamAgent',
+          status: 'started',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      expect(exportedSpans).toHaveLength(1);
+      expect(exportedSpans[0].name).toBe('qwen-code.subagent_execution');
+    });
+
+    it('still bridges other events normally (e.g. qwen-code.tool_call)', async () => {
+      const logRecord = {
+        body: 'tool call',
+        hrTime: [3000, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.tool_call',
+          tool_name: 'read_file',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      // Sanity check: skip list is narrow — non-listed events still bridge.
+      expect(exportedSpans).toHaveLength(1);
+      expect(exportedSpans[0].name).toBe('qwen-code.tool_call');
+    });
   });
 
   describe('export failure diagnostics', () => {

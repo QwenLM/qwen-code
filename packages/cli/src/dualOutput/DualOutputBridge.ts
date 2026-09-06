@@ -13,13 +13,15 @@ import {
 } from 'node:fs';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
+import type { PermissionSuggestion } from '../nonInteractive/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
+import { reportChatRecordingFailureToAdapter } from '../nonInteractive/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 
@@ -49,8 +51,16 @@ export const SUPPORTED_EVENTS = [
  *
  * History:
  *   1 — initial release (session_start, session_end, full stream-json).
+ *   2 — textual tool_result content is bounded for transport.
  */
-export const DUAL_OUTPUT_PROTOCOL_VERSION = 1;
+export const DUAL_OUTPUT_PROTOCOL_VERSION = 2;
+
+/**
+ * Maximum bytes buffered in the Node.js WriteStream before the bridge
+ * self-disables. Guards against unbounded memory growth when the output
+ * target is a FIFO opened with O_RDWR (no EPIPE on reader disconnect).
+ */
+const MAX_BUFFERED_BYTES = 1024 * 1024; // 1 MB
 
 /**
  * Optional metadata wired into the `session_start` capability handshake.
@@ -78,6 +88,7 @@ export class DualOutputBridge {
   private readonly sessionId: string;
   private active = true;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   constructor(
     config: Config,
@@ -107,8 +118,8 @@ export class DualOutputBridge {
     } else {
       // Open with O_WRONLY|O_NONBLOCK to avoid blocking the event loop on FIFOs.
       // On FIFO, a regular open(O_WRONLY) blocks until a reader connects.
-      // O_NONBLOCK makes it return immediately (ENXIO if no reader yet, which
-      // createWriteStream handles via its internal retry/error mechanism).
+      // O_NONBLOCK makes openSync return immediately; if no reader is
+      // connected yet (ENXIO), the catch block below retries with O_RDWR.
       try {
         const fd = openSync(
           target.filePath,
@@ -117,9 +128,30 @@ export class DualOutputBridge {
         this.stream = createWriteStream('', { fd });
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        // ENXIO: FIFO has no reader yet — fall back to blocking open.
-        // ENOENT: regular file doesn't exist yet — create it.
-        if (code === 'ENXIO' || code === 'ENOENT') {
+        if (code === 'ENXIO') {
+          // FIFO with no reader connected yet. Use O_RDWR | O_NONBLOCK so
+          // the open returns immediately (POSIX: process is both reader and
+          // writer, satisfying the "at least one reader" requirement).
+          // Trade-off: EPIPE won't fire on reader disconnect; the bridge
+          // self-disables when the pipe buffer fills instead.
+          try {
+            const fd = openSync(
+              target.filePath,
+              constants.O_RDWR | constants.O_NONBLOCK,
+            );
+            this.stream = createWriteStream('', { fd });
+          } catch (retryErr) {
+            if ((retryErr as NodeJS.ErrnoException).code === 'EACCES') {
+              throw new Error(
+                `--json-file "${target.filePath}": permission denied opening FIFO for read-write. ` +
+                  'Check read/write permissions on the file and its parent directories, ' +
+                  'or start a reader before launching Qwen Code.',
+              );
+            }
+            throw retryErr;
+          }
+        } else if (code === 'ENOENT') {
+          // Regular file doesn't exist yet — create it.
           this.stream = createWriteStream(target.filePath, { flags: 'w' });
         } else {
           throw err;
@@ -129,9 +161,13 @@ export class DualOutputBridge {
 
     this.stream.on('error', (err) => {
       const code = (err as NodeJS.ErrnoException).code;
-      // Consumer disconnected — gracefully stop writing, don't crash the TUI
       if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED') {
         debugLogger.warn('DualOutput: consumer disconnected, disabling');
+      } else if (code === 'ERR_SYSTEM_ERROR') {
+        debugLogger.warn(
+          'DualOutput: system error on stream, disabling:',
+          (err as NodeJS.ErrnoException).message,
+        );
       } else {
         debugLogger.error('DualOutput stream error:', err);
       }
@@ -144,6 +180,12 @@ export class DualOutputBridge {
       true, // includePartialMessages — always emit streaming events
       this.stream,
     );
+    this.unsubscribeRecordingFailure =
+      typeof config.onChatRecordingFailure === 'function'
+        ? config.onChatRecordingFailure((event) => {
+            this.emitRecordingFailure(event);
+          })
+        : () => {};
 
     // Announce the session immediately so consumers can correlate the channel
     // with a session before any other event arrives. The data payload also
@@ -163,7 +205,9 @@ export class DualOutputBridge {
     }
   }
 
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.processEvent(event);
@@ -175,6 +219,8 @@ export class DualOutputBridge {
 
   startAssistantMessage(): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.startAssistantMessage();
     } catch (err) {
@@ -185,6 +231,8 @@ export class DualOutputBridge {
 
   finalizeAssistantMessage(): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.finalizeAssistantMessage();
     } catch (err) {
@@ -194,6 +242,8 @@ export class DualOutputBridge {
   }
 
   emitUserMessage(parts: Part[]): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.emitUserMessage(parts);
@@ -208,6 +258,8 @@ export class DualOutputBridge {
     response: ToolCallResponseInfo,
   ): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.emitToolResult(request, response);
     } catch (err) {
@@ -221,6 +273,16 @@ export class DualOutputBridge {
     return this.active;
   }
 
+  private disableIfBufferOverflowed(): void {
+    if (this.stream.writableLength > MAX_BUFFERED_BYTES) {
+      debugLogger.warn(
+        'DualOutput: buffered data exceeds limit, disabling (no consumer draining?)',
+      );
+      this.active = false;
+      this.stream.destroy();
+    }
+  }
+
   /**
    * Emits a `can_use_tool` permission request so an external consumer can
    * approve or deny the tool call. Pairs with {@link emitControlResponse}.
@@ -231,7 +293,10 @@ export class DualOutputBridge {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.emitPermissionRequest(
@@ -240,6 +305,7 @@ export class DualOutputBridge {
         toolUseId,
         input,
         blockedPath,
+        permissionSuggestions,
       );
     } catch (err) {
       debugLogger.error('DualOutput emitPermissionRequest error:', err);
@@ -252,6 +318,8 @@ export class DualOutputBridge {
    * the external consumer) so all observers stay in sync.
    */
   emitControlResponse(requestId: string, allowed: boolean): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
     if (!this.active) return;
     try {
       this.adapter.emitControlResponse(requestId, allowed);
@@ -269,6 +337,8 @@ export class DualOutputBridge {
    */
   emitControlError(requestId: string, message: string): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.emitControlError(requestId, message);
     } catch (err) {
@@ -280,6 +350,8 @@ export class DualOutputBridge {
   /** General-purpose system event escape hatch. */
   emitSystemMessage(subtype: string, data?: unknown): void {
     if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
     try {
       this.adapter.emitSystemMessage(subtype, data);
     } catch (err) {
@@ -288,8 +360,23 @@ export class DualOutputBridge {
     }
   }
 
+  private emitRecordingFailure(
+    event: Parameters<typeof reportChatRecordingFailureToAdapter>[1],
+  ): void {
+    if (!this.active) return;
+    this.disableIfBufferOverflowed();
+    if (!this.active) return;
+    try {
+      reportChatRecordingFailureToAdapter(this.adapter, event);
+    } catch (err) {
+      debugLogger.error('DualOutput recording failure output error:', err);
+      this.active = false;
+    }
+  }
+
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    this.unsubscribeRecordingFailure();
     // Try to emit session_end before tearing the stream down so consumers
     // get a definitive termination signal rather than inferring it from
     // EPIPE. Failures here are swallowed — the stream may already be in an
@@ -305,7 +392,7 @@ export class DualOutputBridge {
     }
     this.active = false;
     this.shutdownPromise = new Promise((resolve) => {
-      if (this.stream.closed) {
+      if (this.stream.closed || this.stream.destroyed) {
         resolve();
         return;
       }

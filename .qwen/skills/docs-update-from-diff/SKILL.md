@@ -75,6 +75,13 @@ Verify that the updated docs cover the actual delta:
 - Confirm links and relative paths still make sense
 - Confirm any new page is included in the relevant `_meta.ts`
 - Re-read the changed docs against the code diff, not against memory
+- If the diff added, moved, renamed, or removed a page under `docs/users/`,
+  verify the `qc-helper` bundled skill's topic-to-path index tables
+  (`packages/core/src/skills/bundled/qc-helper/SKILL.md`) are updated to
+  match. This skill ships with the CLI and uses hardcoded doc-path tables at
+  runtime — stale entries cause `/qc-helper` to miss the right documentation.
+  Also check project-level skills under `.qwen/skills/` for hardcoded
+  `docs/users/` references that may need updating.
 
 ## Practical heuristics
 
@@ -86,6 +93,10 @@ Verify that the updated docs cover the actual delta:
   `docs/users/features/**` and `docs/developers/tools/**` when relevant.
 - If tests reveal expected behavior more clearly than implementation code, use
   tests to confirm wording.
+- If the change adds, moves, renames, or removes a docs page, also update
+  hardcoded doc-path consumers: `qc-helper`'s SKILL.md index tables,
+  `_meta.ts` navigation files, and any project-level skills under
+  `.qwen/skills/` that reference `docs/users/` paths.
 
 ## Deliverable
 
