@@ -9,10 +9,12 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -21520,6 +21522,75 @@ exit 0
           version: 'v'.repeat(100),
         }),
       ).toBe(`${'x'.repeat(100)}\n${'v'.repeat(40)}\n`);
+    });
+  });
+
+  it('refuses a planted FIFO or symlink at the sentinel path when writing agent-model', () => {
+    // The sentinel write runs in finish() — AFTER every watchdog has been
+    // disarmed — so a plain O_WRONLY open of a planted FIFO blocks forever
+    // with nothing left to kill it, and a planted symlink is followed with
+    // O_TRUNC: the target loses its content while the round still exits 0
+    // and reports success (both arms measured in the round-4 review, with
+    // the plants created from inside the real sandbox image as the same
+    // uid). The writer opens O_NOFOLLOW|O_NONBLOCK, so the symlink becomes
+    // ELOOP and the readerless FIFO ENXIO, both landing in the best-effort
+    // catch: the run completes and the plants survive untouched.
+    const stubLines = [
+      `process.stdout.write(${JSON.stringify(
+        qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+      )});`,
+      "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+      'process.exit(0);',
+    ];
+    // FIFO arm — soft-skipped where mkfifo is unavailable (Windows lane).
+    withRunnerDir((dir) => {
+      const fifo = join(dir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status !== 0) return;
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // Bounded spawn, NOT runAddressReview: a flags-removed runner blocks
+      // inside open(2), which blocks the worker thread synchronously —
+      // measured: vitest's 90 s testTimeout never fires on it and the whole
+      // suite hangs instead of going red. The spawn timeout's SIGTERM
+      // interrupts the blocked open, so dropping O_NONBLOCK goes red
+      // deterministically at 45 s (status null); the intact arm still
+      // asserts the runner's real exit code.
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          writeWorkdirStub(dir, stubLines),
+        ],
+        { encoding: 'utf8', timeout: 45_000 },
+      );
+      expect(result.status).toBe(0);
+      expect(statSync(fifo).isFIFO()).toBe(true);
+    });
+    // Symlink arm — dropping O_NOFOLLOW truncates the canary and this
+    // asserts red on its content.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const canary = join(dir, 'canary.txt');
+      writeFileSync(canary, 'CI_DEV_BOT_PAT=canary-value\n');
+      symlinkSync(canary, join(dir, 'agent-model'));
+      const result = runAddressReview(dir, writeWorkdirStub(dir, stubLines));
+      expect(result.status).toBe(0);
+      expect(readFileSync(canary, 'utf8')).toBe(
+        'CI_DEV_BOT_PAT=canary-value\n',
+      );
+      expect(lstatSync(join(dir, 'agent-model')).isSymbolicLink()).toBe(true);
     });
   });
 
