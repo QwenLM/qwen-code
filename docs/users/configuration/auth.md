@@ -121,9 +121,9 @@ Token Plan is available in two regions, each with its own dedicated endpoint:
 
 ### Interactive setup
 
-Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. Token Plan API keys have no prefix requirement (unlike Coding Plan keys, which start with `sk-sp-`).
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. Token Plan API keys have no prefix requirement (unlike Coding Plan keys, which start with `sk-sp-`).
 
-After authentication, use the `/model` command to browse and switch between the models included in your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; the `/model` picker discovers the models directly from the endpoint and always shows what your plan currently supports.
+After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
 
 ### Headless or scripted setup
 
@@ -136,6 +136,8 @@ export OPENAI_MODEL="qwen3.7-plus"
 ```
 
 Use `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` for the China (Beijing) endpoint, or `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` for the international (Singapore) endpoint. Replace `qwen3.7-plus` with any model included in your plan.
+
+Note that `BAILIAN_TOKEN_PLAN_API_KEY` is a provider-specific key: it takes effect once the `settings.json` provider entry in the next section exists, because that entry declares it as the `envKey`. To select OpenAI-compatible auth with environment variables alone, export `OPENAI_API_KEY` instead — provider-specific keys do not select the auth type by themselves.
 
 ### Alternative: configure via `settings.json`
 
@@ -395,7 +397,7 @@ The standalone `qwen auth` CLI command has been removed. Use these replacements 
 | Check current authentication     | Run `/doctor` inside Qwen Code                                                                |
 | OAuth browser flow               | Run `qwen` interactively and use `/auth`; OAuth cannot be configured with env vars alone      |
 
-Legacy invocations such as `qwen auth status` now print a removal notice with these migration paths.
+Legacy invocations such as `qwen auth status` print a removal notice that summarizes these migration paths, including a Token Plan entry with the base URLs for both regions.
 
 ## Security notes
 
