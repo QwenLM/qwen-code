@@ -7,6 +7,17 @@ import {
 } from 'react';
 import { persistDaemonToken } from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
+import { Button } from './ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from './ui/card';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -27,6 +38,7 @@ interface AuthCopy {
   tokenLabel: string;
   connect: string;
   retry: string;
+  hint: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
@@ -47,6 +59,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     tokenLabel: 'Bearer token',
     connect: 'Connect',
     retry: 'Retry',
+    hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
   },
   'zh-CN': {
     heading: '连接到 Qwen Code',
@@ -62,6 +75,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     tokenLabel: 'Bearer token',
     connect: '连接',
     retry: '重试',
+    hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
 };
 
@@ -195,39 +209,62 @@ export function StandaloneAuth({
 
   if (accepted) return children(accepted.token);
   return (
-    <main
-      style={{
-        maxWidth: 480,
-        margin: '15vh auto',
-        padding: 24,
-        fontFamily: 'system-ui',
-      }}
-    >
-      <h1>{copy.heading}</h1>
-      <p role="status">{status}</p>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          candidateRef.current = token.trim();
-          setAttempt((n) => n + 1);
-        }}
-      >
-        {needsToken && (
-          <label>
-            {copy.tokenLabel}{' '}
-            <input
-              aria-label={copy.tokenLabel}
-              type="password"
-              autoComplete="off"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-            />
-          </label>
-        )}
-        <button type="submit" disabled={busy}>
-          {busy ? copy.connecting : needsToken ? copy.connect : copy.retry}
-        </button>
-      </form>
-    </main>
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <Card className="w-full max-w-md">
+        <CardHeader className="items-center text-center">
+          <CardTitle className="text-2xl">{copy.heading}</CardTitle>
+          <CardDescription className="font-mono text-xs break-all">
+            {baseUrl}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-5">
+          <p
+            role="status"
+            className="text-center text-sm text-muted-foreground"
+          >
+            {status}
+          </p>
+          <form
+            className="flex flex-col gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              candidateRef.current = token.trim();
+              setAttempt((n) => n + 1);
+            }}
+          >
+            {needsToken && (
+              <>
+                <Label htmlFor="daemon-bearer-token" className="sr-only">
+                  {copy.tokenLabel}
+                </Label>
+                <Input
+                  id="daemon-bearer-token"
+                  type="password"
+                  autoComplete="off"
+                  autoFocus
+                  placeholder={copy.tokenLabel}
+                  className="h-11 text-center font-mono text-base tracking-[0.18em]"
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+              </>
+            )}
+            <Button
+              type="submit"
+              size="lg"
+              className="h-11 w-full text-base"
+              disabled={busy}
+            >
+              {busy ? copy.connecting : needsToken ? copy.connect : copy.retry}
+            </Button>
+          </form>
+        </CardContent>
+        <CardFooter className="justify-center">
+          <p className="text-center text-xs text-muted-foreground">
+            {copy.hint}
+          </p>
+        </CardFooter>
+      </Card>
+    </div>
   );
 }
