@@ -6,10 +6,8 @@
 
 import { Box, Text } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
-import {
-  type Extension,
-  getExtensionDisplayName,
-} from '@qwen-code/qwen-code-core';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
 import { theme } from '../../../semantic-colors.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 

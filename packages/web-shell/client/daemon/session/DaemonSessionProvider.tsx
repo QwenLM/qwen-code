@@ -52,6 +52,7 @@ import {
   getConnectionAfterSessionClear,
   getPromptSettledKey,
   getWorkspaceModelsAfterSessionClear,
+  hasLocallySubmittedPrompt,
   resolveSessionRestoreTimeouts,
 } from './actions.js';
 import {
@@ -123,6 +124,7 @@ import {
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
+  DaemonActivePromptState,
   DaemonConnectionState,
   DaemonPromptStatus,
   DaemonSessionActions,
@@ -1064,6 +1066,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
+  // Daemon-authoritative "a prompt is in flight" state for the connected
+  // session, pushed in by the host from the workspace live-state poll via
+  // `actions.setDaemonActivePrompt`. The owner lets a signal published during
+  // session loading wait for that exact session without leaking to another.
+  const daemonActivePromptRef = useRef<DaemonActivePromptState | undefined>(
+    undefined,
+  );
   const heartbeatSupportedRef = useRef(false);
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
@@ -1328,6 +1337,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     turnNavigationSupported,
   ]);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
+  const settleCurrentSessionRestoredPromptRef = useRef<() => boolean>(
+    () => false,
+  );
+  // Apply the buffered transcript batch from outside the connect closure. The
+  // action layer must settle against a committed store, not one that is still
+  // 16ms behind (#9487).
+  const flushCurrentTranscriptRef = useRef<() => void>(() => {});
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -1440,6 +1456,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       cancelTranscriptFlush();
       runTranscriptFlush(true);
     };
+    flushCurrentTranscriptRef.current = flushTranscriptSync;
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
       store.dispatch(events);
@@ -1509,6 +1526,39 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let standaloneCreateAttempted = false;
       let productContextFailure = false;
       let hasCurrentSessionActivePrompt = () => false;
+      const getDaemonActivePrompt = (
+        target: { workspaceCwd?: string; sessionId?: string } | undefined,
+      ): boolean | undefined => {
+        const state = daemonActivePromptRef.current;
+        return state?.sessionId !== undefined &&
+          target !== undefined &&
+          state?.workspaceCwd === target.workspaceCwd &&
+          state.sessionId === target.sessionId
+          ? state.active
+          : undefined;
+      };
+      // The one gate every non-terminal path asks before settling the pane to
+      // idle. A settle is safe only when no prompt this browser is tracking is
+      // still running AND the daemon is not reporting the turn in flight;
+      // otherwise a transport hiccup or a quiet stretch inside a long tool call
+      // reads as "turn finished" (#9487). Terminal events (turn_complete,
+      // turn_error, prompt.cancelled) and lifecycle transitions do not ask —
+      // they settle unconditionally, which is what makes them terminal.
+      const maySettleToIdle = (
+        target = session ?? sessionRef.current ?? connectionRef.current,
+      ) => {
+        if (hasCurrentSessionActivePrompt()) return false;
+        if (getDaemonActivePrompt(target) === true) {
+          // The counterpart to the settle breadcrumb in the action layer:
+          // "the pane has said working for 40 minutes" is otherwise
+          // indistinguishable from a genuinely long silent tool call.
+          console.debug(
+            '[DaemonSessionProvider] settle skipped: daemon reports the prompt in flight',
+          );
+          return false;
+        }
+        return true;
+      };
       if (
         !restoreSessionId &&
         !reconnectSessionId &&
@@ -2165,13 +2215,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              // Do not reset daemonActivePromptRef here: the bridge may have
+              // already published authority for the target while it was
+              // loading. Owner matching below prevents the previous session's
+              // value from leaking into the new one (#9487).
               needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
                 nextSession.replaySnapshot.compactedReplay.length +
                 nextSession.replaySnapshot.liveJournal.length;
               if (replaySnapshotEventCount > 0) {
-                setPromptStatus('idle');
+                // Rebuilding the transcript store is not a turn boundary. The
+                // episode-start updater below can only preserve a state this
+                // reset has not already flattened, so an observer pane whose
+                // ring-evicted reload carries a replay snapshot would lose the
+                // indicator for the rest of the turn (#9487).
+                if (maySettleToIdle(nextSession)) setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 needsStoreReset = true;
               } else {
@@ -2230,6 +2289,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // controller/promise to put in `activePromptsRef`. Keep that restored
           // live state separately so `session.replay_complete` (history caught
           // up) does not get mistaken for `turn_complete` (prompt finished).
+          const daemonActivePrompt = getDaemonActivePrompt(activeSession);
+          if (daemonActivePrompt === false) {
+            settledRestoredActivePromptSessionsRef.current.add(activeSession);
+          }
           const restoredActivePromptSettled =
             settledRestoredActivePromptSessionsRef.current.has(activeSession);
           let restoredActivePrompt =
@@ -2240,16 +2303,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // Once a terminal event consumes it, keep it consumed across SSE
             // reconnects for the same client; later prompts from this page are
             // still tracked independently in activePromptsRef.
+            if (!restoredActivePrompt) return false;
             settledRestoredActivePromptSessionsRef.current.add(activeSession);
             restoredActivePrompt = false;
+            return true;
           };
           const hasSessionActivePrompt = () =>
             restoredActivePrompt ||
-            activePromptsRef.current.has(activeSession.sessionId) ||
-            activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
+            hasLocallySubmittedPrompt(
+              activePromptsRef.current,
+              activeSession.sessionId,
+            );
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
-          setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
+          settleCurrentSessionRestoredPromptRef.current =
+            settleRestoredActivePrompt;
+          setPromptStatus((current) =>
+            hasSessionActivePrompt()
+              ? 'streaming'
+              : // A Last-Event-ID resume on the same session is not a turn
+                // boundary. `hasSessionActivePrompt()` only knows about
+                // prompts this browser submitted plus the one-shot /load
+                // snapshot, so for an observer pane it reads false mid-turn
+                // and would reset a running turn to idle. Keep whatever the
+                // stream already established while the daemon still reports
+                // the prompt in flight (#9487).
+                daemonActivePrompt === true && current !== 'idle'
+                ? current
+                : 'idle',
+          );
 
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
@@ -3051,6 +3133,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => false;
             setConnection((current) => ({
               ...current,
               status: 'connecting',
@@ -3289,7 +3372,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       type: 'assistant.done',
                       reason: 'replay_complete',
                     });
-                    setPromptStatus('idle');
+                    // "History caught up" is not "turn finished". Finishing the
+                    // replayed streaming block above is right either way, but
+                    // an observer pane reconnecting mid-turn would otherwise
+                    // settle here and — inside a long silent tool call there is
+                    // no next event to revive it — stay settled (#9487).
+                    if (maySettleToIdle()) {
+                      setPromptStatus('idle');
+                    }
                   }
                 }
               }
@@ -3334,7 +3424,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   passiveAssistantDoneTimerRef,
                   'passive_observer',
                   3000,
-                  () => setPromptStatus('idle'),
+                  () => {
+                    // Silence is not a terminal signal: one tool call
+                    // routinely runs far longer than this window without
+                    // emitting an event, and dropping the pane's loading
+                    // state there is exactly the mid-turn indicator loss in
+                    // #9487. The stale streaming block is still finished
+                    // above; settle the prompt state only when the daemon
+                    // does not contradict it.
+                    if (!maySettleToIdle()) return;
+                    setPromptStatus('idle');
+                  },
                 );
               }
               const pendingRepair = liveJournalRepairRef.current;
@@ -3363,7 +3463,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   // Resync asks us to rebuild transcript state, but it is not a
                   // prompt terminal signal. Keep loading alive for local/restored
                   // prompts until turn_complete, turn_error, or prompt_cancelled.
-                  if (!hasSessionActivePrompt()) {
+                  if (maySettleToIdle()) {
                     setPromptStatus('idle');
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
@@ -3385,6 +3485,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
+                  settleCurrentSessionRestoredPromptRef.current = () => false;
                   setConnection((current) => ({
                     ...current,
                     status: 'connecting',
@@ -3489,6 +3590,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => false;
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
@@ -3497,13 +3599,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
-              if (!hasSessionActivePrompt()) {
+              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              if (maySettleToIdle()) {
                 // A transport close is only a safe "done" signal for passive
                 // observers. When a local/restored prompt is still active, the
                 // daemon may continue running while we reconnect via
                 // Last-Event-ID, so keep the prompt in streaming state until a
-                // real turn_complete/turn_error/prompt_cancelled arrives.
-                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                // real turn_complete/turn_error/prompt_cancelled arrives. The
+                // daemon's live prompt state is the same authority: while it
+                // reports the turn in flight, a dropped stream (proxy idle
+                // timeout mid silent tool gap) must not settle the pane — the
+                // resume finds no new events inside the gap to revive it
+                // (#9487).
                 setPromptStatus('idle');
                 dispatchTranscriptNow({
                   type: 'assistant.done',
@@ -3650,9 +3757,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
           // Retriable transport failures are not prompt terminal events. Keep
           // restored/local prompts in streaming state until the daemon sends
-          // turn_complete, turn_error, or prompt_cancelled.
-          if (isAuthFailure || isTerminal || !hasCurrentSessionActivePrompt()) {
-            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+          // turn_complete, turn_error, or prompt_cancelled — and likewise an
+          // observed turn the daemon still reports in flight: the reconnect
+          // resumes into the same silent gap with no events to revive a
+          // settled indicator (#9487).
+          clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+          if (isAuthFailure || isTerminal || maySettleToIdle()) {
             setPromptStatus('idle');
           }
           if (
@@ -3904,6 +4014,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         hasCurrentSessionActivePromptRef.current = () => false;
+        settleCurrentSessionRestoredPromptRef.current = () => false;
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
@@ -4133,10 +4244,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         manualSessionClearRef,
         skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
+        daemonActivePromptRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
+        settleRestoredActivePrompt: () =>
+          settleCurrentSessionRestoredPromptRef.current(),
+        flushTranscript: () => flushCurrentTranscriptRef.current(),
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
+          settleCurrentSessionRestoredPromptRef.current = () => false;
         },
         restartEventStream: (sessionId: string) => {
           const eventStream = eventStreamRef.current;
