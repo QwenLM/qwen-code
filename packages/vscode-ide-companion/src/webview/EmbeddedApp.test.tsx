@@ -921,11 +921,15 @@ describe('EmbeddedApp permission diff dismissal', () => {
     return props as CapturedProps;
   }
 
-  async function dismiss(requestId: string): Promise<void> {
+  async function dismiss(
+    requestId: string,
+    source: Window | null = window.parent,
+  ): Promise<void> {
     await act(async () => {
       window.dispatchEvent(
         new MessageEvent('message', {
           data: { type: 'permissionDiffClosed', data: { requestId } },
+          source,
         }),
       );
       await Promise.resolve();
@@ -1001,6 +1005,33 @@ describe('EmbeddedApp permission diff dismissal', () => {
     expect((opened[1]?.data as { requestId?: string })?.requestId).toBe(
       'req-second',
     );
+  });
+
+  it('ignores a dismissal posted by a nested iframe window', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+
+    // MCP apps and artifact previews run in scriptable sandboxed iframes inside
+    // this webview. Handing the edit preview back is not a vote, but it is a
+    // state flip they must not be able to trigger.
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    try {
+      await dismiss('req-write', iframe.contentWindow);
+      await dismiss('req-write', null);
+    } finally {
+      iframe.remove();
+    }
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
   });
 
   it('ignores a dismissal for a request that is not the pending one', async () => {

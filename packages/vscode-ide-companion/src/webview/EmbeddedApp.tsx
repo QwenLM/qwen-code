@@ -699,7 +699,11 @@ export function EmbeddedApp() {
       } else if (message.type === 'permissionDiffClosed') {
         const requestId = (message.data as { requestId?: unknown } | null)
           ?.requestId;
-        if (typeof requestId === 'string') {
+        // Same source gate as the decision handler below: MCP apps and artifact
+        // previews run in scriptable sandboxed iframes inside this webview and
+        // can postMessage here. This is not a vote, but it does flip who owns
+        // the edit preview, so only the preload parent frame may send it.
+        if (typeof requestId === 'string' && event.source === window.parent) {
           openPermissionDiffsRef.current.delete(requestId);
           if (webShellPermissionRequestIdRef.current === requestId) {
             dismissedPermissionDiffIdRef.current = requestId;

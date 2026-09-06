@@ -249,9 +249,16 @@ export async function activate(context: vscode.ExtensionContext) {
     // leaving the user to approve or reject something they can no longer look
     // at (#10557).
     diffManager.onDidClosePermissionDiff(({ permissionRequestId }) => {
-      for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-        []) {
-        provider.notifyPermissionDiffClosed(permissionRequestId);
+      try {
+        for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+          []) {
+          provider.notifyPermissionDiffClosed(permissionRequestId);
+        }
+      } catch (err) {
+        // A disposed or half-torn-down surface must not take down the emitter
+        // and with it every other surface's notification, the same way the
+        // vote commands above guard their fan-out.
+        logger.warn('[Extension] Permission diff close fan-out failed:', err);
       }
     }),
     vscode.workspace.registerTextDocumentContentProvider(
