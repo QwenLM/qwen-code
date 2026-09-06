@@ -157,6 +157,16 @@ describe('LocalFilesPanel degradation matrix', () => {
       { phase: 'unavailable', blocker: 'workspace-ineligible' },
       '该会话的工作区不能托管本地目录',
     ],
+    [
+      'unavailable/workspace-resolving',
+      { phase: 'unavailable', blocker: 'workspace-resolving' },
+      '正在解析该会话所属的工作区',
+    ],
+    [
+      'unavailable/unsupported-daemon',
+      { phase: 'unavailable', blocker: 'unsupported-daemon' },
+      '该 daemon 未启用客户端文件桥',
+    ],
   ])('renders %s fully translated', (_label, status, zh) => {
     mount(status, 'zh-CN');
     expect(text()).not.toContain('localFiles.');

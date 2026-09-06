@@ -732,6 +732,34 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('tears down a socket opened before a late start() rejection', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+      locks: {
+        request: async (_name, _options, callback) => {
+          const run = callback({});
+          // Let run() open its socket before the rejection escapes.
+          await Promise.resolve();
+          await Promise.resolve();
+          void run.catch(() => {});
+          throw new DOMException('blocked by policy', 'SecurityError');
+        },
+      },
+    });
+    await h.flush();
+    await h.flush();
+    // fail() runs teardown(): a socket opened before the rejection must be
+    // closed, not left dangling behind the failed status.
+    expect(h.sockets).toHaveLength(1);
+    expect(h.sockets[0]!.closeCount).toBe(1);
+    expect(h.get().status).toMatchObject({ phase: 'failed' });
+    h.unmount();
+  });
+
   it('stops the running bridge when a blocker activates late', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const common = {

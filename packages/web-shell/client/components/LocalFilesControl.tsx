@@ -225,9 +225,12 @@ export function resolveLocalFilesWorkspaceRoute(options: {
     const entry = (
       options.workspaces ?? options.capabilities?.workspaces
     )?.find((w) => w.cwd === options.workspaceCwd);
+    // `trusted !== true`, not `=== false`: a field absent on the wire must
+    // withhold like an explicit false, as session-context does for the same
+    // field. This surface fails closed.
     if (
       entry !== undefined &&
-      (entry.kind === 'live' || entry.trusted === false)
+      (entry.kind === 'live' || entry.trusted !== true)
     ) {
       return { kind: 'none' };
     }
@@ -242,7 +245,7 @@ export function resolveLocalFilesWorkspaceRoute(options: {
   const entry = matches[0];
   // Registry lag: the session's workspace is not in the snapshot yet.
   if (entry === undefined) return { kind: 'pending' };
-  if (entry.kind === 'live' || entry.trusted === false) {
+  if (entry.kind === 'live' || entry.trusted !== true) {
     return { kind: 'none' };
   }
   return { kind: 'legacy' };
@@ -315,7 +318,7 @@ export function LocalFilesControl({
   // withhold instead of failing open onto the primary mount.
   const withheldBlocker =
     capabilities !== undefined &&
-    !capabilities.features.includes('client_mcp_over_ws')
+    !capabilities.features?.includes('client_mcp_over_ws')
       ? ('unsupported-daemon' as const)
       : route.kind === 'none'
         ? ('workspace-ineligible' as const)

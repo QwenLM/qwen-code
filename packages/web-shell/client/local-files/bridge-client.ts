@@ -292,14 +292,10 @@ export class LocalFilesBridge {
     } catch (err) {
       // A sandboxed iframe can reject navigator.locks.request outright
       // (SecurityError); without a catch that is an unhandled rejection and
-      // the UI parks in connecting forever.
-      if (!this.stopped) {
-        this.setState({
-          phase: 'failed',
-          code: 'start_failed',
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+      // the UI parks in connecting forever. fail() also tears down, so a
+      // throw escaping after connect() opened a socket cannot leave it open
+      // behind the failed status.
+      this.fail('start_failed', err);
     } finally {
       this.running = false;
     }

@@ -125,12 +125,25 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       cwd: '/live',
       kind: 'live',
     } as unknown as DaemonWorkspaceCapability;
+    const noTrustField = {
+      ...locked,
+      id: 'notrust-ws',
+      cwd: '/notrust',
+      trusted: undefined,
+    } as unknown as DaemonWorkspaceCapability;
     const base = { capabilities, sessionId: 'session-1' };
     expect(
       resolveLocalFilesWorkspaceRoute({
         ...base,
         workspaces: [primary, untrusted],
         workspaceCwd: '/untrusted',
+      }),
+    ).toEqual({ kind: 'none' });
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        ...base,
+        workspaces: [primary, noTrustField],
+        workspaceCwd: '/notrust',
       }),
     ).toEqual({ kind: 'none' });
     expect(
@@ -169,7 +182,11 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       ...primary,
       kind: 'live',
     } as unknown as DaemonWorkspaceCapability;
-    for (const entry of [untrustedPrimary, livePrimary]) {
+    const noTrustFieldPrimary = {
+      ...primary,
+      trusted: undefined,
+    } as unknown as DaemonWorkspaceCapability;
+    for (const entry of [untrustedPrimary, livePrimary, noTrustFieldPrimary]) {
       expect(
         resolveLocalFilesWorkspaceRoute({
           capabilities,
@@ -347,6 +364,24 @@ describe('LocalFilesControl wiring', () => {
         qwenCodeVersion: '1.2.3',
         workspaceCwd: '/primary',
         features: ['dynamic_workspace_registration'],
+        workspaces: [
+          {
+            id: 'ws-1',
+            cwd: '/primary',
+            kind: 'directory',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      }),
+    ).toBe('unsupported-daemon');
+
+    // Capabilities without a features array at all (version skew): the
+    // preflight must withhold instead of throwing during render.
+    expect(
+      await renderCaptured({
+        qwenCodeVersion: '1.2.3',
+        workspaceCwd: '/primary',
         workspaces: [
           {
             id: 'ws-1',
