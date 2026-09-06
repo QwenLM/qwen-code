@@ -11,6 +11,7 @@ import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFra
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
@@ -119,6 +120,7 @@ function SubagentDetailContent({
   onStop,
   onRightPanelOpen,
   onArtifactsChange,
+  onOpenSubagent,
   onError,
 }: {
   rootTool: ACPToolCall;
@@ -129,6 +131,7 @@ function SubagentDetailContent({
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
+  onOpenSubagent?: (tool: ACPToolCall) => void;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
@@ -197,6 +200,25 @@ function SubagentDetailContent({
     }
   };
 
+  const transcript = (
+    <MessageList
+      messages={messages}
+      pendingApproval={null}
+      loadingTranscript={connection.loadingTranscript}
+      catchingUp={connection.catchingUp}
+      isResponding={isRunning}
+      activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
+      workspaceCwd={connection.workspaceCwd || ''}
+      hideSessionTimeline
+      firstTurnMetrics={metrics}
+      includeSubagentToolUsageInMetrics={false}
+      turnFileChanges={fileChangesByTurn}
+      turnArtifacts={artifactsByTurn}
+      onTurnOutputOpen={handleRightPanelOpen}
+      onError={onError}
+    />
+  );
+
   return (
     <div className={styles.detail}>
       <div className={styles.overview}>
@@ -227,22 +249,13 @@ function SubagentDetailContent({
         {stopError && <div className={styles.stopError}>{stopError}</div>}
       </div>
       <div className={styles.transcript}>
-        <MessageList
-          messages={messages}
-          pendingApproval={null}
-          loadingTranscript={connection.loadingTranscript}
-          catchingUp={connection.catchingUp}
-          isResponding={isRunning}
-          activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
-          workspaceCwd={connection.workspaceCwd || ''}
-          hideSessionTimeline
-          firstTurnMetrics={metrics}
-          includeSubagentToolUsageInMetrics={false}
-          turnFileChanges={fileChangesByTurn}
-          turnArtifacts={artifactsByTurn}
-          onTurnOutputOpen={handleRightPanelOpen}
-          onError={onError}
-        />
+        {onOpenSubagent ? (
+          <SubagentDetailsProvider onOpen={onOpenSubagent}>
+            {transcript}
+          </SubagentDetailsProvider>
+        ) : (
+          transcript
+        )}
       </div>
     </div>
   );
@@ -255,6 +268,7 @@ export function SubagentDetail({
   workspaceCwd,
   onRightPanelOpen,
   onArtifactsChange,
+  onOpenSubagent,
   onError,
 }: {
   sessionId: string;
@@ -265,6 +279,11 @@ export function SubagentDetail({
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
+  ) => void;
+  onOpenSubagent?: (
+    tool: ACPToolCall,
+    sessionId: string,
+    workspaceCwd?: string,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
 }) {
@@ -293,6 +312,7 @@ export function SubagentDetail({
     let cancelled = false;
     let hasResolved = false;
     let retryCount = 0;
+    let lastResolvedRunning = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
@@ -304,19 +324,21 @@ export function SubagentDetail({
         );
         if (cancelled) return;
         hasResolved = true;
+        retryCount = 0;
+        lastResolvedRunning = resolved.status === 'running';
         setResolution(resolved);
         if (resolved.status === 'running') {
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         }
       } catch {
         if (cancelled) return;
-        if (!hasResolved && retryCount < 3) {
+        if (retryCount < 3) {
           retryCount += 1;
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         } else if (!hasResolved) {
           setLoadError(true);
-        } else {
-          refreshTimer = setTimeout(() => void refresh(), 3_000);
+        } else if (lastResolvedRunning) {
+          refreshTimer = setTimeout(() => void refresh(), 30_000);
         }
       }
     };
@@ -366,6 +388,11 @@ export function SubagentDetail({
         resolution={resolution}
         onRightPanelOpen={onRightPanelOpen}
         onArtifactsChange={onArtifactsChange}
+        onOpenSubagent={
+          onOpenSubagent
+            ? (tool) => onOpenSubagent(tool, sessionId, workspaceCwd)
+            : undefined
+        }
         onError={onError}
         onStop={() =>
           workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
