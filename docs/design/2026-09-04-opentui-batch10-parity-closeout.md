@@ -193,8 +193,8 @@ per-item height distribution itself stays open as transcript-region work.
 
 U-6/G-1 (landed — Decision 8), U-7/G-2 (landed — Decision 11),
 U-9 (landed — Decision 10), G-3 (landed —
-Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (steer
-recording), U-11 (queue separator decision), U-13 (landed — Decision 5).
+Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (landed
+— Decision 12), U-11 (queue separator decision), U-13 (landed — Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
 
 ## Decision 8 — U-6/G-1: the auth auto-open trigger
@@ -318,6 +318,28 @@ Tab/Right fills, typing dismisses-but-inserts, submit clears).
 call itself is untestable in its harness (no effects run — same boundary as
 Decisions 8/9) and is review-pinned against AppContainer's generation
 effect.
+
+## Decision 12 — U-32: the steering hop is recorded for /resume
+
+`recordMidTurnUserMessage` (core) writes a steered message into the chat
+recording with the `mid_turn_user_message` subtype so /resume reconstructs
+the exact API shape (user parts riding the same Content as tool results).
+Ink calls it from its steering `accept()`; OpenTUI's U-12 port carried the
+echo but not the recording — zero callers. The fix stays in the existing
+ownership: `resolveSteeredPromptParts` now collects per-message recordings
+alongside the echo events (same membership as the echo: a declined message
+is neither echoed nor recorded; an empty-parts one is both, matching ink's
+accept()), and the drain loop records them at the commit point — after the
+restore check, before the echo events yield, so a restored hop records
+nothing (the all-or-nothing contract ink's restore already enforces). No
+goal-permit argument: the goal command has no OpenTUI counterpart (the
+already-documented not-ported list keeps only what is genuinely absent —
+slash interception and the read-card deferral; the recording is now
+ported).
+
+Coverage: `live-session.test.ts` gains two tests — per-message recording
+shape `([[{text:'first'}],'first'], [[{text:'second'}],'second'])` on a
+two-message hop, and zero recording on the restored (aborted read) hop.
 
 ## Coverage boundary
 

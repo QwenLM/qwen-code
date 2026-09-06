@@ -192,6 +192,9 @@ vi.mock('../hooks/atCommandProcessor.js', () => ({
 function createFakeConfig(
   sendMessageStream: (...args: unknown[]) => unknown,
   bridgeModel?: VisionBridgeModelSelection,
+  recorder?: {
+    recordMidTurnUserMessage: (...args: unknown[]) => void;
+  },
 ) {
   return {
     initialize: vi.fn(async () => {}),
@@ -203,6 +206,7 @@ function createFakeConfig(
     // Pinning a bridge model is what turns `shouldRunVisionBridge` on; every
     // other test leaves it undefined and the prompt rides through untouched.
     getDefaultVisionBridgeModel: () => bridgeModel,
+    getChatRecordingService: () => recorder,
     getDebugLogger: () => ({
       debug: () => {},
       warn: () => {},
@@ -720,6 +724,55 @@ describe('livePromptEvents', () => {
     // And nothing the restored hop produced reaches the transcript: the echo
     // belongs to ink's accept step (U-12), which an aborted hop never gets to.
     expect(events.filter((e) => e.type === 'user')).toEqual([]);
+  });
+
+  // --- U-32: a steer is recorded for /resume (ink accept() :3352-3358) -----
+
+  it('records each surviving steered message with its own parts (U-32)', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, {
+      recordMidTurnUserMessage,
+    });
+
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    );
+
+    // Per message, in ink accept() order — each with its own parts, not the
+    // joined hop (a resumed session replays the same shape).
+    expect(recordMidTurnUserMessage.mock.calls).toEqual([
+      [[{ text: 'first' }], 'first'],
+      [[{ text: 'second' }], 'second'],
+    ]);
+  });
+
+  it('records nothing when the steering hop is restored (U-32)', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const controller = new AbortController();
+    atMocks.hang = () => controller.abort();
+
+    await drain(
+      livePromptEvents(config, 'start', controller.signal, {
+        drainSteering: () => ['read @a.ts'],
+      }),
+    );
+
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
   });
 
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {

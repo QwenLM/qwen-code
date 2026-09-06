@@ -445,11 +445,22 @@ interface SteeredPromptResolution {
    */
   events: OpenTuiStreamEvent[];
   /**
+   * Per surviving message: its own parts and display text, for the chat
+   * recorder (U-32) — ink's accept() records each message this way so a
+   * steer survives /resume. Empty when the hop is restored.
+   */
+  recordings: SteeredMessageRecording[];
+  /**
    * Texts to put back at the front of the queue. All of them or none: ink
    * discards the resolved parts when an abort lands, so nothing can go out
    * twice.
    */
   restore: string[];
+}
+
+interface SteeredMessageRecording {
+  message: string;
+  parts: Part[];
 }
 
 /**
@@ -458,9 +469,10 @@ interface SteeredPromptResolution {
  * prompt-side vision bridge — before it rides to the model as steering.
  *
  * Not ported, on purpose: ink's slash interception at this boundary (its goal
- * command has no OpenTUI counterpart) and its two-phase recording, which
- * defers the read cards until the messages are committed. Here the cards go out
- * as they are produced, and an abort drops the whole hop instead.
+ * command has no OpenTUI counterpart, and with it the goal-permit recording
+ * argument) and its two-phase card deferral — ink defers the read cards until
+ * the messages are committed; here the cards go out as they are produced, and
+ * an abort drops the whole hop instead.
  */
 async function resolveSteeredPromptParts(
   config: Config,
@@ -471,10 +483,12 @@ async function resolveSteeredPromptParts(
   const restore = (): SteeredPromptResolution => ({
     parts: [],
     events: [],
+    recordings: [],
     restore: [...texts],
   });
   const events: OpenTuiStreamEvent[] = [];
   const segments: Part[][] = [];
+  const recordings: SteeredMessageRecording[] = [];
 
   for (const message of texts) {
     if (signal.aborted) return restore();
@@ -528,6 +542,7 @@ async function resolveSteeredPromptParts(
       events.push(imageFormatWarningEvent());
     }
     if (messageParts.length > 0) segments.push(messageParts);
+    recordings.push({ message, parts: messageParts });
     // U-12 (ink accept() :3359-3367): `sentToModel: false` — the steer rides
     // the tool boundary, not a standalone user turn. Not coupled to this
     // message's own parts: accept() echoes every message it recorded. The one
@@ -541,7 +556,7 @@ async function resolveSteeredPromptParts(
     if (parts.length > 0) parts.push({ text: '\n\n' });
     parts.push(...segment);
   }
-  return { parts, events, restore: [] };
+  return { parts, events, recordings, restore: [] };
 }
 
 /**
@@ -896,6 +911,15 @@ export async function* livePromptEvents(
         );
         if (steered.restore.length > 0) {
           options?.restoreSteering?.(steered.restore);
+        }
+        // U-32 (ink accept() :3352-3358): record each surviving message so a
+        // steer survives /resume as a mid-turn user message.
+        const recorder = config.getChatRecordingService?.();
+        for (const recording of steered.recordings) {
+          recorder?.recordMidTurnUserMessage(
+            recording.parts,
+            recording.message,
+          );
         }
         // Carries the per-message USER echoes too (U-12), in ink accept() order.
         for (const ev of steered.events) yield ev;
