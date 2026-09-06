@@ -3410,7 +3410,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }).catch((err) => {
         writeStderrLine(
           `qwen serve: deferred close (${opts.trigger}) failed for ` +
-            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : extractErrorMessage(err)}`,
         );
       });
     } finally {
@@ -3467,6 +3467,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
         SERVE_CONTROL_EXT_METHODS.sessionClose,
       );
+      // The child answered, so the run of unanswered probes is over — granted
+      // or refused. Hoisted above the `closed` branch because a granted close
+      // can still fail its local teardown and leave the entry registered and
+      // usable, and it must not carry a stale count into the next probe.
+      entry.activeWorkCloseFailures = 0;
+      entry.activeWorkCloseRetryAt = null;
       if (response['closed'] === true) {
         // The child is done with it; only local teardown remains.
         return true;
@@ -3497,10 +3503,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.childHolds = adopted;
         entry.childHoldsAt = Date.now();
       }
-      // The child answered, so the run of unanswered probes is over: whatever
-      // it said, the next snapshot is allowed to ask again immediately.
-      entry.activeWorkCloseFailures = 0;
-      entry.activeWorkCloseRetryAt = null;
       return false;
     } catch (err) {
       entry.activeWorkCloseFailures++;
