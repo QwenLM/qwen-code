@@ -215,6 +215,8 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
+
 ### Anthropic (`anthropic`)
 
 ```json
