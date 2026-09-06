@@ -638,9 +638,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onHover={scopeList.setActiveIndex}
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
-              <text
-                fg={titleColor}
-              >{`${item.label}    ${item.description}`}</text>
+              <box flexDirection="row">
+                <text fg={titleColor}>{`${item.label} `}</text>
+                <text fg={C.dim}>{item.description}</text>
+              </box>
             )}
           />
         </DialogFrame>

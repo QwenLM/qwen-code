@@ -397,6 +397,33 @@ describe('livePromptEvents', () => {
     );
   });
 
+  it('keeps the rejected initialization cached across direct re-entries', async () => {
+    // Core flips `initialized` before awaiting the flight, so a re-entry after
+    // a settled failure throws the re-entry error, not the real one: only the
+    // cached rejected promise keeps surfacing the real cause. The submit-path
+    // test above cannot see this — its mock rejects identically on every call,
+    // so re-entering after an evicted cache entry looks the same.
+    let calls = 0;
+    const initialize = vi.fn(async () => {
+      calls += 1;
+      throw new Error(
+        calls === 1 ? 'auth exploded' : 'Config was already initialized',
+      );
+    });
+    const config = {
+      initialize,
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'auth exploded',
+    );
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'auth exploded',
+    );
+    expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
   it('waits for the chat an in-flight startup initialization creates', async () => {
     // The boot-time command-registry load owns the initialize() flight, so the
     // turn's own call throws "already initialized" and its catch proceeds
