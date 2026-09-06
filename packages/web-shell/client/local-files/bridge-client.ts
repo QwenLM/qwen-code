@@ -289,6 +289,17 @@ export class LocalFilesBridge {
         );
       }
       if (!owned && !this.stopped) this.setState({ phase: 'held-elsewhere' });
+    } catch (err) {
+      // A sandboxed iframe can reject navigator.locks.request outright
+      // (SecurityError); without a catch that is an unhandled rejection and
+      // the UI parks in connecting forever.
+      if (!this.stopped) {
+        this.setState({
+          phase: 'failed',
+          code: 'start_failed',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
     } finally {
       this.running = false;
     }

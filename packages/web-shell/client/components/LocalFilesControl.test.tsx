@@ -30,7 +30,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
     capabilities: {
       qwenCodeVersion: '1.2.3',
       workspaceCwd: '/primary',
-      features: ['dynamic_workspace_registration'],
+      features: ['dynamic_workspace_registration', 'client_mcp_over_ws'],
       workspaces: [
         {
           id: 'ws-1',
@@ -87,9 +87,9 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       workspaceCwd: '/locked',
       sessionId: 'session-1',
     };
-    // The bare snapshot lacks the locked entry: both sibling voice call sites
-    // pass the merged list for exactly this reason.
-    expect(resolveLocalFilesWorkspaceRoute(base)).toBeUndefined();
+    // The bare snapshot lacks the locked entry: judgement waits (pending)
+    // until the merged list (or a refreshed snapshot) arrives.
+    expect(resolveLocalFilesWorkspaceRoute(base)).toEqual({ kind: 'pending' });
     expect(
       resolveLocalFilesWorkspaceRoute({
         ...base,
@@ -188,7 +188,7 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
         workspaceCwd: '/primary',
         sessionId: 'session-1',
       }),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'pending' });
     expect(
       resolveLocalFilesWorkspaceRoute({
         capabilities,
@@ -196,7 +196,21 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
         workspaceCwd: '/not-in-snapshot-yet',
         sessionId: 'session-1',
       }),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'pending' });
+  });
+
+  it('resolves legacy for a single-workspace daemon without a registry', () => {
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        capabilities: {
+          ...capabilities,
+          workspaces: undefined,
+        } as unknown as DaemonCapabilities,
+        workspaces: [],
+        workspaceCwd: '/primary',
+        sessionId: 'session-1',
+      }),
+    ).toEqual({ kind: 'legacy' });
   });
 });
 
@@ -286,5 +300,66 @@ describe('LocalFilesControl wiring', () => {
     expect(options.withheldBlocker).toBe('workspace-ineligible');
     act(() => root.unmount());
     container.remove();
+  });
+
+  it('withholds when the daemon lacks the feature or the snapshot is pending', async () => {
+    const renderCaptured = async (caps: unknown) => {
+      vi.resetModules();
+      vi.doMock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+        useConnection: () => ({
+          sessionId: 'session-1',
+          workspaceCwd: '/primary',
+        }),
+        useWorkspace: () => ({
+          baseUrl: 'https://daemon.example/',
+          token: undefined,
+          capabilities: caps,
+          client: {},
+        }),
+        useWorkspaceActions: () => ({ preheatAcp: vi.fn() }),
+      }));
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const { I18nProvider } = await import('../i18n');
+      const { LocalFilesControl } = await import('./LocalFilesControl');
+      Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <LocalFilesControl triggerClassName="t" />
+          </I18nProvider>,
+        );
+      });
+      const options = capturedHookOptions.current as {
+        withheldBlocker?: string;
+      };
+      act(() => root.unmount());
+      container.remove();
+      return options.withheldBlocker;
+    };
+
+    // Daemon without the reverse channel: no point offering Connect.
+    expect(
+      await renderCaptured({
+        qwenCodeVersion: '1.2.3',
+        workspaceCwd: '/primary',
+        features: ['dynamic_workspace_registration'],
+        workspaces: [
+          {
+            id: 'ws-1',
+            cwd: '/primary',
+            kind: 'directory',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      }),
+    ).toBe('unsupported-daemon');
+
+    // Snapshot pending: starting now would fail open onto the primary mount.
+    expect(await renderCaptured(undefined)).toBe('workspace-resolving');
   });
 });
