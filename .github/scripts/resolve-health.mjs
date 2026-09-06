@@ -412,6 +412,36 @@ export function assess(prs, options = {}) {
 // (see ANSWERABLE_ASSOCIATIONS).
 // Kept single-line (STATE_RE) — JSON.stringify of a flat object never emits
 // a newline.
+// The record rides in one comment, and GitHub refuses a body over 65,536
+// characters. Every request-SHAPED comment is sighted, from anyone, so the
+// window prune alone does not bound it: a wave of `/resolve`-shaped comments
+// from accounts the lane would never serve grows the record past that limit
+// and the watch can then write no state at all — no barrier, no roster, no
+// recovery close. Measured at ~42 bytes an entry, so this cap holds the
+// record near 17 KB and leaves the report room in the same comment.
+//
+// What to drop is not symmetric. An ANSWERABLE judgment guards the demotion
+// direction, where losing it hides a real outage; a refusal guards the
+// promotion direction, which additionally requires its author to actually
+// gain write access. So answerable entries are kept first and refusals give
+// up the newest room, oldest first. Whatever falls out is judged live again
+// — the bound the record already documents for a request sighted while no
+// issue was open.
+export const JUDGMENT_CAP = 400;
+
+function capJudgments(entries) {
+  if (entries.length <= JUDGMENT_CAP) {
+    return entries;
+  }
+  const answerable = entries.filter((e) => ANSWERABLE_ASSOCIATIONS.has(e[2]));
+  const refused = entries.filter((e) => !ANSWERABLE_ASSOCIATIONS.has(e[2]));
+  const keep = new Set(answerable.slice(-JUDGMENT_CAP));
+  for (const entry of refused.slice(-Math.max(0, JUDGMENT_CAP - keep.size))) {
+    keep.add(entry);
+  }
+  return entries.filter((e) => keep.has(e));
+}
+
 function stateOf(assessment, previous = null) {
   // The request floor is carried forward, never lowered: a request the watch
   // can read today may be deleted tomorrow, and the recovery gate must not
@@ -437,13 +467,14 @@ function stateOf(assessment, previous = null) {
       judgments.set(s.id, [s.id, s.at, s.association]);
     }
   }
+  const kept = [...judgments.values()].sort(
+    (a, b) => a[1].localeCompare(b[1]) || a[0] - b[0],
+  );
   return {
     streak: assessment.streak,
     unanswered: assessment.unanswered.map((u) => u.id),
     newestRequest: carried && (!seen || carried > seen) ? carried : seen,
-    requests: [...judgments.values()].sort(
-      (a, b) => a[1].localeCompare(b[1]) || a[0] - b[0],
-    ),
+    requests: capJudgments(kept),
     latest: assessment.latestAttempt?.id ?? null,
   };
 }

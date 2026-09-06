@@ -20,6 +20,7 @@ import {
   fetchPrs,
   findOpenIssue,
   isRequest,
+  JUDGMENT_CAP,
   main,
   readState,
 } from './resolve-health.mjs';
@@ -1930,6 +1931,52 @@ describe('resolve-health: decisions', () => {
       decide(editedB, existing).map((a) => a.type),
       ['comment'],
       'no close: the lagged request was never served',
+    );
+  });
+
+  it('caps the judgment record so a comment wave cannot wedge the write', () => {
+    // Every request-SHAPED comment is sighted, from anyone, so the window
+    // prune alone does not bound the record: a wave of `/resolve`-shaped
+    // comments from accounts the lane would never serve grows the state
+    // comment past GitHub's 65,536-character body limit, and the watch can
+    // then write no state at all. What survives the cap is not symmetric —
+    // an answerable judgment guards the direction that hides a real outage.
+    const wave = [];
+    for (let i = 0; i < JUDGMENT_CAP * 4; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-27T00:00:00Z') + i * 1000,
+      ).toISOString();
+      wave.push(
+        comment(
+          `drive-by${i}`,
+          at,
+          '@qwen-code /resolve',
+          7,
+          at,
+          // A handful of real maintainer requests, buried oldest in the wave.
+          i < 5 ? 'COLLABORATOR' : 'NONE',
+        ),
+      );
+    }
+    const flooded = assess([{ number: 7, state: 'open', comments: wave }], {
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    const body = decide(flooded, null)[0].body;
+    const marker = body.match(/<!-- qwen-resolve-health-state [^\n]*-->/)[0];
+    assert.ok(
+      marker.length < 20000,
+      `state marker is ${marker.length} bytes, which a comment wave can push past GitHub's limit`,
+    );
+    const recorded = readState([body]).requests;
+    assert.equal(recorded.length, JUDGMENT_CAP);
+    // The five answerable judgments are the oldest in the wave, so a plain
+    // newest-first cap would have dropped every one of them.
+    const answerable = recorded.filter((e) => e[2] === 'COLLABORATOR');
+    assert.equal(answerable.length, 5, 'answerable judgments are kept first');
+    assert.deepEqual(
+      recorded,
+      [...recorded].sort((a, b) => a[1].localeCompare(b[1]) || a[0] - b[0]),
+      'and the record stays in the order the reader expects',
     );
   });
 
