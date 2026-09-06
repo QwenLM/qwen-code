@@ -66,7 +66,7 @@ import {
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { probeWorktreePath } from './lib/paths.js';
+import { inertPath, probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
@@ -89,10 +89,9 @@ import {
 import {
   discardWorktree,
   exposeDependencies,
+  describeFilterScreen,
   localFilterCommands,
   redirectedAncestor,
-  screenKeyList,
-  screenStopDetail,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
@@ -1693,18 +1692,17 @@ function restoreProbeTreeTracked(
   // `filter.lfs.clean` into the user's GLOBAL config, and refusing on that
   // would put every contributor with git-lfs into permanent refusal — the same
   // failure as a tripwire that fires on every healthy run.
+  // A non-empty answer is a refusal whichever half it came from: a filter the
+  // screen found, or a candidate it could not read to the bottom. Both mean
+  // the checkout below would execute something this screen did not clear.
   const filters = localFilterCommands(probeTree);
-  // Gate on `stopped`, not `unreadable` — the same field `scratch-tree` gates
-  // on. A screen that stopped for ANY reason (an unreadable candidate OR an
-  // over-cap admin dir) did not finish, and either way the checkout below would
-  // execute a filter it failed to see. Keying on the `unreadable` file field
-  // would let a future stop mode that sets `stopped` without a file silently
-  // authorise the checkout while scratch-tree refuses.
-  if (filters.stopped) {
-    return `the screen could not clear this tree's restore: ${screenStopDetail(filters)}`;
-  }
-  if (filters.keys.length > 0) {
-    return `the repository's local config defines content filter(s) ${screenKeyList(filters)}, which this tree's restore would EXECUTE`;
+  if (filters.length > 0) {
+    return (
+      "the repository's local config defines content filter(s), or includes " +
+      'config this screen could not read to the bottom: ' +
+      `${describeFilterScreen(filters.map(inertPath))} — this tree's restore ` +
+      'would EXECUTE them'
+    );
   }
   // Re-asked before EACH spawn below, not once before the first. The gap
   // between the two is a whole `checkout --force` — a window that scales with
@@ -3198,27 +3196,16 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // checkout spawn in the gap. A residual window remains and cannot be
         // closed from here — there is no `-c` kill switch for
         // attribute-selected filters, so a checkout either reads merged config
-        // or does not run. It is NOT sub-millisecond: the screen is a walk of
-        // several spawns, measured at 56-100 ms on a repository with no linked
-        // worktrees, and a plant can stretch it with filler admin entries. The
-        // screen reads `<common>/config` last for that reason (see
-        // `localFilterCommands`), which removes the amplification but not the
-        // window.
+        // or does not run. It is not sub-millisecond either: the screen is a
+        // walk of several spawns over a candidate set the repository's own
+        // state sizes.
         const revertFilters = localFilterCommands(probeTree);
-        // Gate on `stopped`, matching the restore and scratch-tree — a screen
-        // that stopped for any reason did not finish, so the checkout must not
-        // proceed on it (see the restore's note above).
-        if (revertFilters.stopped) {
+        if (revertFilters.length > 0) {
           throw new Error(
-            'the screen could not clear this revert: ' +
-              screenStopDetail(revertFilters),
-          );
-        }
-        if (revertFilters.keys.length > 0) {
-          throw new Error(
-            "the repository's local config defines content filter(s) " +
-              `${screenKeyList(revertFilters)}, which this revert's checkout ` +
-              'would EXECUTE',
+            "the repository's local config defines content filter(s), or " +
+              'includes config this screen could not read to the bottom: ' +
+              `${describeFilterScreen(revertFilters.map(inertPath))} — this ` +
+              "revert's checkout would EXECUTE them",
           );
         }
         // The root verdict again, two syscalls before the spawn. The checkout

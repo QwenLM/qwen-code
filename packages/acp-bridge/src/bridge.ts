@@ -1913,9 +1913,9 @@ export function extractErrorCode(err: unknown): string | undefined {
  * turn content except the idle bookkeeping subtypes skipped via
  * `isIdleBookkeepingSessionUpdate`: the user-shell output stream (its
  * history goes to the model conversation, not the persisted transcript
- * the refresh pages) and the latest-wins state snapshots
- * (`available_commands_update`, `current_mode_update`) that settings and
- * approval-mode refreshes fan out to idle sessions.
+ * the refresh pages) and latest-wins state metadata
+ * (`available_commands_update`, `current_mode_update`, and
+ * `session_info_update`).
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1965,7 +1965,8 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
  * the user-shell output stream (injected into the model conversation
  * history instead of the transcript the refresh pages) and the
  * latest-wins state snapshots (`available_commands_update` from a
- * skills/settings refresh, the legacy dual-emit `current_mode_update`).
+ * skills/settings refresh, the legacy dual-emit `current_mode_update`, and
+ * title metadata in `session_info_update`).
  */
 function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (event.type !== 'session_update') return false;
@@ -1978,7 +1979,8 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const subtype = updateRecord['sessionUpdate'];
   if (
     subtype === 'available_commands_update' ||
-    subtype === 'current_mode_update'
+    subtype === 'current_mode_update' ||
+    subtype === 'session_info_update'
   ) {
     return true;
   }

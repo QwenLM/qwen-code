@@ -19,14 +19,14 @@
 import { spawnSync } from 'node:child_process';
 import {
   accessSync,
-  constants as fsConstants,
+  constants,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
-  mkdirSync,
-  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -34,9 +34,8 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { inertPath } from './paths.js';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -78,6 +77,14 @@ const GIT_ENV_CONFIG = [
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_PARAMETERS',
+  // The one config key with an environment spelling of its own:
+  // `GIT_DEFAULT_HASH` is `init.defaultObjectFormat`, and it changes what a
+  // bare `git init` creates — a sha256 store beside a sha1 source cannot
+  // read the source's objects through an alternates pointer, so the
+  // standalone scratch tree would stand up unable to check out the reviewed
+  // head. The tree names the source's format explicitly as well; this
+  // closes the class the way the numbered keys above are closed.
+  'GIT_DEFAULT_HASH',
 ];
 
 /**
@@ -188,6 +195,329 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   // reader the pipeline points at `git show HEAD:` does not either.
   env['GIT_NO_REPLACE_OBJECTS'] = '1';
   return env;
+}
+
+/** git's own ceiling on nested includes (`MAX_INCLUDE_DEPTH` in config.c). */
+const MAX_INCLUDE_DEPTH = 10;
+
+/**
+ * How many config files the include walk reads before it refuses. The
+ * fan-out is the planter's to write — N `include.path` lines are N spawns,
+ * and 2 000 of them held the walk for 29 seconds (measured) — and the walk
+ * runs before every launch wave. A repository whose repo-local config
+ * genuinely fans out past this is a repository this screen reports rather
+ * than reads.
+ */
+const MAX_INCLUDE_FILES = 64;
+
+/** How many screen hits a refusal message names before it counts the rest. */
+const FILTER_SCREEN_NAMED = 12;
+
+/**
+ * One read per file: the filter commands it defines and the includes it
+ * carries, in file order. `--get-regexp` matches canonical key names, so
+ * `includeIf` arrives as `includeif.<cond>.path`.
+ */
+const SCREEN_KEYS =
+  '^filter\\..*\\.(smudge|clean|process)$|^include\\.path$|^includeif\\..*\\.path$';
+
+/** What `filterCommandsIn` found, and what it could not read. */
+export interface FilterScreen {
+  /**
+   * Every `filter.<name>.smudge|clean|process` key the repo-local config
+   * files define, canonical, in discovery order — the names a caller can
+   * blank on its own git invocation (`filterBlankEnv`) or refuse on.
+   */
+  filters: string[];
+  /**
+   * Every file the walk could NOT read to the bottom, each with its reason:
+   * a dangling include, another user's `~user/`, a target that is not a
+   * regular file, a parse failure, a nesting past git's limit, a fan-out
+   * past this screen's. A filter behind one of these is a filter the
+   * caller cannot see and therefore cannot blank — so each is a refusal.
+   */
+  unread: string[];
+}
+
+/**
+ * The repo-local `filter.<name>.smudge|clean|process` commands defined in the
+ * config files git reads for a tree whose common dir is `commonDir` and whose
+ * admin dir is `gitDir` — followed through every `include.path` and
+ * `includeIf.<cond>.path` those files carry — and the files it could not
+ * read. Empty on both counts means: every candidate was read to the bottom
+ * and none defines a filter command.
+ *
+ * Two git invocations in this pipeline EXECUTE these — hooks and fsmonitor
+ * are blanked by key name, filters cannot be blanked BLIND, because their
+ * key carries a name of the planter's choosing. The scratch-tree checkouts
+ * run the smudge side of an attributed file; the residue `status` runs the
+ * clean side (or the `process` filter that serves both) when a stat-stale
+ * attributed file refreshes the index — measured live through the exact
+ * residue invocation on git 2.43 and 2.47, and the tree still reported
+ * clean. The planting surface is two plain writes into the common dir the
+ * scratch-tree report calls shared: `git config filter.evil.clean CMD` and
+ * one line appended to `$(git rev-parse --git-path info/attributes)`.
+ * discard and cleanup never wipe the common dir, so a filter planted while
+ * reviewing one PR fires on every later matching checkout of the user's OWN
+ * repository — persistence planted by reviewing a malicious PR, measured
+ * live. The local config files are read with `--file` rather than merged
+ * config because filters in the user's global config (git-lfs is the common
+ * one) are the user's own contract, exactly like any git command they run —
+ * while a probe's planting surface is the repo-local files. The state cannot
+ * be told apart from a filter the user set deliberately, and cannot be
+ * safely wiped, so what the caller does with a hit is the caller's: the
+ * scratch-tree checkouts refuse, the residue measurement blanks the names
+ * it was handed. And it is a one-shot read of same-user-writable state, like
+ * every gate in this file: cost, not closure.
+ *
+ * Includes are followed by hand because `--file` does not expand them, and
+ * an include is the one indirection that delivers every other key: a
+ * planter commits `[filter "evil"] clean = …` in an innocuous file and adds
+ * one `include.path` line to the repo-local config, and a `--file` read
+ * lists the directive while the `status` refresh runs the command
+ * (measured). Each target is resolved the way git resolves it — `~/`
+ * against `$HOME`, a relative path against the directory of the path git
+ * OPENED for the including file (its spelled path, not its realpath: a
+ * symlinked `.git/config` includes beside the link, measured) — and read
+ * with the same single spawn, recursively, under a visited set keyed by
+ * realpath, git's own nesting limit, and this screen's file cap. An
+ * `includeIf` is followed whether or not its condition holds today: the
+ * screen answers what the file can deliver, not what it delivers this
+ * minute. Every spawn runs with the common dir as cwd, so a target that
+ * lives outside the repository never makes git discover a repository in a
+ * foreign directory (a dangling gitfile there exits 128 — measured — and
+ * would read as a file this screen could not read).
+ *
+ * Bounded like the other planter-sized reads here: the listing's size is
+ * the config file's, which is the planter's to write, and past Node's 1 MiB
+ * default `spawnSync` answers ENOBUFS with no stdout — a `continue` on that
+ * read the file as filter-free while the refresh ran the planted command
+ * (measured at 1.01 MiB). So the spawn carries the house `maxBuffer`, and a
+ * read that fails for ANY reason lands in `unread`, never in "no filters".
+ *
+ * Every linked worktree's per-worktree config is a candidate too, not only
+ * the two files git reads for THIS tree: the scratch-tree screen runs
+ * against the review worktree while the checkout it authorises runs in the
+ * SCRATCH tree, whose own `<common>/worktrees/<label>/config.worktree` is
+ * honored once `extensions.worktreeConfig` is on — a filter planted there
+ * executed during the reset while a narrower screen reported the repository
+ * clean. The admin directory is one `readdir`, and a filter in any of these
+ * is a plant whichever tree carries it.
+ */
+export function filterCommandsIn(
+  commonDir: string,
+  gitDir: string,
+): FilterScreen {
+  const candidates = [
+    join(commonDir, 'config'),
+    join(gitDir, 'config.worktree'),
+  ];
+  try {
+    for (const entry of readdirSync(join(commonDir, 'worktrees'))) {
+      candidates.push(join(commonDir, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
+  const filters = new Set<string>();
+  const unread = new Set<string>();
+  const visited = new Set<string>();
+  // `-z`: one `key\nvalue\0` record per hit, so a value holding a newline
+  // (a path can) still parses — the key never holds one. Exit 1 is "no key
+  // matched"; any other failure, ENOBUFS included, is a file not read.
+  const read = (
+    file: string,
+  ): { records: Array<[string, string]> } | { unreadable: string } => {
+    const r = spawnSync(
+      'git',
+      ['config', '--file', file, '-z', '--get-regexp', SCREEN_KEYS],
+      {
+        cwd: commonDir,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedGitEnv(),
+      },
+    );
+    if (r.error) {
+      return {
+        unreadable: (r.error as NodeJS.ErrnoException).code ?? r.error.message,
+      };
+    }
+    if ((r.status !== 0 && r.status !== 1) || typeof r.stdout !== 'string') {
+      return { unreadable: `git config exited ${r.status}` };
+    }
+    const records: Array<[string, string]> = [];
+    for (const rec of r.stdout.split('\0')) {
+      if (!rec) continue;
+      const nl = rec.indexOf('\n');
+      records.push(
+        nl === -1 ? [rec, ''] : [rec.slice(0, nl), rec.slice(nl + 1)],
+      );
+    }
+    return { records };
+  };
+  const visit = (file: string, depth: number, via: string | null): void => {
+    let real: string;
+    try {
+      real = realpathSync(file);
+    } catch {
+      // A candidate that is not there is the normal case (no per-worktree
+      // config, no linked worktrees); an include target that is not there
+      // is the dangling include git ignores and this screen refuses.
+      if (via !== null) {
+        unread.add(
+          `${via} -> ${file} (missing — git ignores a dangling include; this screen refuses it)`,
+        );
+      }
+      return;
+    }
+    if (visited.has(real)) return;
+    if (visited.size >= MAX_INCLUDE_FILES) {
+      unread.add(
+        `${via ?? file} -> ${file} (include fan-out past ${MAX_INCLUDE_FILES} files — not screened)`,
+      );
+      return;
+    }
+    visited.add(real);
+    // What git would open: a regular file this process can read. Anything
+    // else git answers with exit 1 and a `warning: unable to access` —
+    // the status of an empty match (measured on a directory target) — so
+    // the check is made here, before the read, and refuses.
+    try {
+      if (!statSync(real).isFile()) {
+        unread.add(
+          `${via ?? file} -> ${file} (not a regular file — not screened)`,
+        );
+        return;
+      }
+      accessSync(real, constants.R_OK);
+    } catch {
+      unread.add(`${via ?? file} -> ${file} (could not be read)`);
+      return;
+    }
+    if (depth > MAX_INCLUDE_DEPTH) {
+      unread.add(
+        `${via} -> ${file} (nested past git's include limit — not screened)`,
+      );
+      return;
+    }
+    // Read by the path git would open, and resolve includes against ITS
+    // directory: git resolves a relative include against the path it opened,
+    // so a symlinked `.git/config` includes beside the link, not beside the
+    // link's target (measured). The realpath is the visited-set key only.
+    const r = read(file);
+    if ('unreadable' in r) {
+      unread.add(`${file} (could not be read: ${r.unreadable})`);
+      return;
+    }
+    for (const [key, value] of r.records) {
+      if (key.startsWith('filter.')) {
+        filters.add(key);
+        continue;
+      }
+      let target: string;
+      if (value.startsWith('~/')) {
+        // git expands `~` from $HOME (expand_user_path), not from passwd;
+        // the fallback is for an environment with no HOME at all.
+        target = join(process.env['HOME'] || homedir(), value.slice(2));
+      } else if (value.startsWith('~')) {
+        unread.add(
+          `${key} -> ${value} (another user's home — not resolved here)`,
+        );
+        continue;
+      } else {
+        target = resolve(dirname(file), value);
+      }
+      visit(target, depth + 1, `${key} (in ${file})`);
+    }
+  };
+  for (const candidate of candidates) visit(candidate, 0, null);
+  return { filters: [...filters], unread: [...unread] };
+}
+
+/**
+ * The screen's hits as a refusal message names them: the first few
+ * verbatim, the rest counted. A planter can pad the config with thousands
+ * of keys, and a message that joined every one of them is its own overflow.
+ */
+export function describeFilterScreen(hits: string[]): string {
+  const named = hits.slice(0, FILTER_SCREEN_NAMED);
+  const rest = hits.length - named.length;
+  return rest > 0 ? `${named.join(', ')}, and ${rest} more` : named.join(', ');
+}
+
+/**
+ * The environment that blanks, for ONE git invocation, every content filter
+ * the screen named: `filter.<name>.clean|smudge|process` emptied and
+ * `filter.<name>.required` false, so the invocation neither runs the
+ * command nor fails for want of it (git-lfs marks its filter required, and
+ * an emptied required filter fails the command instead of skipping it —
+ * measured). git's convert code skips a filter whose command is empty, so
+ * the file's bytes are compared as they are; that is the measurement the
+ * residue probe wants — a stat-stale attributed file that differs from its
+ * index blob only by the filter is reported, and the note already tells a
+ * reader to check a surprising path against `git show HEAD:` first.
+ *
+ * Through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, not
+ * `-c`: `-c` splits its argument at the FIRST `=`, so a filter a planter
+ * named `a=b` cannot be blanked by it, while the env pair carries any name
+ * the config parser accepts. Applied over `sanitizedGitEnv()`, which has
+ * already dropped whatever pairs the caller's shell exported.
+ */
+export function filterBlankEnv(filterKeys: string[]): NodeJS.ProcessEnv {
+  const names = new Set<string>();
+  for (const key of filterKeys) {
+    const m = /^filter\.(.+)\.(?:smudge|clean|process)$/.exec(key);
+    if (m) names.add(m[1]);
+  }
+  const env: NodeJS.ProcessEnv = {};
+  let n = 0;
+  for (const name of names) {
+    for (const [key, value] of [
+      ['clean', ''],
+      ['smudge', ''],
+      ['process', ''],
+      ['required', 'false'],
+    ]) {
+      env[`GIT_CONFIG_KEY_${n}`] = `filter.${name}.${key}`;
+      env[`GIT_CONFIG_VALUE_${n}`] = value;
+      n++;
+    }
+  }
+  if (n > 0) env['GIT_CONFIG_COUNT'] = String(n);
+  return env;
+}
+
+/**
+ * `filterCommandsIn` for a tree path, flattened for a caller that refuses on
+ * any hit: the scratch-tree command screens the review worktree this way
+ * before any checkout. Discovery is per flag and absolute, as
+ * `worktreeResidue`'s is — a combined newline-delimited answer mis-pairs
+ * under a directory whose name holds a newline — and a discovery that
+ * fails is itself a hit: a repository whose git dirs cannot be resolved is
+ * not one this screen can call filter-free.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const discover = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      return null;
+    }
+    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+  };
+  const commonDir = discover('--git-common-dir');
+  const gitDir = discover('--git-dir');
+  if (commonDir === null || gitDir === null) {
+    return [
+      "the repository's git directories could not be resolved (git rev-parse failed) — not screened",
+    ];
+  }
+  const screen = filterCommandsIn(commonDir, gitDir);
+  return [...screen.filters, ...screen.unread];
 }
 
 /**
@@ -582,557 +912,6 @@ function trackedIgnoreSources(
 export const RESIDUE_PATH_CAP = 12;
 
 /**
- * Caps for the config screen, which reads attacker-writable files.
- *
- * `MAX_SCREEN_KEYS` bounds what a refusal REPORTS — the message names the
- * first keys and the caller says how many more; an unbounded join is its own
- * denial-of-service, the same rule the `unreadable` field follows by naming
- * one file rather than a list. `MAX_SCREEN_CANDIDATES` bounds what the screen
- * READS: one synchronous spawn per registered worktree, on a directory a
- * probe can fill. Both fail closed — past the candidate bound the screen
- * refuses, because skipping would let filler entries hide a real filter.
- */
-export const MAX_SCREEN_KEYS = RESIDUE_PATH_CAP;
-export const MAX_SCREEN_CANDIDATES = 256;
-
-/**
- * The largest config file the screen will hand to git.
- *
- * Bounding the COUNT of candidates without bounding their SIZE leaves the same
- * denial of service one file over: git parses linearly, the spawn is
- * synchronous, and the screen runs once per mutant.
- *
- * Sized from the measured parse rate — about 6.3 ms per MB — so one candidate
- * costs at most ~50 ms and a full capped walk stays inside the spawn timeout.
- * A real git config is kilobytes. It is deliberately far above the largest
- * legitimate-looking plant a test exercises (a padded `smudge` VALUE at ~1.2
- * MB, which `--name-only` keeps out of stdout and the screen still reports):
- * this bound is against files that cannot be parsed in reasonable time, not
- * against large values, which are a different finding with a different answer.
- */
-export const MAX_SCREEN_CONFIG_BYTES = 8 * 1024 * 1024;
-
-/**
- * The repo-local `filter.<name>` COMMANDS, when any are defined.
- *
- * A checkout EXECUTES these whenever it rewrites a file, and disabling hooks
- * does not cover filters — they are separate config. The callers that screen
- * through this function are the scratch tree's reset and rebuild, the probe
- * tree's per-run restore, and the probe tree's revert. That list is the set of
- * SCREENED sites, not a census of the pipeline's filter-executing checkouts:
- * the `worktree add` spawns that CREATE the probe and base trees run
- * unscreened today, and hooks are neutralised only at the spawns that pass
- * `core.hooksPath` explicitly, not pipeline-wide. Do not read this comment as
- * a completeness map — widening the screen means adding a call site, and the
- * count above is what has one.
- *
- * The planting surface this screen covers is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The candidate config
- * files are read with `--file`, one file at a time, rather than merged config:
- * filters in the user's global config (git-lfs is the common one) are the
- * user's own contract, exactly like any git command they run, so global config
- * stays out of scope.
- *
- * TWO limits, both declared rather than discovered. Screening repo-local-only
- * is a deliberate TRADE, not a claim that repo-local files are all a probe can
- * reach: probe code runs as the user, so `git config --global` is open to it,
- * and a filter planted there is read by every checkout here and never seen by
- * this screen. And a filter reached only through an `include.path` /
- * `includeIf` directive is not seen either — see the spawn below for why
- * neither `--includes` nor a hand-walk is the answer, and #10441 for the
- * design that is.
- * Refusing on merged config is not the answer — `git lfs install` writes
- * `filter.lfs.clean` globally, and refusing on that is permanent refusal for
- * every contributor who has git-lfs. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
- */
-export interface LocalFilterScreen {
-  /**
-   * The repo-local `filter.<name>` command keys found, capped at
-   * `MAX_SCREEN_KEYS`. `total` says how many there were before the cap, so a
-   * refusal can name what it is not showing instead of silently shortening.
-   */
-  keys: string[];
-  /**
-   * How many matching entries the screen found, against `keys.length` shown.
-   *
-   * Exact while under `MAX_SCREEN_KEYS`; beyond it an upper bound, because
-   * retention stops at the cap and there is nothing left to deduplicate a
-   * later repeat against. Either way it answers the only question a refusal
-   * needs it for: is there more than what is named.
-   */
-  total: number;
-  /**
-   * Why the screen stopped, when it did.
-   *
-   * `unreadable` and `over-cap` both refuse, but they call for opposite
-   * remedies: an unreadable candidate is a file to fix or remove, while an
-   * over-cap admin directory was read perfectly well and holds more
-   * registered worktrees than the bound — "remove that file" there would
-   * deregister every legitimate linked worktree, the pipeline's own included.
-   */
-  stopped: 'unreadable' | 'over-cap' | null;
-  /**
-   * The first candidate file the screen could not read to completion, when one
-   * stopped it — otherwise null.
-   *
-   * Exit 1 is git's ordinary "no key matched" and is not a failure. Anything
-   * else is: a spawn error, a spawn killed at the timeout, a config git could
-   * not parse to the end (a malformed section header exits 128), or an ENOBUFS
-   * from more filter keys than the buffer holds. Skipping such a file reports the
-   * repository clean on the one file that might define the filter, so the caller
-   * refuses instead. One file, not a list: the refusal only has to name where
-   * the screen stopped, and an unbounded join is its own denial-of-service.
-   */
-  unreadable: string | null;
-}
-
-/**
- * The screened keys, flattened and counted, for a refusal message.
- *
- * `keys` arrives already capped by the producer, so this never re-slices; it
- * reports the shortfall instead. Both halves matter: `inertPath` because a
- * config subsection name legally carries control and format characters that
- * `--get-regexp` prints verbatim, and these strings land in the agent-facing
- * report; the count because a message naming 12 of 13 keys sends a user to
- * remove the 12 and be refused again on the one it never mentioned.
- */
-export function screenKeyList(screen: LocalFilterScreen): string {
-  const shown = screen.keys.map(inertPath).join(', ');
-  return screen.total > screen.keys.length
-    ? `${shown} (capped enumeration: ${screen.keys.length} shown of ${screen.total})`
-    : shown;
-}
-
-/**
- * Why a screen that stopped could not finish, phrased for the reader who has
- * to act on it.
- *
- * The two causes need opposite remedies, so they must not share a sentence:
- * an unreadable candidate is a file to fix or remove, while an over-cap admin
- * directory was read perfectly well — telling that reader to "remove that
- * file" would deregister every legitimate linked worktree they have.
- */
-export function screenStopDetail(screen: LocalFilterScreen): string {
-  const where = inertPath(screen.unreadable ?? '');
-  return screen.stopped === 'over-cap'
-    ? `more than ${MAX_SCREEN_CANDIDATES} worktrees are registered under ${where} — more than this screen will walk, so it cannot tell whether one of them defines a content filter. Prune stale ones (\`git worktree prune\`) and re-run`
-    : `${where} could not be read to the end`;
-}
-
-/**
- * A single `git rev-parse <flag>` answer, as a path, or null on any failure.
- *
- * One invocation per value, never a combined newline-delimited request: the
- * answers are arbitrary filesystem paths and a POSIX path may itself carry a
- * newline, so a combined answer cannot be split unambiguously — a healthy
- * worktree below a directory whose name holds a newline parses to extra
- * records, misassigns the paths, and the caller reports a live plant as clean
- * or a real worktree as not-a-worktree. Measured with exactly such a directory.
- * The only byte removed is git's terminal record delimiter; every other byte
- * belongs to the path, so neither a split nor a trim is a parse here. Callers
- * that need absolute paths pass `--path-format=absolute` as a leading flag.
- */
-/**
- * The screen's spawn budget.
- *
- * Every read below opens attacker-writable config, and git follows an
- * `include.path` at startup — so a plant naming a FIFO (or a symlink to
- * `/dev/zero`) blocks the very first `rev-parse`. `spawnSync` blocks the event
- * loop, so no JS timer can interrupt it; the bound has to be on the spawn.
- */
-const SCREEN_SPAWN_TIMEOUT_MS = 20_000;
-
-/**
- * A rev-parse answer, or null when the screen could not get one.
- *
- * `encoding: 'utf8'` transcodes an invalid byte to U+FFFD, so a repository
- * under a path carrying one yields an answer that names no real file. Callers
- * must treat that as unmeasured rather than resolve candidates against it —
- * the residue walker in this file fails the same shape closed for the same
- * reason.
- */
-function revParsePath(cwd: string, ...flags: string[]): string | null {
-  const r = spawnSync('git', ['rev-parse', ...flags], {
-    cwd,
-    encoding: 'utf8',
-    timeout: SCREEN_SPAWN_TIMEOUT_MS,
-    killSignal: 'SIGKILL',
-    env: sanitizedGitEnv(),
-  });
-  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
-  return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
-}
-
-/**
- * True when a transcode replaced bytes this screen would otherwise resolve.
- *
- * Exported for its own test: the end-to-end fixture cannot be built from Node.
- * A path holding an invalid UTF-8 byte survives neither `Buffer`→`string` nor
- * the `cwd` option, which takes a string only — so the repository that would
- * produce such a rev-parse answer cannot be created and then addressed from a
- * test. The rule this function states is pinned here instead, and its two call
- * sites are one `if` each.
- */
-export function carriesReplacementChar(value: string): boolean {
-  return value.includes('\uFFFD');
-}
-
-/**
- * The admin entry whose `gitdir` file points back at `tree`, if any.
- *
- * `git worktree add` does NOT always register a tree under its own basename:
- * a name already taken — crash residue in the never-wiped common dir, or a
- * directory a probe created — makes it register `<name>1` instead (measured on
- * git 2.43.0). Deriving the entry from the basename therefore reads a stale
- * decoy dead-last while the file the checkout honours goes by mid-walk, which
- * is exactly backwards. Ask the admin entries which one claims the tree.
- *
- * Filesystem only: this runs inside a screen whose whole point is to not
- * depend on git resolving anything for it.
- */
-function adminConfigClaiming(common: string, tree: string): string | null {
-  let entries: string[];
-  try {
-    entries = readdirSync(join(common, 'worktrees'));
-  } catch {
-    return null;
-  }
-  for (const entry of entries.slice(0, MAX_SCREEN_CANDIDATES)) {
-    try {
-      const backpointer = readFileSync(
-        join(common, 'worktrees', entry, 'gitdir'),
-        'utf8',
-      ).trim();
-      // `<tree>/.git` is what git writes there.
-      if (resolve(dirname(backpointer)) === tree) {
-        return join(common, 'worktrees', entry, 'config.worktree');
-      }
-    } catch {
-      // Unreadable or absent: not the entry we are looking for. The screen's
-      // own walk below still visits it and refuses if it cannot be read.
-    }
-  }
-  return null;
-}
-
-export function localFilterCommands(
-  worktree: string,
-  /**
-   * The tree the authorised checkout will run in, when that is not `worktree`.
-   *
-   * The screen reads candidates in sequence and the checkout reads merged
-   * config at its start, so each file's window runs from ITS read to the
-   * spawn. The file that decides what the checkout executes therefore has to
-   * be read last. For the restore and the revert that tree is the screened
-   * one, which is the default; `scratch-tree` screens the review worktree
-   * while authorising a checkout in the scratch tree, and only the caller
-   * knows which tree that is.
-   *
-   * Its per-worktree config is looked for at `<common>/worktrees/<basename of
-   * that path>/config.worktree`, which is where `git worktree add` registers
-   * it. If the tree does not exist yet — the rebuild path creates it after
-   * this screen — the file does not exist either and the read is a no-op,
-   * which is the correct answer: there is nothing there to plant in.
-   */
-  checkoutTree?: string,
-): LocalFilterScreen {
-  const commonDir = revParsePath(worktree, '--git-common-dir');
-  // The second discovery spawn is skipped once the first fails. Both read
-  // config at git startup, so a plant that blocks one blocks the other for the
-  // whole `SCREEN_SPAWN_TIMEOUT_MS`, and a null `commonDir` already decides the
-  // refusal below whatever `gitDir` would have answered. Running both anyway
-  // doubled that stall to a measured 40s of blocked event loop — most of
-  // vitest's fixed 60s worker RPC budget, which on the Linux lane (no
-  // unhandled-error exemption) exits an all-green suite red.
-  const gitDir =
-    commonDir === null ? null : revParsePath(worktree, '--git-dir');
-  if (commonDir === null || gitDir === null) {
-    // Two very different reasons land here, and only one is benign. A plain
-    // "not a repository" answer is the caller's own problem — its checkout has
-    // nothing to run in either. But a discovery spawn KILLED at the timeout
-    // above reaches this line too, and that one happens precisely when a plant
-    // has made git block, so it must not read as clean. There is no way to
-    // tell them apart from the outside, so this fails closed: a screen that
-    // could not discover the repository did not screen it.
-    return {
-      keys: [],
-      total: 0,
-      unreadable: worktree,
-      stopped: 'unreadable',
-    };
-  }
-  if (carriesReplacementChar(commonDir) || carriesReplacementChar(gitDir)) {
-    // An invalid byte in the repository path came back as U+FFFD, so every
-    // candidate built from it names a file that does not exist, the admin
-    // readdir hits ENOENT — "the ordinary case" — and the screen would answer
-    // clean over whatever the real path holds. Unmeasured, not clean.
-    return {
-      keys: [],
-      total: 0,
-      unreadable: worktree,
-      stopped: 'unreadable',
-    };
-  }
-  const common = resolve(worktree, commonDir);
-  // `<common>/config` is read LAST, and the order is load-bearing. The
-  // checkout this screen authorises reads merged config at its own start, so
-  // everything between the screen's read of a file and that checkout is a
-  // window in which a plant can land in it. The admin-dir set below is
-  // attacker-AMPLIFIABLE — up to MAX_SCREEN_CANDIDATES one-byte filler
-  // entries, each costing spawns — so reading the common config first put the
-  // most likely plant target at the START of a walk the plant itself can
-  // stretch to seconds. Measured: 256 fillers stretched the walk to ~9 s, and
-  // a blind planter won. Reading it last leaves only the walk's own tail
-  // between it and the checkout. This does not close the window — nothing
-  // here can, since a checkout either reads merged config or does not run —
-  // it removes the amplification.
-  // The SCREENED tree's own per-worktree config is always a candidate. For a
-  // main working tree `gitDir` IS the common dir, so this is
-  // `<common>/config.worktree` — a file the `worktrees/*` walk below never
-  // reaches and `git worktree add` loads at startup. Deriving the checkout
-  // tree's entry instead of adding to the list dropped it, and for a main
-  // checkout that turned a refusal into an executed plant.
-  const screenedAdminConfig = join(resolve(worktree, gitDir), 'config.worktree');
-
-  // The checkout tree's own, when the caller named a different tree — resolved
-  // from the admin entry that points BACK at it, never from its basename.
-  // `git worktree add` numbers an entry on a name collision (`foo` taken by
-  // crash residue makes the add register `foo1`), so a basename derivation can
-  // hold back a stale decoy while the file the checkout honours is read
-  // mid-walk. `null` when no entry claims it: the tree may not exist yet on
-  // the rebuild path, and then there is nothing there to plant in.
-  const checkoutAdminConfig =
-    checkoutTree === undefined || resolve(checkoutTree) === resolve(worktree)
-      ? null
-      : adminConfigClaiming(common, resolve(checkoutTree));
-
-  const candidates: string[] = [];
-  // Every OTHER worktree's per-worktree config too. This screen runs against
-  // the review worktree, but the checkout it authorises runs in the SCRATCH
-  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
-  // once `extensions.worktreeConfig` is on and was never read here — a filter
-  // planted there executed during the reset while this function reported the
-  // repository clean. The admin directory is one `readdir`, and a filter in
-  // any of these is a plant whichever tree carries it.
-  //
-  // Bounded, and fail closed over the bound. Each entry costs one synchronous
-  // `git config` spawn below, and the admin directory is the same never-wiped
-  // surface the filter itself is planted in: M empty `worktrees/<e>/` dirs are
-  // M spawns on EVERY screen call, which is once per mutant. A healthy repo
-  // carries O(shards) entries. Past the cap the screen has not read what it
-  // was asked to read, so it refuses rather than walking a plant's filler —
-  // and refusing beats skipping, which would let filler hide a real filter.
-  let worktreeEntries: string[] | null = null;
-  try {
-    worktreeEntries = readdirSync(join(common, 'worktrees'));
-  } catch (e) {
-    // ENOENT is the ordinary "no linked worktrees registered" — the two
-    // candidates above are all of it. Anything else is a directory this
-    // screen could NOT walk while git still opens each `config.worktree` by
-    // direct path (the search bit alone suffices), so a swallowed EACCES
-    // would answer clean on candidates that were never read. Refuse instead:
-    // this is the directory-level twin of the per-file readability gate below.
-    if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      return {
-        keys: [],
-        total: 0,
-        unreadable: join(common, 'worktrees'),
-        stopped: 'unreadable',
-      };
-    }
-  }
-  if (worktreeEntries && worktreeEntries.length > MAX_SCREEN_CANDIDATES) {
-    return {
-      keys: [],
-      total: 0,
-      unreadable: join(common, 'worktrees'),
-      stopped: 'over-cap',
-    };
-  }
-  for (const entry of worktreeEntries ?? []) {
-    // The checkout tree's own config comes last, below — not here, in the
-    // middle of a set an attacker can pad.
-    // Entry names are the THIRD attacker-influenced source of candidate bytes,
-    // after the two rev-parse answers. `readdirSync` transcodes an invalid
-    // byte to U+FFFD, `join` re-encodes it as EF BF BD, `existsSync` is then
-    // false and the loop would skip a `config.worktree` that really exists and
-    // really defines a filter — the clean verdict authorising the checkout
-    // that runs it. The sibling hazards on this same directory (EACCES, and
-    // U+FFFD in the rev-parse answers) both refuse; so does this.
-    if (carriesReplacementChar(entry)) {
-      return {
-        keys: [],
-        total: 0,
-        unreadable: join(common, 'worktrees'),
-        stopped: 'unreadable',
-      };
-    }
-    const candidate = join(common, 'worktrees', entry, 'config.worktree');
-    if (candidate !== checkoutAdminConfig) candidates.push(candidate);
-  }
-  // The screened tree's own, when it is not the one held back below. Without
-  // this a cross-tree call skips it entirely — and for a main working tree it
-  // is `<common>/config.worktree`, which no admin walk reaches.
-  if (
-    checkoutAdminConfig !== null &&
-    screenedAdminConfig !== checkoutAdminConfig &&
-    !candidates.includes(screenedAdminConfig)
-  ) {
-    candidates.push(screenedAdminConfig);
-  }
-  // Then the common config, then — dead last — the file the authorised
-  // checkout will actually honour. Order is the whole mitigation here: the
-  // admin set above is attacker-paddable, so anything read before it carries a
-  // window the plant itself can widen.
-  candidates.push(join(common, 'config'));
-  // Dead last: the file the authorised checkout honours. When the caller named
-  // a different tree that is its entry; otherwise the screened tree's own.
-  candidates.push(checkoutAdminConfig ?? screenedAdminConfig);
-  // Retention is bounded at INSERTION, not at the report. The caps below limit
-  // how many keys are NAMED and how many files are read, but the Set itself
-  // would hold every distinct key an attacker wrote — bounded only by the
-  // product of the caps, on exactly the input this screen exists to survive.
-  // Tens of thousands of keys per file across the admin set is a gibibyte of
-  // key text held live to report twelve of them, once per mutant. Past the cap
-  // only the count matters, so only the count is kept.
-  const found = new Set<string>();
-  let total = 0;
-  let unreadable: string | null = null;
-  for (const file of candidates) {
-    // Once a stop is decided nothing later can change it — every caller gates
-    // on `stopped` before it looks at `keys` — so the remaining candidates are
-    // work an attacker chose for us. Each one is a synchronous spawn.
-    if (unreadable !== null) break;
-    if (!existsSync(file)) continue;
-    // Existence is not readability, and git does not distinguish them for us:
-    // an unreadable `--file` exits 1 with a warning on stderr — byte-identical
-    // in status to "no key matched" — so asking git and reading the exit code
-    // reports a config this screen never read as clean. Settle it here instead,
-    // by construction: a regular file (git follows symlinks to read config, so
-    // this must too) that this process can open. Anything else is a candidate
-    // the screen could not check, which is a refusal, not a pass.
-    let readable = false;
-    let oversized = false;
-    try {
-      const st = statSync(file);
-      readable = st.isFile();
-      // Size, too. git parses a config file linearly, so a half-gigabyte
-      // candidate is seconds of blocked event loop per call — and this screen
-      // runs once per mutant, per hunk probe, for the control and the
-      // baseline. Past the bound the screen has not read what it was asked to
-      // read, which is a refusal, the same answer the other bounds give.
-      // git's own config files are kilobytes.
-      if (readable && st.size > MAX_SCREEN_CONFIG_BYTES) oversized = true;
-      if (readable) accessSync(file, fsConstants.R_OK);
-    } catch {
-      readable = false;
-    }
-    if (!readable || oversized) {
-      unreadable ??= file;
-      continue;
-    }
-    const r = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        file,
-        // NO `--includes`, and no hand-walk of the include graph either —
-        // this screen does not follow includes at all, and that is a declared
-        // limit rather than an oversight. Both alternatives were tried and
-        // both were worse. `--includes` makes git EVALUATE `includeIf` in
-        // THIS process's context while the checkout runs in another tree, so a
-        // condition false here and true there hides a filter the checkout then
-        // executes; it also follows an edge out of the repository, dragging
-        // the user's own `filter.lfs.*` into a repo-local screen and refusing
-        // every later review. Walking the graph by hand instead means
-        // re-implementing git's own path resolution — `%(prefix)`, `~//`,
-        // `~user`, symlinked components, non-UTF-8 targets — and eleven
-        // divergences from git were measured across five review rounds, each
-        // one a silent skip. The condition problem survives both: no single
-        // context matches a cross-tree checkout.
-        //
-        // So a filter reached only through an include is NOT screened here.
-        // Issue #9558 scopes it out in as many words ("`include.path` /
-        // `includeIf` ... are each handled separately today"), and #10441
-        // carries the design that closes it — resolving each hit's origin the
-        // way git resolves it, which is a different change with its own tests.
-        // BEFORE the pattern: `--name-only` after it silently prints nothing
-        // and exits 1 even with live keys. With it, each line is the whole key
-        // and nothing has to be parsed out of a `key value` pair — a config
-        // subsection name may legally carry whitespace, and splitting on it
-        // named `filter.evil` for a planted `filter.evil name.smudge`, so the
-        // refusal prescribed an unset that exits 5 while the plant stood. Key
-        // names cannot contain newlines, so line-per-key is unambiguous.
-        '--name-only',
-        '--get-regexp',
-        // `process` beside the pair: it is the third executable key (a
-        // long-running filter git speaks a protocol to), and enumerating two
-        // of three is how the first cut of this screen read as complete.
-        '^filter\\..*\\.(smudge|clean|process)$',
-      ],
-      {
-        cwd: worktree,
-        encoding: 'utf8',
-        // No raised `maxBuffer`: `--name-only` prints one KEY per matching line
-        // and never the value, so a padded `smudge` value cannot reach stdout —
-        // output is bounded by key count, not by an attacker-chosen length. A
-        // config carrying more keys than the default holds sets `r.error`
-        // (ENOBUFS), which the gate below turns into a refusal.
-        timeout: SCREEN_SPAWN_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-        // Byte-wise regex semantics. `--get-regexp` is POSIX matching and is
-        // locale-sensitive: under a UTF-8 locale a key whose subsection name
-        // carries an invalid byte never matches, so git exits 1 and the gate
-        // below reads that as the ordinary clean answer — while the checkout
-        // resolves filter keys by exact name, which no locale affects. The
-        // screen would certify clean over a filter the checkout runs.
-        env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
-      },
-    );
-    // Exit 1 is "no key matched" — the ordinary clean answer. Every other
-    // outcome means this file was not read to the end, and a screen that did
-    // not finish must not be the reason a checkout is authorised.
-    if (r.error || (r.status !== 0 && r.status !== 1)) {
-      unreadable ??= file;
-      continue;
-    }
-    if (r.status === 1 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line;
-      // A Set, not `Array.includes`: the key names here are attacker-written and
-      // as many as the 1 MiB output holds, so a linear membership test per line
-      // is quadratic on exactly the input this screen exists to survive.
-      // (Measured: 100k keys took 144 s as an array scan and 53 ms as a Set.)
-      if (!key) continue;
-      // Deduplicated only within the cap — past it there is nothing left to
-      // deduplicate against, which is the whole point of not retaining it. So
-      // `total` counts matching entries, exact while under the cap and an
-      // upper bound beyond it; `keys` stays distinct. A refusal saying "12
-      // shown of 40" is honest either way: there is more than it is naming.
-      if (found.size < MAX_SCREEN_KEYS) {
-        if (found.has(key)) continue;
-        found.add(key);
-      }
-      total += 1;
-    }
-  }
-  return {
-    keys: [...found],
-    total,
-    unreadable,
-    stopped: unreadable === null ? null : 'unreadable',
-  };
-}
-
-/**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
  *
@@ -1254,19 +1033,31 @@ export function worktreeResidue(
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
   // enclosing user checkout: the wrong tree's dirty state answered as this
   // one's. Fail closed the way a loud git failure below does.
-  // One invocation per value (see `revParsePath`): the answers are three
-  // arbitrary filesystem paths, a POSIX name may carry a newline, so no combined
-  // newline-delimited answer can be split unambiguously — a healthy worktree
-  // below a directory whose name holds one parses to extra records, misassigns
-  // gitDir/commondir, and reports the checkout as not a worktree. These need
-  // absolute paths, so they pass `--path-format=absolute`.
-  const discover = (flag: string): string | null =>
-    revParsePath(cwd, '--path-format=absolute', flag);
+  // One invocation per value: the answers are three arbitrary filesystem
+  // paths, and a POSIX name may carry a newline, so no combined
+  // newline-delimited answer can be split unambiguously — a healthy
+  // worktree below a directory whose name holds one parses to extra
+  // records, misassigns gitDir/commondir, and reports the checkout as not
+  // a worktree. Measured with exactly such a directory.
+  const discover = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
+      cwd,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      return null;
+    }
+    // Remove only git's terminal record delimiter: every other byte
+    // belongs to the path, so neither a split nor a trim is a parse here.
+    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+  };
   const toplevel = discover('--show-toplevel');
   const gitDir = discover('--git-dir');
   const commonDir = discover('--git-common-dir');
   let isWorktree = false;
   let anchor: string[] = [];
+  let filterBlanks: NodeJS.ProcessEnv = {};
   try {
     if (
       toplevel !== null &&
@@ -1442,6 +1233,36 @@ export function worktreeResidue(
           };
         }
       }
+      // The `status` below REFRESHES the index, and a stat-stale tracked
+      // file whose attributes select a content filter runs that filter's
+      // `clean` (or `process`) command as part of the refresh — a repo-local
+      // `filter.evil.clean` executed under the exact invocation below and
+      // the tree still measured clean (git 2.43 and 2.47, live). The `-c`
+      // blanks on that invocation close the two channels a fixed key names;
+      // a filter's key carries a name of the planter's choosing, so the
+      // names are READ first — from the repo-local config files of the
+      // identity pinned above, includes followed — and every name found is
+      // blanked on the measurement itself (`filterBlankEnv`), the way the
+      // fixed keys are: a repository whose own config defines a filter
+      // (git-lfs `--local`, git-crypt) keeps its residue measurement, where
+      // a refusal would have left it unmeasured for good. What is refused is
+      // a config the screen could not read to the bottom: a filter it cannot
+      // see it cannot blank.
+      const screen = filterCommandsIn(commonDir, realpathSync(gitDir));
+      if (screen.unread.length > 0) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the residue measurement would run under repo-local config ' +
+            'this screen could not read to the bottom: ' +
+            `${describeFilterScreen(screen.unread)} — a content filter ` +
+            'reached that way would execute on the index refresh, and a ' +
+            'filter the screen cannot see it cannot blank; remove the ' +
+            'include, or the file it names, if it is not yours',
+        };
+      }
+      filterBlanks = filterBlankEnv(screen.filters);
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.
@@ -1465,9 +1286,20 @@ export function worktreeResidue(
       // runs a command on `status`, and this tree's config is writable by
       // anything running as the user. Emptying it here is the same discipline
       // as the checkouts' `core.hooksPath` — the tripwire is the one command
-      // that must not be steerable by the tree it is measuring.
+      // that must not be steerable by the tree it is measuring. `status`
+      // WRITES the index too — a stat-stale tracked file refreshes it — and
+      // the write fires `post-index-change` from a repo-local `core.hooksPath`
+      // (measured live on git 2.43), so the hook directory is blanked here the
+      // way the checkouts blank it. Those are the two channels a FIXED key
+      // names; the refresh's third channel, a content filter's `clean` or
+      // `process` command, lives under a key of the planter's naming, so its
+      // names come from the `filterCommandsIn` read above and are blanked
+      // through `filterBlanks` in this spawn's environment — and when that
+      // read could not finish, the measurement was refused above instead.
       '-c',
       'core.fsmonitor=',
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
       'status',
       '--porcelain',
       '--untracked-files=all',
@@ -1477,7 +1309,7 @@ export function worktreeResidue(
       cwd,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
-      env: sanitizedGitEnv(),
+      env: { ...sanitizedGitEnv(), ...filterBlanks },
     },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {

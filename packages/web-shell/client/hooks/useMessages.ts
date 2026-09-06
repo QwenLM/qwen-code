@@ -11,7 +11,10 @@ import {
   useTranscriptBlocks,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
+import {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 import type { Message } from '../adapters/types';
 import {
   isActiveToolStatus,
@@ -20,10 +23,13 @@ import {
   projectTerminalBackgroundAgentTool,
 } from '../adapters/toolClassification';
 
-type Translator = (
-  key: string,
-  vars?: Record<string, string | number>,
-) => string;
+// Re-exported for existing callers. The projection itself lives in a leaf module
+// so the read-only transcript entry does not pull this file's daemon imports —
+// see adapters/localizedMessages.ts.
+export {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
@@ -64,23 +70,6 @@ interface ReconciliationRound {
   errors: ReadonlyArray<{ callId: string; error: unknown }>;
   notFounds: ReadonlyArray<string>;
   succeeded: ReadonlyArray<string>;
-}
-
-export function transcriptBlocksToLocalizedMessages(
-  blocks: readonly DaemonTranscriptBlock[],
-  t: Translator,
-  safeToolProjection = false,
-): Message[] {
-  return transcriptBlocksToDaemonMessages(blocks, {
-    safeToolProjection,
-    includeSourceIdentity: true,
-    labels: {
-      promptCancelled: t('request.cancelled'),
-      branchSuccess: (name) => t('branch.success', { name }),
-      modelStreamInterrupted: t('error.modelStreamInterrupted'),
-      loopDetected: t('error.loopDetected'),
-    },
-  });
 }
 
 function reuseUnchangedProjectedPrefix(

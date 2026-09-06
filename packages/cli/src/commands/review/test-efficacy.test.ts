@@ -32,10 +32,9 @@ import {
   runOneMutant,
   runOneHunkProbe,
   committedSymlinkProbes,
-  gitfileMarker,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
-import { MAX_SCREEN_KEYS, sanitizedGitEnv } from './lib/worktree.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -716,39 +715,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       );
 
       expect(r.verdict).toBe('inconclusive');
-      expect(r.detail).toContain('could not be read to the end');
-    } finally {
-      isolation.dispose();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('says the enumeration was capped when more keys were planted than shown', () => {
-    // The cap exists so an attacker-written key list cannot become the whole
-    // refusal string; the count exists so the message does not send a user to
-    // remove the keys it named and leave the rest standing.
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-capmsg-'));
-    const isolation = isolateHostGitConfig();
-    try {
-      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
-      asCheckout(dir);
-      let cfg = '';
-      for (let i = 0; i < MAX_SCREEN_KEYS + 1; i++) {
-        cfg += `[filter "evil${i}"]\n\tsmudge = cat\n`;
-      }
-      appendFileSync(join(dir, '.git', 'config'), cfg);
-
-      const r = runOneMutant(
-        dir,
-        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
-        ['a.test.ts'],
-      );
-
-      expect(r.verdict).toBe('inconclusive');
-      expect(r.detail).toContain('capped enumeration');
-      expect(r.detail).toContain(
-        `${MAX_SCREEN_KEYS} shown of ${MAX_SCREEN_KEYS + 1}`,
-      );
+      expect(r.detail).toContain('could not read to the bottom');
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
@@ -856,34 +823,6 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       }
     },
   );
-
-  it('gives a gitfile and a directory markers that cannot collide', () => {
-    // The file's own bytes and the word for "it was a directory" must not
-    // share one string space. If they do, a gitfile whose literal content is
-    // the directory token compares EQUAL to a directory swapped in for it —
-    // capture-1 reads the planted text, capture-2 finds a real directory, and
-    // the pre-spawn re-check passes over the swap.
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-marker-'));
-    try {
-      const asFile = join(dir, 'as-file');
-      const asDir = join(dir, 'as-dir');
-      // Every token this function can emit, written as file CONTENT.
-      mkdirSync(asDir);
-      const dirMarker = gitfileMarker(asDir);
-      for (const token of [dirMarker, 'dir', 'other', 'oversized:9']) {
-        writeFileSync(asFile, token);
-        expect(gitfileMarker(asFile)).not.toBe(dirMarker);
-      }
-      // And two gitfiles differing only in bytes a utf8 decode would fold
-      // together must still differ: git resolves the raw bytes.
-      writeFileSync(asFile, Buffer.from([0xff, 0xfe]));
-      const a = gitfileMarker(asFile);
-      writeFileSync(asFile, Buffer.from([0xfe, 0xff]));
-      expect(gitfileMarker(asFile)).not.toBe(a);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 
   // POSIX-only: the swap is driven from a `#!/bin/sh` shim.
   it.skipIf(process.platform === 'win32')(
@@ -1129,7 +1068,7 @@ exec ${realGit} "$@"
       );
 
       expect(r.verdict).toBe('inconclusive');
-      expect(r.detail).toContain('could not be read to the end');
+      expect(r.detail).toContain('could not read to the bottom');
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
