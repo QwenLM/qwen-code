@@ -481,7 +481,7 @@ describe('SendMessageTool — background-task mode', () => {
       outputFile: '/tmp/test.jsonl',
       metaPath: '/tmp/test.meta.json',
     });
-    const continueResident = vi.fn().mockReturnValue(true);
+    const continueResident = vi.fn().mockReturnValue('continued');
     registry.registerResidentAgent('agent-1', {
       continue: continueResident,
       dispose: vi.fn(),
@@ -498,6 +498,32 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('existing runtime');
     expect(result.returnDisplay).toContain('Continued');
+  });
+
+  it('reports resident capacity without attempting a cold revive', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+    });
+    registry.registerResidentAgent('agent-1', {
+      continue: vi.fn().mockReturnValue('capacity_wait'),
+      dispose: vi.fn(),
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'now refactor the helper' },
+      new AbortController().signal,
+    );
+
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('capacity');
   });
 
   it('revives a completed task when no resident runtime is available', async () => {

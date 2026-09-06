@@ -15,6 +15,7 @@ import {
   type AgentTaskRegistration,
   type BackgroundApproval,
   type BackgroundTaskEntry,
+  type ResidentAgentContinuationResult,
   type ResidentBackgroundAgent,
 } from './background-tasks.js';
 import {
@@ -297,7 +298,7 @@ describe('BackgroundTaskRegistry', () => {
       overrides: Partial<ResidentBackgroundAgent> = {},
     ): ResidentBackgroundAgent {
       return {
-        continue: vi.fn(() => true),
+        continue: vi.fn(() => 'continued' as const),
         dispose: vi.fn(),
         ...overrides,
       };
@@ -309,12 +310,12 @@ describe('BackgroundTaskRegistry', () => {
       registry.registerResidentAgent('resident-1', resident);
 
       expect(registry.continueResidentAgent('resident-1', 'too early')).toBe(
-        false,
+        'not_completed',
       );
 
       registry.complete('resident-1', 'first result');
       expect(registry.continueResidentAgent('resident-1', 'keep going')).toBe(
-        true,
+        'continued',
       );
       expect(resident.continue).toHaveBeenCalledWith('keep going');
 
@@ -328,7 +329,7 @@ describe('BackgroundTaskRegistry', () => {
       expect(resident.dispose).not.toHaveBeenCalled();
       expect(
         registry.continueResidentAgent('resident-1', 'after unregister'),
-      ).toBe(false);
+      ).toBe('fallback');
     });
 
     it('disposes a replaced resident without letting its stale handle remove the replacement', () => {
@@ -477,7 +478,7 @@ describe('BackgroundTaskRegistry', () => {
       registry.register(makeRegistration('cancelled-completion'));
       const resident = makeResident();
       registry.registerResidentAgent('cancelled-completion', resident);
-      let continuation: boolean | undefined;
+      let continuation: ResidentAgentContinuationResult | undefined;
       registry.setNotificationCallback(() => {
         continuation = registry.continueResidentAgent(
           'cancelled-completion',
@@ -488,7 +489,7 @@ describe('BackgroundTaskRegistry', () => {
       registry.cancel('cancelled-completion');
       registry.complete('cancelled-completion', 'finished while cancelling');
 
-      expect(continuation).toBe(false);
+      expect(continuation).toBe('fallback');
       expect(resident.continue).not.toHaveBeenCalled();
       expect(resident.dispose).toHaveBeenCalledOnce();
     });
@@ -1867,7 +1868,7 @@ describe('BackgroundTaskRegistry', () => {
     it('disposes a resident runtime when its terminal entry is evicted', () => {
       registry.register(makeRegisteredEntry('resident-oldest', 0));
       const resident = {
-        continue: vi.fn(() => true),
+        continue: vi.fn(() => 'continued' as const),
         dispose: vi.fn(),
       };
       registry.registerResidentAgent('resident-oldest', resident);
