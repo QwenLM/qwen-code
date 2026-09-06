@@ -1776,11 +1776,16 @@ process.stdout.write(JSON.stringify({
   });
 
   it('refuses the REVERT when the baseline planted an unparseable config', async () => {
-    // The keys-found branch has a witness; the `stopped` branch did not. A
-    // plant that makes the screen STOP — here an unparseable `config.worktree`
-    // — must refuse the revert just as a found key does, because a screen that
-    // could not finish did not clear anything. The plant lands mid-run, after
-    // the restore's own screen has already passed.
+    // A filter key the screen FOUND has a witness; a candidate it could not
+    // read did not. Both have to refuse the revert, because a screen that
+    // could not finish did not clear anything — and the caller cannot tell the
+    // two apart, which is the point: the screen returns what it could not read
+    // alongside what it found, as one flat list, and this PR treats a
+    // non-empty answer as a refusal whichever half it came from. The
+    // unreadable half here is an unparseable `config.worktree`, which git
+    // answers with exit 128 rather than the exit 1 that means "no key
+    // matched" (both measured), so it cannot be confused with a clean read.
+    // The plant lands mid-run, after the restore's own screen has passed.
     const canary = join(repo, 'PWNED-revert-stopped');
     writeFileSync(
       vitestScript(),
@@ -1798,8 +1803,8 @@ if (!fs.existsSync(stamp)) {
   const attrs = g('rev-parse', '--git-path', 'info/attributes');
   fs.mkdirSync(path.dirname(attrs), { recursive: true });
   fs.appendFileSync(attrs, '*.ts filter=evil\\n');
-  // ...and an unparseable candidate, so the screen STOPS before it can
-  // enumerate that filter. A stop must refuse exactly as a key would.
+  // ...and an unparseable candidate, so the screen comes back with a file it
+  // could not read instead of the filter's key. Either half must refuse.
   const gitDir = g('rev-parse', '--git-dir');
   fs.writeFileSync(path.join(gitDir, 'config.worktree'), '[filter "x"\\n\\tsmudge = cat\\n');
 }

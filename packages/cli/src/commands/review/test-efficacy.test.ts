@@ -653,15 +653,17 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
-  it('still sees a filter whose value is padded huge — `--name-only` never prints the value', () => {
-    // The screened file is attacker-writable, and a `smudge` value padded past
-    // `spawnSync`'s DEFAULT 1 MiB buffer would kill git with ENOBUFS if the
-    // enumeration printed values — the screen would skip the one file that
-    // defines the filter and report the repository clean. `--name-only` prints
-    // only the KEY, so the padded value never reaches stdout: the key is found
-    // and the refusal fires with no raised buffer at all. Remove `--name-only`
-    // and this goes red (the 1.2 MiB value overflows the default buffer and the
-    // detail no longer names the key), which is what pins the flag.
+  it('still sees a filter whose value is padded huge', () => {
+    // The screened file is attacker-writable and git prints every matching
+    // value in full, so a `smudge` padded past `spawnSync`'s DEFAULT 1 MiB
+    // buffer kills git with ENOBUFS and leaves no stdout — a screen reading
+    // that as "no key matched" skips the one file defining the filter and
+    // reports the repository clean while the restore executes it. What closes
+    // that is the raised buffer the screen's read carries, so the padded value
+    // is read, the key is found, and the refusal fires. This asserts the
+    // COMBINATION end to end, from the probe down through the screen; the
+    // buffer itself lives in the screen, which is `main`'s and not this diff's,
+    // so no mutation of this PR reddens it. Lowering that buffer does.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-bigvalue-'));
     const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
     const isolation = isolateHostGitConfig();
@@ -696,11 +698,14 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
   });
 
   it('refuses a config candidate it cannot read — not "clean"', () => {
-    // git reports an unreadable `--file` with exit 1 and a warning on stderr —
-    // the same status as "no key matched" — so a screen that asks git and reads
-    // the exit code calls a config it never read clean. The candidate here is
-    // `config.worktree`, which git honors once `extensions.worktreeConfig` is
-    // on; a directory in its place is a candidate the screen cannot check.
+    // git answers an unreadable `--file` with exit 1 and a warning on stderr —
+    // the same status as "no key matched" — so readability cannot be inferred
+    // from the exit code, and a screen that tried would call a config it never
+    // read clean. The screen decides it constructively instead, before the
+    // read: a candidate that is not a regular file it can open is a refusal.
+    // The candidate here is `config.worktree`, which git honors once
+    // `extensions.worktreeConfig` is on; a directory in its place is the shape
+    // that gate exists for.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-unreadable-'));
     const isolation = isolateHostGitConfig();
     try {
