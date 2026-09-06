@@ -243,6 +243,25 @@ describe('DiffManager permission diff dismissal', () => {
 
     expect(closed).not.toHaveBeenCalled();
   });
+
+  it('stops notifying once the manager is disposed', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+
+    // An extension-host reload activates a second manager while the previous
+    // one's listener closure still holds the torn-down provider registry.
+    manager.dispose();
+    await manager.cancelDiff(rightUri as never);
+
+    expect(closed).not.toHaveBeenCalled();
+  });
 });
 
 // R3-9: the request-id binding was landed without a witness for any of its three

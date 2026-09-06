@@ -551,8 +551,7 @@ export function shouldAutoExpand(tool: ACPToolCall): boolean {
   if (tool.status === 'completed') return false;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return true;
-  if (name === 'write_file' || name === 'writefile') return true;
-  if (name === 'edit' || name === 'editfile') return true;
+  if (isEditToolName(name)) return true;
   if (isShellToolName(name)) return true;
   return false;
 }

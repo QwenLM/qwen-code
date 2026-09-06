@@ -2798,4 +2798,49 @@ describe('pending edit approval rows', () => {
 
     expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
   });
+
+  it('hands a pending bare-write row back to the shell already expanded', () => {
+    const tool = makeTool({
+      toolName: 'write',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+    });
+
+    // While the host shows the diff natively the row is deliberately locked:
+    // `write` is an edit alias, so the native editor owns the interaction.
+    const hostOwned = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-write',
+          toolCallId: tool.callId,
+          toolName: 'write',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+
+    // Handing the preview back has to unlock *and* auto-expand it, or the user
+    // is left with an approval whose content is nowhere on screen. The expanded
+    // renderer already handles the bare name, so only shouldAutoExpand has to
+    // agree with isEditToolName about it.
+    const handedBack = renderToolLine(tool, {
+      approval: {
+        id: 'perm-write',
+        toolCallId: tool.callId,
+        toolName: 'write',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+    expect(
+      handedBack.querySelector('[class*="lineExpandable"]'),
+    ).not.toBeNull();
+    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+  });
 });

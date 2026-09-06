@@ -2525,6 +2525,20 @@ describe('WebViewProvider web-shell permission bridge', () => {
     expect(decisionCalls(postMessage)).toHaveLength(0);
   });
 
+  it('relays a permission diff dismissal to the webview under requestId', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.notifyPermissionDiffClosed('req-1');
+
+    // The receiver in the webview reads data.requestId only and treats any
+    // other key as "not a dismissal", so the rename this wire invites has to
+    // be pinned here.
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionDiffClosed',
+      data: { requestId: 'req-1' },
+    });
+  });
+
   it('does not vote before permission ownership state arrives', async () => {
     const setup = await setupAttachedProvider({ captureMessageHandler: true });
 

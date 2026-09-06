@@ -2390,9 +2390,7 @@ export class WebViewProvider {
    * without a vote, so it can take the edit preview back (#10557).
    */
   notifyPermissionDiffClosed(permissionRequestId: string): void {
-    const webview = this.getActiveWebview();
-    if (!webview) return;
-    void webview.postMessage({
+    this.sendMessageToWebView({
       type: 'permissionDiffClosed',
       data: { requestId: permissionRequestId },
     });
