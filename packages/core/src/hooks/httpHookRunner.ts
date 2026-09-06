@@ -243,6 +243,11 @@ export class HttpHookRunner {
           },
           body,
           signal: combinedSignal,
+          // Never follow redirects: the whitelist and DNS-level SSRF checks
+          // above validated only this URL, and a 30x would re-send the hook
+          // payload to an unvalidated target. A 3xx response falls into the
+          // non-2xx branch below (non-blocking error).
+          redirect: 'manual',
         });
 
         cleanup();

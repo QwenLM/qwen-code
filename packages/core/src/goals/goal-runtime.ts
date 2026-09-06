@@ -47,6 +47,7 @@ import {
 } from './goal-protocol.js';
 import {
   elapsedActiveTime,
+  GoalInvalidTransitionError,
   reduceGoalControl,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
@@ -176,10 +177,16 @@ export interface GoalRuntime {
   ): Promise<void>;
   getPreparedRestore(): Promise<void>;
   activateRestoredWork(): Promise<void>;
-  dispatch(request: GoalControlRequest): Promise<GoalStateResponse>;
+  dispatch(
+    request: GoalControlRequest,
+    options?: { refuseIfActive?: boolean },
+  ): Promise<GoalStateResponse>;
   bindHost(host: GoalTurnHost): () => void;
   beginTurn(turnKey: string): GoalTurnPermit | undefined;
-  releaseTurn(turnKey: string): Promise<boolean>;
+  releaseTurn(
+    turnKey: string,
+    options?: { requeue?: boolean },
+  ): Promise<boolean>;
   /**
    * Confirms the turn's prompt reached the model.
    *
@@ -1437,7 +1444,10 @@ export function createGoalRuntime(
       broadcast();
       return structuredClone(currentPermit);
     },
-    releaseTurn(turnKey: string): Promise<boolean> {
+    releaseTurn(
+      turnKey: string,
+      options?: { requeue?: boolean },
+    ): Promise<boolean> {
       return enqueue(async () => {
         assertOperational();
         let released = false;
@@ -1485,7 +1495,9 @@ export function createGoalRuntime(
           broadcast();
           released = true;
         }
-        if (released && !currentPermit) queueContinuation();
+        if (released && !currentPermit && options?.requeue !== false) {
+          queueContinuation();
+        }
         return released;
       });
     },
@@ -1730,9 +1742,22 @@ export function createGoalRuntime(
       pendingProposal = undefined;
       return proposal ? structuredClone(proposal) : undefined;
     },
-    dispatch(request: GoalControlRequest): Promise<GoalStateResponse> {
+    dispatch(
+      request: GoalControlRequest,
+      dispatchOptions?: { refuseIfActive?: boolean },
+    ): Promise<GoalStateResponse> {
       const execute = async (): Promise<GoalStateResponse> => {
         assertOperational();
+        if (
+          dispatchOptions?.refuseIfActive &&
+          request.action === 'replace' &&
+          snapshot.goal?.status === 'active'
+        ) {
+          throw new GoalInvalidTransitionError(
+            'An active Goal cannot be replaced by an approved proposal',
+            getSnapshot(),
+          );
+        }
         const recordUuid = randomUUID();
         const nextGoal = reduceGoalControl(snapshot.goal, {
           request,

@@ -35,6 +35,8 @@ Add a channel to `~/.qwen/settings.json`:
       "senderPolicy": "pairing",
       "groupPolicy": "pairing",
       "watchTodos": true,
+      "startReaction": "🤔",
+      "endReaction": "赞",
       "groups": {
         "*": { "requireMention": true }
       },
@@ -81,6 +83,8 @@ Ordinary direct messages are recovered the same way: a five-second history check
 
 When a message quotes another DingTalk message, the quoted text is included as reply context for the agent on both the real-time and history fallback paths.
 
+`startReaction` is the emoji character or DingTalk reaction name added while an accepted task is running; an omitted or empty value uses the default `🤔`. `endReaction` replaces it after the task completes, fails, or is cancelled; an omitted or empty value disables the end reaction.
+
 ## Document Mentions
 
 There is no document or knowledge-base watch list. To start a document task:
@@ -89,7 +93,7 @@ There is no document or knowledge-base watch list. To start a document task:
 2. Enable the option that sends a DingTalk notification to that account.
 3. DWS delivers the notification card through the account's direct-message history.
 
-The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds DingTalk's `暗中观察` eyes reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
+The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds the configured start reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
 
 Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
 
@@ -117,6 +121,6 @@ qwen serve --workspace /path/to/your/project --channel dws-work
 
 Do not run both forms at once because they share the channel-service lease.
 
-For local verification, send a direct message from another account, approve pairing if required, and verify the eyes reaction appears while the task runs. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
+For local verification, send a direct message from another account, approve pairing if required, and verify the configured start reaction appears while the task runs. If an end reaction is configured, verify that it replaces the start reaction afterward. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
 
 The channel ignores events from sender IDs that DWS identifies as the authenticated account, preventing reply and pairing loops without inferring identity from message text. Starting the IM sources requires that authoritative self-identity: if the authenticated account exposes no openDingTalkId and no earlier session under the same profile recorded one, the channel refuses to connect. A reconnect that temporarily loses the ID keeps filtering on the previously recorded self sender IDs.

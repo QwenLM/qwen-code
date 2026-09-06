@@ -1,0 +1,42 @@
+{
+  "id": "startup-banner",
+  "description": "Startup/banner: fixed (OpenTUI) must not full-clear or duplicate the banner vs base (Ink).",
+  "proves": "fixed side startup emits no more full-screen clears / duplicate live-output than base under identical terminal geometry.",
+  "doesNotProve": "model-streaming behavior (no model stream in this scenario); visual identity.",
+  "terminal": { "rows": 24, "columns": 80 },
+  "timeoutMs": 8000,
+  "input": [],
+  "env": {},
+  "compareParams": [],
+  "commands": {
+    "base": {
+      "argv": [
+        "node",
+        "scripts/tui-parity/fixtures/emitters/tui-emitter.mjs",
+        "--frames",
+        "1",
+        "--clears-per-frame",
+        "0",
+        "--dups",
+        "0"
+      ]
+    },
+    "fixed": {
+      "argv": [
+        "node",
+        "scripts/tui-parity/fixtures/emitters/tui-emitter.mjs",
+        "--frames",
+        "1",
+        "--clears-per-frame",
+        "0",
+        "--dups",
+        "0"
+      ]
+    }
+  },
+  "thresholds": {
+    "maxFullScreenClears": 1,
+    "maxDuplicateEvents": 1,
+    "maxDec2026Unbalanced": 0
+  }
+}

@@ -54,6 +54,11 @@ const argv = yargs(hideBin(process.argv))
     type: 'string',
     description:
       'Path to write the final image URI. Used for CI/CD pipeline integration.',
+  })
+  .option('prune', {
+    type: 'boolean',
+    default: true,
+    description: 'prune dangling images after the build',
   }).argv;
 
 let sandboxCommand;
@@ -105,7 +110,36 @@ if (!argv.s) {
   execSync('npm pack', { stdio: 'ignore', cwd: distDir });
 }
 
-const buildStdout = process.env.VERBOSE ? 'inherit' : 'ignore';
+// The image build is the longest step this script runs, and its output used to
+// be discarded unless VERBOSE was set: a failure surfaced as an execSync stack
+// trace with `stdout: null`, so the line that actually failed inside the
+// Dockerfile (a packaging guard, an apt failure, an OOM kill) was gone and the
+// only way to see it was to re-run the whole build by hand. CI always streams
+// it; interactive runs stay quiet but keep the output so a failure can print
+// it.
+const streamBuildOutput = Boolean(process.env.VERBOSE || process.env.CI);
+const buildStdio = streamBuildOutput ? 'inherit' : ['ignore', 'pipe', 'pipe'];
+// A non-verbose build still writes megabytes of layer progress. execSync kills
+// the child once maxBuffer is exceeded, so this has to clear a real build's
+// output by a wide margin — otherwise capturing it would itself fail the build.
+const BUILD_OUTPUT_MAX_BUFFER = 128 * 1024 * 1024;
+const BUILD_OUTPUT_TAIL_LINES = 200;
+
+function printCapturedBuildOutput(error) {
+  const captured = [error?.stdout, error?.stderr]
+    .map((stream) => stream?.toString() ?? '')
+    .join('')
+    .split('\n');
+  const tail = captured.slice(-BUILD_OUTPUT_TAIL_LINES).join('\n').trim();
+  if (!tail) return;
+  console.error(
+    `\n--- last ${BUILD_OUTPUT_TAIL_LINES} lines of ${sandboxCommand} build output ---`,
+  );
+  console.error(tail);
+  console.error(
+    '--- end of build output (set VERBOSE=true to stream it) ---\n',
+  );
+}
 
 // Determine the appropriate shell based on OS
 const isWindows = os.platform() === 'win32';
@@ -143,7 +177,11 @@ function buildImage(imageName, dockerfile) {
       `${sandboxCommand} build ${buildCommandArgs} ${
         process.env.BUILD_SANDBOX_FLAGS || ''
       } --build-arg CLI_VERSION_ARG=${npmPackageVersion} -f "${dockerfile}" -t "${finalImageName}" .`,
-      { stdio: buildStdout, shell: shellToUse },
+      {
+        stdio: buildStdio,
+        shell: shellToUse,
+        maxBuffer: BUILD_OUTPUT_MAX_BUFFER,
+      },
     );
     console.log(`built ${finalImageName}`);
 
@@ -161,6 +199,12 @@ function buildImage(imageName, dockerfile) {
       }
       writeFileSync(argv.outputFile, finalImageName);
     }
+  } catch (error) {
+    if (!streamBuildOutput && (error?.stdout || error?.stderr)) {
+      printCapturedBuildOutput(error);
+      error.message = `${sandboxCommand} build failed — output printed above`;
+    }
+    throw error;
   } finally {
     // If we created a temp file, delete it now.
     if (tempAuthFile) {
@@ -171,4 +215,6 @@ function buildImage(imageName, dockerfile) {
 
 buildImage(image, dockerFile);
 
-execSync(`${sandboxCommand} image prune -f`, { stdio: 'ignore' });
+if (argv.prune) {
+  execSync(`${sandboxCommand} image prune -f`, { stdio: 'ignore' });
+}

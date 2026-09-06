@@ -155,6 +155,7 @@ export class WebViewProvider {
   // a diff, auto-allow read/execute, or auto-reject on cancel).
   private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
+  private readonly webShellPermissionOwners = new Map<vscode.Webview, string>();
   // Track a pending ask user question request and its resolver
   private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
   private pendingAskUserQuestionResolve:
@@ -205,6 +206,11 @@ export class WebViewProvider {
     this.agentManager = new QwenAgentManager();
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
+      for (const webview of this.webShellPermissionOwners.keys()) {
+        if (webview !== this.attachedWebview) {
+          this.webShellPermissionOwners.delete(webview);
+        }
+      }
       // Panel dispose callback — unblock any pending ACP Promises
       if (this.pendingPermissionResolve) {
         this.pendingPermissionResolve('cancel');
@@ -942,6 +948,7 @@ export class WebViewProvider {
 
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
+      this.webShellPermissionOwners.delete(webview);
       this.attachedWebview = null;
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
@@ -1932,7 +1939,19 @@ export class WebViewProvider {
     message: { type: string; data?: unknown },
     webview: vscode.Webview,
   ): Promise<boolean> {
+    if (message.type === 'webShellPermissionState') {
+      const data = message.data as
+        | { pending?: unknown; requestId?: unknown }
+        | undefined;
+      if (data?.pending === true && typeof data.requestId === 'string') {
+        this.webShellPermissionOwners.set(webview, data.requestId);
+      } else {
+        this.webShellPermissionOwners.delete(webview);
+      }
+      return true;
+    }
     if (message.type === 'webShellSessionChanged') {
+      this.webShellPermissionOwners.delete(webview);
       const data = message.data as
         | { sessionId?: unknown; workspaceCwd?: unknown }
         | undefined;
@@ -1947,6 +1966,7 @@ export class WebViewProvider {
       return true;
     }
     if (message.type === 'webShellReady') {
+      this.webShellPermissionOwners.delete(webview);
       const workspaceCwd =
         (vscode.window.activeTextEditor
           ? vscode.workspace.getWorkspaceFolder(
@@ -2360,7 +2380,9 @@ export class WebViewProvider {
    * Whether there is a pending permission decision awaiting an option.
    */
   hasPendingPermission(): boolean {
-    return !!this.pendingPermissionResolve;
+    return (
+      this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
+    );
   }
 
   /** Get current ACP mode id (if known). */
@@ -2384,7 +2406,36 @@ export class WebViewProvider {
    */
   respondToPendingPermission(
     choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
+    context?: { fromDiffEditor?: boolean; permissionRequestId?: string },
   ): void {
+    // Web-shell approvals are bound to the request id stored on the managed
+    // diff. The target web shell validates that exact id again before voting,
+    // so an original file or a stale/stacked diff cannot resolve another
+    // session's approval.
+    if (
+      typeof choice === 'string' &&
+      context?.fromDiffEditor &&
+      context.permissionRequestId
+    ) {
+      const decision =
+        choice === 'accept' || choice === 'allow'
+          ? 'allow'
+          : choice === 'cancel' || choice === 'reject'
+            ? 'reject'
+            : undefined;
+      const webview = decision
+        ? Array.from(this.webShellPermissionOwners).find(
+            ([, requestId]) => requestId === context.permissionRequestId,
+          )?.[0]
+        : undefined;
+      if (webview && decision) {
+        void webview.postMessage({
+          type: 'webShellPermissionDecision',
+          data: { decision, requestId: context.permissionRequestId },
+        });
+      }
+      return;
+    }
     if (!this.pendingPermissionResolve || !this.pendingPermissionRequest) {
       return; // nothing to do
     }

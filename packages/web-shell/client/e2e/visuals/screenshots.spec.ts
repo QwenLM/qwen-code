@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
+import { devices, expect, test } from '@playwright/test';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
@@ -30,6 +30,26 @@ import {
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
+
+function createTerminalTurnErrorScenario(sessionId: string) {
+  return createWebShellDaemonScenario({
+    sessionId,
+    events: [
+      userTextEvent('Summarize the current workspace.', { id: 1 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId,
+          message:
+            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+          promptId: 'prompt-turn-error-visual',
+        },
+      },
+    ],
+  });
+}
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
@@ -62,6 +82,139 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`usage-limited goal status`, async ({ page }, testInfo) => {
+      // Seed the compatibility card together with its canonical V2 state, as
+      // emitted by both live goal updates and transcript replay.
+      const usageLimitedGoalEvent: DaemonEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-visual-usage-limited',
+                  revision: 2,
+                  objective: 'Finish the evaluation suite',
+                  status: 'usage_limited',
+                  limitKind: 'token_budget',
+                  evidenceCursor: { recordId: 'goal-visual-record' },
+                  turnCount: 4,
+                  activeTimeMs: 5000,
+                  tokensUsed: 1000,
+                  createdAt: 1234,
+                  updatedAt: 2345,
+                  lastReason: 'Token budget reached',
+                },
+              },
+              goalStatus: {
+                kind: 'aborted',
+                condition: 'Finish the evaluation suite',
+                iterations: 4,
+                durationMs: 5000,
+                lastReason: 'Token budget reached',
+              },
+            },
+          },
+        },
+      };
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Finish the evaluation suite.', { id: 1 }),
+          usageLimitedGoalEvent,
+          turnCompleteEvent('prompt-goal-usage-limited', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).toContainText('Token budget reached');
+      await captureScreenshot(page, `goal-usage-limited-${theme}`);
+    });
+
+    test(`terminal turn error`, async ({ browser, page }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const scenario = createTerminalTurnErrorScenario(
+        'turn-error-copy-visual',
+      );
+      const daemon = await installScenario(page, scenario, baseURL);
+      await gotoSession(page, scenario, daemon, theme);
+
+      const errorRow = page
+        .locator('[data-web-shell-message-row]')
+        .filter({ hasText: 'The model provider closed the response stream' });
+      const copyButton = errorRow.getByRole('button', {
+        name: 'Copy',
+        exact: true,
+      });
+      const actions = errorRow.locator('[data-web-shell-message-actions]');
+      await expect(actions).toHaveCSS('opacity', '0');
+      await copyButton.focus();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await copyButton.evaluate((button) => button.blur());
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
+
+      await page.setViewportSize({ width: 720, height: 800 });
+      await page.mouse.move(0, 0);
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
+
+      const touchContext = await browser.newContext({
+        ...devices['Pixel 7'],
+        baseURL,
+      });
+      try {
+        const touchPage = await touchContext.newPage();
+        const touchScenario = createTerminalTurnErrorScenario(
+          'turn-error-copy-touch-visual',
+        );
+        const touchDaemon = await installScenario(
+          touchPage,
+          touchScenario,
+          baseURL,
+        );
+        await gotoSession(touchPage, touchScenario, touchDaemon, theme);
+        expect(
+          await touchPage.evaluate(
+            () => window.matchMedia('(hover: none)').matches,
+          ),
+        ).toBe(true);
+        const touchErrorRow = touchPage
+          .locator('[data-web-shell-message-row]')
+          .filter({ hasText: 'The model provider closed the response stream' });
+        const touchCopyButton = touchErrorRow.getByRole('button', {
+          name: 'Copy',
+          exact: true,
+        });
+        await expect(
+          touchErrorRow.locator('[data-web-shell-message-actions]'),
+        ).toHaveCSS('opacity', '1');
+        await expect(touchCopyButton).toBeVisible();
+        await captureScreenshot(
+          touchPage,
+          `terminal-turn-error-copy-touch-${theme}`,
+        );
+      } finally {
+        await touchContext.close();
+      }
     });
 
     test(`parallel agents group`, async ({ page }, testInfo) => {

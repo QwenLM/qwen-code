@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonGitBranchesResult,
   DaemonGitBranchInfo,
@@ -30,6 +31,48 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { validateBranchName } from './GitModePopover';
 import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import styles from './BranchPickerPopover.module.css';
+
+// The daemon's stash/force pull flows chain git commands, each with its own
+// 30s budget. The stash flow's worst case is 16 of them (guards, fetch,
+// upstream check, listings, push, pull, abort, apply, list, drop, and the
+// drop-shift compensation's log + store) = 480s; size the client fetch
+// timeout above that so the request is not aborted while the daemon is
+// still restoring the repository.
+const GIT_PULL_FETCH_TIMEOUT_MS = 600_000;
+
+function daemonErrorBody(err: unknown): Record<string, unknown> | undefined {
+  if (!(err instanceof DaemonHttpError)) return undefined;
+  const body = err.body;
+  return typeof body === 'object' && body !== null
+    ? (body as Record<string, unknown>)
+    : undefined;
+}
+
+function pullRefusalCode(err: unknown): string | undefined {
+  if (!(err instanceof DaemonHttpError) || err.status !== 409) return undefined;
+  const code = daemonErrorBody(err)?.['error'];
+  return typeof code === 'string' ? code : undefined;
+}
+
+function isDirtyWorkingTreeError(err: unknown): boolean {
+  return pullRefusalCode(err) === 'dirty_working_tree';
+}
+
+// The daemon refuses to discard from a workspace below the repository root,
+// but the tree is still dirty and stashing is still viable: keep the panel
+// up (with the daemon's explanation) instead of hiding the remaining option.
+function isForceUnsupportedError(err: unknown): boolean {
+  return pullRefusalCode(err) === 'force_unsupported';
+}
+
+// The daemon's `message` is the carrier of what went wrong — git's own
+// notice, or the core's explanation of a refusal — while the SDK's error
+// message only names the route and code. Prefer the former when present.
+function pullErrorMessage(err: unknown): string {
+  const message = daemonErrorBody(err)?.['message'];
+  if (typeof message === 'string' && message.trim() !== '') return message;
+  return err instanceof Error ? err.message : String(err);
+}
 
 interface BranchPickerPopoverProps {
   open: boolean;
@@ -78,13 +121,17 @@ type TranslateFn = ReturnType<typeof useI18n>['t'];
  * Derive the per-action hints shown beside Update / Commit / Push so the user
  * can judge before clicking.
  *
- * Disabling is reserved for what git itself refuses: `git pull` during a
- * merge/rebase/cherry-pick, with unmerged entries, on a detached HEAD, or
- * without a usable upstream; `git push --set-upstream` only on a detached
- * HEAD (a push does not consult the index, so conflicts and in-progress
- * operations are shown as warnings on an enabled row). Soft states (up to
- * date, nothing to push, clean tree) only dim the row since the action is
- * still harmless.
+ * Disabling is reserved for what is provable from the local repository
+ * alone: `git pull` during a merge/rebase/cherry-pick, with unmerged
+ * entries, on a detached HEAD, or without a usable upstream; `git push` only
+ * on a detached HEAD. Whether a remote will accept a push is *not* locally
+ * decidable — the destination depends on config git itself sometimes
+ * declines to resolve (`push.default=simple` in triangular shapes),
+ * `remote.<name>.push` refspecs and forcing refspecs change the answer, and
+ * every count is a snapshot of the last fetch — so a push the counts call
+ * doomed is warned about on an enabled row, and the click surfaces git's own
+ * authoritative message. Soft states (up to date, nothing to push, clean
+ * tree) only dim the row since the action is still harmless.
  *
  * The branch listing (fetched on open) provides ahead/behind/upstream; the
  * status provides the tree counters and the in-progress operation. When the
@@ -148,21 +195,63 @@ export function deriveActionHints(
   }
 
   let push: ActionHint | undefined;
-  // Only a detached HEAD makes the daemon's `git push --set-upstream` fail;
-  // an in-progress operation or conflicts are surfaced but left clickable.
+  // The push row's *information* comes from the push destination — git's own
+  // `%(push)` answer, which may differ from the tracking upstream in
+  // triangular workflows:
+  //  - `pushTarget` resolved: its counts rule; `pushGone` means the
+  //    destination's ref is missing, so a push would create it.
+  //  - A live upstream but no `pushTarget`: git declined to name a
+  //    destination (`push.default` the branch name does not satisfy, a
+  //    `remote.<name>.push` refspec, `nothing`) and refuses some of those
+  //    pushes outright, so the upstream counts are no stand-in — say nothing
+  //    rather than dress a pull-side number as a push-side one.
+  //  - No upstream: the push publishes the branch and sets one.
+  // With no listing at all the status counters are all there is.
+  const pushKnown = head?.pushTarget !== undefined && head.pushGone !== true;
+  const pushSideUnknown =
+    head !== undefined && head.pushTarget === undefined && hasUpstream === true;
+  const pushAhead = pushKnown ? (head.pushAhead ?? 0) : ahead;
+  const pushBehind = pushKnown ? (head.pushBehind ?? 0) : behind;
+  // Only a detached HEAD disables: it is the one push failure provable from
+  // local state alone (the daemon's `--set-upstream` path refuses it).
+  // Everything the counts suggest — behind, diverged — is a last-fetch
+  // snapshot about a remote whose acceptance also depends on refspecs and
+  // reconciliation config, so those states warn on an enabled row and let
+  // git give the authoritative answer on click.
   const pushDisabled = detached;
   if (blocker) {
     push = blocker;
-  } else if (hasUpstream === false) {
-    push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
-  } else if (ahead > 0 && behind > 0) {
+  } else if (head?.pushGone === true) {
+    // The destination is known and its ref is missing: a push publishes the
+    // branch. Named ahead of the count branches so this never reads as
+    // "Nothing to push".
     push = {
-      text: t('branchPicker.hint.aheadBehind', { ahead, behind }),
+      text: t('branchPicker.hint.createsPushBranch', {
+        target: head.pushTarget ?? '',
+      }),
+      tone: 'info',
+    };
+  } else if (pushSideUnknown) {
+    // Git declined to name the destination; any number here would be a
+    // pull-side count wearing a push-side label.
+    push = undefined;
+  } else if (hasUpstream === false && !pushKnown) {
+    push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
+  } else if (pushAhead > 0 && pushBehind > 0) {
+    push = {
+      text: t('branchPicker.hint.aheadBehind', {
+        ahead: pushAhead,
+        behind: pushBehind,
+      }),
       tone: 'warning',
     };
-  } else if (ahead > 0) {
-    push = { text: `↑${ahead}`, tone: 'info' };
-  } else if (hasUpstream) {
+  } else if (pushBehind > 0) {
+    // Nothing to push and the destination is ahead: a push would be
+    // rejected as it stands, so this is a warning rather than a dim row.
+    push = { text: `↓${pushBehind}`, tone: 'warning' };
+  } else if (pushAhead > 0) {
+    push = { text: `↑${pushAhead}`, tone: 'info' };
+  } else if (hasUpstream || pushKnown) {
     push = { text: t('branchPicker.hint.nothingToPush'), tone: 'muted' };
   }
 
@@ -246,15 +335,29 @@ export function BranchPickerPopover({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const [statusType, setStatusType] = useState<'info' | 'error' | 'success'>(
-    'info',
-  );
+  const [statusType, setStatusType] = useState<
+    'info' | 'error' | 'success' | 'warning'
+  >('info');
   const [search, setSearch] = useState('');
   const [newBranchMode, setNewBranchMode] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
   const [checkoutRefMode, setCheckoutRefMode] = useState(false);
   const [checkoutRefValue, setCheckoutRefValue] = useState('');
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [pullBlocked, setPullBlocked] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Daemon explanation shown in the panel instead of the fixed blocked line
+  // when the refusal carried one worth reading — a discard the daemon
+  // refused (force_unsupported). While set, the Discard action is hidden:
+  // the daemon has declared it impossible for this workspace, so offering
+  // it again could only loop the same refusal.
+  const [pullBlockedDetail, setPullBlockedDetail] = useState<string | null>(
+    null,
+  );
+  // Whether the footer currently shows a stash-restore warning: the only
+  // signal that the user's changes sit in a stash entry, so it must survive
+  // the reopen reset below even when the pull settled while closed.
+  const stickyWarningRef = useRef(false);
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     recent: false,
     local: false,
@@ -278,24 +381,30 @@ export function BranchPickerPopover({
   const onStatusRefreshedRef = useRef(onStatusRefreshed);
   onStatusRefreshedRef.current = onStatusRefreshed;
 
-  const fetchBranches = useCallback(async () => {
-    const requestId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await ws.workspaceGitBranches(gitCwd);
-      if (requestId !== requestIdRef.current) return;
-      setData(result);
-      setListingFetchedAt(Date.now());
-    } catch (err) {
-      if (requestId !== requestIdRef.current) return;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setLoading(false);
+  // `silent` is the post-action refresh: the listing on screen is stale but
+  // usable, so the refresh must neither raise the placeholder the render gate
+  // swaps those rows for nor replace them with its own error.
+  const fetchBranches = useCallback(
+    async (silent = false) => {
+      const requestId = ++requestIdRef.current;
+      if (!silent) setLoading(true);
+      setError(null);
+      try {
+        const result = await ws.workspaceGitBranches(gitCwd);
+        if (requestId !== requestIdRef.current) return;
+        setData(result);
+        setListingFetchedAt(Date.now());
+      } catch (err) {
+        if (requestId !== requestIdRef.current || silent) return;
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
-    }
-  }, [ws, gitCwd]);
+    },
+    [ws, gitCwd],
+  );
 
   const fetchStatus = useCallback(async () => {
     const requestId = ++statusRequestIdRef.current;
@@ -312,6 +421,13 @@ export function BranchPickerPopover({
       // Keep whatever the caller passed; the hints degrade to the listing.
     }
   }, [ws, gitCwd]);
+
+  // Re-read the listing and the status together so the hints never mix a
+  // fresh listing with a pre-action tree snapshot.
+  const refreshAfterAction = useCallback(async () => {
+    await fetchBranches(true);
+    void fetchStatus();
+  }, [fetchBranches, fetchStatus]);
 
   // A status fetched for a previous workspace must not seed the next one.
   useEffect(() => {
@@ -333,7 +449,10 @@ export function BranchPickerPopover({
       setCheckoutRefMode(false);
       setNewBranchName('');
       setCheckoutRefValue('');
-      setStatusMsg(null);
+      if (!stickyWarningRef.current) setStatusMsg(null);
+      setPullBlocked(false);
+      setConfirmDiscard(false);
+      setPullBlockedDetail(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [open, fetchBranches, fetchStatus]);
@@ -355,16 +474,28 @@ export function BranchPickerPopover({
   }, [open, data, effectiveStatus, listingFetchedAt, fetchBranches]);
 
   const showStatus = useCallback(
-    (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
+    (msg: string, type: 'info' | 'error' | 'success' | 'warning' = 'info') => {
       setStatusMsg(msg);
       setStatusType(type);
+      stickyWarningRef.current = type === 'warning';
     },
     [],
   );
 
+  const clearPullPanel = useCallback(() => {
+    setPullBlocked(false);
+    setConfirmDiscard(false);
+    setPullBlockedDetail(null);
+    // The panel hides the status line while it is up; drop that stale
+    // blocked message too so a competing action starts from a clean footer.
+    setStatusMsg(null);
+    stickyWarningRef.current = false;
+  }, []);
+
   const handleCheckout = useCallback(
     async (ref: string) => {
       if (busyAction) return;
+      clearPullPanel();
       setBusyAction('checkout');
       try {
         await ws.workspaceGitCheckout(ref, gitCwd);
@@ -377,7 +508,16 @@ export function BranchPickerPopover({
         setBusyAction(null);
       }
     },
-    [ws, busyAction, gitCwd, onBranchChanged, onOpenChange, showStatus, t],
+    [
+      ws,
+      busyAction,
+      gitCwd,
+      onBranchChanged,
+      onOpenChange,
+      showStatus,
+      clearPullPanel,
+      t,
+    ],
   );
 
   const handleNewBranch = useCallback(async () => {
@@ -390,6 +530,9 @@ export function BranchPickerPopover({
       }
       return;
     }
+    // Only an actual branch creation competes with the pull panel; a
+    // rejected name leaves the resolution offer in place.
+    clearPullPanel();
     setBusyAction('newBranch');
     try {
       await ws.workspaceGitCreateBranch(newBranchName, undefined, gitCwd);
@@ -412,6 +555,7 @@ export function BranchPickerPopover({
     onBranchChanged,
     onOpenChange,
     showStatus,
+    clearPullPanel,
     t,
   ]);
 
@@ -422,6 +566,7 @@ export function BranchPickerPopover({
 
   const handlePush = useCallback(async () => {
     if (busyAction) return;
+    clearPullPanel();
     setBusyAction('push');
     try {
       const result = await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
@@ -430,25 +575,97 @@ export function BranchPickerPopover({
       onBranchChanged?.();
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
+      // A rejected push moves no local ref, so this re-read only picks up a
+      // fetch that landed elsewhere — git's message above is the authority on
+      // why. Awaited so the row spinner stays up until the re-read lands.
+      await refreshAfterAction();
     } finally {
       setBusyAction(null);
     }
-  }, [ws, busyAction, gitCwd, fetchBranches, onBranchChanged, showStatus, t]);
+  }, [
+    ws,
+    busyAction,
+    gitCwd,
+    refreshAfterAction,
+    fetchBranches,
+    onBranchChanged,
+    showStatus,
+    clearPullPanel,
+    t,
+  ]);
 
-  const handlePull = useCallback(async () => {
-    if (busyAction) return;
-    setBusyAction('pull');
-    try {
-      const result = await ws.workspaceGitPull(undefined, gitCwd);
-      showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
-      await fetchBranches();
-      onBranchChanged?.();
-    } catch (err) {
-      showStatus(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setBusyAction(null);
-    }
-  }, [ws, busyAction, gitCwd, fetchBranches, onBranchChanged, showStatus, t]);
+  const handlePull = useCallback(
+    async (opts?: { stash?: boolean; force?: boolean }) => {
+      if (busyAction) return;
+      const action = opts?.stash
+        ? 'pullStash'
+        : opts?.force
+          ? 'pullDiscard'
+          : 'pull';
+      setBusyAction(action);
+      setStatusMsg(null);
+      try {
+        const result = await ws.workspaceGitPull(
+          opts,
+          gitCwd,
+          GIT_PULL_FETCH_TIMEOUT_MS,
+        );
+        // The resolution panel stays mounted (with its button spinner) while
+        // its own action is in flight; it only closes once the pull settles.
+        clearPullPanel();
+        if (result.stashRestoreConflict) {
+          showStatus(
+            t('branchPicker.pullStashConflict', {
+              sha: result.stashSha ?? '',
+            }),
+            'warning',
+          );
+        } else if (result.stashKept) {
+          // A kept or displaced stash entry: the output is the only record
+          // of where it went, so render it sticky like the conflict case.
+          showStatus(result.output, 'warning');
+        } else {
+          showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
+        }
+        await fetchBranches();
+        onBranchChanged?.();
+      } catch (err) {
+        if (isDirtyWorkingTreeError(err)) {
+          setPullBlocked(true);
+          setConfirmDiscard(false);
+          setPullBlockedDetail(null);
+          showStatus(t('branchPicker.pullBlocked'), 'error');
+        } else if (isForceUnsupportedError(err)) {
+          setPullBlocked(true);
+          setConfirmDiscard(false);
+          setPullBlockedDetail(pullErrorMessage(err));
+          showStatus(t('branchPicker.pullBlocked'), 'error');
+        } else {
+          clearPullPanel();
+          showStatus(pullErrorMessage(err), 'error');
+        }
+        // A failed pull has usually still fetched (the force-reset shape
+        // self-heals here; a deleted upstream ref defeats the fetch itself
+        // and needs a prune). Not awaited: the resolution panel this catch
+        // just opened must not sit disabled for a listing round-trip it
+        // never needed.
+        void refreshAfterAction();
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      ws,
+      busyAction,
+      gitCwd,
+      fetchBranches,
+      refreshAfterAction,
+      onBranchChanged,
+      showStatus,
+      clearPullPanel,
+      t,
+    ],
+  );
 
   const q = search.toLowerCase().trim();
 
@@ -817,18 +1034,90 @@ export function BranchPickerPopover({
           )}
         </div>
 
-        {statusMsg && (
-          <div
-            className={`${styles.statusBar} ${
-              statusType === 'error'
-                ? styles.statusBarError
-                : statusType === 'success'
-                  ? styles.statusBarSuccess
-                  : ''
-            }`}
-          >
-            {statusMsg}
+        {pullBlocked ? (
+          <div className={styles.pullBlocked}>
+            <div className={styles.pullBlockedMessage}>
+              {pullBlockedDetail ?? t('branchPicker.pullBlocked')}
+            </div>
+            {confirmDiscard ? (
+              <>
+                <div className={styles.pullBlockedHint}>
+                  {t('branchPicker.pullDiscardConfirm')}
+                </div>
+                <div className={styles.pullBlockedActions}>
+                  <button
+                    type="button"
+                    className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
+                    disabled={!!busyAction}
+                    onClick={() => void handlePull({ force: true })}
+                  >
+                    {busyAction === 'pullDiscard' && (
+                      <Loader2Icon size={13} className={styles.spin} />
+                    )}
+                    {t('branchPicker.pullDiscardGo')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.pullBlockedButton}
+                    disabled={!!busyAction}
+                    onClick={() => setConfirmDiscard(false)}
+                  >
+                    {t('branchPicker.cancel')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className={styles.pullBlockedActions}>
+                <button
+                  type="button"
+                  className={styles.pullBlockedButton}
+                  disabled={!!busyAction}
+                  onClick={() => void handlePull({ stash: true })}
+                >
+                  {busyAction === 'pullStash' ? (
+                    <Loader2Icon size={13} className={styles.spin} />
+                  ) : (
+                    <ArrowDownToLineIcon size={13} />
+                  )}
+                  {t('branchPicker.pullStash')}
+                </button>
+                {pullBlockedDetail === null && (
+                  <button
+                    type="button"
+                    className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
+                    disabled={!!busyAction}
+                    onClick={() => setConfirmDiscard(true)}
+                  >
+                    {t('branchPicker.pullDiscard')}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={styles.pullBlockedButton}
+                  disabled={!!busyAction}
+                  onClick={() => clearPullPanel()}
+                >
+                  {t('branchPicker.cancel')}
+                </button>
+              </div>
+            )}
           </div>
+        ) : (
+          statusMsg && (
+            <div
+              className={`${styles.statusBar} ${
+                statusType === 'error'
+                  ? styles.statusBarError
+                  : statusType === 'success'
+                    ? styles.statusBarSuccess
+                    : statusType === 'warning'
+                      ? styles.statusBarWarning
+                      : ''
+              }`}
+            >
+              {statusMsg}
+            </div>
+          )
         )}
       </PopoverContent>
     </Popover>
