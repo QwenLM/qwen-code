@@ -3873,11 +3873,6 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
-          # NEW in this PR: absent from the trusted base until it merges, so
-          # a bare cp would kill every pre-merge round — same guard as the
-          # heartbeat below (af-149); the gate fails open on absence.
-          rm -rf "${RUNNER_TEMP}/count-test-surface.mjs"
-          cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs" 2> /dev/null || true
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # Absent from the trusted base until this PR merges, and this step
           # runs under -e: a hard failure here would kill every pre-merge
@@ -4045,6 +4040,22 @@ jobs:
             sleep $((attempt * 15))
           done
           git config core.hooksPath .husky
+
+      # The test-weakening gate's instrument, staged from the trusted
+      # checkout after npm ci and before the branch checkout, digested into
+      # expression context (af-111) and verified before it executes.
+      # Full rationale → qwen-autofix.md#af-157
+      - name: 'Stage trusted test-surface instrument'
+        id: 'stage_surface'
+        run: |-
+          rm -rf "${RUNNER_TEMP}/count-test-surface.mjs" "${RUNNER_TEMP}/weaken-parser"
+          cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs" 2> /dev/null || true
+          if [[ -f "${RUNNER_TEMP}/count-test-surface.mjs" ]]; then
+            mkdir -p "${RUNNER_TEMP}/weaken-parser"
+            cp node_modules/typescript/lib/typescript.js "${RUNNER_TEMP}/weaken-parser/typescript.cjs"
+            echo "weaken_counter_sha256=$(sha256sum "${RUNNER_TEMP}/count-test-surface.mjs" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+            echo "weaken_parser_sha256=$(sha256sum "${RUNNER_TEMP}/weaken-parser/typescript.cjs" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: 'Download CLI bundle'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -4741,29 +4752,15 @@ jobs:
           # Classify the live head: a round that pushes onto a fully GREEN
           # head and leaves it red introduced the red. Recorded now, charged
           # by the consecutive-failure walk later.
-          # The charge verdict counts ONLY checks outside the loop's own
-          # lanes — the canonical five-name exclusion this file's other
-          # own-lane filters use. A red auxiliary lane (review-pr, patrol,
-          # fork bridge/signal) or the loop's own failed/in-flight
-          # review-address run is the loop's business, not a regression the
-          # pushed code introduced; charging it would bill a round for a
-          # red it never authored, and an in-flight own check would hold
-          # the verdict at pending for the whole trigger family whose suite
-          # attaches to the PR head. The review-address carve-out stays at
-          # the FEEDBACK sites (N_FAILED_CHECKS / N_RED_NOW), where a
-          # failed own round genuinely is new feedback.
+          # Counts ONLY checks outside the loop's own lanes (the canonical
+          # five-name exclusion, plus the loop's own dispatch StatusContext
+          # by its exact context value — it carries no workflowName), and
+          # binds to the commit the rollup describes: a moved head reads
+          # `none`. GREEN is an ALLOWLIST, never a default: the charge-
+          # enabling verdict requires every counted check to hold a state
+          # this classifier recognises as passing, so any state it does not
+          # know (a new conclusion, a verdict that never came) is pending.
           # Full rationale → qwen-autofix.md#af-155
-          # The loop's own dispatch-pending commit status is a StatusContext,
-          # which carries no workflowName: excluded by its exact context
-          # value (never by typename, or third-party DCO/CLA statuses would
-          # stop counting), or the loop's own stamp keeps the `none` arm
-          # unreachable and an unreported head classifies green.
-          # The rollup is read live, minutes after the checkout: bind the
-          # verdict to the commit it describes, or a head pushed in between
-          # is classified under the checked-out head's name. A moved head
-          # reads `none` -- unknown, never chargeable. A check with no verdict
-          # (EXPECTED: a required context that never reported; STALE; a run
-          # that never started) is pending, never green.
           CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" '
             [ .[] | select((((.workflowName // "")
                 | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not))
@@ -4771,9 +4768,9 @@ jobs:
             | if ($c | length) == 0 then "none"
               elif any($c[]; (.conclusion // .state // "")
                 | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")) then "red"
-              elif any($c[]; ((.status // "") | IN("QUEUED", "IN_PROGRESS", "WAITING", "PENDING"))
-                or ((.conclusion // .state // "") | IN("PENDING", "", "EXPECTED", "STALE", "STARTUP_FAILURE"))) then "pending"
-              else "green" end' "${WORKDIR}/checks.json" 2> /dev/null || echo 'none')"
+              elif all($c[]; (.conclusion // .state // "")
+                | IN("SUCCESS", "NEUTRAL", "SKIPPED")) then "green"
+              else "pending" end' "${WORKDIR}/checks.json" 2> /dev/null || echo 'none')"
           case "${CHECK_STATE}" in green | red | pending | none) ;; *) CHECK_STATE='none' ;; esac
           if [[ "${ROLLUP_HEAD:-}" != "${CHECKED_OUT_HEAD}" ]]; then
             echo "🩸 #${PR}: the check rollup describes ${ROLLUP_HEAD:-<unknown>}, not the checked-out head ${CHECKED_OUT_HEAD} — head state unknown"
@@ -5417,6 +5414,8 @@ jobs:
           LD_LIBRARY_PATH: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          WEAKEN_COUNTER_SHA256: '${{ steps.stage_surface.outputs.weaken_counter_sha256 }}'
+          WEAKEN_PARSER_SHA256: '${{ steps.stage_surface.outputs.weaken_parser_sha256 }}'
           # RUNNER_TEMP, WORKDIR, and BRANCH re-enter the digest check and
           # the allowlisted child below from the step environment: a
           # $GITHUB_ENV plant points the digest oracle at a decoy runner
@@ -5532,6 +5531,8 @@ jobs:
             CI="${CI:-true}" \
             KISS_AUDIT="${KISS_AUDIT:-false}" \
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}" \
+            WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Repair deterministic rejection'
@@ -5725,6 +5726,8 @@ jobs:
           LD_LIBRARY_PATH: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          WEAKEN_COUNTER_SHA256: '${{ steps.stage_surface.outputs.weaken_counter_sha256 }}'
+          WEAKEN_PARSER_SHA256: '${{ steps.stage_surface.outputs.weaken_parser_sha256 }}'
           # RUNNER_TEMP, WORKDIR, and BRANCH re-enter the digest check and
           # the allowlisted child below from the step environment: a
           # $GITHUB_ENV plant points the digest oracle at a decoy runner
@@ -5792,6 +5795,8 @@ jobs:
             CI="${CI:-true}" \
             KISS_AUDIT="${KISS_AUDIT:-false}" \
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}" \
+            WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Finalize verification'
@@ -6514,19 +6519,17 @@ jobs:
                   | [ scan("<!-- autofix-regression round=([0-9]+) key=([^ ]+) -->") ] | .[]
                   | select(.[1] == $win) | .[0] ]
                 | unique | join(" ")' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
-              # THIS round's own observation is not in COMMENTS_JSON yet — the
-              # marker rides the report this step is still composing. Without
-              # it the newest regressing push always escapes the walk by one
-              # round, which is exactly the round that matters.
+              # THIS round's own observation rides the report this step is
+              # still composing, so it is not in COMMENTS_JSON yet — without
+              # it the newest regressing push escapes the walk by one round.
               [[ -n "${REGRESSED_ROUND:-}" ]] && REGRESSED_ROUNDS="${REGRESSED_ROUNDS} ${REGRESSED_ROUND}"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
                 if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* || "${H}" == *"deferred a stale-base refresh"* ]]; then
                   # A push that turned the checks red is not progress: it
-                  # bought the next round's work rather than reducing it, and
-                  # resetting here let a PR alternate regress/repair forever
-                  # while every brake read it as converging. The round number
-                  # is read from the headline the same report wrote it into.
+                  # bought the next round's work rather than reducing it. The
+                  # round number comes from the headline the report wrote it
+                  # into. Full rationale → qwen-autofix.md#af-155
                   H_ROUND=''
                   [[ "${H}" =~ \(round\ ([0-9]+)/ ]] && H_ROUND="${BASH_REMATCH[1]}"
                   if [[ -n "${H_ROUND}" && " ${REGRESSED_ROUNDS} " == *" ${H_ROUND} "* ]]; then

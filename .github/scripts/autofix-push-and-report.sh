@@ -590,6 +590,13 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
   # retry can advance it past the verified head, and the regression marker
   # must name what the PR now carries.
   PUSHED_HEAD="$(git rev-parse HEAD 2> /dev/null || echo '')"
+  # The premise the push marker stamps: the head state prepare classified,
+  # unless the pushed head did not start from that head -- a salvage-merged
+  # branch move or a base-conflict merge carries content prepare never
+  # classified, and an unknown premise is never green.
+  PUSH_PRE="${CHECK_STATE:-none}"
+  [[ "${PUSH_RACE_MERGED}" == 'true' ]] && PUSH_PRE='none'
+  [[ "${CONFLICT:-false}" == 'true' ]] && PUSH_PRE='none'
   {
     echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
     echo
@@ -648,10 +655,6 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     #   autofix-regression — the PRIOR round prepare found had left a green
     #                        head red. Written by whichever report this round
     #                        posts, so the record survives a later failure.
-    # A salvage-merged branch move means the pushed head did not start
-    # from the head prepare classified: the premise is unknown, never green.
-    PUSH_PRE="${CHECK_STATE:-none}"
-    [[ "${PUSH_RACE_MERGED}" == 'true' ]] && PUSH_PRE='none'
     echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
     if [[ -n "${REGRESSED_ROUND:-}" ]]; then
       echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
@@ -733,6 +736,33 @@ for attempt in 1 2 3; do
   fi
   if [[ "${attempt}" == 3 ]]; then
     echo "::error::report post failed ${attempt} times for PR #${PR}; giving up"
+    # The report is the only carrier of this round's af-155 state, and no
+    # other step re-posts the report of a round that reached this script:
+    # the handoff comment the workflow can still post is gated on an
+    # outcome that is neither `fixed` nor `noop`. So whenever THIS round
+    # authored af-155 state -- a push whose head a later round can charge,
+    # an observation it made about the PRIOR round, or both -- a
+    # marker-only note carries it. Best-effort, and deliberately not
+    # gated on the outcome: a no-op round pushes nothing, but the
+    # regression it observed is just as unrecoverable once its report is
+    # lost, because the marker it read is superseded by the next push.
+    if [[ -n "${PUSHED_HEAD:-}" || -n "${REGRESSED_ROUND:-}" ]]; then
+      {
+        if [[ -n "${PUSHED_HEAD:-}" ]]; then
+          echo "🤖 Round ${NEXT_ROUND} pushed ${PUSHED_HEAD:0:9} but its report could not be posted; this note carries the round's push record only. · 第 ${NEXT_ROUND} 轮已推送 ${PUSHED_HEAD:0:9}，但报告发布失败；本条仅记录本轮的推送标记。"
+        else
+          echo "🤖 Round ${ROUND} could not post its report; this note carries the round's regression record only. · 第 ${ROUND} 轮报告发布失败；本条仅记录本轮的回归标记。"
+        fi
+        echo
+        if [[ -n "${PUSHED_HEAD:-}" ]]; then
+          echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
+        fi
+        if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+          echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
+        fi
+      } > "${WORKDIR}/push-marker.md"
+      gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/push-marker.md" || echo "::warning::push marker fallback post failed for PR #${PR}"
+    fi
   else
     echo "::warning::report post attempt ${attempt} failed for PR #${PR}; retrying"
     sleep 10

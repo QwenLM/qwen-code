@@ -258,6 +258,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
 - [155. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-155)
 - [156. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-156)
+- [157. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-157)
 
 ---
 
@@ -4269,9 +4270,15 @@ the marker's head to the checked-out head, and the check
 rollup to the commit it describes (`headRefOid` is read in
 the same call as the rollup; a rollup for any other commit
 classifies `none`, unknown, never chargeable). A re-arm
-changes the window key and drops the whole set with it.
-Cancelled checks are not red here, matching the scan's own
-N_RED_NOW filter. The loop's own lanes are excluded wholesale
+changes the window key and drops the whole set with it. A
+head classified from a base-conflict merge or a salvage merge
+stamps `pre=none`: the pushed head did not start from the
+head prepare classified. A cancelled check is neither red
+(matching the scan's own N_RED_NOW filter) nor green: it
+classifies pending, like every other verdict-less state.
+When the push landed but the round report could not be
+posted, a marker-only comment carries the push marker, so
+the regression it may have caused can still be charged. The loop's own lanes are excluded wholesale
 by the canonical five-name filter this file's other own-lane
 filters use, plus the loop's own dispatch-pending commit
 status by its exact context value (a StatusContext carries no
@@ -4281,13 +4288,23 @@ address runs visible as feedback: a charge verdict must never
 see them (a failed own round is feedback, not a regression
 the pushed code authored, and an in-flight own check would
 hold the verdict at pending across the trigger family whose
-suite attaches to the PR head). What remains uncovered is a
-flake: a
-genuinely flaky check failing on the bot's push
-reads as a regression. The consequence is bounded on purpose
-— one regression only declines to RESET a counter that needs
-five consecutive non-progress rounds to trip, and the
-recovery is automatic, since a clean push resets it.
+suite attaches to the PR head). What remains uncovered is red the round did
+not author but cannot be distinguished from red it did: a
+genuinely flaky check failing on the bot's push, and main's
+own breakage arriving between the classification and the
+CI run, since CI reports on the merge of the pushed head
+with a main that moved. Neither is separable from here. A
+base-equality axis alongside the head one was considered and
+rejected: main moves between almost every pair of rounds, so
+requiring it would make the charge unreachable rather than
+accurate, and reading main's own health would put a second
+API dependency inside the charge. The consequence is bounded
+on purpose — one regression only declines to RESET a counter
+that needs five consecutive non-progress rounds to trip, and
+the recovery is automatic, since a clean push resets it. What
+the round itself can tell is already told: a push carrying a
+conflict or salvage merge stamps `pre=none`, because its head
+did not start from the head prepare classified.
 ```
 
 <a id="af-156"></a>
@@ -4347,4 +4364,59 @@ streak-reset needles ("deferred a stale-base refresh"): like the
 updated-a-stale-base round it defers to, the round's failure is not
 evidence about the PR, and counting it toward the cap would park a PR
 for having been reviewed at the wrong moment.
+```
+
+<a id="af-157"></a>
+
+### 157. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…
+
+In `review-address` · `Stage trusted test-surface instrument`.
+
+```text
+The test-weakening gate's instrument: the counter from the
+same trusted checkout as the gate runner, and its parser
+from the dependencies `npm ci` just installed against the
+TRUSTED lockfile — integrity-checked there, before any
+branch step runs.
+
+It is a step of its own, and it sits where it does because
+both halves have a placement constraint. The counter must
+come from the trusted checkout, so it must be staged BEFORE
+"Prepare branch and feedback" switches the working tree to
+the PR branch — a branch-supplied counter would let the code
+under test define its own measurement. The parser must come
+from node_modules, so it can only be staged AFTER "Install
+dependencies". Nothing else runs in that window, which is
+why this is not folded into the schema-gate staging step
+above.
+
+The parser is staged as a `.cjs` copy of typescript's
+single-file build rather than required from node_modules at
+gate time: the copy carries its own extension, so no
+`package.json` a later step plants beside it can change how
+Node loads it, and the digest below pins the bytes that
+actually execute.
+
+Both digests travel in expression context (the af-111
+doctrine) and the gate verifies them before the counter
+runs; a digest that does not match is tampering, and the
+gate fails the round without a retry.
+
+Absent from the trusted base implies absent on disk. This
+script is new in its PR, so the tolerant `cp` fails every
+pre-merge round — and `rm -rf` runs first so a leftover a
+same-UID run planted at the staged path on this persistent
+host cannot survive the failure and be digested as trusted
+content. `-rf`, not `-f`: the leftover can be a directory,
+whose non-zero `rm -f` exit would abort this `-e` step
+before the tolerant cp and wedge every later round on the
+host. When the counter is absent no digest is recorded and
+the gate fails open (`WEAKEN_MEASURED=false`), reporting
+that the surface could not be measured.
+
+A counter WITHOUT its parser is the one case that is not
+tolerated: the parser copy is a bare `cp` inside the
+presence branch, so a tree that has the counter but no
+installed typescript fails the step loudly instead of
+producing a round that quietly measures nothing.
 ```

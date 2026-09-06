@@ -1050,32 +1050,62 @@ fi
 # TypeScript compiler's parser over the WHOLE file, never text patterns
 # over diff lines -- so comments, strings, regex literals, JSX and line
 # breaks are the parser's business and can neither decoy nor hide a token.
-# Per file it counts statement-level assertion call chains, test/describe
-# registrations with their enabled/disabled state (every collector
-# spelling of skip/todo/fails, the x-aliases, a literal skipIf/runIf, a
-# literal options object, a body-level unconditional skip()), and bare
-# early returns ahead of a test body's assertions. The script's header is
-# the definition of record.
+# Per file it counts statement-position assertion call chains, test/
+# describe registrations with their enabled/disabled state (every collector
+# spelling of skip/todo/fails, the x-aliases, a constant skipIf/runIf or
+# options object, a body-level unconditional skip(), a disabled describe's
+# nesting), and bare early returns ahead of a test body's assertions. The
+# script's header is the definition of record. Neither the counter nor its
+# parser is the round's to choose: both are staged from the trusted base
+# (the parser installed from the base lockfile's pin) and digested there,
+# and the digests -- carried in expression context, unreachable from any
+# disk write branch code makes later -- are verified here before either
+# executes. A mismatch is tampering and rejects non-retryably; an
+# instrument that was never digested measures nothing (UNAVAILABLE below).
+# The parser is a `.cjs` copy of typescript's single-file build, so its
+# loading cannot be steered by a package.json planted beside it.
 #
 # ATTRIBUTION. Each file's round delta is tip - pre-round - main's own
-# contribution. Across a main-derived merge, main's contribution is the
-# delta from the branch's side to git's auto-merge of main's side onto it
-# (three-way, `git merge-file --ours`: a conflict resolves for the branch,
-# a modify/delete conflict keeps the branch's version, a deletion the
-# result adopted is main's); across a fast-forwarded main commit it is the
+# contribution. Across a main-derived merge (any parent from the second on
+# that origin/main reaches), main's contribution is the delta from the
+# branch's side to git's auto-merge of main's side onto it (three-way,
+# `git merge-file --ours`: a conflict resolves for the branch, a modify/
+# delete conflict keeps the branch's version, a deletion the result
+# adopted is main's); across a fast-forwarded main commit it is the
 # commit's own delta. So a weakening committed before, during, or after a
 # merge of main measures the same, an assertion moved within a file nets
 # zero whichever commit sequence produced the tip, and main's own delta
-# neither charges nor shields the round. Assertions are counted per file;
-# registrations by title, so un-skipping one test never licenses silencing
-# another, while a brand-new todo/skip registration is the round's own and
-# charges nothing.
+# neither charges nor shields the round. An event that moved nothing for
+# the file (byte-identical or absent on both sides) is not recorded.
+# `--ours` is the attribution MODEL, not a claim about how the round
+# actually resolved: a resolution that took main's side over an edit of
+# the branch's own reads as the round having made that change, which
+# over-charges and is answered by one ack entry. It is deliberate that the
+# error lands on that side -- the alternative models main's side as the
+# round's baseline, which shields a weakening instead of surfacing one --
+# and the one shape where main's side landing over the branch matters,
+# main's file surviving the round's deletion, is measured from the merge
+# base instead.
+# Assertions are counted per file; registrations by kind and title as
+# multisets, so un-skipping one test never licenses silencing another,
+# while a brand-new todo/skip registration is the round's own and charges
+# nothing. Every file is measured under ONE name end to end: a round that
+# RENAMES a test file is measured as the deletion of the old path plus a
+# new file at the new one, so the rename costs one ack entry naming the
+# old path -- deliberately fail-closed, and never silent, since whatever
+# shrank inside the destination rides into the round report as the
+# reason a maintainer reads against the diff. Following a name across a
+# round's own renames is a non-goal: it is a second rename tracker layered
+# on git's own, and every reading of it that this gate tried disagreed
+# with git in some history shape. A parentless commit in the round's
+# history is the round's own authorship, measured against the empty tree.
 #
 # SIGNALS, one entry per file, the first that applies: the file was
 # deleted (held by the baseline -- pre-round, or landed by main during the
-# round -- and absent at the tip); net assertions removed; a baseline-
-# enabled registration now disabled; net enabled registrations removed;
-# early returns added. Files are selected by NAME: `*.test.*`, `*.spec.*`,
+# round -- and absent at the tip); a baseline-enabled registration now
+# disabled; net assertions removed (an early return planted ahead of them
+# counts here: the runner then reports the test passed having asserted
+# nothing); net enabled tests removed. Files are selected by NAME: `*.test.*`, `*.spec.*`,
 # `test_*.py`, and the `tests/*.rs` / `*_test.rs` / `*_tests.rs` shapes,
 # snapshots excluded. Non-JS shapes measure a zero surface and are judged
 # by the deletion arm alone. A test surface only a runner can enumerate --
@@ -1084,71 +1114,142 @@ fi
 #
 # NOT MEASURED, by design: whether an assertion is REACHABLE (dead code, a
 # condition false in CI, a helper never called), condition-valued guards
-# (`.skipIf(cond)`, `skip(cond, reason)` -- this repository's environment-
-# guard idiom), and options carried by reference. Those are runtime facts;
-# the package test run and the bite check are the runner-backed
-# instruments, and this gate certifies only what it measures: the
-# declared surface.
+# (`.skipIf(cond)`, `skip(cond, reason)`, `if (cond) ctx.skip()` -- this
+# repository's environment-guard idiom, which the runner reports as
+# skipped), and options or collector names carried by a binding. Those are
+# runtime facts; the package test run and the bite check are the
+# runner-backed instruments, and this gate certifies only what it
+# measures: the declared surface.
 #
-# Fails OPEN on the measured signals -- a history the walk cannot read or
-# a counter that cannot run skips them with a logged UNAVAILABLE -- and
-# never on a whole-file deletion, which the pre-round->tip pair proves
-# without the walk.
+# Fails OPEN on the measured signals -- a counter or parser that is absent
+# or unverifiable, or a history the walk cannot read, skips them with a
+# logged UNAVAILABLE -- and never on a whole-file deletion or typechange,
+# which the pre-round->tip pair proves without the walk; an enumeration git
+# itself refuses fails CLOSED there, since the absence of deletions cannot
+# then be certified.
 WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/test_*.py' ':(glob)**/tests/*.rs' ':(glob)**/*_test.rs' ':(glob)**/*_tests.rs' ':(exclude,glob)**/__snapshots__/**')
 WEAKEN_COUNTER="${RUNNER_TEMP}/count-test-surface.mjs"
+WEAKEN_PARSER="${RUNNER_TEMP}/weaken-parser/typescript.cjs"
 WEAKEN_MEASURED='true'
 WEAKEN_TMP="$(mktemp -d "${RUNNER_TEMP}/weaken.XXXXXX")"
+EMPTY_TREE="$(git hash-object -t tree /dev/null)"
 # Parallel indexed arrays throughout (bash 3.2 has no associative arrays):
 # measured files and their signal text.
 WEAKENED_PATHS=()
 WEAKENED_SIGNALS=()
+# Success when ${1} exactly matches one of the remaining arguments.
+weaken_member() {
+  local f="${1}" weaken_e
+  shift
+  for weaken_e in "$@"; do
+    if [[ "${weaken_e}" == "${f}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+weaken_digest() {
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum "${1}" | cut -d' ' -f1
+  else
+    shasum -a 256 "${1}" | cut -d' ' -f1
+  fi
+}
+# The instrument's trust chain: digested at staging, present, unchanged.
+# Undigested (never staged) measures nothing; a digested instrument that is
+# now absent or changed is tampering.
+weaken_trusted() {
+  local file="${1}" expected="${2}" what="${3}" actual
+  [[ -n "${expected}" ]] || return 1
+  if [[ ! -f "${file}" ]]; then
+    echo "staged ${what} is missing although it was digested at staging (${expected})" >> "${GATE_LOG}"
+    reject_fix "staged ${what} was removed after staging" 'false' 'false'
+  fi
+  if ! actual="$(weaken_digest "${file}")"; then
+    echo "staged ${what} cannot be digested although it was digested at staging (${expected})" >> "${GATE_LOG}"
+    reject_fix "staged ${what} was made unreadable after staging" 'false' 'false'
+  fi
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "staged ${what} does not match its trusted-base digest (expected ${expected}, found ${actual})" >> "${GATE_LOG}"
+    reject_fix "staged ${what} was modified after staging" 'false' 'false'
+  fi
+  return 0
+}
+weaken_trusted "${WEAKEN_COUNTER}" "${WEAKEN_COUNTER_SHA256:-}" 'test-surface counter' || WEAKEN_MEASURED='false'
+weaken_trusted "${WEAKEN_PARSER}" "${WEAKEN_PARSER_SHA256:-}" 'test-surface parser' || WEAKEN_MEASURED='false'
 # The round's first-parent history, oldest first, each commit classified
-# once: main = an ancestor of origin/main (a fast-forwarded ride of main's
-# own commit), merge = a merge whose second parent is main-derived, own =
-# the round's authorship. Only main and merge commits are events the
+# once: main = a commit on origin/main's own FIRST-PARENT chain (a
+# fast-forwarded ride of main's own history), merge = a merge one of whose
+# parents from the second on sits on that chain, own = the round's
+# authorship, a parentless root included. Reachability alone is not
+# enough: a commit main merged in as someone's feature-branch tip is
+# reachable from origin/main while never having been main, and merging one
+# with `-s ours` would otherwise credit the round with a smaller copy of a
+# file that main never carried. Only main and merge commits are events the
 # measurement subtracts; the round's own commits are already inside
 # tip - pre-round.
 WEAKEN_COMMITS=()
 WEAKEN_KINDS=()
-[[ -f "${WEAKEN_COUNTER}" ]] || WEAKEN_MEASURED='false'
+WEAKEN_MAIN_PARENT=()
+WEAKEN_MAIN_LINE="$(git rev-list --first-parent origin/main 2> /dev/null)" || WEAKEN_MEASURED='false'
+# Success when ${1} is a commit origin/main itself has been.
+weaken_on_main_line() {
+  local weaken_sha
+  weaken_sha="$(git rev-parse -q --verify "${1}^{commit}" 2> /dev/null)" || return 1
+  grep -qxF -- "${weaken_sha}" <<< "${WEAKEN_MAIN_LINE}"
+}
 if weaken_list="$(git rev-list --first-parent --reverse "origin/${BRANCH}..${BRANCH}" 2> /dev/null)"; then
   while IFS= read -r c; do
     [[ -n "${c}" ]] || continue
-    if ! git rev-parse -q --verify "${c}^" > /dev/null 2>&1; then
-      WEAKEN_MEASURED='false'
-      break
-    fi
-    if git merge-base --is-ancestor "${c}" origin/main 2> /dev/null; then
+    weaken_kind='own'
+    weaken_mp=''
+    if weaken_on_main_line "${c}"; then
       weaken_kind='main'
-    elif git rev-parse -q --verify "${c}^2" > /dev/null 2>&1 &&
-      git merge-base --is-ancestor "${c}^2" origin/main 2> /dev/null; then
-      weaken_kind='merge'
     else
-      weaken_kind='own'
+      weaken_pi=2
+      while git rev-parse -q --verify "${c}^${weaken_pi}" > /dev/null 2>&1; do
+        if weaken_on_main_line "${c}^${weaken_pi}"; then
+          weaken_kind='merge'
+          weaken_mp="${weaken_pi}"
+          break
+        fi
+        weaken_pi=$(( weaken_pi + 1 ))
+      done
     fi
     WEAKEN_COMMITS+=("${c}")
     WEAKEN_KINDS+=("${weaken_kind}")
+    WEAKEN_MAIN_PARENT+=("${weaken_mp}")
   done <<< "${weaken_list}"
 else
   WEAKEN_MEASURED='false'
 fi
+# The first parent of ${1}, or the empty tree for a parentless root.
+weaken_parent() {
+  git rev-parse -q --verify "${1}^" 2> /dev/null || printf '%s\n' "${EMPTY_TREE}"
+}
 # Export ${1}:${2} to a file under WEAKEN_TMP named ${3}; print the file's
 # path, or nothing when the ref holds no such blob. Failure means git
 # itself failed, never an absent blob.
+# Success when ${1}:${2} is a BLOB -- a tree that took the file's name is
+# not the file, and `git cat-file -e` alone accepts one.
+weaken_is_blob() {
+  [[ "$(git cat-file -t "${1}:${2}" 2> /dev/null || true)" == 'blob' ]]
+}
 weaken_blob() {
   local ref="${1}" f="${2}" out="${WEAKEN_TMP}/${3}"
-  if git cat-file -e "${ref}:${f}" 2> /dev/null; then
+  if weaken_is_blob "${ref}" "${f}"; then
     git show "${ref}:${f}" > "${out}" 2> /dev/null || return 1
     printf '%s\n' "${out}"
   fi
 }
-# Main's side auto-merged onto the branch at merge commit ${1} for file
-# ${2}: print the blob file, or nothing when the auto-merge holds no file.
+# Main's side (parent ${3}) auto-merged onto the branch at merge commit
+# ${1} for file ${2}: print the blob file, or nothing when the auto-merge
+# holds no file.
 weaken_auto_blob() {
-  local c="${1}" f="${2}" tag="${3}" mb p1 p2 base out="${WEAKEN_TMP}/${3}.auto"
-  mb="$(git merge-base "${c}^" "${c}^2" 2> /dev/null)" || mb=''
+  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base weaken_rc=0 out="${WEAKEN_TMP}/${4}.auto"
+  mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
   p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
-  p2="$(weaken_blob "${c}^2" "${f}" "${tag}.p2")" || return 1
+  p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
   base=''
   if [[ -n "${mb}" ]]; then
     base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
@@ -1158,17 +1259,27 @@ weaken_auto_blob() {
     # stands. Deleted it: a deletion the merge result adopted is main's;
     # keeping the file (a modify/delete conflict resolved for the branch)
     # leaves the branch's version as the baseline.
-    if [[ -n "${base}" ]] && ! git cat-file -e "${c}:${f}" 2> /dev/null; then
+    if [[ -n "${base}" ]] && ! weaken_is_blob "${c}" "${f}"; then
       return 0
     fi
     [[ -n "${p1}" ]] && printf '%s\n' "${p1}"
     return 0
   fi
   if [[ -z "${p1}" ]]; then
-    # The branch holds no blob: main added the file and it lands; or the
-    # branch deleted it earlier and main's edit is a modify/delete conflict
-    # resolved for the branch's deletion.
-    [[ -z "${base}" ]] && printf '%s\n' "${p2}"
+    # The branch holds no blob. Main ADDED the file: it lands, and its whole
+    # surface is main's contribution. The branch deleted it and main edited
+    # it -- a modify/delete conflict: when the resolution kept main's
+    # version the file is back, and main's contribution is its own delta
+    # from the merge base (the second line tells the caller to compare
+    # against the base, since the branch side holds nothing); when the
+    # resolution kept the deletion main moved nothing the round can be
+    # charged or credited for, so no side is printed at all.
+    if [[ -z "${base}" ]]; then
+      printf '%s\n' "${p2}"
+    elif weaken_is_blob "${c}" "${f}"; then
+      printf '%s\n' "${p2}"
+      printf '%s\n' "${base}"
+    fi
     return 0
   fi
   if [[ -z "${base}" ]]; then
@@ -1177,25 +1288,35 @@ weaken_auto_blob() {
     printf '%s\n' "${p1}"
     return 0
   fi
-  # Conflicts resolve for the branch (--ours). Only a hard failure (binary
-  # content) leaves the output empty, and then the branch's side stands.
-  git merge-file -p --ours "${p1}" "${base}" "${p2}" > "${out}" 2> /dev/null || true
-  [[ -s "${out}" ]] || cp "${p1}" "${out}"
+  # Conflicts resolve for the branch (--ours), and git reports the number
+  # of conflicts left -- 0 here, since --ours leaves none. A hard failure
+  # is git's negative return, which the shell reports as 255 or above; the
+  # branch's side stands for it. The result's SIZE decides nothing: main
+  # emptying a test file is a legitimately empty clean merge, and reading
+  # emptiness as failure would attribute main's emptying to the round.
+  git merge-file -p --ours "${p1}" "${base}" "${p2}" > "${out}" 2> /dev/null || weaken_rc=$?
+  if (( weaken_rc > 127 )); then
+    cp "${p1}" "${out}"
+  fi
   printf '%s\n' "${out}"
 }
 # Measure file ${1}: write the manifest (tip, pre-round, and every main
-# event that touched the file) and print the counter's verdict JSON.
+# event that moved the file) and print the counter's verdict JSON. One
+# name throughout -- a round that renames a test file is measured as the
+# deletion of the old path and a new file at the new one.
 weaken_measure() {
-  local f="${1}" tag="${2}" tip pre before after events='' weaken_i c kind j=0
+  local f="${1}" tag="${2}" tip pre before after events='' weaken_i c kind mp j=0
+  local weaken_pair weaken_over
   tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
   pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
   for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
     c="${WEAKEN_COMMITS[weaken_i]}"
     kind="${WEAKEN_KINDS[weaken_i]}"
+    mp="${WEAKEN_MAIN_PARENT[weaken_i]}"
     [[ "${kind}" != 'own' ]] || continue
     # An event only where the commit moved this file relative to a parent.
     if git diff --quiet "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null &&
-      { [[ "${kind}" != 'merge' ]] || git diff --quiet "${c}^2" "${c}" -- ":(literal)${f}" 2> /dev/null; }; then
+      { [[ "${kind}" != 'merge' ]] || git diff --quiet "${c}^${mp}" "${c}" -- ":(literal)${f}" 2> /dev/null; }; then
       continue
     fi
     j=$(( j + 1 ))
@@ -1203,7 +1324,14 @@ weaken_measure() {
     if [[ "${kind}" == 'main' ]]; then
       after="$(weaken_blob "${c}" "${f}" "${tag}.e${j}.after")" || return 1
     else
-      after="$(weaken_auto_blob "${c}" "${f}" "${tag}.e${j}")" || return 1
+      weaken_pair="$(weaken_auto_blob "${c}" "${f}" "${mp}" "${tag}.e${j}")" || return 1
+      after="$(sed -n 1p <<< "${weaken_pair}")"
+      # A resolution that landed main's version over the round's deletion
+      # measures main's contribution from the MERGE BASE: the branch side
+      # holds nothing to compare against, and main's own delta is what
+      # survived into the result.
+      weaken_over="$(sed -n 2p <<< "${weaken_pair}")"
+      [[ -z "${weaken_over}" ]] || before="${weaken_over}"
     fi
     events+="$(jq -cn --arg b "${before}" --arg a "${after}" \
       '{before: (if $b == "" then null else $b end), after: (if $a == "" then null else $a end)}'),"
@@ -1213,7 +1341,19 @@ weaken_measure() {
      tip: (if $tip == "" then null else $tip end),
      pre: (if $pre == "" then null else $pre end),
      events: $events}' > "${WEAKEN_TMP}/${tag}.json" || return 1
-  node "${WEAKEN_COUNTER}" measure "${WEAKEN_TMP}/${tag}.json"
+  local weaken_out
+  weaken_out="$(WEAKEN_PARSER_FILE="${WEAKEN_PARSER}" node "${WEAKEN_COUNTER}" measure "${WEAKEN_TMP}/${tag}.json")" || return 1
+  # An exit-0 run that printed no readable verdict is a measurement
+  # FAILURE, not a verdict: read as one, its missing `baselinePresent`
+  # would say "not the round's to weaken" and silently uncharge the file
+  # while the round still reports itself measured. Every field the reader
+  # below consumes must be present and of the right type, or the caller's
+  # fail-closed arm takes the file.
+  jq -e '(.baselinePresent | type) == "boolean"
+    and (.assertions | type) == "number"
+    and (.enabled | type) == "number"
+    and (.newlyDisabled | type) == "array"' <<< "${weaken_out}" > /dev/null 2>&1 || return 1
+  printf '%s\n' "${weaken_out}"
 }
 weaken_add_file() {
   local weaken_e
@@ -1236,28 +1376,70 @@ weaken_add_diff() {
     weaken_add_file "${f}"
   done < "${WEAKEN_TMP}/list"
 }
-# Candidates: every pathspec file a non-main commit of the round moved
-# relative to a parent (a merge also lists what it moved relative to
-# main's side, so an --ours resolution that discards main's newly landed
-# test is enumerated), plus the pre-round->tip deletions, which need no
-# walk at all.
+# Candidates: every pathspec file the round's pre-round->tip pair moved at
+# all -- the authority on what the round changed, and the only arm that
+# sees a merge whose TREE equals its first parent's (`-s ours` onto main,
+# a reset that drops a pre-round commit): those move nothing per commit
+# while moving plenty end to end. A file only MAIN moved comes in here too
+# and measures to a zero delta, so the wider net costs a measurement, never
+# a verdict. The per-commit arms stay: a merge lists what it moved relative
+# to MAIN's side as well, so an --ours resolution that discards a test main
+# landed mid-round is enumerated even though the pre-round ref never held
+# it.
 WEAKEN_FILES=()
 if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
   for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
     c="${WEAKEN_COMMITS[weaken_i]}"
     [[ "${WEAKEN_KINDS[weaken_i]}" != 'main' ]] || continue
-    weaken_add_diff "${c}^" "${c}"
+    weaken_add_diff "$(weaken_parent "${c}")" "${c}"
     [[ "${WEAKEN_KINDS[weaken_i]}" == 'merge' ]] || continue
-    weaken_add_diff "${c}^2" "${c}"
+    weaken_add_diff "${c}^${WEAKEN_MAIN_PARENT[weaken_i]}" "${c}"
   done
 fi
-weaken_add_diff --diff-filter=D "origin/${BRANCH}" "${BRANCH}"
+weaken_add_diff "origin/${BRANCH}" "${BRANCH}"
+# A pre-existing test replaced by a symlink or a submodule still has a blob
+# at the tip, so the deletion arm reads the tip's MODE: anything but a
+# regular file at that path is the deletion of its surface, whatever the
+# counter would read from the link's target text. Direction matters -- a
+# symlink the round replaces with a real test file grew the surface and is
+# measured, not charged.
+weaken_tip_mode() {
+  git ls-tree "${BRANCH}" -- ":(literal)${1}" 2> /dev/null | awk '{print $1; exit}'
+}
+# Success when the round's BASELINE holds ${1} -- the pre-round ref, or any
+# main-derived event that landed it during the round. This is the baseline
+# `baselinePresent` reports, so the fail-closed arm below can never stand
+# in for the measured one on a narrower definition than it uses.
+weaken_baseline_holds() {
+  local weaken_bi
+  weaken_is_blob "origin/${BRANCH}" "${1}" && return 0
+  for (( weaken_bi = 0; weaken_bi < ${#WEAKEN_COMMITS[@]}; weaken_bi++ )); do
+    [[ "${WEAKEN_KINDS[weaken_bi]}" != 'own' ]] || continue
+    if weaken_is_blob "${WEAKEN_COMMITS[weaken_bi]}" "${1}"; then
+      return 0
+    fi
+    if [[ "${WEAKEN_KINDS[weaken_bi]}" == 'merge' ]] &&
+      weaken_is_blob "${WEAKEN_COMMITS[weaken_bi]}^${WEAKEN_MAIN_PARENT[weaken_bi]}" "${1}"; then
+      return 0
+    fi
+  done
+  return 1
+}
 if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
   for (( weaken_idx = 0; weaken_idx < ${#WEAKEN_FILES[@]}; weaken_idx++ )); do
     f="${WEAKEN_FILES[weaken_idx]}"
     if ! weaken_verdict="$(weaken_measure "${f}" "f${weaken_idx}")"; then
-      WEAKEN_MEASURED='false'
-      break
+      # The instrument could not measure THIS file -- an input the round
+      # itself authored can exhaust the parser. Fail closed for the file
+      # alone (one ack entry answers it) and keep measuring the rest of
+      # the round, rather than waiving every measured signal because one
+      # file was unreadable. A file the round's BASELINE never held has no
+      # coverage to weaken, so it is skipped rather than charged.
+      if weaken_baseline_holds "${f}"; then
+        WEAKENED_PATHS+=("${f}")
+        WEAKENED_SIGNALS+=('test surface could not be measured')
+      fi
+      continue
     fi
     weaken_baseline="$(jq -r '.baselinePresent' <<< "${weaken_verdict}" 2> /dev/null)" || weaken_baseline=''
     signal=''
@@ -1265,14 +1447,14 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
       # Not the round's to weaken: the file is its own (pre-round absent and
       # never landed by main) or main itself removed it.
       :
-    elif ! git cat-file -e "${BRANCH}:${f}" 2> /dev/null; then
+    elif [[ "$(weaken_tip_mode "${f}")" != '100644' &&
+      "$(weaken_tip_mode "${f}")" != '100755' ]]; then
       signal='test file deleted'
     else
       signal="$(jq -r '
-        if .assertions < 0 then "net \(-.assertions) assertion(s) removed"
-        elif (.newlyDisabled | length) > 0 then "\(.newlyDisabled | length) pre-existing test registration(s) disabled"
-        elif .enabled < 0 then "net \(-.enabled) enabled test registration(s) removed"
-        elif .guards > 0 then "\(.guards) early return(s) added before assertions"
+        if (.newlyDisabled | length) > 0 then "\(.newlyDisabled | length) pre-existing test registration(s) disabled"
+        elif .assertions < 0 then "net \(-.assertions) assertion(s) removed"
+        elif .enabled < 0 then "net \(-.enabled) enabled test(s) removed"
         else "" end' <<< "${weaken_verdict}" 2> /dev/null)" || signal=''
     fi
     if [[ -n "${signal}" ]]; then
@@ -1282,39 +1464,27 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
   done
 fi
 if [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
-  # UNAVAILABLE: only whole-file deletions are judged, from the explicit
-  # pre-round->tip pair. Without the walk, main's own deletion is told apart
-  # by the merge base -- main can only delete what it tracked, so freight is
-  # exactly "present at the merge base, gone from main's tip"; a test the PR
-  # itself added is in neither and stays charged. An unresolvable merge base
-  # degrades PR_BASE to origin/main above, which makes the exemption
-  # unsatisfiable: every deletion is then surfaced rather than dropped.
-  echo '🧪 test-weakening measurement UNAVAILABLE this round (history walk or counter failed) — only whole-file deletions are judged' | tee -a "${GATE_LOG}"
+  # UNAVAILABLE: only whole-file deletions and typechanges are judged, from
+  # the explicit pre-round->tip pair, and every one of them is surfaced --
+  # without the walk nothing proves that main, not the round, removed a
+  # file, and a deletion main did make is acknowledged like any other. An
+  # enumeration git refuses is a fail-closed rejection: the absence of
+  # deletions cannot be certified from nothing.
+  echo '🧪 test-weakening measurement UNAVAILABLE this round (instrument or history unreadable) — only whole-file deletions are judged' | tee -a "${GATE_LOG}"
   WEAKENED_PATHS=()
   WEAKENED_SIGNALS=()
+  if ! git diff --name-only -z --no-renames --diff-filter=DT "origin/${BRANCH}" "${BRANCH}" \
+    -- "${WEAKEN_PATHSPEC[@]}" > "${WEAKEN_TMP}/deleted" 2> /dev/null; then
+    echo 'the pre-round->tip deletion enumeration failed; the absence of test deletions cannot be certified' >> "${GATE_LOG}"
+    reject_fix 'test-weakening gate could not enumerate whole-file deletions; refusing to certify their absence'
+  fi
   while IFS= read -r -d '' f; do
     [[ -n "${f}" ]] || continue
-    if git cat-file -e "${PR_BASE}:${f}" 2> /dev/null &&
-      ! git cat-file -e "origin/main:${f}" 2> /dev/null; then
-      continue
-    fi
     WEAKENED_PATHS+=("${f}")
     WEAKENED_SIGNALS+=('test file deleted')
-  done < <(git diff --name-only -z --no-renames --diff-filter=D "origin/${BRANCH}" "${BRANCH}" \
-    -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+  done < "${WEAKEN_TMP}/deleted"
 fi
 rm -rf "${WEAKEN_TMP}"
-# Success when ${1} exactly matches one of the remaining arguments.
-weaken_member() {
-  local f="${1}" weaken_e
-  shift
-  for weaken_e in "$@"; do
-    if [[ "${weaken_e}" == "${f}" ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
 if (( ${#WEAKENED_PATHS[@]} > 0 )); then
   # The acknowledgement is the agent's own machine-readable claim, held to
   # the same shape rules as deferred-findings.json: an array, a string path,

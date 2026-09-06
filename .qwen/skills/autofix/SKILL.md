@@ -487,18 +487,26 @@ Two boundaries hold regardless of what any feedback asks for:
   say-so: it is sound only when the pinned behavior itself is wrong (show the
   probe that proves the correct behavior) or the coverage demonstrably
   survives in a named surviving test. State that evidence in the summary AND
-  record it machine-readably: the gate parses every pre-existing test file
-  (by name: `*.test.*`, `*.spec.*`, `test_*.py`, Rust test-file shapes) and
+  record it machine-readably: the gate parses every pre-existing
+  JavaScript/TypeScript test file (by name: `*.test.*`, `*.spec.*`) and
   REJECTS the round when its declared test surface shrank — the file was
   deleted, statement-level assertions were removed, a test or describe that
   was enabled is now disabled by any spelling (`.skip`/`.todo`/`.fails`,
-  `xit`, a literal `skipIf(true)`/`runIf(false)`, `{ skip: true }`, a
-  body-level `skip()`/`ctx.skip()`), enabled registrations were removed, or
-  a bare early `return` was added ahead of a test's assertions — unless each
+  `xit`, a constant `skipIf(true)`/`runIf(false)`, `{ skip: true }` or any
+  truthy constant, an unconditional body-level `skip()`/`ctx.skip()`, a
+  wrapping `describe.skip`), or enabled tests were removed — an early
+  `return` planted ahead of a test's assertions counts as removing them —
+  unless each
   such file is named in `<workdir>/test-weakening.json`, a JSON array of
   `{"path": "<file>", "reason": "<evidence>"}` whose reason is at least 40
-  characters. Condition-valued environment guards (`.skipIf(cond)`,
-  `skip(cond, reason)`), snapshot churn, and a brand-new `it.todo` are not
+  characters. The Python and Rust test-file shapes (`test_*.py`,
+  `tests/*.rs`, `*_test.rs`, `*_tests.rs`) are watched for DELETION alone —
+  their contents are not parsed, so only the file-deleted signal can charge
+  them. RENAMING a test file counts as deleting the old path: record
+  one entry naming it, with the new path as the evidence. Condition-valued
+  environment guards (`.skipIf(cond)`, `skip(cond, reason)`,
+  `if (cond) ctx.skip()`), snapshot churn, and a brand-new `it.todo` are
+  not
   weakening and need no entry; an assertion moved WITHIN a file nets zero
   and needs none either, while one moved to another file does (name its new
   home as the evidence). Main's own changes crossing a merge are attributed
