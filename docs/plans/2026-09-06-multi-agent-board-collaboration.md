@@ -1,7 +1,8 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: Design settled — ready to implement
+> Status: Design settled; implementation started and **not yet reconciled with this document** (§5.1)
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
+> Verification: **none of the landed code has ever been executed** — see §0.2 before building on it
 > Supersedes the Agent-Team-first direction in [`2026-09-06-agent-team-webshell-gap.md`](./2026-09-06-agent-team-webshell-gap.md) §6
 > Related: #9402 (board storage), #10078 (session boundary), #10247 §5, #11072, #11140
 
@@ -37,6 +38,42 @@ Qwen Code does not have that limitation. `resumeBackgroundAgent`
 **running** agent via `registry.queueMessage`. So this design takes the durable,
 observable, shared-thread model *and* keeps mid-run steering — better than either
 Agent Team or Multica alone on the axis each of them loses.
+
+### 0.2 What is verified, and what is not
+
+Read this before treating anything below as established.
+
+**Verified by reading source.** Every claim about Qwen Code and Multica carries
+a `file:line`. Those were read directly, at the baseline commit above for Qwen
+Code and at `multica-ai/multica@7a438bd5b` for Multica. The reuse table in §1 is
+the load-bearing one: if `resumeBackgroundAgent` does not queue into a running
+agent, or the runtime has no auto-compaction, decisions 9 and 6 collapse.
+Re-check those two first.
+
+**Not verified — never run.** The code on this branch
+(`packages/core/src/agents/mesh/`) has never been built, type-checked, or
+executed. It was written against the conventions of `cronTasksFile.ts` and the
+team modules and reviewed by eye. Its tests have not been run. Treat it as a
+detailed proposal in TypeScript, not as a working foundation: expect type errors
+and expect the first real run to find wrong assumptions about the store and lock
+helpers.
+
+The reason is an environment constraint, not an oversight — builds and test
+sweeps are not run on this machine. CI on PR #11072 is the first thing that will
+have executed any of it.
+
+**Never prototyped end to end.** No agent has been launched, no thread has been
+dispatched, no prompt in §6 has been sent to a model. The dispatch rules in §4
+are reasoned from Multica's and Agent Team's failure modes, not from observed
+behaviour of this system.
+
+**How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
+and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
+`server/internal/daemon/wakeup.go`, and `server/internal/handler/comment.go`.
+Line numbers drift; the symbols (`PriorSessionID`, `taskWakeupLoop`,
+`ReasonAlreadyActive`, `decidePostMergeMiss`) do not. An earlier version of this
+design was wrong about Multica precisely because it reasoned from the docs
+rather than these files — argue from the symbols, not from the marketing pages.
 
 ## 1. Execution model
 
@@ -214,7 +251,7 @@ Landed on this branch (storage and rules; nothing starts an agent yet):
 | `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure |
 | `core/src/agents/mesh/thread-actions.ts` | `postMessage` — append and book under one lock |
 
-### Changes the settled decisions require in that code
+### 5.1 Changes the settled decisions require in that code
 
 1. `types.ts` — add `blocked` to `ThreadStatus`; add `parentThreadId`,
    `rootThreadId`, `tokensUsed`, `firstDispatchedAt` to `Thread`; add `attempts`
@@ -228,6 +265,42 @@ Landed on this branch (storage and rules; nothing starts an agent yet):
    `maxConcurrentRuns` and `agentConcurrencyLimit`.
 4. `thread-actions.ts` — charge tokens from each run's stats delta; reset only
    the turn counter on a human post.
+
+### 5.2 Order of work
+
+Dependencies, not preferences. Each step is testable before the next begins.
+
+1. **Reconcile the landed code with §2** (the four changes in §5.1). Until this
+   is done the rules on disk contradict the decisions here.
+2. **Read-only shell allowlist** — decisions 2 and 3 gate everything an agent
+   may do, and the launcher needs it.
+3. **Programmatic agent launcher**, extracted from the `agent` tool's teammate
+   path. First point where a persona'd agent can be started outside a model
+   turn; verifiable on its own.
+4. **Thread tools** with ambient thread scoping (§6). Needs 3 to have something
+   to run inside.
+5. **Dispatcher and sweeper**, including host-session keepalive. Needs 1, 3, 4.
+   This is where the design stops being provable by unit test.
+6. **REST routes** over the store and the dispatcher.
+7. **Web Shell**: roster, thread list, thread view, run transcripts; absorb
+   #11140's sidebar entry.
+8. **Channel notifications** for the four events. Last because it is additive
+   and needs a configured channel to demonstrate.
+
+Steps 1-4 are unit-testable. Step 5 needs a live model to prove; steps 6-8 need
+the daemon and a browser.
+
+### 5.3 Acceptance
+
+Unit coverage is expected for: the dispatch decision table (all twelve outcomes,
+§4), mention parsing, budget arithmetic including the sub-thread sharing rule
+(17), the store's validation and locking, prompt assembly including first-entry
+truncation, and ambient thread scoping refusing a model-supplied id.
+
+Beyond unit tests, the design is only proven by the §8 demo run against a live
+model, plus two negative cases that must be shown deliberately rather than
+assumed: a ping-pong tripping the turn gate, and a run killed mid-flight being
+revived and continued by the sweeper.
 
 Still to build:
 
