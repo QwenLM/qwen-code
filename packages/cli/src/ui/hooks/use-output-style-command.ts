@@ -5,11 +5,10 @@
  */
 
 import { useState, useCallback, useRef } from 'react';
-import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
-import {
-  BUILT_IN_OUTPUT_STYLES,
-  createDebugLogger,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
+import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core/core/output-styles.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
