@@ -82,6 +82,13 @@ export interface OpenTuiAppProps {
   /** Runtime sidecar, created by the entry and passed straight through. */
   runtime?: OpenTuiRuntime;
   extensionRefreshState?: ExtensionRefreshState;
+  /**
+   * Dialog auto-opened at boot (U-6). Ink auto-opens the auth dialog from the
+   * unauthenticated initial state (useAuth) and the one-shot startup
+   * authError (useInitializationAuthError); here the entry computes that once
+   * and every later setDialog stays slash-dispatch owned.
+   */
+  initialDialog?: OpenTuiDialogRequest | null;
 
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
@@ -191,7 +198,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onRenderError,
   } = props;
 
-  const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(null);
+  const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
+    props.initialDialog ?? null,
+  );
   const [noticeText, setNoticeText] = useState<string | null>(null);
   const [commandList, setCommandList] = useState<readonly SlashCommand[]>(
     commands ?? [],

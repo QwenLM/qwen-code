@@ -332,6 +332,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiAuthDialog
           config={config}
           settings={settings}
+          initialError={request.initialError}
           onClose={onClose}
           notify={notify}
         />

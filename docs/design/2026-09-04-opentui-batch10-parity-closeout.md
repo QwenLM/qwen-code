@@ -197,6 +197,37 @@ wiring), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (steer
 recording), U-11 (queue separator decision), U-13 (landed — Decision 5).
 Each lands as its own commit in this PR with its decision recorded here.
 
+## Decision 8 — U-6/G-1: the auth auto-open trigger
+
+The registered "the entry receives no initialization result" shrank again on
+inspection: ink's `InitializationResult.shouldOpenAuthDialog` is dead in
+production code. The dialog's boot auto-open is exactly two triggers —
+`config.getAuthType() === undefined` (useAuth's `isAuthDialogOpen` initial
+state) and the one-shot startup `authError` (`useInitializationAuthError`) —
+so the entry computes that once at boot and hands the shell an
+`initialDialog` request (`{ dialog: 'auth', initialError? }`, an additive
+extension of the auth variant of `OpenTuiDialogRequest`). The shell seeds its
+`dialog` state from it; every later `setDialog` stays slash-dispatch owned.
+The auth dialog seeds its existing local error surface with `initialError`,
+so a failed startup login opens showing the message ink shows, while the
+no-provider open carries no error (same as ink). One-shot semantics hold by
+construction: the request is computed once before the renderer exists, not in
+a re-rendering hook.
+
+The wiring's first test run also exposed two latent regressions of the U-31
+commit: the entry-test's mock config lacked `initialize`, so
+`ensureConfigInitialized`'s synchronous `config.initialize()` call threw
+before the runtime sidecar — both fallback-contract tests had been failing
+since `f6213a18cd` (the 138-test verification ran four files but not this
+one).
+
+Coverage: unit-only. The three boot shapes (unauthenticated → open without an
+error; startup authError → open with the message; authenticated → no
+auto-open) are pinned by asserting the rendered element tree in
+`start-opentui-ui.test.tsx` — 70 tests across the five touched files, plus
+typecheck and eslint clean. No real-terminal boot scenario was exercised;
+the dialog's own flows are covered by the existing dialogs-auth suite.
+
 ## Coverage boundary
 
 Verified on the final state (both legs, `QWEN_CODE_LANG=en`):

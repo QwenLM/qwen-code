@@ -72,6 +72,7 @@ import { setUpdateHandler } from '../handleAutoUpdate.js';
 import { useLogger } from '../hooks/useLogger.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
@@ -101,6 +102,8 @@ interface OpenTuiEntryAppProps {
   extensionRefreshState?: ExtensionRefreshState;
   /** Decoded early-captured keystrokes; injected into the composer once. */
   capturedText: string;
+  /** Boot-computed auth auto-open request (U-6); null when none. */
+  initialDialog: OpenTuiDialogRequest | null;
 }
 
 function OpenTuiEntryApp({
@@ -110,6 +113,7 @@ function OpenTuiEntryApp({
   startupWarnings,
   extensionRefreshState,
   capturedText,
+  initialDialog,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
   const { stats, startNewSession } = useSessionStats();
@@ -269,6 +273,7 @@ function OpenTuiEntryApp({
       getSessionStats={getSessionStats}
       runtime={runtime}
       extensionRefreshState={extensionRefreshState}
+      initialDialog={initialDialog}
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
@@ -300,7 +305,7 @@ export async function startOpenTuiUI(
   settings: LoadedSettings,
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
-  _initializationResult: InitializationResult,
+  initializationResult: InitializationResult,
   options: StartOpenTuiUIOptions = {},
 ): Promise<boolean> {
   let renderer: CliRenderer;
@@ -343,6 +348,18 @@ export async function startOpenTuiUI(
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
 
+    // U-6: ink's boot auto-open is "unauthenticated" (useAuth initial state)
+    // plus the one-shot startup authError (useInitializationAuthError);
+    // shouldOpenAuthDialog is never read in ink's production code, so the
+    // behavior contract is exactly these two.
+    const initialDialog: OpenTuiDialogRequest | null =
+      initializationResult.authError || config.getAuthType() === undefined
+        ? {
+            dialog: 'auth',
+            initialError: initializationResult.authError ?? undefined,
+          }
+        : null;
+
     root.render(
       // children must sit in the props object: the provider declares it as a
       // required prop, which createElement's rest-children overloads can't fill.
@@ -357,6 +374,7 @@ export async function startOpenTuiUI(
             startupWarnings={startupWarnings}
             extensionRefreshState={options.extensionRefreshState}
             capturedText={capturedText}
+            initialDialog={initialDialog}
           />
         ),
       }),

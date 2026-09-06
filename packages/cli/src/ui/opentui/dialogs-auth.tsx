@@ -763,6 +763,9 @@ type AuthDialogProps = {
   onClose: () => void;
   /** Append a command-style message to the chat history (success feedback). */
   notify?: (text: string) => void;
+  /** Startup auth failure surfaced by the auto-open (U-6); null when the
+   * dialog opened because no auth type is configured. */
+  initialError?: string;
 };
 
 export function OpenTuiAuthDialog(props: AuthDialogProps) {
@@ -787,8 +790,11 @@ function AuthDialogFlow({
   settings,
   onClose,
   notify,
+  initialError,
 }: AuthDialogProps & { config: Config }) {
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(
+    initialError ?? null,
+  );
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
   const [mainIndex, setMainIndex] = useState<number | null>(null);
