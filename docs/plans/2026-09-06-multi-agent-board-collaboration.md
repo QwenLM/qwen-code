@@ -779,6 +779,54 @@ difference, not a backlog.
 steering, guardrails — the target reaches roughly 80%**, which is the part that
 was actually asked for. The implementation is still only at §5.2 step 1.
 
+### 7.1 Relationship to the Agent Board (#9402)
+
+The Agent Board and this subsystem both store shared work items as locked JSON
+files, both have an owner, a status, and a question/answer flow, and both were
+written by the same author within a month. They are nonetheless different
+layers, and the difference is structural, not cosmetic:
+
+| | Agent Board (#9402) | Mesh threads (this design) |
+| --- | --- | --- |
+| Who participates | any process that can run `qwen board` — Codex, shell scripts, cron | agents Qwen Code hosts itself, on the background-agent layer |
+| Actor identity | `--as <label>`, recorded, not authenticated (`board-lock.ts`, user doc) | derived from the ambient run; never model- or caller-supplied (§6) |
+| Delivery | pull: a participant sees work only when it reads the board | push: admission books a run, the dispatcher wakes the body (§4) |
+| Storage scope | global named boards, `~/.qwen/boards/<board>/` | one workspace, `~/.qwen/tmp/<project-hash>/mesh/` (§3) |
+| Roster, launcher, wake, budgets, provenance, sequences, outbox | none by design (its PR body lists each as absent) | all present (§2, §3) |
+| Question flow | `ask` with TTL and exit codes; any label may answer | `thread_block` ends the run; a person answers; aggregate status (§4) |
+| Item model | task `pending → in_progress → completed`, `notes[]`; asks `open/answered/declined/timeout` | thread `open → in_progress → blocked/in_review → done`, sequenced messages, runs |
+
+The Board is a **passive interoperability surface for processes Qwen Code
+does not host**. The mesh is an **active collaboration runtime for agents it
+does host**. Making one the storage of the other fails in both directions:
+
+- *Board as the thread store* would force label actors, global boards, and
+  no sequences or outbox onto the mesh — every property §3 and §6 exist to
+  provide. Not viable without rewriting the Board into the mesh store.
+- *Mesh as the Board* would require Codex or a shell script to speak the
+  mesh REST surface (§5.2 step 9) and be admitted as a *runtime*. That is
+  exactly §9.12, and it is a v2 question, not a v1 storage choice.
+
+**Decision for v1: separate, with the convergence path fixed now.**
+
+1. The two stores stay separate. Neither imports the other. The user-facing
+   names stay distinct: *board* is the foreign-process surface, *threads*
+   (with *agents*) is the orchestrated one. Do not call mesh threads a board.
+2. The Board does not ship as a standalone user surface while this design is
+   in flight. Its own PR body already says a standalone merge needs a concrete
+   native consumer; the mesh is not that consumer in v1.
+3. If §9.12 is answered *runtime is first-class*, the v2 foreign-runtime
+   claimer — a process that claims mesh runs through REST — replaces the
+   Board's use case, and the Board's `claim / done / ask / answer` CLI is the
+   natural shape of that claimer's command surface. The Board's code is then
+   the seed of a runtime adapter, not a parallel store.
+4. If §9.12 is answered *no*, the Board remains the only way a non-hosted
+   process shares work, and the single integration point is a bridge agent: a
+   mesh agent whose body polls a board. That bridge is out of scope for v1.
+
+Until §9.12 is decided, step 3 builds the mesh store as designed and takes
+nothing from `packages/core/src/agents/team/board-*.ts`.
+
 ## 8. Demo
 
 Two agents investigating a real problem, with a person steering.

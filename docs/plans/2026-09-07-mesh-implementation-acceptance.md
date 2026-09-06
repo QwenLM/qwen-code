@@ -82,7 +82,7 @@ Evidence: the channel transcript.
 
 Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, definition read at revive only.
 
-One more decision that predates all of these: the relationship between this subsystem and the agent board in #9402. Both are filesystem-backed shared work items under the runtime dir with per-item locks. Decide before step 3 whether the board becomes the thread store, the thread store supersedes the board, or they stay separate with a documented reason. Two stores for the same concept is the outcome to avoid.
+The relationship to the Agent Board (#9402) is now recorded in the design's §7.1: separate stores in v1, distinct names, no imports from `board-*.ts` in step 3, and a convergence path that depends on §9.12 (runtime as a first-class concept). What remains the owner's call is §9.12 itself.
 
 ## 4. Working in one PR
 
