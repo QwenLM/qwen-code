@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 async function loadExportApi() {
   try {
@@ -34,8 +35,6 @@ Usage:
 
 Notes:
   - Input JSONL is expected to contain one ChatRecord per line.
-  - The legacy exported JSONL shape is also accepted when source ChatRecords
-    are unavailable.
 `;
   console.error(message.trimEnd());
   process.exit(exitCode);
@@ -55,7 +54,7 @@ function parseArgs(argv) {
   return { input: args[0] ?? null, output };
 }
 
-async function readJsonlObjects(inputPath) {
+export async function readJsonlObjects(inputPath) {
   const input =
     inputPath === '-'
       ? process.stdin
@@ -77,7 +76,7 @@ async function readJsonlObjects(inputPath) {
   return objects;
 }
 
-function looksLikeChatRecord(value) {
+export function looksLikeChatRecord(value) {
   return (
     value !== null &&
     typeof value === 'object' &&
@@ -91,7 +90,7 @@ function looksLikeChatRecord(value) {
   );
 }
 
-function looksLikeExportJsonl(objects) {
+export function looksLikeExportJsonl(objects) {
   const first = objects[0];
   return (
     first !== null &&
@@ -127,15 +126,6 @@ async function buildProductSessionData(records, collectSessionMetadata) {
   };
 }
 
-function buildLegacySessionData(objects) {
-  const [metadata, ...messages] = objects;
-  return {
-    sessionId: metadata.sessionId,
-    startTime: metadata.startTime,
-    messages,
-  };
-}
-
 function defaultOutPath(inputPath) {
   if (inputPath === '-') return path.resolve(process.cwd(), 'export.html');
   const directory = path.dirname(inputPath);
@@ -143,36 +133,66 @@ function defaultOutPath(inputPath) {
   return path.resolve(directory, `${basename}.html`);
 }
 
+/**
+ * The input gate. Legacy exported JSONL is rejected rather than rendered: it
+ * has already been through a renderer once, so feeding it back in would put
+ * previously-rendered markup on the page without passing the export API's
+ * document allowlist. Source ChatRecords are the only shape that goes through
+ * that allowlist, so they are the only shape accepted.
+ */
+export function selectChatRecords(objects) {
+  if (objects.length === 0) throw new Error('Input JSONL is empty.');
+
+  if (looksLikeExportJsonl(objects)) {
+    throw new Error(
+      'Legacy exported JSONL cannot be rendered safely; provide source ChatRecord JSONL.',
+    );
+  }
+  const records = objects.filter(looksLikeChatRecord);
+  if (records.length === 0) {
+    throw new Error(
+      'Unrecognized JSONL format (expected ChatRecord-per-line).',
+    );
+  }
+  return records;
+}
+
+/**
+ * Render accepted records to HTML. `api` is the `@qwen-code/qwen-code/export`
+ * module, taken as an argument so a caller can supply it — the real one comes
+ * from `loadExportApi()`, which needs built CLI output.
+ */
+export async function renderHtmlFromObjects(objects, api) {
+  const records = selectChatRecords(objects);
+  const sessionData = await buildProductSessionData(
+    records,
+    api.collectSessionMetadata,
+  );
+  return api.toHtml(sessionData, records);
+}
+
 async function main() {
-  const { collectSessionMetadata, toHtml } = await loadExportApi();
+  const api = await loadExportApi();
   const { input, output } = parseArgs(process.argv);
   if (!input) printUsage(1);
 
   const objects = await readJsonlObjects(input);
-  if (objects.length === 0) throw new Error('Input JSONL is empty.');
-
-  let sessionData;
-  let records;
-  if (looksLikeExportJsonl(objects)) {
-    sessionData = buildLegacySessionData(objects);
-  } else {
-    records = objects.filter(looksLikeChatRecord);
-    if (records.length === 0) {
-      throw new Error(
-        'Unrecognized JSONL format (expected ChatRecord-per-line).',
-      );
-    }
-    sessionData = await buildProductSessionData(records, collectSessionMetadata);
-  }
-
-  const html = toHtml(sessionData, records);
+  const html = await renderHtmlFromObjects(objects, api);
   const outputPath = output ? path.resolve(output) : defaultOutPath(input);
   await fsp.mkdir(path.dirname(outputPath), { recursive: true });
   await fsp.writeFile(outputPath, html, 'utf8');
   console.log(`Wrote HTML export to: ${outputPath}`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+// Only run when invoked as the CLI. Importing this module (the test does)
+// must not execute a render or touch process state.
+const invokedDirectly =
+  typeof process.argv[1] === 'string' &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

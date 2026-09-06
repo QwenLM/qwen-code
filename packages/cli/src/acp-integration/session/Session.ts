@@ -181,6 +181,11 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_DISPOSED,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
   ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
@@ -558,6 +563,12 @@ type RunToolResult = {
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  /**
+   * A tool in this batch asked to end the turn once its result is recorded.
+   * Mirrors `ToolResult.terminateTurn`, which today only `update_goal` sets
+   * when verification or evidence checkpointing needs a turn boundary.
+   */
+  terminateTurn?: boolean;
 };
 
 type MidTurnDrainResult = {
@@ -2542,7 +2553,11 @@ export class Session implements SessionContext {
       // goal hangs in `claimGoalTurn` behind the leaked permit. Settling is
       // safe to repeat -- it no-ops once the permit is no longer current,
       // and it swallows its own errors.
-      await this.#settleGoalTurn(turn, undefined, true);
+      await this.#settleGoalTurn(
+        turn,
+        undefined,
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.warn(
         `ACP Goal turn failed: ${
           error instanceof Error ? error.message : String(error)
@@ -2582,7 +2597,7 @@ export class Session implements SessionContext {
   async #settleGoalTurn(
     turn: AcpGoalTurn,
     result: PromptResponse | undefined,
-    failed: boolean,
+    failureMessage: string | undefined,
   ): Promise<void> {
     try {
       const runtime = await this.config.getGoalRuntimeReady();
@@ -2591,14 +2606,28 @@ export class Session implements SessionContext {
       }
       if (!turn.modelStarted) {
         if (
-          turn.controller.signal.reason === USER_CANCEL_ABORT_REASON &&
+          (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+            turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON) &&
           runtime.getSnapshot().goal?.status === 'active'
         ) {
-          await runtime.dispatch({
-            action: 'pause',
-            expectedGoalId: turn.permit.goalId,
-            expectedRevision: turn.permit.revision,
-          });
+          try {
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: turn.permit.goalId,
+              expectedRevision: turn.permit.revision,
+              reason:
+                turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+                  ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                  : GOAL_PAUSE_REASON_USER_INTERRUPT,
+            });
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to record pre-model ACP Goal turn settlement: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            await runtime.releaseTurn(turn.turnKey, { requeue: false });
+          }
         } else {
           await runtime.releaseTurn(turn.turnKey);
         }
@@ -2634,25 +2663,39 @@ export class Session implements SessionContext {
       // landed, and the paused branch silently stops the autonomous loop.
       const supersededByNewPrompt =
         turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON;
-      const shouldPause =
-        !supersededByNewPrompt &&
-        (failed ||
-          result?.stopReason === 'max_tokens' ||
-          cancelledByUser ||
-          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+      // One list, not two: the cause that decides whether to pause is the same
+      // cause that names the pause. Enumerating them separately means a fifth
+      // cause can compile, pause correctly, and fall through to the failure
+      // arm -- mislabelling the stop in the journal, the `_meta.goalState`
+      // update and the card, with no test able to see it.
+      const pauseReason = supersededByNewPrompt
+        ? undefined
+        : cancelledByUser
+          ? GOAL_PAUSE_REASON_USER_INTERRUPT
+          : result?.stopReason === 'max_tokens'
+            ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
+            : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+              ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+              : failureMessage !== undefined
+                ? goalPauseReasonForFailure(failureMessage)
+                : undefined;
       // Same latched-write-failure hazard as the flush above, one step later:
       // `pause` and `finishTurn` both persist through
       // `appendRecordStrict`, which re-throws the latched failure forever.
       // Letting that escape would leave `currentPermit` set and the runtime
-      // `running`, so no continuation is ever scheduled again and every later
-      // prompt hangs in `claimGoalTurn`. Fall back to `releaseTurn`, which is
-      // in-memory only, so the loop survives the already-degraded session.
+      // `running`, so every later prompt hangs in `claimGoalTurn`. Fall back
+      // to the in-memory-only `releaseTurn`; a turn that was meant to pause
+      // must not be requeued when persisting that pause fails.
       try {
-        if (shouldPause && runtime.getSnapshot().goal?.status === 'active') {
+        if (
+          pauseReason !== undefined &&
+          runtime.getSnapshot().goal?.status === 'active'
+        ) {
           await runtime.dispatch({
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            reason: pauseReason,
           });
           return;
         }
@@ -2663,7 +2706,11 @@ export class Session implements SessionContext {
             error instanceof Error ? error.message : String(error)
           }`,
         );
-        await runtime.releaseTurn(turn.turnKey);
+        if (pauseReason !== undefined) {
+          await runtime.releaseTurn(turn.turnKey, { requeue: false });
+        } else {
+          await runtime.releaseTurn(turn.turnKey);
+        }
       }
     } catch (error) {
       debugLogger.warn(
@@ -2690,6 +2737,7 @@ export class Session implements SessionContext {
         action: 'pause',
         expectedGoalId: goal.goalId,
         expectedRevision: goal.revision,
+        reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
       });
     } catch (error) {
       debugLogger.warn(
@@ -4314,7 +4362,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getLlmClient()!.getChat();
+    const llmClient = this.config.getLlmClient()!;
+    const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -4328,7 +4377,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -4383,7 +4432,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
+    this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -4416,14 +4465,18 @@ export class Session implements SessionContext {
     }
 
     this.todoStopGuard.suspend();
+    const abortReason =
+      this.closing || this.disposed
+        ? SESSION_DISPOSE_ABORT_REASON
+        : USER_CANCEL_ABORT_REASON;
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
+      this.pendingPrompt.abort(abortReason);
       this.pendingPrompt = null;
     }
 
     for (const turn of queuedGoalTurns) {
-      turn.controller.abort(USER_CANCEL_ABORT_REASON);
+      turn.controller.abort(abortReason);
     }
 
     // Cancel any in-progress cron execution
@@ -4456,6 +4509,10 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: queuedGoalTurn.permit.goalId,
             expectedRevision: queuedGoalTurn.permit.revision,
+            reason:
+              abortReason === SESSION_DISPOSE_ABORT_REASON
+                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                : GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         }
       } catch (error) {
@@ -4790,7 +4847,7 @@ export class Session implements SessionContext {
 
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
-    let promptFailed = false;
+    let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
       const result = await this.#executePrompt(
@@ -4858,7 +4915,8 @@ export class Session implements SessionContext {
       }
       return completedResult;
     } catch (error) {
-      promptFailed = true;
+      promptFailureMessage =
+        error instanceof Error ? error.message : String(error);
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
@@ -4887,7 +4945,11 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
       if (goalTurn) {
-        await this.#settleGoalTurn(goalTurn, promptResult, promptFailed);
+        await this.#settleGoalTurn(
+          goalTurn,
+          promptResult,
+          promptFailureMessage,
+        );
       } else if (reservedGoalRuntime && reservedGoalTurnKey) {
         await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
       }
@@ -5299,8 +5361,9 @@ export class Session implements SessionContext {
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
-                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                  null;
+                  this.config
+                    .getLlmClient()!
+                    .stripOrphanedUserEntriesFromHistory() ?? null;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -5316,7 +5379,7 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -6114,6 +6177,26 @@ export class Session implements SessionContext {
                       ),
                     };
                   }
+                  if (
+                    await this.#endGoalTurnAfterToolRun(
+                      toolRun,
+                      goalTurn,
+                      channelTurn,
+                      responseCapture.channelDelivery !== undefined,
+                    )
+                  ) {
+                    const result = {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
+                    this.#recordPromptCompletionEffects(
+                      result,
+                      responseCapture,
+                      isFreshUserTurn,
+                    );
+                    return result;
+                  }
                   const nextAfterTools =
                     await this.#buildNextMessageAfterToolRun(
                       toolRun,
@@ -6168,46 +6251,14 @@ export class Session implements SessionContext {
                 fullTurnModelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
+                goalTurn,
+                channelTurn,
               );
-              if (result.stopReason !== 'cancelled') {
-                responseCapture.agentOutput.writeToSpan(
-                  getActiveInteractionSpan(),
-                );
-              }
-              if (
-                isFreshUserTurn &&
-                result.stopReason === 'end_turn' &&
-                !result.loopProtectionStopped &&
-                this.config.getManagedAutoMemoryEnabled()
-              ) {
-                const memoryManager = this.config.getMemoryManager();
-                const history = this.#getCurrentChat().getHistoryShallow();
-                void memoryManager
-                  .scheduleExtract({
-                    projectRoot: this.config.getProjectRoot(),
-                    sessionId: this.config.getSessionId(),
-                    history,
-                    config: this.config,
-                  })
-                  .catch((error: unknown) => {
-                    debugLogger.warn(
-                      'Failed to schedule ACP managed auto-memory extraction.',
-                      error,
-                    );
-                  });
-                void memoryManager
-                  .scheduleDream({
-                    projectRoot: this.config.getProjectRoot(),
-                    sessionId: this.config.getSessionId(),
-                    config: this.config,
-                  })
-                  .catch((error: unknown) => {
-                    debugLogger.warn(
-                      'Failed to schedule ACP managed auto-memory dream.',
-                      error,
-                    );
-                  });
-              }
+              this.#recordPromptCompletionEffects(
+                result,
+                responseCapture,
+                isFreshUserTurn,
+              );
               return { stopReason: result.stopReason };
             } finally {
               logConversationFinishedEvent(
@@ -6252,6 +6303,8 @@ export class Session implements SessionContext {
     modelOverride?: string,
     responseCapture?: AgentResponseCapture,
     rejectOnLoopDetected = false,
+    goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
     loopProtectionStopped?: boolean;
@@ -6321,6 +6374,8 @@ export class Session implements SessionContext {
               getModelOverride: () => modelOverride,
               responseCapture,
               rejectOnLoopDetected,
+              ...(goalTurn ? { goalTurn } : {}),
+              ...(channelTurn ? { channelTurn: true } : {}),
             },
           );
           if (continuation.kind === 'terminal') {
@@ -6421,6 +6476,8 @@ export class Session implements SessionContext {
                 getModelOverride: () => modelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
+                ...(goalTurn ? { goalTurn } : {}),
+                ...(channelTurn ? { channelTurn: true } : {}),
               },
             );
             if (continuation.kind === 'terminal') {
@@ -6556,6 +6613,8 @@ export class Session implements SessionContext {
           getModelOverride: () => modelOverride,
           responseCapture,
           rejectOnLoopDetected,
+          ...(goalTurn ? { goalTurn } : {}),
+          ...(channelTurn ? { channelTurn: true } : {}),
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -6582,6 +6641,8 @@ export class Session implements SessionContext {
       getModelOverride?: () => string | undefined;
       responseCapture?: AgentResponseCapture;
       rejectOnLoopDetected?: boolean;
+      goalTurn?: AcpGoalTurn;
+      channelTurn?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -7175,6 +7236,22 @@ export class Session implements SessionContext {
               ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
               : getAbortAwareEndTurnStopReason(pendingSend.signal),
             loopProtectionStopped: true,
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+        if (
+          await this.#endGoalTurnAfterToolRun(
+            toolRun,
+            options.goalTurn,
+            options.channelTurn ?? false,
+            options.responseCapture?.channelDelivery !== undefined,
+          )
+        ) {
+          return {
+            kind: 'terminal',
+            stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -7861,6 +7938,105 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+  }
+
+  /**
+   * Ends a Goal turn whose tool batch asked for it, mirroring the interactive
+   * and headless paths.
+   *
+   * `update_goal` sets the flag when verification or evidence checkpointing
+   * needs a turn boundary. Feeding a queued proposal back to the model leaves
+   * it parked: the objective is already satisfied, so the model has nothing
+   * left to do but call the Goal tools again, and the runtime rejects every
+   * later proposal for the same turn. Observed runs looped between the two
+   * Goal tools until a human cancelled them, with the turn count never leaving
+   * zero.
+   *
+   * The batch's own responses are preserved so the transcript keeps a
+   * response for every call, but mid-turn user input is deliberately left
+   * queued for the next continuation rather than drained into a turn that is
+   * already over.
+   *
+   * Channel turns and requested channel deliveries keep the loop alive for
+   * their final tool-free response; ending on the tool batch would return or
+   * submit an empty response because only a tool-free response is committed
+   * as the channel final.
+   *
+   * Returns false outside a Goal turn, where nothing sets the flag today and
+   * a turn has no verification boundary to reach.
+   */
+  async #endGoalTurnAfterToolRun(
+    toolRun: RunToolResult,
+    goalTurn: AcpGoalTurn | undefined,
+    channelTurn: boolean,
+    hasChannelDelivery: boolean,
+  ): Promise<boolean> {
+    // Loop protection keeps its own stop path, with the telemetry and the
+    // context message that go with it, so it wins a batch that trips both.
+    if (
+      !goalTurn ||
+      toolRun.terminateTurn !== true ||
+      toolRun.loopDetected ||
+      channelTurn ||
+      hasChannelDelivery
+    ) {
+      return false;
+    }
+    this.todoStopGuard.suspend();
+    this.#preserveUnsentMessageHistory(
+      { role: 'user', parts: toolRun.parts },
+      true,
+    );
+    await this.messageRewriter?.waitForPendingRewrites();
+    return true;
+  }
+
+  #recordPromptCompletionEffects(
+    result: {
+      stopReason: PromptResponse['stopReason'];
+      loopProtectionStopped?: boolean;
+    },
+    responseCapture: AgentResponseCapture,
+    isFreshUserTurn: boolean,
+  ): void {
+    if (result.stopReason !== 'cancelled') {
+      responseCapture.agentOutput.writeToSpan(getActiveInteractionSpan());
+    }
+    if (
+      !isFreshUserTurn ||
+      result.stopReason !== 'end_turn' ||
+      result.loopProtectionStopped ||
+      !this.config.getManagedAutoMemoryEnabled()
+    ) {
+      return;
+    }
+    const memoryManager = this.config.getMemoryManager();
+    const history = this.#getCurrentChat().getHistoryShallow();
+    void memoryManager
+      .scheduleExtract({
+        projectRoot: this.config.getProjectRoot(),
+        sessionId: this.config.getSessionId(),
+        history,
+        config: this.config,
+      })
+      .catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to schedule ACP managed auto-memory extraction.',
+          error,
+        );
+      });
+    void memoryManager
+      .scheduleDream({
+        projectRoot: this.config.getProjectRoot(),
+        sessionId: this.config.getSessionId(),
+        config: this.config,
+      })
+      .catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to schedule ACP managed auto-memory dream.',
+          error,
+        );
+      });
   }
 
   async #buildNextMessageAfterToolRun(
@@ -10646,6 +10822,11 @@ export class Session implements SessionContext {
         sequence: toolResultRecordSequence++,
       });
     };
+    // Batch-level, like `memoryWriteCandidates`, but folded in by
+    // `finalizeRunToolResult` rather than passed to it: a tool that asked to
+    // end the turn asked no matter which of the exits below the batch takes,
+    // and the exits that run before any tool does read it as false anyway.
+    let batchTerminatesTurn = false;
     const finalizeRunToolResult = async (
       result: RunToolResult,
     ): Promise<RunToolResult> => {
@@ -10669,7 +10850,11 @@ export class Session implements SessionContext {
         })),
       };
       if (orderedRecords.length === 0) {
-        return { ...result, repeatedToolFailureBatch };
+        return {
+          ...result,
+          repeatedToolFailureBatch,
+          ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
+        };
       }
       const finalized = await finalizeToolResponses(
         this.config,
@@ -10713,6 +10898,7 @@ export class Session implements SessionContext {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
         repeatedToolFailureBatch,
+        ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
       };
     };
     let skippedToolCallCounter = 0;
@@ -11200,6 +11386,7 @@ export class Session implements SessionContext {
           for (const r of results) {
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
+            batchTerminatesTurn ||= r.terminateTurn === true;
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
@@ -11243,6 +11430,7 @@ export class Session implements SessionContext {
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
+            batchTerminatesTurn ||= r.terminateTurn === true;
             if (r.loopDetected) {
               await appendSkippedAfter(
                 parts,
@@ -11785,6 +11973,13 @@ export class Session implements SessionContext {
           // The VS Code extension is just a UI layer for requestPermission.
           const isAskUserQuestionTool =
             policyToolName === ToolNames.ASK_USER_QUESTION;
+          // Core keeps built-in tool classes lazy-loaded. The bundle's
+          // keepNames preserves this class check; name and kind also reject
+          // MCP and registry shadows.
+          const isTrustedAskUserQuestionTool =
+            isAskUserQuestionTool &&
+            tool.kind === Kind.Think &&
+            tool.constructor.name === 'AskUserQuestionTool';
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
           const flowResult =
@@ -11973,15 +12168,17 @@ export class Session implements SessionContext {
             // exactly that tail rather than triggering a `structuredClone`
             // of the whole session on every non-fast-path AUTO call.
             // Parallels coreToolScheduler.ts.
+            const llmClient = this.config.getLlmClient?.();
             const messages =
-              this.config
-                .getLlmClient?.()
-                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+              llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const trustedUserAnswers =
+              llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
               pmForcedAsk,
               toolParams,
               messages,
+              trustedUserAnswers,
               config: this.config,
               signal: abortSignal,
               skipClassifierReason: fallback.fallback
@@ -12598,6 +12795,19 @@ export class Session implements SessionContext {
                   cancelBeforeExecutionIfAborted(toolName);
                 if (confirmationCancellation) {
                   return confirmationCancellation;
+                }
+                if (
+                  isTrustedAskUserQuestionTool &&
+                  isApproveOutcome(outcome) &&
+                  confirmationDetails.type === 'ask_user_question'
+                ) {
+                  this.config
+                    .getLlmClient?.()
+                    ?.recordTrustedUserAnswers(
+                      callId,
+                      confirmationDetails.questions,
+                      output.answers,
+                    );
                 }
               } catch (error) {
                 if (outcome !== ToolConfirmationOutcome.Cancel) {
@@ -13389,6 +13599,7 @@ export class Session implements SessionContext {
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
+            ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
             memoryWriteCandidates:
               status === 'success'
                 ? [
