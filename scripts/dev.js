@@ -65,37 +65,55 @@ const cliEntry = join(cliPackageDir, 'index.ts');
 const tmpDir = mkdtempSync(join(tmpdir(), 'qwen-dev-'));
 const loaderPath = join(tmpDir, 'loader.mjs');
 
-const coreSourcePath = join(root, 'packages', 'core', 'index.ts');
-const coreSourceUrl = pathToFileURL(coreSourcePath).href;
-// Subpath imports (`@qwen-code/qwen-code-core/utils/debugLogger.js`) resolve
-// through the package's `./*` export to compiled `dist/src/*`. In dev that is
-// whatever `npm run build` last produced, so without this the running CLI
-// mixes live source for the package root with stale output for every module
-// imported by path. Point them at the source tree instead.
-const coreSrcUrl = pathToFileURL(
-  join(root, 'packages', 'core', 'src') + '/',
-).href;
+const coreDir = join(root, 'packages', 'core');
+const coreSpecifier = '@qwen-code/qwen-code-core';
+const coreSourceUrl = pathToFileURL(join(coreDir, 'index.ts')).href;
+const coreSrcUrl = pathToFileURL(join(coreDir, 'src') + '/').href;
+
+const coreExports = JSON.parse(
+  readFileSync(join(coreDir, 'package.json'), 'utf-8'),
+).exports;
+
+const coreSubpathSourceUrls = {};
+for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
+  const distEntry = conditions?.import;
+  // Skips the root (handled below) and the string-valued entries — `./dist/*`,
+  // `./src/*`, `./package.json` — whose target is not one fixed source file.
+  if (subpath === '.' || typeof distEntry !== 'string') continue;
+  if (!distEntry.startsWith('./dist/')) continue;
+  const sourcePath = join(
+    coreDir,
+    distEntry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+  );
+  if (existsSync(sourcePath)) {
+    coreSubpathSourceUrls[`${coreSpecifier}/${subpath.slice(2)}`] =
+      pathToFileURL(sourcePath).href;
+  }
+}
 
 const loaderCode = `
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const coreSourceUrl = '${coreSourceUrl}';
+const coreSubpathSourceUrls = ${JSON.stringify(coreSubpathSourceUrls, null, 2)};
 const coreSrcUrl = '${coreSrcUrl}';
-const corePrefix = '@qwen-code/qwen-code-core/';
+const corePrefix = '${coreSpecifier}/';
 
 export function resolve(specifier, context, nextResolve) {
-  if (specifier === '@qwen-code/qwen-code-core') {
+  const url =
+    specifier === '${coreSpecifier}'
+      ? coreSourceUrl
+      : coreSubpathSourceUrls[specifier];
+  if (url) {
     return {
       shortCircuit: true,
-      url: coreSourceUrl,
+      url,
       format: 'module',
     };
   }
   if (specifier.startsWith(corePrefix)) {
-    // Only redirect when the source file is actually there. The named subpath
-    // exports (goalWire, memoryScopes, …) do not mirror their file names, so
-    // they fall through to the package's own mapping.
+    // Deep paths mirror packages/core/src; leave missing files to Node.
     const sub = specifier.slice(corePrefix.length).replace(/\\.js$/, '');
     for (const ext of ['.ts', '.tsx']) {
       const candidate = new URL(sub + ext, coreSrcUrl);

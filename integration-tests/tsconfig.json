@@ -63,6 +63,15 @@
       "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
         "../packages/core/src/utils/conversations-runtime-marker.ts"
       ],
+      "@qwen-code/qwen-code-core/storage": [
+        "../packages/core/src/config/storage.ts"
+      ],
+      "@qwen-code/qwen-code-core/atomicFileWrite": [
+        "../packages/core/src/utils/atomicFileWrite.ts"
+      ],
+      "@qwen-code/qwen-code-core/debugLogger": [
+        "../packages/core/src/utils/debugLogger.ts"
+      ],
       "@qwen-code/qwen-code-core/*": ["../packages/core/src/*"],
       "@qwen-code/qwen-code-core/goalWire": [
         "../packages/core/src/goals/goal-wire.ts"

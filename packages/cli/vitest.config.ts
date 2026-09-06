@@ -21,19 +21,10 @@ export default defineConfig({
     alias: [
       // Named core subpaths. None of these targets can be derived from the
       // specifier (noFollowOpen lives at utils/no-follow-open.ts), so they
-      // have to be matched ahead of the wildcard below. The sync partner is
-      // the set of named keys in the `exports` map of
-      // packages/core/package.json: a new named key whose target is not
-      // `src/<key>.ts` must be added here too, above the wildcard, or the
-      // wildcard will claim it and point at a file that does not exist.
-      // packages/cli/tsconfig.json is not that trigger — only three of these
-      // nine (noFollowOpen, subSessionConstants, transcriptRecords) are named
-      // in its `paths`; the rest are reached either by cli sources resolving
-      // against core's `exports` map or by acp-bridge / sdk-typescript sources
-      // this suite pulls in. Unlike the skill-review-harness loader's
-      // equivalent named map, which
-      // scripts/tests/text-capture-core-loader-sync.test.js checks against
-      // core's exports, this map has no gate and is kept in sync by hand.
+      // have to be matched ahead of the wildcard below. A new named subpath
+      // added to packages/cli/tsconfig.json must be added here too, above
+      // the wildcard, or the wildcard will claim it and point at a file
+      // that does not exist.
       ...toAliases({
         '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
           __dirname,
@@ -66,6 +57,18 @@ export default defineConfig({
         '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
           __dirname,
           '../core/src/utils/envVarResolver.ts',
+        ),
+        '@qwen-code/qwen-code-core/storage': path.resolve(
+          __dirname,
+          '../core/src/config/storage.ts',
+        ),
+        '@qwen-code/qwen-code-core/atomicFileWrite': path.resolve(
+          __dirname,
+          '../core/src/utils/atomicFileWrite.ts',
+        ),
+        '@qwen-code/qwen-code-core/debugLogger': path.resolve(
+          __dirname,
+          '../core/src/utils/debugLogger.ts',
         ),
         '@qwen-code/qwen-code-core/conversationsRuntimeMarker': path.resolve(
           __dirname,

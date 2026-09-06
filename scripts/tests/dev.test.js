@@ -5,14 +5,23 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const { spawnMock, platformMock, existsSyncMock, writeFileSyncMock } =
-  vi.hoisted(() => ({
-    spawnMock: vi.fn(() => ({ on: vi.fn() })),
-    platformMock: vi.fn(() => 'darwin'),
-    existsSyncMock: vi.fn(() => false),
-    writeFileSyncMock: vi.fn(),
-  }));
+const {
+  spawnMock,
+  platformMock,
+  existsSyncMock,
+  readFileSyncMock,
+  writeFileSyncMock,
+} = vi.hoisted(() => ({
+  spawnMock: vi.fn(() => ({ on: vi.fn() })),
+  platformMock: vi.fn(() => 'darwin'),
+  existsSyncMock: vi.fn(() => false),
+  readFileSyncMock: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
+  writeFileSyncMock: vi.fn(),
+}));
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
@@ -34,7 +43,7 @@ vi.mock('node:fs', () => ({
   existsSync: existsSyncMock,
   symlinkSync: vi.fn(),
   mkdirSync: vi.fn(),
-  readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
+  readFileSync: readFileSyncMock,
 }));
 
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
@@ -150,32 +159,130 @@ describe('scripts/dev.js launcher', () => {
     },
   );
 
-  it('redirects file-backed core subpaths to source and named subpaths through exports', async () => {
-    await import('../dev.js?loader-subpaths');
-    const loaderSource = writeFileSyncMock.mock.calls.find(([filePath]) =>
-      normalizePath(filePath).endsWith('/loader.mjs'),
-    )[1];
-    const loader = await import(
-      `data:text/javascript,${encodeURIComponent(loaderSource)}`
+  it('resolves core subpaths to packages/core/src, not the exports map dist', async () => {
+    // Intercepting only the package root leaves a named subpath to Node's
+    // `exports` map, which resolves into packages/core/dist while the root
+    // loads packages/core/src — one dev process holding two instances of the
+    // same module. Config binds the debug session on the src copy, so the dist
+    // copy's REMOTE_INPUT logger reads an empty session and every
+    // debugLogger(...) call in RemoteInputWatcher silently no-ops.
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const coreDir = join(repoRoot, 'packages', 'core');
+    const corePackageJson = await readFile(
+      join(coreDir, 'package.json'),
+      'utf-8',
     );
-    const nextResolve = vi.fn(() => ({ url: 'fallback' }));
+    const existsOnDisk = async (p) => {
+      try {
+        await stat(p);
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
-    expect(
-      loader.resolve(
-        '@qwen-code/qwen-code-core/utils/debugLogger.js',
-        {},
-        nextResolve,
-      ),
-    ).toEqual(
-      expect.objectContaining({
-        shortCircuit: true,
-        url: expect.stringMatching(
-          /packages\/core\/src\/utils\/debugLogger\.ts$/,
-        ),
-      }),
-    );
-    expect(
-      loader.resolve('@qwen-code/qwen-code-core/goalWire', {}, nextResolve),
-    ).toEqual({ url: 'fallback' });
+    // Ground truth independent of the implementation's derivation rule.
+    const expectedSources = {
+      '@qwen-code/qwen-code-core': 'packages/core/index.ts',
+      '@qwen-code/qwen-code-core/debugLogger':
+        'packages/core/src/utils/debugLogger.ts',
+      '@qwen-code/qwen-code-core/storage':
+        'packages/core/src/config/storage.ts',
+      '@qwen-code/qwen-code-core/atomicFileWrite':
+        'packages/core/src/utils/atomicFileWrite.ts',
+      '@qwen-code/qwen-code-core/utils/debugLogger.js':
+        'packages/core/src/utils/debugLogger.ts',
+    };
+
+    // Every named subpath the exports map publishes, so the interception
+    // cannot silently fall behind as subpaths are added.
+    const namedSubpaths = [];
+    for (const [subpath, conditions] of Object.entries(
+      JSON.parse(corePackageJson).exports ?? {},
+    )) {
+      const distEntry = conditions?.import;
+      if (subpath === '.' || typeof distEntry !== 'string') continue;
+      if (!distEntry.startsWith('./dist/')) continue;
+      const sourcePath = join(
+        coreDir,
+        distEntry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+      );
+      if (await existsOnDisk(sourcePath)) {
+        namedSubpaths.push(`@qwen-code/qwen-code-core/${subpath.slice(2)}`);
+      }
+    }
+    expect(namedSubpaths.length).toBeGreaterThan(0);
+
+    const defaultRead = readFileSyncMock.getMockImplementation();
+    const defaultExists = existsSyncMock.getMockImplementation();
+    try {
+      readFileSyncMock.mockImplementation((filePath, ...rest) =>
+        normalizePath(filePath).endsWith('packages/core/package.json')
+          ? corePackageJson
+          : defaultRead(filePath, ...rest),
+      );
+      // The launcher only probes the source files it is about to map, so answer
+      // from the real tree: a mapping whose source is missing must be dropped
+      // rather than emitted.
+      existsSyncMock.mockImplementation((filePath) => {
+        const normalized = normalizePath(filePath);
+        return (
+          normalized.includes('/packages/core/') &&
+          (Object.values(expectedSources).some((s) => normalized.endsWith(s)) ||
+            namedSubpaths.some((specifier) => {
+              const sub = specifier.slice('@qwen-code/qwen-code-core/'.length);
+              const distEntry =
+                JSON.parse(corePackageJson).exports[`./${sub}`]?.import;
+              return normalized.endsWith(
+                distEntry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+              );
+            }))
+        );
+      });
+
+      await import('../dev.js?subpath-source-map');
+
+      const loaderCall = writeFileSyncMock.mock.calls.find(([filePath]) =>
+        normalizePath(filePath).endsWith('loader.mjs'),
+      );
+      expect(loaderCall).toBeDefined();
+      // Execute the hook the launcher actually generates instead of asserting
+      // on its source text.
+      const loader = await import(
+        `data:text/javascript;base64,${Buffer.from(loaderCall[1]).toString('base64')}`
+      );
+      const nextResolve = (specifier) => ({
+        url: `fallthrough:${specifier}`,
+        format: 'module',
+        shortCircuit: false,
+      });
+
+      for (const [specifier, expected] of Object.entries(expectedSources)) {
+        const resolved = loader.resolve(specifier, {}, nextResolve);
+        expect(resolved.shortCircuit, specifier).toBe(true);
+        const resolvedPath = normalizePath(fileURLToPath(resolved.url));
+        expect(resolvedPath, specifier).toContain(expected);
+        expect(resolvedPath, specifier).not.toContain('/dist/');
+      }
+
+      // Completeness: no published named subpath may fall through to Node,
+      // which is the lane that reaches dist.
+      for (const specifier of namedSubpaths) {
+        const resolved = loader.resolve(specifier, {}, nextResolve);
+        expect(resolved.shortCircuit, specifier).toBe(true);
+        expect(resolved.url, specifier).not.toContain('fallthrough:');
+        expect(normalizePath(fileURLToPath(resolved.url)), specifier).toContain(
+          '/packages/core/src/',
+        );
+      }
+
+      // Unrelated specifiers still reach Node's resolver.
+      expect(loader.resolve('node:fs', {}, nextResolve).url).toBe(
+        'fallthrough:node:fs',
+      );
+    } finally {
+      readFileSyncMock.mockImplementation(defaultRead);
+      existsSyncMock.mockImplementation(defaultExists);
+    }
   });
 });
