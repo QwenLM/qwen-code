@@ -419,6 +419,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      // web-templates' export-html template build scripts also run with `node`.
+      'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
