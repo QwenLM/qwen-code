@@ -14,7 +14,12 @@ import fs from 'node:fs';
 import { EOL } from 'node:os';
 import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
-import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
+import { vi } from 'vitest';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServerOptions,
+  type FakeOpenAIToolCall,
+} from './fake-openai-server.js';
 import {
   e2eRendererEnv,
   pickE2eRenderer,
@@ -964,5 +969,58 @@ export class TestRig {
     });
 
     return { ptyProcess, promise };
+  }
+}
+
+export async function runForcedToolCallScenario(options: {
+  rig: TestRig;
+  toolCall: FakeOpenAIToolCall;
+  prompt: string;
+  finalResponse: string;
+}): Promise<Array<Record<string, unknown>>> {
+  const { rig, toolCall, prompt, finalResponse } = options;
+  let streamingRequestIndex = 0;
+  const fakeServer = await startFakeOpenAIServer(({ body }) => {
+    if (body['stream'] !== true) {
+      return { content: '{"selected_memories":[]}' };
+    }
+    if (streamingRequestIndex++ === 0) {
+      return { toolCalls: [toolCall] };
+    }
+    return { content: finalResponse };
+  }, fakeServerHostOptions());
+
+  const noProxy = IS_CONTAINER_SANDBOX
+    ? CONTAINER_SANDBOX_NO_PROXY
+    : '127.0.0.1,localhost';
+  vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+  vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+  vi.stubEnv('OPENAI_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('NO_PROXY', noProxy);
+  vi.stubEnv('no_proxy', noProxy);
+
+  try {
+    // Explicit CLI flags outrank a developer's ~/.qwen/settings.json
+    // (settings.model.name beats the OPENAI_MODEL env var and can silently
+    // route the run to a real model endpoint instead of the fake server).
+    await rig.run(
+      prompt,
+      '--auth-type',
+      'openai',
+      '--model',
+      'fake-model',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--openai-api-key',
+      'fake-key',
+    );
+    return fakeServer.requests
+      .filter(({ body }) => body['stream'] === true)
+      .map(({ body }) => body);
+  } finally {
+    await fakeServer.close();
   }
 }

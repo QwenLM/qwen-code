@@ -69,6 +69,31 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
   });
 
+  it('does not advertise todo_write by default', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).not.toContain('todo_write');
+    expect(prompt).not.toContain('# Task Management');
+    expect(prompt).toContain('revise it as you learn');
+  });
+
+  it('advertises todo_write when it is enabled', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'interactive',
+      undefined,
+      true,
+    );
+
+    expect(prompt).toContain('# Task Management');
+    expect(prompt).toContain("Use 'todo_write'");
+    expect(prompt).toContain('pass the matching Todo ID as `todo_id`');
+  });
+
   it('instructs the model not to bypass denied tool calls through equivalent paths', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();
@@ -178,7 +203,14 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('uses todos selectively and keeps plans outcome-oriented', () => {
     vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'interactive',
+      undefined,
+      true,
+    );
 
     expect(prompt).toContain('complex, ambiguous, or multi-phase tasks');
     expect(prompt).toContain('Do not use it for simple or single-step queries');
@@ -810,6 +842,7 @@ describe('main-session style: reminder decision matches prompt section', () => {
     getExperimentalZedIntegration: () => opts.acp,
     getInputFormat: () => InputFormat.TEXT,
     isInteractive: () => opts.interactive,
+    isTodoWriteEnabled: () => false,
   });
 
   beforeEach(() => {
@@ -905,6 +938,15 @@ describe('main-session style: reminder decision matches prompt section', () => {
       '<function=run_shell_command>',
     );
   });
+
+  it('forwards the todo_write setting to the base prompt', () => {
+    const config = {
+      ...makeConfig({ interactive: false, acp: false }),
+      isTodoWriteEnabled: () => true,
+    };
+
+    expect(getMainSessionBaseSystemPrompt(config)).toContain('todo_write');
+  });
 });
 
 describe('main-session style: project trust gate', () => {
@@ -928,6 +970,7 @@ describe('main-session style: project trust gate', () => {
     getExperimentalZedIntegration: () => false,
     getInputFormat: () => InputFormat.TEXT,
     isInteractive: () => true,
+    isTodoWriteEnabled: () => false,
     ...(trusted === undefined ? {} : { isTrustedFolder: () => trusted }),
   });
 

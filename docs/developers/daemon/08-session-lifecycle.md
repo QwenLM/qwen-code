@@ -57,7 +57,7 @@ Under `sessionScope: 'thread'`, each thread can mint a distinct session. The cal
 
 `X-Qwen-Client-Id` is **optional** but **strongly recommended**. The daemon does not generate one on the caller's behalf — clients pick their own and reuse it across requests so the daemon can attribute votes, audit events, and detect reconnects.
 
-Each independent controller should use a distinct, stable ID. The WebUI generates IDs with a `webui_` prefix by default. A host and an embedded WebShell should share an ID only when they intentionally act as one logical controller; once shared, daemon logs cannot distinguish which one originated a request.
+Each independent controller should use a distinct, stable ID. Web Shell preserves the historical `webui_` prefix for compatibility. A host and an embedded Web Shell should share an ID only when they intentionally act as one logical controller; once shared, daemon logs cannot distinguish which one originated a request.
 
 Validation rules:
 
