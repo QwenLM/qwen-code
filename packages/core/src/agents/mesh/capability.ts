@@ -5,6 +5,10 @@
  */
 
 import type { ToolConfig } from '../runtime/agent-types.js';
+import {
+  evaluateToolInvocationGuard,
+  type ToolInvocationGuard,
+} from '../../core/tool-invocation-guard.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { classifyShellCommandSafetyInDirectory } from '../../utils/shellAstParser.js';
 
@@ -90,24 +94,42 @@ export function classifyMeshTool(name: string): MeshToolClassification {
   ];
 }
 
-export function buildMeshToolConfig(
-  definitionTools?: readonly string[],
-): ToolConfig {
-  const allowAll =
-    definitionTools === undefined || definitionTools.includes('*');
-  const allowed = allowAll
+export function buildMeshToolConfig(definition?: ToolConfig): ToolConfig {
+  const allowAll = definition === undefined || definition.tools.includes('*');
+  let allowed = allowAll
     ? Object.entries(MESH_TOOL_CLASSIFICATION)
         .filter(([, classification]) => classification === 'allow')
         .map(([name]) => name)
-    : definitionTools.filter((name) => classifyMeshTool(name) === 'allow');
+    : definition.tools
+        .map((tool) => (typeof tool === 'string' ? tool : tool.name))
+        .filter(
+          (name): name is string =>
+            typeof name === 'string' && classifyMeshTool(name) === 'allow',
+        );
+  if (definition?.executionAllowedTools !== undefined) {
+    const executable = new Set(definition.executionAllowedTools);
+    allowed = allowed.filter((name) => executable.has(name));
+  }
+  if (definition?.disallowedTools?.length) {
+    const disallowed = new Set(definition.disallowedTools);
+    allowed = allowed.filter((name) => !disallowed.has(name));
+  }
   const tools = Array.from(new Set([...allowed, ...MESH_THREAD_TOOL_NAMES]));
+  const threadTools = new Set<string>(MESH_THREAD_TOOL_NAMES);
 
   return {
     tools,
     executionAllowedTools: [...tools],
-    disallowedTools: Object.entries(MESH_TOOL_CLASSIFICATION)
-      .filter(([, classification]) => classification === 'deny')
-      .map(([name]) => name),
+    disallowedTools: Array.from(
+      new Set([
+        ...Object.entries(MESH_TOOL_CLASSIFICATION)
+          .filter(([, classification]) => classification === 'deny')
+          .map(([name]) => name),
+        ...(definition?.disallowedTools ?? []).filter(
+          (name) => !threadTools.has(name),
+        ),
+      ]),
+    ),
   };
 }
 
@@ -122,4 +144,44 @@ export async function checkMeshShellCommand(
         allowed: false,
         reason: `Mesh agents may only run read-only shell commands; classified as ${safety}.`,
       };
+}
+
+export function createMeshToolInvocationGuard(
+  upstream?: ToolInvocationGuard,
+): ToolInvocationGuard {
+  return async (context) => {
+    if (upstream) {
+      const upstreamDecision = await evaluateToolInvocationGuard(
+        upstream,
+        context,
+      );
+      if (!upstreamDecision.allowed) return upstreamDecision;
+    }
+
+    const classification = classifyMeshTool(context.toolName);
+    if (classification === 'deny') {
+      return {
+        allowed: false,
+        reason: `Tool "${context.toolName}" is outside the mesh read-only capability boundary.`,
+      };
+    }
+    if (context.toolName !== ToolNames.SHELL) return { allowed: true };
+    if (context.args['is_background'] === true) {
+      return {
+        allowed: false,
+        reason: 'Mesh agents may not start background shell processes.',
+      };
+    }
+    const command = context.args['command'];
+    if (typeof command !== 'string') {
+      return { allowed: false, reason: 'Mesh shell command is missing.' };
+    }
+    const directory = context.args['directory'];
+    return checkMeshShellCommand(
+      command,
+      typeof directory === 'string'
+        ? directory
+        : (context.cwd ?? process.cwd()),
+    );
+  };
 }

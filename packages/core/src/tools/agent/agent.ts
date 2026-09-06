@@ -271,6 +271,51 @@ export interface AgentParams {
   working_dir?: string;
 }
 
+export type ProgrammaticBackgroundAgentLaunchResult =
+  | { status: 'started'; backgroundAgentId: string }
+  | { status: 'capacity_wait' }
+  | { status: 'launch_failed'; error: string };
+
+interface ProgrammaticBackgroundAgentLaunchOptions {
+  agentId: string;
+  meshAgentId: string;
+  subagentConfig: SubagentConfig;
+  toolConfig: ToolConfig;
+}
+
+export async function launchProgrammaticBackgroundAgent(
+  config: Config,
+  params: Pick<AgentParams, 'description' | 'prompt'>,
+  options: ProgrammaticBackgroundAgentLaunchOptions,
+): Promise<ProgrammaticBackgroundAgentLaunchResult> {
+  const invocation = new AgentToolInvocation(
+    config,
+    config.getSubagentManager(),
+    {
+      ...params,
+      subagent_type: options.subagentConfig.name,
+      run_in_background: true,
+    },
+    undefined,
+    options,
+  );
+  const result = await invocation.execute();
+  if (invocation.programmaticStatus === 'started') {
+    return { status: 'started', backgroundAgentId: options.agentId };
+  }
+  if (invocation.programmaticStatus === 'capacity_wait') {
+    return { status: 'capacity_wait' };
+  }
+  return {
+    status: 'launch_failed',
+    error:
+      result.error?.message ??
+      (typeof result.llmContent === 'string'
+        ? result.llmContent
+        : 'Failed to launch background agent.'),
+  };
+}
+
 const debugLogger = createDebugLogger('AGENT');
 const resolvedForkProfiles = new WeakMap<AgentParams, ForkProfile>();
 const FORK_PROFILE_SAFE_MODE_ERROR =
@@ -1387,12 +1432,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
   private callId?: string;
+  programmaticStatus: 'started' | 'capacity_wait' | 'launch_failed' =
+    'launch_failed';
 
   constructor(
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
     private readonly forkProfile?: ForkProfile,
+    private readonly programmatic?: ProgrammaticBackgroundAgentLaunchOptions,
   ) {
     super(params);
   }
@@ -2607,6 +2655,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       if (isFork) {
         subagentConfig = FORK_AGENT;
+      } else if (this.programmatic) {
+        subagentConfig = this.programmatic.subagentConfig;
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
           effectiveSubagentType,
@@ -2750,6 +2800,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundOwnerId,
         );
         if (!backgroundSlotReservation) {
+          if (this.programmatic) {
+            this.programmaticStatus = 'capacity_wait';
+            return this.buildSpawnBlockedResult(
+              'No background-agent capacity is currently available.',
+              'Background-agent capacity is full',
+            );
+          }
           const queuedCount = registry.getQueuedCount();
           const queueText =
             queuedCount === 0
@@ -2991,7 +3048,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const launchDepth = childLaunchDepth();
       const hookOpts = {
-        agentId: `${subagentConfig.name}-${agentIdSuffix}`,
+        agentId:
+          this.programmatic?.agentId ??
+          `${subagentConfig.name}-${agentIdSuffix}`,
         // Resolved config name, not the raw requested type. Hooks, spans, task
         // rows, and the meta sidecar all read this field.
         agentType: subagentConfig.name,
@@ -3057,11 +3116,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             ...(shouldRunInBackground && subagentRuntimeAuthOverrides
               ? { runtimeAuthOverrides: subagentRuntimeAuthOverrides }
               : {}),
+            ...(this.programmatic
+              ? { toolConfigOverride: this.programmatic.toolConfig }
+              : {}),
           },
         );
         subagent = result.subagent;
         subagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
+        toolConfig = this.programmatic?.toolConfig;
       }
       const runtimeEventEmitter =
         subagent.getCore().getEventEmitter?.() ?? this.eventEmitter;
@@ -3272,6 +3335,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
+          ...(this.programmatic
+            ? { meshAgentId: this.programmatic.meshAgentId }
+            : {}),
           agentType: hookOpts.agentType,
           description: this.params.description,
           parentSessionId: sessionId,
@@ -3287,9 +3353,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork &&
-          (this.params.fork_tools !== undefined ||
-            this.forkProfile !== undefined) &&
+          ...((this.programmatic !== undefined ||
+            (isFork &&
+              (this.params.fork_tools !== undefined ||
+                this.forkProfile !== undefined))) &&
           bgToolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
@@ -3864,6 +3931,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         currentTurnPromise.catch(reportUnexpectedBackgroundError);
 
+        this.programmaticStatus = 'started';
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
           llmContent:

@@ -11,6 +11,7 @@ import {
   buildMeshToolConfig,
   checkMeshShellCommand,
   classifyMeshTool,
+  createMeshToolInvocationGuard,
   MESH_THREAD_TOOL_NAMES,
   MESH_TOOL_CLASSIFICATION,
 } from './capability.js';
@@ -43,12 +44,10 @@ describe('mesh capability boundary', () => {
 
   it('applies the built-in ceiling and always adds thread tools', () => {
     const full = buildMeshToolConfig();
-    const wildcard = buildMeshToolConfig(['*']);
-    const narrowed = buildMeshToolConfig([
-      ToolNames.READ_FILE,
-      ToolNames.EDIT,
-      'mcp__server__read',
-    ]);
+    const wildcard = buildMeshToolConfig({ tools: ['*'] });
+    const narrowed = buildMeshToolConfig({
+      tools: [ToolNames.READ_FILE, ToolNames.EDIT, 'mcp__server__read'],
+    });
 
     expect(wildcard).toEqual(full);
     expect(full.tools).toContain(ToolNames.SHELL);
@@ -66,6 +65,22 @@ describe('mesh capability boundary', () => {
     ]);
     expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
     expect(narrowed.disallowedTools).toEqual(full.disallowedTools);
+  });
+
+  it('preserves definition execution and disallow restrictions', () => {
+    const narrowed = buildMeshToolConfig({
+      tools: ['*'],
+      executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SHELL],
+      disallowedTools: [ToolNames.READ_FILE, 'thread_post'],
+    });
+
+    expect(narrowed.tools).toEqual([
+      ToolNames.SHELL,
+      ...MESH_THREAD_TOOL_NAMES,
+    ]);
+    expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
+    expect(narrowed.disallowedTools).not.toContain('thread_post');
+    expect(narrowed.disallowedTools).toContain(ToolNames.READ_FILE);
   });
 
   it.each(['cat package.json', 'git status', 'grep -r TODO packages/core'])(
@@ -88,5 +103,34 @@ describe('mesh capability boundary', () => {
       allowed: false,
       reason: expect.stringContaining(safety),
     });
+  });
+
+  it('enforces the boundary at invocation time', async () => {
+    const guard = createMeshToolInvocationGuard();
+    const base = { callId: 'call-1', signal: new AbortController().signal };
+    await expect(
+      guard({
+        ...base,
+        toolName: ToolNames.EDIT,
+        args: {},
+        cwd: process.cwd(),
+      }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    await expect(
+      guard({
+        ...base,
+        toolName: ToolNames.SHELL,
+        args: { command: 'git push' },
+        cwd: process.cwd(),
+      }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    await expect(
+      guard({
+        ...base,
+        toolName: ToolNames.SHELL,
+        args: { command: 'git status' },
+        cwd: process.cwd(),
+      }),
+    ).resolves.toEqual({ allowed: true });
   });
 });

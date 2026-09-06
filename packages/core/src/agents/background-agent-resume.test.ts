@@ -94,6 +94,14 @@ describe('BackgroundAgentResumeService', () => {
           : null,
       ),
       createAgentHeadless: vi.fn(),
+      convertToRuntimeConfig: vi.fn().mockResolvedValue({
+        promptConfig: {},
+        modelConfig: {},
+        runConfig: {},
+        toolConfig: {
+          tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL],
+        },
+      }),
     };
     const hookSystem =
       options.hookSystem !== undefined
@@ -208,6 +216,7 @@ describe('BackgroundAgentResumeService', () => {
       getToolRegistry: () => stubToolRegistry,
       createToolRegistry: vi.fn().mockResolvedValue(overrideToolRegistry),
       getPermissionManager: () => permissionManager,
+      getToolInvocationGuard: () => undefined,
     } as unknown as Config;
 
     return {
@@ -800,6 +809,86 @@ describe('BackgroundAgentResumeService', () => {
       (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
     ).toBe(true);
 
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
+  it('restores the mesh capability ceiling on cold resume', async () => {
+    const sessionId = 'session-mesh-resume';
+    const agentId = 'mesh-ag_alice';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+    writeAgentMeta(metaPath, {
+      agentId,
+      meshAgentId: 'ag_alice',
+      agentType: 'researcher',
+      description: 'Review',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Review' }] },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Review',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Review',
+      outputFile,
+      metaPath,
+    });
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await service.resumeBackgroundAgent(agentId, 'continue');
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1)!;
+    expect(createCall[2]?.toolConfigOverride).toMatchObject({
+      tools: expect.arrayContaining([ToolNames.READ_FILE, ToolNames.SHELL]),
+      disallowedTools: expect.arrayContaining([ToolNames.EDIT]),
+    });
+    const guard = (createCall[1] as Config).getToolInvocationGuard();
+    await expect(
+      guard?.({
+        callId: 'call-edit',
+        toolName: ToolNames.EDIT,
+        args: {},
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
