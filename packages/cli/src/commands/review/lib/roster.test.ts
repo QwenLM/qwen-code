@@ -22,6 +22,7 @@ import {
   reviewMode,
   isTerritoryFanOut,
   hasExecutableScript,
+  isPromptPath,
 } from './roster.js';
 
 /** A same-repo PR: a worktree to build in, a PR number to check an issue against. */
@@ -100,14 +101,118 @@ describe('requiredAgents — Step 3A', () => {
     expect(med).not.toContain('6a');
     expect(med).not.toContain('6b');
     expect(med).not.toContain('6c');
+    // The counter-frame audit is a persona-tier depth pass: same gate.
+    expect(med).not.toContain('6d');
     expect(med).toEqual(
       expect.arrayContaining(['0', '1a', '2', '3a', '3b', '3c', '4', '5', '7']),
     );
     // High, and the default (no effort recorded), still demand them.
     expect(keys({ ...PR, effort: 'high' })).toEqual(
-      expect.arrayContaining(['6a', '6b', '6c']),
+      expect.arrayContaining(['6a', '6b', '6c', '6d']),
     );
-    expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c']));
+    expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c', '6d']));
+    // The counter-frame audit alone survives the 3B topology switch: the
+    // author's frame spans territories, so it stays a whole-diff agent there —
+    // and a chunked PR with a strong narrative is the most frame-capturable
+    // shape. Same effort gate as in 3A.
+    const fanOut = keys({ ...PR, srcDiffLines: 900, diffLines: 4000 });
+    expect(fanOut).not.toContain('6a');
+    expect(fanOut).toContain('6d');
+    expect(
+      keys({ ...PR, srcDiffLines: 900, diffLines: 4000, effort: 'medium' }),
+    ).not.toContain('6d');
+    // And no frame without a PR: a local or file-path review has no
+    // description to counter and no incident to replay — 6d is gated on the
+    // PR identity exactly as Agent 0 is, in both topologies.
+    const noPr = { ...PR, prNumber: undefined, ownerRepo: undefined };
+    expect(keys(noPr)).not.toContain('6d');
+    expect(keys({ ...noPr, srcDiffLines: 900, diffLines: 4000 })).not.toContain(
+      '6d',
+    );
+    // But NO mode gate: an identity-bearing cross-repo lightweight review
+    // keeps 6d — it reads the diff and the PR context, needing no tree. A
+    // `&& mode !== 'diff-only'` "reconciliation" at either add site would
+    // silently drop the counter-frame audit from exactly the lightweight PR
+    // reviews the SKILL narration promises it to.
+    expect(keys({ ...PR, worktreePath: undefined })).toContain('6d');
+    expect(
+      keys({
+        ...PR,
+        worktreePath: undefined,
+        srcDiffLines: 900,
+        diffLines: 4000,
+      }),
+    ).toContain('6d');
+  });
+
+  it('owes the prose-execution audit when the diff touches an instruction file — or when its file list is unknown', () => {
+    // No prompt file in the diff: no prose to execute, no agent.
+    expect(keys(PR)).not.toContain('prose-exec');
+    const withSkill = {
+      ...PR,
+      files: [
+        ...PR.files,
+        { path: 'packages/core/src/skills/bundled/review/SKILL.md' },
+      ],
+    };
+    // A prompt file plus a tree: owed — and at medium too, unlike the
+    // personas: on a prompt-file diff it is the highest-yield agent there is.
+    expect(keys(withSkill)).toContain('prose-exec');
+    expect(keys({ ...withSkill, effort: 'medium' })).toContain('prose-exec');
+    // Both topologies: a chunked PR touching SKILL.md still owes the execution.
+    expect(
+      keys({ ...withSkill, srcDiffLines: 900, diffLines: 4000 }),
+    ).toContain('prose-exec');
+    // And in BOTH tree'd modes: a local (uncommitted-change) review runs the
+    // repository's tooling too, so `mode !== 'diff-only'` owes the audit there
+    // as well — narrowing the gate to pr-worktree alone must fail here.
+    expect(
+      keys({ ...withSkill, worktreePath: undefined, untrackedFiles: [] }),
+    ).toContain('prose-exec');
+    // Reserved directories hold their files under any basename, and the
+    // pipeline's rules file is prose it provably follows: each owes the
+    // audit even as the diff's ONLY prompt-path change.
+    expect(
+      keys({
+        ...PR,
+        files: [{ path: '.qwen/commands/release-notes.test.md' }],
+      }),
+    ).toContain('prose-exec');
+    expect(
+      keys({ ...PR, files: [{ path: '.qwen/review-rules.md' }] }),
+    ).toContain('prose-exec');
+    // A references-only diff in a skill bundle owes it too: the directory
+    // marker, not the SKILL.md filename, is what rosters the audit — a PR
+    // changing only `references/posting.md` (the recipe behind the
+    // pipeline's one sanctioned write to a pull request) got none before.
+    expect(
+      keys({
+        ...PR,
+        files: [
+          {
+            path: 'packages/core/src/skills/bundled/review/references/persistence.md',
+          },
+        ],
+      }),
+    ).toContain('prose-exec');
+    // But never without a tree to run the repository's tooling in.
+    expect(
+      keys({
+        files: withSkill.files,
+        chunks: [],
+      }),
+    ).not.toContain('prose-exec');
+    // No `files[]` at all — a plan an older CLI wrote — is "we do not know",
+    // and the answer is the one 1b gives the same input: run the audit (one
+    // empty-scope return) rather than let the skew drop the role its only
+    // add site owes. A recorded EMPTY list gets the same fail-safe answer
+    // (`hasDeletions` is pinned the same way): the audit runs and returns a
+    // documented empty scope.
+    expect(keys({ ...PR, files: undefined })).toContain('prose-exec');
+    expect(keys({ ...PR, files: 'junk' as unknown as never })).toContain(
+      'prose-exec',
+    );
+    expect(keys({ ...PR, files: [] })).toContain('prose-exec');
   });
 
   it('skips the removed-behavior audit on a diff that removes nothing', () => {
@@ -146,12 +251,25 @@ describe('requiredAgents — Step 3A', () => {
     ['0', false],
     ['', false],
     ['not-a-number', false],
-  ])('requires Agent 0 for prNumber %o → %s', (prNumber, expected) => {
+  ])('gates Agent 0 and 6d on prNumber %o → %s', (prNumber, expected) => {
     // The number arrives from a plan file, so a corrupted or absent value must
     // fail closed to "no PR" rather than demanding an issue agent that has nothing
     // to fetch — but a legitimate numeric string must still count, or every real
     // PR review loses Agent 0.
-    expect(keys({ ...PR, prNumber }).includes('0')).toBe(expected);
+    const k = keys({ ...PR, prNumber });
+    expect(k.includes('0')).toBe(expected);
+    // The counter-frame audit shares the prNumber conjunct, pinned here in
+    // ISOLATION (ownerRepo still present): dropping `isPositivePrNumber` from
+    // `countersFrame` would otherwise ship green, roster 6d on a plan its brief
+    // builder throws on, and wedge `agent-prompt --roster` for the whole review.
+    expect(k.includes('6d')).toBe(expected);
+  });
+
+  it('gates the counter-frame audit on ownerRepo in isolation too', () => {
+    // A valid prNumber with no ownerRepo still has no frame to fetch: the
+    // ownerRepo conjunct of `countersFrame` must hold on its own, or dropping it
+    // rosters 6d on a plan the brief builder rejects.
+    expect(keys({ ...PR, ownerRepo: undefined })).not.toContain('6d');
   });
 
   it('asks for no issue-fidelity agent on a local review — there is no issue', () => {
@@ -248,6 +366,43 @@ describe('requiredAgents — Step 3A', () => {
     expect(fanOut).not.toContain('6a');
     expect(fanOut.filter((role) => role === 'test-matrix')).toHaveLength(1);
     expect(fanOut).toContain('1b');
+
+    // 6d keeps the persona tier's effort gate: a manifest cannot re-add the
+    // counter-frame audit to a medium review (a `case '6d': return true`
+    // mutant ships the tier contract's contradiction green).
+    expect(
+      keys({ ...PR, effort: 'medium', repositoryContext: context(['6d']) }),
+    ).not.toContain('6d');
+    // …and the identity half of the same gate: a manifest cannot conjure a
+    // frame onto a PR-less review — the 6d brief builder throws on such a
+    // plan, so honouring this would wedge `agent-prompt --roster` for every
+    // local review of a repo whose manifest names 6d (the
+    // `return plan.effort !== 'medium'` mutant ships exactly that).
+    expect(
+      keys({
+        ...PR,
+        prNumber: undefined,
+        ownerRepo: undefined,
+        repositoryContext: context(['6d']),
+      }),
+    ).not.toContain('6d');
+    // prose-exec cannot be required into a review with no tree to execute
+    // in — check-coverage would exit 3 demanding an agent that can only
+    // whiff.
+    expect(
+      keys({
+        ...PR,
+        worktreePath: undefined,
+        repositoryContext: context(['prose-exec']),
+      }),
+    ).not.toContain('prose-exec');
+    // …but on a tree'd review with NO prompt-path files, the manifest
+    // re-add is honoured — the escape hatch isPromptPath's doc comment
+    // promises, which a `case 'prose-exec': return false` mutant would
+    // silently kill.
+    expect(
+      keys({ ...PR, repositoryContext: context(['prose-exec']) }),
+    ).toContain('prose-exec');
   });
 
   it('fails closed on a present-but-invalid repository context', () => {
@@ -513,5 +668,70 @@ describe('a heavy file in a Step-3A-sized diff', () => {
     // It is still a normal 3A review: the dimension agents each walk the whole diff,
     // and one that walks the whole diff already sees both ends of the file.
     expect(k).toEqual(expect.arrayContaining(['1a', '2', '6a']));
+  });
+});
+
+describe('isPromptPath — the instruction-file detector', () => {
+  it.each([
+    // Skills, agent definitions, prompt directories, and prompt/brief-named files.
+    ['packages/core/src/skills/bundled/review/SKILL.md', true],
+    ['.claude/agents/reviewer.md', true],
+    ['.qwen/agents/helper.md', true],
+    ['src/prompts/system.txt', true],
+    ['packages/cli/src/commands/review/lib/agent-briefs.ts', true],
+    ['packages/cli/src/commands/review/agent-prompt.ts', true],
+    ['docs/system-prompt.md', true],
+    // Root guidance files, by each ecosystem's reserved name — standing
+    // instructions with operational recipes, the motivating incident's shape.
+    ['AGENTS.md', true],
+    ['CLAUDE.md', true],
+    ['QWEN.md', true],
+    ['packages/cli/GEMINI.md', true],
+    ['.github/copilot-instructions.md', true],
+    // Slash-command definitions are prompts too — and the dot-directories
+    // count NESTED as well as at the root (a `(^|\/)` → `(^)` mutant flips
+    // only the nested form, the false-negative direction the doc calls the
+    // expensive one).
+    ['.claude/commands/deploy.md', true],
+    ['.qwen/commands/review.md', true],
+    ['packages/x/.claude/agents/foo.md', true],
+    // A file in a reserved directory is followed under ANY name:
+    // FileCommandLoader globs **/*.md with no test filter, so a command
+    // named `release-notes.test` loads live and a `.test.` basename must
+    // not hide the file from the execution audit.
+    ['.qwen/commands/release-notes.test.md', true],
+    ['.claude/agents/reviewer.test.md', true],
+    ['prompts/system.test.md', true],
+    // The pipeline's own review rules: load-rules reads them first and
+    // bakes them into every brief, so a rules-only diff owes the audit —
+    // the pre-merge review is the only gate that can execute the change.
+    ['.qwen/review-rules.md', true],
+    // Skill bundles, by the loader's own marker: everything prose in the
+    // directory holding a SKILL.md is read AND followed (SKILL.md says so
+    // of `references/posting.md` and `references/persistence.md`), so the
+    // `skills/` segment rosters the audit — not one more filename. Code and
+    // the bundle's own unit tests under the same segment do not: the tests
+    // pin the prose, they are not followed as it.
+    ['packages/core/src/skills/bundled/review/references/posting.md', true],
+    ['packages/core/src/skills/bundled/review/references/persistence.md', true],
+    ['.qwen/skills/triage/references/pr-workflow.md', true],
+    ['packages/core/src/skills/skill-manager.ts', false],
+    ['packages/core/src/skills/skill-manager.test.ts', false],
+    ['packages/core/src/skills/bundled/review/SKILL.test.ts', false],
+    // Singular and embedded tokens — the alternation's both halves (a
+    // `briefs`-only or `prompt`-only mutant flips one of these).
+    ['docs/brief.md', true],
+    ['docs/my-prompts.md', true],
+    // Test code ABOUT prompts pins them; it is not itself followed as one —
+    // both exclusion spellings.
+    ['packages/cli/src/commands/review/agent-prompt.test.ts', false],
+    ['src/review-brief.spec.ts', false],
+    // Ordinary code and docs.
+    ['packages/cli/src/commands/review/drive.ts', false],
+    ['README.md', false],
+    // A token match, not a substring match: promptness must be a word.
+    ['src/prompter.ts', false],
+  ])('%s → %s', (path, expected) => {
+    expect(isPromptPath(path)).toBe(expected);
   });
 });

@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -19,6 +20,86 @@ const documentTemplateModulePath = join(
 );
 const exportTranscriptMaxBlocks = 1_000;
 const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
+// Since #9812 the renderer is no longer inlined into each export: the document
+// loads one version-pinned, SRI-protected asset from unpkg. That moved the cost
+// rather than removing it — the same bytes are now downloaded the first time
+// anyone opens an exported file, on a path that must fail closed, so the size
+// still needs a ceiling. Mirrors the hard bundle-size assertions in
+// packages/sdk-typescript/scripts/build.js.
+// Before #11031 was fixed, the document entry imported the @qwen-code/web-shell
+// package root and pulled the full interactive shell into that asset:
+// 19,523,259 runtime bytes.
+//
+// A byte cap alone is a weak ratchet — it only catches growth, and only once
+// it is large. The structural guard below (FORBIDDEN_DOCUMENT_INPUTS) is the
+// real one: it names the module graphs that must never reach an export and
+// fails with the reason. Keep both.
+//
+// Re-measure and lower these two constants after any change to the document
+// entry's dependencies:
+//   cd packages/web-templates && node src/export-html/build.mjs
+// (the build prints `Document export runtime is N bytes`.)
+//
+// Last measured at 7,275,173 bytes, with the echarts stub below in place, by a
+// reviewer building this branch locally (PR #11038). The prior CI measurement
+// on the same branch without that stub was 8,456,076. Re-measure and lower
+// these two again after any change to the document entry's dependencies.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 7_300_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 7_400_000;
+
+// Modules that must not be reachable from the document entry, checked against
+// the esbuild metafile inputs after the bundle is produced.
+const FORBIDDEN_DOCUMENT_INPUTS = [
+  {
+    pattern: /(^|\/)node_modules\/(shiki|@shikijs)\//,
+    why:
+      'Shiki is unreachable in document mode (CodeBlock renders plain <pre>) ' +
+      'and its Oniguruma WASM engine is blocked by the export CSP; it is ' +
+      'resolved to src/document-shiki-stub.ts by the strip plugin below.',
+  },
+  {
+    pattern: /web-shell\/dist\/index\.js$/,
+    why:
+      'The @qwen-code/web-shell package root drags the interactive shell ' +
+      '(App, daemon providers, editor/terminal chrome) into every export. ' +
+      'Import @qwen-code/web-shell/transcript instead (#11031).',
+  },
+  {
+    pattern: /(^|\/)node_modules\/(echarts|zrender)\//,
+    why:
+      'The chart runtime is only reachable through the `?? () => import("echarts")` ' +
+      'default inside @datafe-open/markdown-chart-echarts, which Web Shell never ' +
+      'takes (MarkdownChartRenderer always passes a loadECharts). IIFE output ' +
+      'cannot code-split, so that dead dynamic import was flattened in; it is ' +
+      'resolved to src/document-echarts-stub.ts by the strip plugin below.',
+  },
+  {
+    pattern: /(^|\/)node_modules\/(codemirror|@codemirror)\//,
+    why:
+      'A read-only export has no composer. CodeMirror last reached it through ' +
+      'three composer-tag getters that UserMessage imported from ' +
+      'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
+      'is editor-free. Import from there, not from the composer hook.',
+  },
+];
+
+// `shiki` and `@shikijs/*` are replaced wholesale rather than marked external:
+// the renderer asset is a single IIFE bundle, so an external specifier would
+// simply fail to resolve in the browser. See src/document-shiki-stub.ts for why
+// this is dead code in an export.
+const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
+const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
+const stripDocumentDeadModules = {
+  name: 'strip-document-dead-modules',
+  setup(build) {
+    build.onResolve({ filter: /^(shiki|@shikijs)(\/|$)/ }, () => ({
+      path: documentShikiStub,
+    }));
+    build.onResolve({ filter: /^echarts(\/|$)/ }, () => ({
+      path: documentEchartsStub,
+    }));
+  },
+};
 const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
   await readFile(
     join(assetsDir, '..', '..', '..', '..', 'package.json'),
@@ -33,6 +114,8 @@ const documentBuildResult = await build({
   bundle: true,
   minify: true,
   write: false,
+  metafile: true,
+  plugins: [stripDocumentDeadModules],
   outfile: join(assetsDistDir, 'export-transcript-document.js'),
   platform: 'browser',
   format: 'iife',
@@ -59,6 +142,65 @@ const documentCssBundle = documentBuildResult.outputFiles.find((file) =>
 );
 if (!documentJsBundle || !documentCssBundle) {
   throw new Error('Failed to generate document export bundles.');
+}
+// Re-measuring the budget should not require editing this file. The size line
+// below says *how much*; this says *what of*, which is the question a
+// regression actually raises.
+const documentInputs = documentBuildResult.metafile.inputs;
+const inputBytesByPackage = new Map();
+for (const [input, { bytes }] of Object.entries(documentInputs)) {
+  const match = input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//);
+  const key = match ? match[1] : 'first-party';
+  inputBytesByPackage.set(key, (inputBytesByPackage.get(key) ?? 0) + bytes);
+}
+const topInputs = [...inputBytesByPackage]
+  .sort(([, left], [, right]) => right - left)
+  .slice(0, 8)
+  .map(([name, bytes]) => `${name} ${bytes}`)
+  .join(', ');
+console.log(`Document export top inputs (pre-minify bytes): ${topInputs}`);
+if (process.env.EXPORT_HTML_METAFILE) {
+  await writeFile(
+    process.env.EXPORT_HTML_METAFILE,
+    JSON.stringify(documentBuildResult.metafile),
+  );
+  console.log(
+    `Document export metafile written to ${process.env.EXPORT_HTML_METAFILE}`,
+  );
+}
+
+const forbiddenInputs = Object.keys(documentInputs)
+  .map((input) => ({
+    input,
+    rule: FORBIDDEN_DOCUMENT_INPUTS.find(({ pattern }) => pattern.test(input)),
+  }))
+  .filter((entry) => entry.rule);
+if (forbiddenInputs.length > 0) {
+  const reasons = [...new Set(forbiddenInputs.map(({ rule }) => rule.why))];
+  const examples = forbiddenInputs.slice(0, 5).map(({ input }) => `  ${input}`);
+  throw new Error(
+    `The document export bundle reached ${forbiddenInputs.length} forbidden input(s):\n` +
+      `${examples.join('\n')}\n` +
+      `${reasons.map((why) => `- ${why}`).join('\n')}`,
+  );
+}
+
+const documentRuntimeBytes =
+  Buffer.byteLength(documentJsBundle.text) +
+  Buffer.byteLength(documentCssBundle.text);
+console.log(`Document export runtime is ${documentRuntimeBytes} bytes`);
+if (documentRuntimeBytes > MAX_DOCUMENT_RUNTIME_BYTES) {
+  throw new Error(
+    `Document export runtime is ${documentRuntimeBytes} bytes; expected <= ${MAX_DOCUMENT_RUNTIME_BYTES}. ` +
+      'Every reader of an exported file downloads this asset before the ' +
+      'transcript renders; import only what the transcript needs ' +
+      '(see packages/web-shell/client/transcript.ts) or raise the budget deliberately.',
+  );
+}
+if (documentRuntimeBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
+  console.warn(
+    `Document export runtime exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
+  );
 }
 const rendererBuildId = createHash('sha256')
   .update(documentJsBundle.contents)
