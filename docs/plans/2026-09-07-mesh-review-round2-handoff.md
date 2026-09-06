@@ -2,7 +2,7 @@
 
 > Reviewed: [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) at `af7fed7021e94b83df3aa013fd4dae3b2a0357e1` (PR #11072)
 > Runtime facts checked against `origin/main` @ `703678136a`; Multica against `multica-ai/multica@7a438bd5b`
-> Method: source reading only. Nothing in this file was built, type-checked, or executed. Every `file:line` below was read at the commits named above; line numbers drift, symbols do not.
+> Original review method: source reading only. The implementation update and §4 observations explicitly identify the later checks that were executed. Every `file:line` below was read at the commits named above; line numbers drift, symbols do not.
 > Audience: the agent that implements §5.2. Read §0 of the design first, then this file.
 
 ## 0. Verdict
