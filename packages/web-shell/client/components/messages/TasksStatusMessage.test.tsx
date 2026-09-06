@@ -338,6 +338,45 @@ describe('process task output', () => {
     expect(container.textContent).toContain('No output yet');
   });
 
+  it('refetches output on the poll cadence while the task keeps running', async () => {
+    vi.useFakeTimers();
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockResolvedValue({
+      output: 'snapshot',
+      truncated: false,
+    });
+    renderTaskDetail(monitorTask());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getTaskOutputMock).toHaveBeenCalledTimes(1);
+
+    // The tab's props never advance — a restored cross-session tab gets no
+    // snapshot merge — so only the running-task refetch interval can pull
+    // fresh output for it.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+
+    expect(getTaskOutputMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch output once the task is terminal', async () => {
+    vi.useFakeTimers();
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockResolvedValue({
+      output: 'snapshot',
+      truncated: false,
+    });
+    renderTaskDetail(monitorTask({ status: 'completed', endTime: 9_000 }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getTaskOutputMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+
+    expect(getTaskOutputMock).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the metadata-only view for older daemons', () => {
     const container = renderTaskDetail(monitorTask());
 

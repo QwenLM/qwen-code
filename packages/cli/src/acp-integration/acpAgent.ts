@@ -7989,10 +7989,20 @@ class QwenAgent implements Agent {
         ? config.getBackgroundShellRegistry().get(taskId)
         : config.getMonitorRegistry().get(taskId);
     if (!entry) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Unknown ${taskKind} task: ${taskId}`,
-      );
+      // Fail closed like the sibling readers (task cancel returns
+      // `{cancelled: false, reason: 'not_found'}`, saved-workflow reads
+      // return `workflow: null`): a routine miss on an unknown or evicted
+      // task id must not throw across the bridge, where the forwarded
+      // error maps to a 500 / -32603 server fault.
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        taskId,
+        kind: taskKind,
+        output: '',
+        truncated: false,
+        error: 'Task output is unavailable.',
+      };
     }
 
     const tail = readTaskOutputTail(

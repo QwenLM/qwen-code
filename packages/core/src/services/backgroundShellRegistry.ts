@@ -28,6 +28,9 @@ import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
   stripDisplayControlChars,
+  TERMINAL_CSI_REGEX,
+  TERMINAL_OSC_REGEX,
+  TERMINAL_SHIFT_DCS_REGEX,
   truncateNotificationLabel,
 } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
@@ -38,11 +41,18 @@ export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 
 function stripOutputControlChars(text: string): string {
+  // Whole sequences first: the per-character loop below only deletes the
+  // ESC byte, so a sequence reaching it would leave its bracket,
+  // parameters, and final letter behind as readable text.
+  const withoutSequences = text
+    .replace(TERMINAL_OSC_REGEX, '')
+    .replace(TERMINAL_CSI_REGEX, '')
+    .replace(TERMINAL_SHIFT_DCS_REGEX, '');
   let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
+  for (let i = 0; i < withoutSequences.length; i++) {
+    const code = withoutSequences.charCodeAt(i);
     if (code === 0x09 || code === 0x0a || code === 0x0d) {
-      out += text[i];
+      out += withoutSequences[i];
       continue;
     }
     if (code < 0x20) continue;
@@ -50,9 +60,33 @@ function stripOutputControlChars(text: string): string {
     // Same bidi set as the shared display helper, in its own loop only
     // because the tail must keep \n and \r, which that helper strips.
     if (isBidiControlChar(code)) continue;
-    out += text[i];
+    out += withoutSequences[i];
   }
   return out;
+}
+
+/**
+ * Normalize carriage returns for non-TTY consumers of the tail. CRLF is a
+ * real newline and collapses to LF; a lone CR redraws the current line
+ * (`npm --progress`, `curl -#`, pip), so each LF-delimited segment keeps
+ * only the frame after its last CR — with a fallback to the latest
+ * non-empty frame so a line that ends right after a redraw's final CR
+ * still shows the frame it drew.
+ */
+function normalizeOutputCarriageReturns(text: string): string {
+  if (!text.includes('\r')) return text;
+  return text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      if (!line.includes('\r')) return line;
+      const frames = line.split('\r');
+      for (let i = frames.length - 1; i >= 0; i--) {
+        if (frames[i]!.length > 0) return frames[i]!;
+      }
+      return '';
+    })
+    .join('\n');
 }
 
 export type TaskOutputTailResult =
@@ -90,8 +124,10 @@ export function readTaskOutputTail(
       }
     }
 
-    const text = stripOutputControlChars(
-      buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
+    const text = normalizeOutputCarriageReturns(
+      stripOutputControlChars(
+        buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
+      ),
     ).trimEnd();
 
     if (!text) return undefined;

@@ -10730,13 +10730,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
       { sessionId, taskId: 'monitor-1', taskKind: 'monitor' },
     );
-    await expect(
-      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTaskOutput, {
+    // An unknown or evicted task id fails closed with the same in-band
+    // envelope as an unreadable capture: a routine client miss must not be
+    // thrown across the bridge, where the forwarded error maps to a
+    // 500 / -32603 server fault.
+    const missingOutput = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
+      {
         sessionId,
         taskId: 'missing',
         taskKind: 'shell',
-      }),
-    ).rejects.toThrow('Unknown shell task: missing');
+      },
+    );
+    expect(missingOutput).toMatchObject({
+      sessionId,
+      taskId: 'missing',
+      kind: 'shell',
+      output: '',
+      truncated: false,
+      error: 'Task output is unavailable.',
+    });
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },

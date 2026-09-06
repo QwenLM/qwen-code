@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   constants as fsConstants,
@@ -22,6 +23,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
+  MAX_TASK_OUTPUT_TAIL_BYTES,
   readTaskOutputTail,
   MAX_RETAINED_TERMINAL_SHELLS,
   statusFilePathFor,
@@ -79,6 +81,51 @@ describe('readTaskOutputTail', () => {
       truncated: true,
     });
   });
+
+  it('strips whole ANSI sequences instead of just their ESC byte', () => {
+    const outputFile = makeOutputFile('\u001b[31mred\u001b[0m done');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'red done',
+      truncated: false,
+    });
+  });
+
+  it('collapses carriage-return redraw frames to the latest frame per line', () => {
+    const outputFile = makeOutputFile(
+      'frame 10%\rframe 45%\rframe 99%\ndone\n',
+    );
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'frame 99%\ndone',
+      truncated: false,
+    });
+  });
+
+  it('keeps CRLF newlines as line breaks and a redraw trailing the file', () => {
+    const outputFile = makeOutputFile('first\r\nsecond\rthird');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'first\nthird',
+      truncated: false,
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'returns undefined instead of blocking when the output path is a FIFO',
+    () => {
+      // Without O_NONBLOCK the no-follow open blocks in open(2) until a
+      // writer appears, so this case can only go red by hanging — that is
+      // the witness for the daemon-thread DoS a planted FIFO causes.
+      const dir = makeTempDir();
+      const fifoPath = join(dir, 'shell.output');
+      execFileSync('mkfifo', [fifoPath]);
+
+      expect(
+        readTaskOutputTail(fifoPath, MAX_TASK_OUTPUT_TAIL_BYTES),
+      ).toBeUndefined();
+    },
+  );
 });
 
 function makeEntry(

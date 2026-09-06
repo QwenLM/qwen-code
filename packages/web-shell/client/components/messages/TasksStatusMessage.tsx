@@ -1478,30 +1478,43 @@ function ProcessTaskOutput({
   useEffect(() => {
     if (!supported) return;
     let active = true;
-    void actions
-      .getTaskOutput(task.id, task.kind)
-      .then((result) => {
-        if (!active) return;
-        const outputElement = outputElementRef.current;
-        followNextOutputRef.current =
-          result.output !== outputValueRef.current &&
-          outputElement !== null &&
-          outputElement.scrollHeight > outputElement.clientHeight &&
-          outputElement.scrollTop + outputElement.clientHeight >=
-            outputElement.scrollHeight - 1;
-        outputValueRef.current = result.output;
-        setOutput(result.output);
-        setTruncated(result.truncated);
-        setUnavailable(Boolean(result.error));
-      })
-      .catch(() => {
-        if (active) setUnavailable(true);
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    const fetchOutput = (): void => {
+      void actions
+        .getTaskOutput(task.id, task.kind)
+        .then((result) => {
+          if (!active) return;
+          const outputElement = outputElementRef.current;
+          followNextOutputRef.current =
+            result.output !== outputValueRef.current &&
+            outputElement !== null &&
+            outputElement.scrollHeight > outputElement.clientHeight &&
+            outputElement.scrollTop + outputElement.clientHeight >=
+              outputElement.scrollHeight - 1;
+          outputValueRef.current = result.output;
+          setOutput(result.output);
+          setTruncated(result.truncated);
+          setUnavailable(Boolean(result.error));
+        })
+        .catch(() => {
+          if (active) setUnavailable(true);
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    };
+    fetchOutput();
+    // A restored cross-session tab never receives a snapshot advance (the
+    // App-level polling-sync effects skip tabs from other sessions), so the
+    // deps below never change for it; re-fetch on the tasks poll cadence
+    // while the task is running. Same-session tabs re-run this effect on
+    // every snapshot advance, which resets the interval before it fires.
+    const refetchInterval =
+      task.status === 'running'
+        ? setInterval(fetchOutput, REFRESH_INTERVAL_MS)
+        : undefined;
     return () => {
       active = false;
+      if (refetchInterval !== undefined) clearInterval(refetchInterval);
     };
   }, [actions, supported, task.id, task.kind, task.runtimeMs, task.status]);
 

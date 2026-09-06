@@ -721,6 +721,78 @@ describe('MonitorTool', () => {
       });
     });
 
+    it('decodes multi-byte UTF-8 split across stdout chunks intact', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // Split the first 3-byte character across two pipe chunks: a raw
+      // per-chunk toString bakes U+FFFD replacements into the capture file
+      // that every task-output surface serves.
+      const encoded = Buffer.from('日本語のログ\n', 'utf8');
+      mockChild.stdout.emit('data', encoded.subarray(0, 2));
+      mockChild.stdout.emit('data', encoded.subarray(2));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('日本語のログ\n');
+      });
+    });
+
+    it('strips an ANSI escape split across stdout chunks from the capture', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A CSI sequence straddling two pipe chunks: ansi-regex leaves the
+      // trailing '\u001b[' of the first chunk intact and the second chunk
+      // reconstitutes the whole sequence inside the persisted file.
+      mockChild.stdout.emit('data', Buffer.from('plain\n\u001b['));
+      mockChild.stdout.emit('data', Buffer.from('31mred\u001b[0m done\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('plain\nred done\n');
+      });
+    });
+
+    it('does not hold back a trailing partial escape longer than the cap', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // An unterminated OSC longer than PARTIAL_LINE_BUFFER_CAP (4096) must
+      // be written immediately rather than accumulated in memory waiting
+      // for a terminator that may never arrive.
+      const overlongPartial = '\u001b]' + 'a'.repeat(5000);
+      mockChild.stdout.emit('data', Buffer.from(overlongPartial));
+      mockChild.stdout.emit('data', Buffer.from('\u0007c\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe(
+          overlongPartial + '\u0007c\n',
+        );
+      });
+    });
+
+    it('flushes held escape and decoder tails into the capture at close', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // Ends mid-escape and mid-codepoint: both tails are released at close
+      // rather than silently dropped from the capture file.
+      const chunk = Buffer.concat([
+        Buffer.from('tail \u001b['),
+        Buffer.from([0xe6]),
+      ]);
+      mockChild.stdout.emit('data', chunk);
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe(
+          'tail \u001b[\ufffd',
+        );
+      });
+    });
+
     it('bounds the task output file while preserving the latest output', async () => {
       const invocation = createInvocation({ command: 'tail -f app.log' });
 

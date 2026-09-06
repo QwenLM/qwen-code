@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import stripAnsi from 'strip-ansi';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -72,6 +73,13 @@ const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_DISPLAY_DESCRIPTION_LENGTH = 80;
 const PARTIAL_LINE_BUFFER_CAP = 4096;
+// The trailing escape sequence a pipe chunk can end in the middle of: an
+// unterminated OSC, a CSI still waiting for its final letter, a lone ESC,
+// or an SS2/SS3/DCS leader byte.
+/* eslint-disable no-control-regex */
+const TRAILING_PARTIAL_ESCAPE_REGEX =
+  /\x1b(?:\][^\x07\x1b]*|\[[\d;?]*|[NOP]?)$/;
+/* eslint-enable no-control-regex */
 // The extra byte preserves readTaskOutputTail's `truncated` signal after the
 // capture starts discarding older output.
 const MAX_MONITOR_OUTPUT_CAPTURE_BYTES = MAX_TASK_OUTPUT_TAIL_BYTES + 1;
@@ -496,8 +504,16 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // path — either `entryAc.signal.aborted` already true at registration
     // time, or `registry.register()` throwing — can flush via
     // `flushPartialLineBuffers` without hitting a TDZ ReferenceError.
-    const stdoutBuf = { value: '' };
-    const stderrBuf = { value: '' };
+    const stdoutBuf = {
+      value: '',
+      heldEscape: '',
+      decoder: new StringDecoder('utf8'),
+    };
+    const stderrBuf = {
+      value: '',
+      heldEscape: '',
+      decoder: new StringDecoder('utf8'),
+    };
     let tokenBucket = THROTTLE_BURST_SIZE;
     let lastRefill = Date.now();
 
@@ -545,6 +561,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // after flushing.
     const flushPartialLineBuffers = (): void => {
       for (const buf of [stdoutBuf, stderrBuf]) {
+        // Release the held-back partial escape and the decoder's trailing
+        // bytes so a sequence or codepoint straddling the final chunk is
+        // still stripped and captured before the output file closes.
+        const tail = stripAnsi(buf.heldEscape + buf.decoder.end());
+        buf.heldEscape = '';
+        if (tail.length > 0) {
+          writeOutputCapture(tail);
+          buf.value += tail;
+        }
         const trimmed = buf.value.trim();
         if (trimmed.length > 0) {
           throttledEmit(trimmed);
@@ -625,10 +650,35 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    const processLines = (buffer: { value: string }, data: Buffer): void => {
+    const processLines = (
+      buffer: {
+        value: string;
+        heldEscape: string;
+        decoder: StringDecoder;
+      },
+      data: Buffer,
+    ): void => {
       if (registration.status !== 'running') return;
 
-      const text = stripAnsi(data.toString('utf-8'));
+      // Decode per stream through StringDecoder so a multi-byte codepoint
+      // split across pipe chunks is reassembled instead of baking U+FFFD
+      // replacements into the capture file; the streams share this
+      // function, so each owns a decoder (a shared one would corrupt the
+      // other stream's buffered trailing bytes).
+      const decoded = buffer.heldEscape + buffer.decoder.write(data);
+      // Hold back a trailing incomplete escape sequence: ansi-regex leaves
+      // a chunk-final lone ESC (or ESC + bracket) intact and the next
+      // chunk would reconstitute the whole sequence inside the capture
+      // file.
+      const holdMatch = TRAILING_PARTIAL_ESCAPE_REGEX.exec(decoded);
+      const held =
+        holdMatch !== null && holdMatch[0].length <= PARTIAL_LINE_BUFFER_CAP
+          ? holdMatch[0]
+          : '';
+      buffer.heldEscape = held;
+      const text = stripAnsi(
+        held.length > 0 ? decoded.slice(0, -held.length) : decoded,
+      );
       writeOutputCapture(text);
       buffer.value += text;
 
