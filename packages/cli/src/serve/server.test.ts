@@ -34038,7 +34038,7 @@ describe('runQwenServe', () => {
       port: 0,
       mode: 'http-bridge',
     });
-    expect(handle.resolvedToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(handle.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
     const port = (handle.server.address() as { port: number }).port;
     const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
     expect(noAuth.status).toBe(401);

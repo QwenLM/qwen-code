@@ -18,7 +18,7 @@ it('generates fresh strong credentials only for remote binds with absent sources
   vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
   const first = resolveRemoteServeToken(undefined, false, undefined);
   expect(first.generated).toBe(true);
-  expect(first.token).toMatch(/^[a-f0-9]{64}$/);
+  expect(first.token).toMatch(/^[A-Za-z0-9_-]{22}$/);
   expect(resolveRemoteServeToken(undefined, false, undefined).token).not.toBe(
     first.token,
   );

@@ -16,7 +16,7 @@ export function resolveRemoteServeToken(
     !loopback && optionToken === undefined && environmentToken === undefined;
   return {
     token: generated
-      ? randomBytes(32).toString('hex')
+      ? randomBytes(16).toString('base64url')
       : resolveServeToken(optionToken, environmentToken),
     generated,
   };

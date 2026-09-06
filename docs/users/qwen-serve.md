@@ -61,7 +61,7 @@ For the deeper "what we won't fix in Stage 1" enumeration (single-host session-s
 qwen serve --hostname 0.0.0.0
 ```
 
-When neither `--token` nor `QWEN_SERVER_TOKEN` is supplied, a non-loopback listener generates a 256-bit ephemeral bearer and prints it once at startup. Explicit flag values take precedence over the environment; explicitly empty values still fail closed. Default loopback behavior is unchanged.
+When neither `--token` nor `QWEN_SERVER_TOKEN` is supplied, a non-loopback listener generates a 128-bit ephemeral bearer (22 URL-safe characters) and prints it once at startup. Explicit flag values take precedence over the environment; explicitly empty values still fail closed. Default loopback behavior is unchanged.
 
 Startup lists token-free local/network URLs from actual interfaces and — for the generated token, or for your own token at an interactive terminal — a **secret-bearing QR code** for one labeled private-LAN address. Only the same private/link-local LAN population Local Control advertises (RFC 1918 / RFC 3927 IPv4 and fc00::/7 ULA IPv6 on physical interfaces) is listed; VPN adapters, container bridges, and routable public addresses are never printed or encoded. Scan the QR to open the built-in Web Shell with the bearer in the URL fragment. The browser removes the credential from the URL and keeps it in per-tab `sessionStorage`. Alternatively, open a printed URL and enter the token; missing or expired credentials show a retry form. Generated tokens rotate on restart. `--no-web` omits the QR, and a piped/redirected stdout never re-publishes a stable operator token as a QR. Addresses do not imply firewall or NAT reachability; no public IP is discovered automatically.
 
