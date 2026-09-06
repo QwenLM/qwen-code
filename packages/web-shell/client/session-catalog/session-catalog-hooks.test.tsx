@@ -50,9 +50,13 @@ const mocks = vi.hoisted(() => ({
     newSession: vi.fn(),
     releaseSession: vi.fn(),
   })),
+  setDaemonActivePrompt: vi.fn(),
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useActions: () => ({
+    setDaemonActivePrompt: mocks.setDaemonActivePrompt,
+  }),
   useSessions: mocks.useSessions,
   useWorkspace: () => mocks.workspace,
 }));
@@ -61,6 +65,7 @@ const {
   useSessionCatalogQuery,
   useSessionCatalogController,
   useSessionActivePromptState,
+  useDaemonActivePromptBridge,
   useWebShellSessions,
 } = await import('./session-catalog-hooks');
 
@@ -70,6 +75,7 @@ let legacy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   legacy = vi.fn();
+  mocks.setDaemonActivePrompt.mockReset();
   mocks.workspace.actions.deleteSession.mockReset();
   mocks.workspace.actions.deleteSessions.mockReset();
   mocks.workspace.actions.archiveSession.mockReset();
@@ -407,6 +413,43 @@ describe('useSessionActivePromptState (#9487)', () => {
       store.applyLiveState('/work', live(true));
     });
     expect(container.textContent).toBe('true');
+  });
+
+  it('publishes only authoritative live prompt state to the provider', async () => {
+    setQualifiedPage([]);
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+
+    function BridgeProbe() {
+      const active = useDaemonActivePromptBridge(client, '/work', 'sess-1');
+      return <span>{String(active)}</span>;
+    }
+
+    await act(async () => {
+      root.render(<BridgeProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(undefined);
+
+    act(() => {
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sess-1',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+      ]);
+    });
+    expect(container.textContent).toBe('true');
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(true);
+
+    act(() => {
+      store.applyLiveState('/work', []);
+    });
+    expect(container.textContent).toBe('false');
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(false);
   });
 
   it('never lets the bounded fallback page settle a turn', async () => {
