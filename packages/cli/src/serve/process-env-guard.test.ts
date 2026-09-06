@@ -151,6 +151,19 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/local-path-open.ts',
+    {
+      reason:
+        'Local-open availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name, terminal ' +
+        'emulators on PATH), so embedded callers may omit the environment ' +
+        'argument; the win32 terminal fallback inherits the daemon ' +
+        'environment to hand the target directory to PowerShell via one ' +
+        'added variable.',
+      accesses: { whole: 4 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
@@ -204,6 +217,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
       accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-attachments-root.ts',
+    {
+      reason:
+        'The session-attachment storage root is a process-scoped daemon setting read once at bridge construction.',
+      accesses: { 'computed:SESSION_ATTACHMENTS_ROOT_ENV': 1 },
     },
   ],
   [

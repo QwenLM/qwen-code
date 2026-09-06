@@ -228,6 +228,26 @@ The npm package publishes only the bundled runtime, canonical schemas,
 Extension manifest, and README. It contains no administrator dialect, provider
 preset, provider identifier, or provider-specific contract fixture.
 
+The public package name is `@qwen-code/external-context-mem0`. Its package and
+Extension manifest versions follow the Qwen Code release version and are
+updated in the same release commit. Administrators can install the latest
+release with `qwen extensions install @qwen-code/external-context-mem0` or pin
+an explicit npm version. Installation never creates an instance file, dialect
+file, credential, or ordinary Qwen setting.
+
+The normal release workflow builds the self-contained bundle, checks whether
+the exact package version already exists, and publishes with the release's npm
+dist-tag and provenance. The package participates in the shared
+already-published guard so a partial release cannot be overwritten by a retry.
+Because npm requires a package to exist before trusted publishing can be
+configured, the publish step remains behind the
+`NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED` repository variable
+until a maintainer completes the one-time public bootstrap publish and binds
+the package to the `release.yml` workflow in the `production-release`
+environment. The bootstrap should publish the first actual Qwen release that
+contains this change, not invent a second version line. Future releases use
+trusted publishing and require no npm token.
+
 When a service fits `DialectV1`, its administrator writes and validates a local
 dialect file. When it does not fit, the service owner publishes a separate MCP
 Extension implementing External Context MCP Profile v1. Qwen does not add a
@@ -243,7 +263,9 @@ built-in provider rollout for either case.
 3. **PR2:** Replace the unused registry with administrator-owned
    `InstanceConfigV2` and `DialectV1` files, while preserving the request engine
    and profile boundary.
-4. Design any portable write capability separately.
+4. **Distribution follow-up:** Publish the self-contained Extension through the
+   normal Qwen Code npm release without adding provider data or Core wiring.
+5. Design any portable write capability separately.
 
 There is no Qwen-maintained provider-preset PR3. Administrators own compatible
 dialect data; incompatible protocols use their own MCP Extension.

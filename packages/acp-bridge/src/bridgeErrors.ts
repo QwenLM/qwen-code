@@ -704,3 +704,10 @@ export class CdWhilePromptActiveError extends Error {
     this.sessionId = sessionId;
   }
 }
+
+export class McpAuthenticationInProgressError extends Error {
+  constructor() {
+    super('Another MCP authentication is already in progress');
+    this.name = 'McpAuthenticationInProgressError';
+  }
+}

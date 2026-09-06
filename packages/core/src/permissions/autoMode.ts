@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Content } from '@google/genai';
+import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
   getAllMemoryFilenames,
@@ -28,15 +29,22 @@ import {
 import type { PermissionDeniedReason } from '../hooks/types.js';
 export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { ToolCallConfirmationDetails } from '../tools/tools.js';
+import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import type {
+  AutoModeFallbackConfirmation,
+  ToolCallConfirmationDetails,
+} from '../tools/tools.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { classifyAction, type ClassifierResult } from './classifier.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import {
+  consumePendingManualRetry,
+  isDenialFallbackReason,
   recordAllow,
   recordBlock,
   recordUnavailable,
+  shouldFallback,
   type AutoModeDenialState,
   type DenialFallbackReason,
 } from './denialTracking.js';
@@ -455,8 +463,8 @@ function stripRawRedirectTargetToken(token: string): string {
  *
  * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
  * internally calls `fs.realpathSync`. A symlink whose target is outside the
- * workspace correctly fails this check and falls through to the classifier
- * — fail-safe by implementation.
+ * workspace correctly fails this check and falls through to the L5.2.6
+ * external_write manual fallback — fail-safe by implementation.
  *
  * Caller should only consult this when L4 evaluation returned `'default'`.
  */
@@ -520,6 +528,7 @@ export type FallbackToAskReason =
   | 'plan_mode_floor'
   | 'org_ask_ceiling'
   | 'classifier_unavailable'
+  | 'external_write'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -536,6 +545,28 @@ export type AutoModeOutcome =
       message?: string;
     };
 
+/** Stable identity for an AUTO-mode action within its filesystem context. */
+export function getAutoModeActionFingerprint(
+  toolName: string,
+  toolParams: Record<string, unknown>,
+  cwd: string,
+): string {
+  return getToolCallRepeatKey(toolName, { cwd, toolParams });
+}
+
+/** Resolve a fallback without consuming its one-shot retry yet. */
+export function prepareAutoModeFallback(
+  config: Config,
+  actionFingerprint: string,
+): {
+  denialState: AutoModeDenialState;
+  fallback: ReturnType<typeof shouldFallback>;
+} {
+  const denialState = config.getAutoModeDenialState();
+  const fallback = shouldFallback(denialState, actionFingerprint);
+  return { denialState, fallback };
+}
+
 /**
  * Apply an AUTO decision and denial-tracking update. Shared by the scheduler
  * and ACP paths; callers still handle their integration-specific responses.
@@ -544,17 +575,20 @@ export function applyAutoModeDecision(
   decision: AutoModeDecision,
   config: Config,
   denialState: AutoModeDenialState,
+  actionFingerprint?: string,
 ): AutoModeOutcome {
   switch (decision.via) {
     case 'fast-path:accept-edits':
     case 'fast-path:allowlist':
-      config.setAutoModeDenialState(recordAllow(denialState));
+      config.setAutoModeDenialState(
+        recordAllow(denialState, actionFingerprint),
+      );
       return { kind: 'approved' };
     case 'blocked:destructive-command':
       config.setAutoModeDenialState(recordBlock(denialState));
       return {
         kind: 'blocked',
-        errorMessage: `${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`,
+        errorMessage: `${decision.reason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
     case 'classifier':
@@ -567,17 +601,54 @@ export function applyAutoModeDecision(
             message: formatClassifierUnavailableFallbackMessage(decision),
           };
         }
-        config.setAutoModeDenialState(recordBlock(denialState));
+        const blockedState = recordBlock(denialState, actionFingerprint);
+        const fallback = shouldFallback(blockedState);
+        if (fallback.fallback) {
+          config.setAutoModeDenialState(
+            consumePendingManualRetry(blockedState),
+          );
+          return {
+            kind: 'fallback',
+            reason: fallback.reason,
+            message: formatDenialFallbackMessage(
+              fallback.reason,
+              decision.reason,
+            ),
+          };
+        }
+        config.setAutoModeDenialState(blockedState);
         return {
           kind: 'blocked',
           errorMessage: formatClassifierBlockMessage(decision),
           reason: 'classifier_blocked',
         };
       }
-      config.setAutoModeDenialState(recordAllow(denialState));
+      config.setAutoModeDenialState(
+        recordAllow(denialState, actionFingerprint),
+      );
       return { kind: 'approved' };
     case 'fallback':
-      return { kind: 'fallback', reason: decision.reason };
+      if (
+        actionFingerprint !== undefined &&
+        denialState.pendingManualRetryFingerprint === actionFingerprint
+      ) {
+        config.setAutoModeDenialState(consumePendingManualRetry(denialState));
+      }
+      if (decision.reason === 'external_write') {
+        return {
+          kind: 'fallback',
+          reason: 'external_write',
+          message:
+            'Writes outside the workspace require manual approval in AUTO mode.',
+        };
+      }
+      return {
+        kind: 'fallback',
+        reason: decision.reason,
+        ...(isDenialFallbackReason(decision.reason)
+          ? { message: formatDenialFallbackMessage(decision.reason) }
+          : {}),
+      };
     default: {
       const _exhaustive: never = decision;
       // Make unexpected JS/interop values visible at runtime.
@@ -599,7 +670,11 @@ export function shouldFirePermissionDeniedForAutoMode(
   return (
     decision.via === 'classifier' &&
     decision.shouldBlock &&
-    outcome.kind === 'blocked'
+    !decision.unavailable &&
+    (outcome.kind === 'blocked' ||
+      (outcome.kind === 'fallback' &&
+        (outcome.reason === 'consecutive_block' ||
+          outcome.reason === 'total_denial')))
   );
 }
 
@@ -611,12 +686,35 @@ export function getAutoModePermissionDeniedReason(
 
 /**
  * Trailing guidance appended to classifier policy-denial tool results.
- * Centralised so the policy boundary (no silent retries, no equivalent-path
- * workarounds, stop and ask the user) stays in sync with the main system
- * prompt's Denied Tool Calls rule.
+ * Centralised so the policy boundary (no equivalent-path workarounds, with an
+ * exact-action retry available for manual review) stays in sync with the main
+ * system prompt's Denied Tool Calls rule.
  */
 export const AUTO_MODE_DENIAL_GUIDANCE =
-  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+
+const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE =
+  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If this action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+
+function formatDenialFallbackMessage(
+  reason: DenialFallbackReason,
+  classifierReason?: string,
+): string {
+  switch (reason) {
+    case 'classifier_blocked_retry':
+      return 'Auto mode previously blocked this exact action. Review it manually.';
+    case 'consecutive_block':
+      return `Auto mode reached its consecutive denial limit on this action${classifierReason ? ` (${classifierReason})` : ''}. Review it manually.`;
+    case 'consecutive_unavailable':
+      return 'Auto mode could not classify consecutive actions. Review this action manually.';
+    case 'total_denial':
+      return 'Auto mode reached its session denial limit. Review this action manually.';
+    default: {
+      const _exhaustive: never = reason;
+      return _exhaustive;
+    }
+  }
+}
 
 export function formatClassifierUnavailableFallbackMessage(
   decision: Extract<AutoModeDecision, { via: 'classifier' }>,
@@ -625,8 +723,9 @@ export function formatClassifierUnavailableFallbackMessage(
   return `Auto Mode couldn't classify this action${detail}. Review it manually. Switching to Default Mode is recommended if you want to continue without the classifier.`;
 }
 
-export function decorateClassifierUnavailableConfirmation(
+export function decorateAutoModeFallbackConfirmation(
   confirmation: ToolCallConfirmationDetails,
+  reason: AutoModeFallbackConfirmation['reason'],
   message: string,
 ): ToolCallConfirmationDetails {
   return {
@@ -635,10 +734,21 @@ export function decorateClassifierUnavailableConfirmation(
       ? {}
       : { hideAlwaysAllow: true }),
     autoModeFallback: {
-      reason: 'classifier_unavailable',
+      reason,
       message,
     },
   } as ToolCallConfirmationDetails;
+}
+
+export function decorateClassifierUnavailableConfirmation(
+  confirmation: ToolCallConfirmationDetails,
+  message: string,
+): ToolCallConfirmationDetails {
+  return decorateAutoModeFallbackConfirmation(
+    confirmation,
+    'classifier_unavailable',
+    message,
+  );
 }
 
 /**
@@ -663,6 +773,8 @@ export interface EvaluateAutoModeInput {
   toolParams: Record<string, unknown>;
   /** Main session message history. */
   messages: readonly Content[];
+  /** Session-scoped host-confirmed answers aligned to the same history read. */
+  trustedUserAnswers?: TrustedUserAnswerSnapshot;
   config: Config;
   signal: AbortSignal;
   /**
@@ -730,6 +842,19 @@ export async function evaluateAutoMode(
     return { via: 'fallback', reason: 'ask_rule' };
   }
 
+  // L5.2.6: External writes must never be auto-approved by the classifier.
+  // If a write tool targets a path outside the workspace, force a fallback to
+  // manual approval (ask) instead of risking an LLM classifier auto-approval.
+  if (
+    PROTECTED_WRITE_TOOL_NAMES.has(input.ctx.toolName) &&
+    input.ctx.filePath &&
+    !input.config
+      .getWorkspaceContext()
+      .isPathWithinWorkspace(input.ctx.filePath)
+  ) {
+    return { via: 'fallback', reason: 'external_write' };
+  }
+
   // Caller (scheduler) has detected an armed fallback state; surface that
   // so the call drops to manual approval instead of burning a classifier
   // request that would deepen the denial streak.
@@ -745,6 +870,7 @@ export async function evaluateAutoMode(
     toolName: input.ctx.toolName,
     toolParams: input.toolParams,
     messages: input.messages,
+    trustedUserAnswers: input.trustedUserAnswers,
     config: input.config,
     signal: input.signal,
   });

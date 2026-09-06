@@ -8,6 +8,7 @@ import { type MutableRefObject, useCallback } from 'react';
 import { type DOMElement } from 'ink';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { type MouseEvent } from '../../utils/mouse.js';
 import {
   measureElementPosition,
@@ -50,6 +51,9 @@ export function TextInputMouseController({
   visibleLineCount,
 }: TextInputMouseControllerProps): null {
   const { rows: terminalHeight } = useTerminalSize();
+  // Quiet while the context menu owns the pointer so a click on the menu
+  // overlay can't also move the composer cursor underneath it.
+  const { menu: contextMenu } = useContextMenu();
 
   const handleMouse = useCallback(
     (event: MouseEvent) => {
@@ -77,7 +81,10 @@ export function TextInputMouseController({
     [linesRef, buffer, visibleLineCount, terminalHeight],
   );
 
-  useMouseEvents(handleMouse, { isActive: true, tracking: 'button' });
+  useMouseEvents(handleMouse, {
+    isActive: contextMenu === null,
+    tracking: 'button',
+  });
 
   return null;
 }

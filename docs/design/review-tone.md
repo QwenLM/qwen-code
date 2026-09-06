@@ -29,9 +29,11 @@ outcome>` arrow notation, the section-header voice** — is template
   is not.
 - **Markers — the `**[Critical]**`/`**[Suggestion]**` prefixes and the
   footer** — are machine-readable signals, not prose style:
-  `qwen-autofix.yml`'s Critical-only mode greps posted bodies for
-  `contains("**[Critical]**")` in a dozen places, and the prefix lets a
-  human triage blockers at a glance. They stay when attribution is on and
+  `qwen-autofix.yml`'s Critical-only mode classifies every feedback body by
+  its source-leading Critical prefix after whitespace, HTML comments, or Unicode
+  format controls, so quoted marker text does not promote a
+  Suggestion. The prefix lets a human triage blockers at a glance. They stay
+  when attribution is on and
   are stripped when it is off — attribution already decides whether the
   post identifies itself, so it decides whether the post carries the
   machine contract too.
@@ -83,9 +85,11 @@ template at all — no new plumbing anywhere.
    marked shape, so severity counting, the unmarked-comment gate, and the
    ledger all ran on the marked comments before the transform.
 2. **`compose-review.ts`** — body Criticals and the cannot-tell list keep
-   their `**[Critical]**` marker when attribution is on (autofix greps it)
-   and lose it when off. All other fixed copy is unchanged — `LGTM! ✅`
-   and the `⚠️` clauses stay in both modes.
+   their `**[Critical]**` marker when attribution is on and lose it when off.
+   When an attributed Comment contains body Criticals or unresolved existing
+   Criticals, a short Critical header is added after rendering so it leads the
+   body despite any opener or budget notice. All other fixed copy is unchanged
+   — `LGTM! ✅` and the `⚠️` clauses stay in both modes.
 3. **`review-footer.ts`** — define the invisible severity markers used by
    unattributed posts and centralize the footer, marker, and visible-severity
    stripping needed to produce a safe plain-prose body.
@@ -112,15 +116,16 @@ template at all — no new plumbing anywhere.
   marker's severity, so an unresolved Critical re-enters the re-check
   section every round even without the visible prefix.
 - `qwen-autofix`'s Critical-only mode (engaged after round 5, or earlier when
-  a counting window's diff-growth budget trips) recognizes visible
-  `**[Critical]**` markers and Request-changes review state. Attribution-off
-  findings lose the visible marker; when their poster is subject to deferral
-  (the review bot, or an author over the window's feedback-batch budget), they
-  are deferred unless the posted review has Request-changes state. That state
-  keeps the findings actionable. A self-authored PR's Request-changes verdict
-  is posted as Comment, so it provides no state-based exception. Disclosed in
-  the setting's description. A fix that parses the invisible severity marker
-  is a possible follow-up, not part of this PR.
+  a counting window's diff-growth budget trips) classifies posted bodies by
+  their source-leading Critical prefix after whitespace, HTML comments, or
+  Unicode format controls. Attribution-off findings have no visible prefix, so
+  they fail that test; when their poster is subject to deferral (the review
+  bot, or an author over the window's feedback-batch budget), they are deferred
+  unless the posted review has Request-changes state. That state keeps the
+  findings actionable. A self-authored PR's Request-changes verdict is posted
+  as Comment, so it provides no state-based exception. Disclosed in the
+  setting's description. A fix that parses the invisible severity marker is a
+  possible follow-up, not part of this PR.
 
 ### Prompt layer (SKILL.md, dogfooded)
 

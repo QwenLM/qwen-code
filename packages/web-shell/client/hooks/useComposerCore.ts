@@ -78,11 +78,22 @@ import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
   getComposerTagSerialized,
+  getComposerTagValue,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
+} from '../utils/composerTag';
+// Re-exported for existing importers; the definitions moved to
+// utils/composerTag.ts so read-only consumers can reach them without pulling
+// CodeMirror in (#11031).
+export {
+  getComposerTagDisplay,
+  getComposerTagLabel,
+  getComposerTagValue,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
@@ -478,18 +489,6 @@ export function serializeComposerTag(tag: WebShellComposerTag): string {
 
 function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
   return tags.map(serializeComposerTag).join('\n');
-}
-
-export function getComposerTagLabel(tag: WebShellComposerTag): string {
-  return tag.label?.trim() ?? '';
-}
-
-export function getComposerTagValue(tag: WebShellComposerTag): string {
-  return tag.value?.trim() ?? '';
-}
-
-export function getComposerTagDisplay(tag: WebShellComposerTag): string {
-  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
 }
 
 export function buildComposerPrompt(
@@ -1127,6 +1126,10 @@ export interface UseComposerCoreOptions {
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
+  attachmentsEnabled?: boolean;
+  workspaceFeaturesEnabled?: boolean;
   composerTagIcons?: WebShellComposerTagIconMap;
   parseUserMessageContent?: UserMessageContentParser;
   renderComposerTag?: ComposerTagRenderer;
@@ -1427,6 +1430,10 @@ export function useComposerCore(
     builtinAtProviders,
     atProviders,
     atWorkspaceCwd,
+    composerScopeKey,
+    disableLegacyHistoryFallback = false,
+    attachmentsEnabled = true,
+    workspaceFeaturesEnabled = true,
     composerTagIcons,
     parseUserMessageContent,
     renderComposerTag,
@@ -1442,15 +1449,17 @@ export function useComposerCore(
   const workspace = useOptionalWorkspace();
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
-  const promptHistoryStorageKey = getPromptHistoryStorageKey(atWorkspaceCwd);
+  const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
+  const promptHistoryStorageKey = getPromptHistoryStorageKey(storageScopeKey);
   const legacyPromptHistoryStorageKey = getPromptHistoryStorageKey();
   const promptHistoryFallbackStorageKey =
+    disableLegacyHistoryFallback ||
     promptHistoryStorageKey === legacyPromptHistoryStorageKey
       ? undefined
       : legacyPromptHistoryStorageKey;
   const composerDraftStorageKey = getComposerDraftStorageKey(
     sessionId,
-    atWorkspaceCwd,
+    storageScopeKey,
   );
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -1470,7 +1479,7 @@ export function useComposerCore(
   const skipNextRestoredAnnotationMappingRef = useRef(false);
   const draftIdentityRef = useRef({
     sessionId,
-    workspaceCwd: atWorkspaceCwd,
+    workspaceCwd: storageScopeKey,
     storageKey: composerDraftStorageKey,
   });
   const unscopedDraftEditedRef = useRef(false);
@@ -1530,6 +1539,8 @@ export function useComposerCore(
   disabledRef.current = disabled;
   const fileDragEnabledRef = useRef(fileDragEnabled);
   fileDragEnabledRef.current = fileDragEnabled;
+  const attachmentsEnabledRef = useRef(attachmentsEnabled);
+  attachmentsEnabledRef.current = attachmentsEnabled;
   const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
   workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
@@ -1559,7 +1570,9 @@ export function useComposerCore(
   const workspaceActionsRef = useRef<AtMentionWorkspaceActions | undefined>(
     undefined,
   );
-  if (workspace && atWorkspaceCwd) {
+  if (!workspaceFeaturesEnabled) {
+    workspaceActionsRef.current = undefined;
+  } else if (workspace && atWorkspaceCwd) {
     const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
     workspaceActionsRef.current = {
       ...workspace.actions,
@@ -1765,9 +1778,25 @@ export function useComposerCore(
     },
     [],
   );
+  useEffect(() => {
+    if (attachmentsEnabled) return;
+    const hadAttachments =
+      pastedImagesRef.current.length > 0 || pastedFilesRef.current.length > 0;
+    resetImageIngestion();
+    if (hadAttachments) {
+      emitImageIngestionNotice('warning', t('composerAdd.file.attachDisabled'));
+    }
+  }, [attachmentsEnabled, emitImageIngestionNotice, resetImageIngestion, t]);
   const enqueueExtractedTransfer = useCallback(
     (transfer: ExtractedFileTransfer) => {
       if (!transfer.claimed) return false;
+      if (!attachmentsEnabledRef.current) {
+        emitImageIngestionNotice(
+          'warning',
+          tRef.current('composerAdd.file.attachDisabled'),
+        );
+        return true;
+      }
       if (disabledRef.current) return true;
 
       const lane = imageIngestionLaneRef.current;
@@ -2607,6 +2636,14 @@ export function useComposerCore(
     const tags = tagsOverride ?? composerTagsRef.current;
     const images = pastedImagesRef.current;
     const files = pastedFilesRef.current;
+    if (
+      !attachmentsEnabledRef.current &&
+      (images.length > 0 || files.length > 0)
+    ) {
+      emitImageIngestionNotice('warning', t('composerAdd.file.attachDisabled'));
+      resetImageIngestion();
+      return true;
+    }
     if (
       !rawText &&
       tags.length === 0 &&
@@ -3449,7 +3486,7 @@ export function useComposerCore(
     const view = viewRef.current;
     const sessionChanged = previousDraftIdentity.sessionId !== sessionId;
     const workspaceChanged =
-      previousDraftIdentity.workspaceCwd !== atWorkspaceCwd;
+      previousDraftIdentity.workspaceCwd !== storageScopeKey;
     const draftStorageChanged =
       previousDraftIdentity.storageKey !== composerDraftStorageKey;
     const wasBrowsingHistory = historyBrowseActiveRef.current;
@@ -3477,7 +3514,7 @@ export function useComposerCore(
     }
     draftIdentityRef.current = {
       sessionId,
-      workspaceCwd: atWorkspaceCwd,
+      workspaceCwd: storageScopeKey,
       storageKey: composerDraftStorageKey,
     };
 
@@ -3491,7 +3528,7 @@ export function useComposerCore(
       sessionId === undefined &&
       previousDraftIdentity.workspaceCwd === undefined &&
       previousDraftIdentity.storageKey === undefined &&
-      atWorkspaceCwd !== undefined &&
+      storageScopeKey !== undefined &&
       (unscopedDraftEditedRef.current || storedDraft === null);
     unscopedDraftEditedRef.current = false;
     const nextText = adoptUnscopedInMemoryDraft
@@ -3515,7 +3552,7 @@ export function useComposerCore(
       unscopedDraftEditedRef.current = false;
     }
   }, [
-    atWorkspaceCwd,
+    storageScopeKey,
     clearPromptHistoryDraftTags,
     composerDraftStorageKey,
     isTouchComposer,
