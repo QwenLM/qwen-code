@@ -10,6 +10,7 @@ import {
   isTerminalTaskLifecycleType,
   PollingChannelBase,
   sanitizeLogText,
+  stripMessagePrefix,
   truncateCodePoints,
   type ChannelAgentBridge,
   type ChannelBaseOptions,
@@ -512,6 +513,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly userInstructions?: string;
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
+  private readonly dwsMessagePrefix?: string;
   private readonly startReactionName: string;
   private readonly endReactionName?: string;
   private readonly watchTodos: boolean;
@@ -550,6 +552,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     client?: DwsClientLike,
   ) {
     const profile = configuredString(config.profile, 'profile');
+    const messagePrefix = configuredString(
+      config.messagePrefix,
+      'messagePrefix',
+    );
     const startReactionName =
       configuredString(config.startReaction, 'startReaction') ??
       DEFAULT_START_REACTION;
@@ -608,6 +614,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }));
     this.startReactionName = startReactionName;
     this.endReactionName = endReactionName;
+    this.dwsMessagePrefix = messagePrefix;
     this.watchTodos = watchTodos;
   }
 
@@ -1331,6 +1338,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       messageId: `todo-${fingerprint}`,
       text: `Process this DingTalk todo:\n${truncateCodePoints(title, MAX_COMMENT_CHARS)}`,
       displayText: title,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1510,6 +1518,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
+  private requiresMention(conversationId: string): boolean {
+    return (
+      this.config.groups[conversationId]?.requireMention ??
+      this.config.groups['*']?.requireMention ??
+      true
+    );
+  }
+
   private async receiveImMessage(
     source: Exclude<DwsImSource, { kind: 'direct' }>,
     message: DwsImMessage,
@@ -1527,9 +1543,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     if (
       source.kind === 'group-all' &&
-      (this.config.groups[message.conversationId]?.requireMention ??
-        this.config.groups['*']?.requireMention ??
-        true)
+      this.requiresMention(message.conversationId)
     ) {
       return;
     }
@@ -1762,13 +1776,47 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
     key: string,
   ): Promise<void> {
+    // DWS reports only that the bot was mentioned somewhere, not which token is
+    // the bot, so a leading mention goes only when what follows is unambiguously
+    // a slash command and no later mention could be the one that caused the
+    // at-event. That scan shares the document-mention parser's boundary
+    // heuristic: an `@` glued to a word is an address like `bob@example.com`,
+    // one behind punctuation is a rival mention. The command lookahead must stay
+    // ahead of the whole-remainder scan; swapping them re-runs it at every
+    // backtracked space, quadratic on attacker-controlled content.
+    //
+    // Mention-required conversations only: an ambient group delivers one message
+    // on both the at stream and its group stream under a single dedup key, and
+    // only when a mention is required is the at stream the sole deliverer, so
+    // the normalized text cannot depend on which copy won the race.
+    const rawText =
+      source.kind === 'at' && this.requiresMention(message.conversationId)
+        ? message.content
+            .replace(
+              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:\s|$))(?![\s\S]*(?<![A-Za-z0-9_])@)/u,
+              '',
+            )
+            .trim()
+        : message.content.trim();
+    const providerDocumentNotification =
+      source.kind === 'direct'
+        ? parseDocumentMentionNotification(rawText)
+        : undefined;
+    const text = providerDocumentNotification
+      ? rawText
+      : stripMessagePrefix(rawText, this.dwsMessagePrefix);
+    if (this.dwsMessagePrefix && !text) {
+      this.markProcessedMessage(key);
+      this.saveCursor();
+      return;
+    }
+
     const target: DwsImTarget =
       source.kind === 'direct'
         ? { kind: 'direct', openDingTalkId: message.senderId }
         : { kind: 'group', conversationId: message.conversationId };
     this.rememberImTarget(message.conversationId, target);
 
-    const text = message.content.trim();
     if (!text) {
       this.markProcessedMessage(key);
       this.saveCursor();
@@ -1776,9 +1824,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
 
     const documentNotification =
-      source.kind === 'direct'
+      providerDocumentNotification ??
+      (source.kind === 'direct'
         ? parseDocumentMentionNotification(text)
-        : undefined;
+        : undefined);
     if (documentNotification) {
       await this.processDocumentNotification(
         message,
@@ -1797,6 +1846,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       chatName: message.conversationId,
       messageId: message.messageId,
       text,
+      bypassMessagePrefix: true,
       ...(message.referencedText
         ? { referencedText: message.referencedText }
         : {}),
@@ -2056,6 +2106,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         threadId: notification.commentKey,
         messageId: message.messageId,
         text: truncateCodePoints(notification.request, MAX_COMMENT_CHARS),
+        bypassMessagePrefix: true,
         isGroup: true,
         isMentioned: true,
         isReplyToBot: false,

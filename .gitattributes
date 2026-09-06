@@ -8,6 +8,7 @@
 *.sh eol=lf
 *.bash eol=lf
 Makefile eol=lf
+packages/vscode-ide-companion/NOTICES.txt linguist-generated=true
 
 # Windows cmd.exe expects batch installers to be checked out with CRLF.
 scripts/installation/install-qwen-standalone.bat text eol=crlf

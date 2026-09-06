@@ -1648,6 +1648,7 @@ describe('ChatPane', () => {
       kind: 'attachment',
       title: 'data.json',
       turnId: 'sess-1',
+      attachmentId: 'attachment-1',
       mimeType: 'application/json',
       data: expect.any(Blob),
       workspaceCwd: '/w',
