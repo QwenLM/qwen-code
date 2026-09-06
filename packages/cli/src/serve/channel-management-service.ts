@@ -225,17 +225,39 @@ export function createChannelManagementService(
         workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd),
       );
 
+  const runtimeOwnerMismatch = (name: string, reason?: string) =>
+    new ChannelManagementError(
+      'channel_runtime_owner_mismatch',
+      `Channel "${name}" does not have one confirmed runtime owner in this workspace.${reason ? ` ${reason}` : ''}`,
+    );
+
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
     const workers = workerFor(name).filter(
       (worker) => worker.workspaceCwd === opts.workspaceCwd,
     );
     if (workers.length !== 1) {
-      throw new ChannelManagementError(
-        'channel_runtime_owner_mismatch',
-        `Channel "${name}" does not have one confirmed runtime owner in this workspace.`,
-      );
+      throw runtimeOwnerMismatch(name);
     }
+  };
+
+  const assertConvergeableRuntimeOwner = (name: string): void => {
+    const workers = workerFor(name);
+    const committed = opts.manager.committedChannelNames().includes(name);
+    if (!committed && workers.length === 0) return;
+    const owned =
+      committed &&
+      workers.length === 1 &&
+      workers[0]!.workspaceCwd === opts.workspaceCwd;
+    if (owned) return;
+    const reason = !committed
+      ? 'A worker exists but the channel is not committed.'
+      : workers.length === 0
+        ? 'Committed selection has no observed worker.'
+        : workers.length !== 1
+          ? `${workers.length} workers claim this channel.`
+          : 'The only worker belongs to another workspace.';
+    throw runtimeOwnerMismatch(name, reason);
   };
 
   const runtimeFor = (name: string): ChannelRuntimeState => {
@@ -447,21 +469,7 @@ export function createChannelManagementService(
       const configured = Object.hasOwn(current.channels, name);
       if (configured) assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
-      if (!configured) {
-        const workers = workerFor(name);
-        const committed = opts.manager.committedChannelNames().includes(name);
-        if (
-          (committed || workers.length > 0) &&
-          (!committed ||
-            workers.length !== 1 ||
-            workers[0]!.workspaceCwd !== opts.workspaceCwd)
-        ) {
-          throw new ChannelManagementError(
-            'channel_runtime_owner_mismatch',
-            `Channel "${name}" does not have one confirmed runtime owner in this workspace.`,
-          );
-        }
-      }
+      if (!configured) assertConvergeableRuntimeOwner(name);
       if (workspaceCommittedNames().includes(name)) {
         assertOwnedRuntime(name);
         await stopChannel(name);

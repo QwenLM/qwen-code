@@ -571,10 +571,13 @@ describe('createChannelManagementService', () => {
 
   it('converges an explicitly deleted owned worker after its config disappears', async () => {
     const { service, store, manager } = setup({
-      snapshot: settingsSnapshot({ channels: {} }),
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['old-bot'] }),
       committedNames: ['old-bot'],
     });
     expect((await service.list()).instances).toEqual({});
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(store.snapshot().startupNames).toEqual(['old-bot']);
     expect(manager.state().workers).toHaveLength(1);
 
     await expect(
@@ -621,9 +624,14 @@ describe('createChannelManagementService', () => {
     expect(manager.committedChannelNames()).toEqual(['bot']);
   });
 
-  it.each(['foreign', 'ambiguous', 'unknown', 'uncommitted'])(
+  it.each([
+    ['foreign', 'The only worker belongs to another workspace.'],
+    ['ambiguous', '2 workers claim this channel.'],
+    ['unknown', 'Committed selection has no observed worker.'],
+    ['uncommitted', 'A worker exists but the channel is not committed.'],
+  ])(
     'rejects missing-config deletion with %s runtime ownership',
-    async (ownership) => {
+    async (ownership, reason) => {
       const { service, store, manager } = setup({
         snapshot: settingsSnapshot({ channels: {} }),
         committedNames: ['bot'],
@@ -651,7 +659,10 @@ describe('createChannelManagementService', () => {
 
       await expect(
         service.remove('bot', { expectedRevision: 'rev-1' }),
-      ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+      ).rejects.toMatchObject({
+        code: 'channel_runtime_owner_mismatch',
+        message: expect.stringContaining(reason),
+      });
       expect(manager.setChannelEnabled).not.toHaveBeenCalled();
       expect(store.remove).not.toHaveBeenCalled();
     },
