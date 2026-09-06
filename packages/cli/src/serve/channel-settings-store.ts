@@ -584,6 +584,10 @@ export class WorkspaceChannelSettingsStore {
       groupHistoryLimit: nextConfig['groupHistoryLimit'],
       groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
       webhooks: nextConfig['webhooks'],
+      // assertManagedConfig has already shape-validated this field.
+      sessionRotation: nextConfig['sessionRotation'] as
+        | { maxTurns?: number; maxAgeHours?: number }
+        | undefined,
     });
     if (multiSessionError) throw invalidConfig(multiSessionError);
     let crossFieldError: unknown;

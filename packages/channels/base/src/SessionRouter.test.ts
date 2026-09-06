@@ -16,6 +16,7 @@ import {
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import { BridgeConnectivityError } from './ChannelAgentBridge.js';
 import type { SessionTarget } from './types.js';
 
 const mockRenameSync = vi.hoisted(() => vi.fn());
@@ -2511,17 +2512,22 @@ describe('SessionRouter', () => {
       const dave = await router.resolve('ch', 'dave', 'chat4');
       router.releaseRoutingLease(dave);
 
+      // The second restore's reservation pass invalidated the first
+      // restore's in-flight bob load: settling it commits nothing — the
+      // successor is loading the same persisted session, so nothing is
+      // discarded either.
       loadResolvers[1]!('old-bob');
-      await drainMicrotasks();
-      loadResolvers[3]!('old-carol');
       await drainMicrotasks();
       loadResolvers[2]!('old-alice');
       await drainMicrotasks();
-      loadResolvers[4]!('old-bob');
+      loadResolvers[3]!('old-bob');
       await drainMicrotasks();
-      loadResolvers[5]!('old-carol');
+      loadResolvers[4]!('old-carol');
+      await drainMicrotasks();
 
-      await expect(first).resolves.toEqual({ restored: 3, failed: 0 });
+      // Only the keys the first restore settled before being superseded
+      // count for it; the second restore settles every key itself.
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
       await expect(second).resolves.toEqual({ restored: 3, failed: 0 });
 
       // Every write holds the whole store: an earlier finisher flushing the
@@ -2595,11 +2601,14 @@ describe('SessionRouter', () => {
 
       loadResolvers[2]!('old-alice');
       await drainMicrotasks();
+      // The second restore's reservation pass invalidated the first
+      // restore's in-flight bob load; settling it discards the superseded
+      // session instead of committing it.
       loadResolvers[1]!('old-bob');
       await drainMicrotasks();
       loadResolvers[3]!('old-bob');
 
-      await expect(first).resolves.toEqual({ restored: 2, failed: 0 });
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
       await expect(second).resolves.toEqual({ restored: 2, failed: 0 });
 
       expect(rotationCounters(router).toTurns.get('old-alice')).toBe(3);
@@ -2777,7 +2786,10 @@ describe('SessionRouter', () => {
       await drainMicrotasks();
       loadResolvers[2]!('old-bob');
 
-      await expect(first).resolves.toEqual({ restored: 2, failed: 0 });
+      // The second restore's reservation pass invalidated the first
+      // restore's in-flight bob load, so the first restore settles only
+      // alice before being superseded.
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
       await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
 
       expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
@@ -2845,7 +2857,10 @@ describe('SessionRouter', () => {
       await drainMicrotasks();
       loadResolvers[2]!('old-bob');
 
-      await expect(restoring).resolves.toEqual({ restored: 2, failed: 0 });
+      // The second restore's reservation pass invalidated the first
+      // restore's in-flight bob load, so the first restore settles only
+      // alice before being superseded.
+      await expect(restoring).resolves.toEqual({ restored: 1, failed: 0 });
       await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
 
       expect(router.getSession('ch', 'alice', 'chat1')).toBe(successor);
@@ -2909,10 +2924,21 @@ describe('SessionRouter', () => {
       await drainMicrotasks();
       loads[3]!.resolve('old-bob');
       await drainMicrotasks();
+      // The second restore's reservation pass invalidated the first
+      // restore's in-flight bob load; settling it commits nothing — the
+      // discard guard sees the same session ID already routed by the
+      // second restore, so nothing is reclaimed either.
       loads[1]!.resolve('old-bob');
 
-      await expect(first).resolves.toEqual({ restored: 2, failed: 0 });
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
       await expect(second).resolves.toEqual({ restored: 1, failed: 1 });
+
+      // The wiped live alice session was reclaimed, not orphaned, when the
+      // overlap's load for it failed.
+      expect(bridge.discardSession).toHaveBeenCalledWith(
+        'old-alice',
+        expect.anything(),
+      );
 
       // The earlier finisher's drop must reach disk through the last
       // finisher's flush even though the last one dropped nothing itself:
@@ -3483,6 +3509,452 @@ describe('SessionRouter', () => {
       // rejection, taking the channel process down after the retirement
       // already landed.
       expect(attachCatch).toHaveBeenCalledOnce();
+    });
+
+    it('leases a session handed to a waiter of an in-flight creation', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      let releaseCreate!: (sessionId: string) => void;
+      (bridge.newSession as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseCreate = resolve;
+          }),
+      );
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'alice', 'chat1');
+      await drainMicrotasks();
+      releaseCreate('session-1');
+
+      expect(await first).toBe('session-1');
+      expect(await second).toBe('session-1');
+      // Both the creating message and the waiter hold a routing lease: with
+      // the waiter's missing, its message would rotate nothing — but an
+      // at-bound session could be retired while it still prompts.
+      expect(routingLeases(router).get('session-1')).toBe(2);
+      router.releaseRoutingLease('session-1');
+      router.releaseRoutingLease('session-1');
+      expect(routingLeases(router).has('session-1')).toBe(false);
+    });
+
+    it('invalidates an in-flight creation when a restore reserves the key', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      let releaseCreate!: (sessionId: string) => void;
+      (bridge.newSession as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseCreate = resolve;
+          }),
+      );
+
+      // A message starts creating a fresh session for a persisted key while
+      // a restore fires: the reservation pass must supersede the creation —
+      // otherwise the creation commits and the restore's load orphans it.
+      const waiting = router.resolve('ch', 'alice', 'chat1');
+      await drainMicrotasks();
+      const restoring = router.restoreSessions();
+      await drainMicrotasks();
+
+      releaseCreate('brand-new');
+      await drainMicrotasks();
+
+      // The waiter is re-routed to the restored session, and the superseded
+      // creation is reclaimed instead of leaking on the bridge.
+      await expect(waiting).resolves.toBe('old-alice');
+      await expect(restoring).resolves.toEqual({ restored: 1, failed: 0 });
+      expect(bridge.discardSession).toHaveBeenCalledWith(
+        'brand-new',
+        expect.anything(),
+      );
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-alice');
+    });
+
+    it('keeps un-attempted routes when the bridge dies mid-restore', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+          'ch:carol:chat3': {
+            sessionId: 'old-carol',
+            target: {
+              channelName: 'ch',
+              senderId: 'carol',
+              chatId: 'chat3',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new BridgeConnectivityError(
+          'ACP agent process exited while a session request was in flight',
+        ),
+      );
+
+      // The child dies on the first load: the restore must abort and keep
+      // every route it never reached — a pruning flush here would leave the
+      // crash-recovery restore seconds later with nothing to reload.
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 0,
+      });
+      expect(router.getAll()).toHaveLength(3);
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(Object.keys(persisted)).toHaveLength(3);
+
+      // Crash recovery re-attaches the bridge and retries the whole store.
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        (id: string) => Promise.resolve(id),
+      );
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 3,
+        failed: 0,
+      });
+      expect(router.getAll()).toHaveLength(3);
+    });
+
+    it('re-routes to the wiped live session when an overlap load fails under held leases', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 2,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      // A message routes to the restored session and stays in flight (its
+      // lease is never released) when a reconnect restore wipes the route
+      // and its load then fails transiently.
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-alice');
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('transient resume error'),
+      );
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+
+      // The route is not dropped: the in-flight message still owns the live
+      // session, with its counters and lease carried across the wipe.
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-alice');
+      expect(rotationCounters(router).toTurns.get('old-alice')).toBe(3);
+      expect(routingLeases(router).get('old-alice')).toBe(1);
+      expect(bridge.discardSession).not.toHaveBeenCalledWith(
+        'old-alice',
+        expect.anything(),
+      );
+
+      // Once the turn settles, the next message enforces the bound.
+      router.releaseRoutingLease('old-alice');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
+        'old-alice',
+      );
+    });
+
+    it('does not re-apply a validation drop to a replacement created mid-overlap', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          // Fails persisted-entry validation: dropped from the store.
+          'ch:bob:chat2': { sessionId: '' },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+
+      // A message re-creates the dropped route mid-window; a second restore
+      // reads the same pre-validation snapshot and must not re-apply the
+      // drop to the live replacement.
+      const replacement = await router.resolve('ch', 'bob', 'chat2');
+      router.releaseRoutingLease(replacement);
+
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+      loadResolvers[1]!('old-alice');
+      await drainMicrotasks();
+
+      await expect(first).resolves.toEqual({ restored: 0, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      expect(router.getSession('ch', 'bob', 'chat2')).toBe(replacement);
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:bob:chat2'].sessionId).toBe(replacement);
+      expect(persisted['ch:alice:chat1'].sessionId).toBe('old-alice');
+    });
+
+    it('does not resurrect a route cleared after both reservation passes', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      expect(loadResolvers).toHaveLength(2);
+
+      // /clear lands after BOTH restores reserved the key: the second
+      // restore's reservation invalidated the first's operation, and the
+      // clear invalidates the second's — neither settle may re-add it.
+      expect(router.removeSession('ch', 'alice', 'chat1')).toEqual([]);
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+      loadResolvers[1]!('old-alice');
+      await drainMicrotasks();
+
+      await expect(first).resolves.toEqual({ restored: 0, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 0, failed: 0 });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1']).toBeUndefined();
+      // Both loaded sessions were superseded before they could route: both
+      // are reclaimed (the second settle's discard guard sees the first
+      // settle already dropped the route, but the session is still unrouted).
+      expect(bridge.discardSession).toHaveBeenCalledWith(
+        'old-alice',
+        expect.anything(),
+      );
+    });
+
+    it('keeps a group-promoted target across an overlapping restore', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      // A group message promotes the target after the restore: the
+      // promotion is newer than any snapshot a reconnect restore reads.
+      expect(
+        await routed(router, 'ch', 'alice', 'chat1', undefined, undefined, true),
+      ).toBe('old-alice');
+      expect(router.getTarget('old-alice')?.isGroup).toBe(true);
+
+      // The reconnect restore reads the pre-promotion snapshot (written back
+      // by hand, as if the promotion's persist had been suspended past the
+      // snapshot) and must not reseed the target back to it.
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      expect(router.getTarget('old-alice')?.isGroup).toBe(true);
+    });
+
+    it('adopts an earlier wipe’s counters when the reservation lands inside the wipe window', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 2,
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 100 });
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      // A first restore settles alice and parks on bob; messages routed in
+      // the window advance alice's counter while persists stay suspended,
+      // so the on-disk snapshot a later restore reads is stale (turns: 2).
+      const seeding = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe('old-alice');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe('old-alice');
+      expect(rotationCounters(router).toTurns.get('old-alice')).toBe(4);
+
+      // A second restore reserves alice (capturing turns: 4) and parks; a
+      // third restore lands inside its wipe window and must adopt that
+      // capture — not rewind to the stale snapshot's 2.
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      const third = router.restoreSessions();
+      await drainMicrotasks();
+
+      loadResolvers[3]!('old-alice');
+      await drainMicrotasks();
+      loadResolvers[4]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[1]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[2]!('old-alice');
+      await drainMicrotasks();
+
+      await expect(seeding).resolves.toEqual({ restored: 1, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 0, failed: 0 });
+      await expect(third).resolves.toEqual({ restored: 2, failed: 0 });
+
+      expect(rotationCounters(router).toTurns.get('old-alice')).toBe(4);
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1'].turns).toBe(4);
     });
   });
   describe('clearAll', () => {

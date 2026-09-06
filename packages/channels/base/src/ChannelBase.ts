@@ -1907,13 +1907,25 @@ export abstract class ChannelBase {
           'loop dropped because session was cleared before it ran',
         );
       }
-      if (options.shouldContinue && !(await options.shouldContinue())) {
-        // The firing was routed and counted but never prompted: give the
-        // count back so a dropped firing cannot consume the session's bound.
-        this.router.uncountTurn(this.name, sessionId);
-        throw new ChannelLoopSkippedError(
-          'loop dropped because it is no longer enabled',
-        );
+      if (options.shouldContinue) {
+        try {
+          if (!(await options.shouldContinue())) {
+            // The firing was routed and counted but never prompted: give the
+            // count back so a dropped firing cannot consume the session's bound.
+            this.router.uncountTurn(this.name, sessionId);
+            throw new ChannelLoopSkippedError(
+              'loop dropped because it is no longer enabled',
+            );
+          }
+        } catch (error) {
+          // A rejecting shouldContinue (the scheduler's job-store read can
+          // throw) also aborts before any prompt — the resolve-time count
+          // must come back on that path too.
+          if (!(error instanceof ChannelLoopSkippedError)) {
+            this.router.uncountTurn(this.name, sessionId);
+          }
+          throw error;
+        }
       }
       let shouldClaimStaticContext = false;
       let staticContext: string[] = [];
@@ -2687,11 +2699,13 @@ export abstract class ChannelBase {
   private purgeSessionState(sessionId: string): void {
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
-    // sessionQueues is deliberately NOT purged: a queued turn may still hold
-    // the captured chain, and deleting the entry would let the next message
-    // (which lazy recovery can re-attach to this same session ID) seed a
-    // fresh chain and run concurrently with the stale queued turn. /clear is
-    // the only path that may delete it, after the chain drains.
+    // sessionQueues is deliberately NOT purged here: a queued turn may still
+    // hold the captured chain, and deleting the entry would let the next
+    // message (which lazy recovery can re-attach to this same session ID)
+    // seed a fresh chain and run concurrently with the stale queued turn.
+    // Only paths that retire the ID permanently may delete it: /clear after
+    // the chain drains, and rotation (which defers until no turn is running
+    // or queued) — see handleSessionRotated.
     this.removePendingPermissionsForSession(sessionId);
   }
 
@@ -6437,7 +6451,14 @@ export abstract class ChannelBase {
     }
 
     if (btwQuestion !== undefined) {
-      await this.handleBtw(envelope, sessionId, btwQuestion, sourceLabel);
+      try {
+        await this.handleBtw(envelope, sessionId, btwQuestion, sourceLabel);
+      } finally {
+        // A side question starts no turn: give the resolve-time count back
+        // and release the routing lease, like the bang-shell path below.
+        this.router.uncountTurn(this.name, sessionId);
+        this.router.releaseRoutingLease(sessionId);
+      }
       return;
     }
 

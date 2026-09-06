@@ -95,6 +95,7 @@ interface MultiSessionCompatibilityConfig {
   groupHistoryLimit?: unknown;
   groups?: Record<string, unknown>;
   webhooks?: unknown;
+  sessionRotation?: ChannelConfig['sessionRotation'];
 }
 
 export function multiSessionCompatibilityError(
@@ -122,6 +123,17 @@ export function multiSessionCompatibilityError(
   }
   if (config.webhooks !== undefined && config.webhooks !== null) {
     return `Channel "${name}" cannot use webhooks when multiSession is enabled.`;
+  }
+  // Named tasks resolve sessions through NamedSessionManager, never through
+  // SessionRouter.resolve where the rotation gate lives — the bound would be
+  // accepted but never fire.
+  const rotation = config.sessionRotation;
+  if (
+    rotation !== undefined &&
+    rotation !== null &&
+    (rotation.maxTurns !== undefined || rotation.maxAgeHours !== undefined)
+  ) {
+    return `Channel "${name}" cannot use sessionRotation when multiSession is enabled.`;
   }
   return undefined;
 }
@@ -577,6 +589,7 @@ export async function parseChannelConfig(
   );
   const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
   const webhooks = parseWebhookConfig(name, rawConfig);
+  const sessionRotation = parseSessionRotationConfig(name, rawConfig);
 
   const multiSessionError = multiSessionCompatibilityError(name, {
     multiSession,
@@ -584,6 +597,7 @@ export async function parseChannelConfig(
     groupHistoryLimit: rawConfig['groupHistoryLimit'],
     groups,
     webhooks,
+    sessionRotation,
   });
   if (multiSessionError) throw new Error(multiSessionError);
 
@@ -599,7 +613,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
     multiSession,
-    sessionRotation: parseSessionRotationConfig(name, rawConfig),
+    sessionRotation,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

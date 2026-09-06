@@ -14586,6 +14586,35 @@ describe('ChannelBase', () => {
       ).not.toBe(sessionId);
     });
 
+    it('does not count /btw questions against maxTurns', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 2 } });
+      (bridge as unknown as Record<string, unknown>)['btw'] = vi
+        .fn()
+        .mockImplementation((sessionId: string) =>
+          Promise.resolve({ sessionId, answer: 'side answer' }),
+        );
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The side question routes but starts no turn: it must give its
+      // resolve-time count and routing lease back like the bang-shell path.
+      await ch.handleInbound(envelope({ text: '/btw what is up?' }));
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+
+      // Rotation still fires exactly at the bound: a leaked count or lease
+      // would shift or stall it.
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
     it('collect: buffered messages count once against maxTurns', async () => {
       let settleFirst!: (value: string) => void;
       let callCount = 0;
@@ -14846,6 +14875,84 @@ describe('ChannelBase', () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
       ).not.toBe(sessionId);
       expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('does not consume the bound when shouldContinue rejects before the prompt', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 2 },
+        dispatchMode: 'followup',
+      });
+      ch.proactiveSupported = true;
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The firing queues behind the busy session; the scheduler's job-store
+      // read then REJECTS in the in-closure recheck — a different failure
+      // from a false shouldContinue, but the firing still never prompts, so
+      // the resolve-time count must come back on this path too.
+      const job: ChannelLoop = {
+        id: 'loop-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const loopRun = ch.runLoopPrompt(job, {
+        shouldContinue: async () => {
+          throw new Error('job store read failed');
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      settleFirst('done');
+      await firstTurn;
+      await expect(loopRun).rejects.toThrow('job store read failed');
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('notifies only the triggering chat when a single-scope session rotates', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 1 },
+        sessionScope: 'single',
+      });
+
+      await ch.handleInbound(envelope({ chatId: 'chat-a', text: 'first' }));
+      await ch.handleInbound(envelope({ chatId: 'chat-b', text: 'second' }));
+
+      // The rotation notice documents a reset of EVERY chat sharing the
+      // session, but only the chat whose message tripped the bound is
+      // notified — the limitation documented for sessionScope: single.
+      const notices = ch.sent.filter((m) => m.text.includes('rotated'));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.chatId).toBe('chat-b');
     });
 
     it('defers rotation while a webhook turn is still running', async () => {

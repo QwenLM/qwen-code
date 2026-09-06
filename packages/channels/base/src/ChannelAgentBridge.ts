@@ -99,6 +99,14 @@ export interface BridgeSessionInfo {
   worktreeState?: 'persisted-v1';
 }
 
+/**
+ * The bridge cannot reach the agent at all (the child exited, the connection
+ * is down), as opposed to one session being unloadable. Restores must keep
+ * persisted routes on this failure so crash recovery can retry them; only a
+ * per-session failure may drop a route.
+ */
+export class BridgeConnectivityError extends Error {}
+
 export interface ChannelAgentBridgeSessionOptions {
   approvalMode?: string;
   /** Whether daemon-managed Channel loop tools may be attached to the session. */

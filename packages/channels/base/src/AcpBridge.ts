@@ -20,6 +20,7 @@ import {
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  BridgeConnectivityError,
   resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
@@ -262,9 +263,16 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const sessionId = await this.settleOnChildExit(async () => {
       await this.registerChannelLoopMcpServer();
       const response = await conn.newSession({ cwd, mcpServers: [] });
+      // Inside the settle window: a child exit mid-setSessionMode must
+      // reject here too, not hang the caller. A failed approval mode still
+      // closes and throws before the session is registered below.
+      await this.applySessionApprovalMode(
+        conn,
+        response.sessionId,
+        options?.approvalMode,
+      );
       return response.sessionId;
     });
-    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
@@ -284,8 +292,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         cwd,
         mcpServers: [],
       });
+      // Same settle-window coverage as newSession.
+      await this.applySessionApprovalMode(
+        conn,
+        sessionId,
+        options?.approvalMode,
+      );
     });
-    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
@@ -327,18 +340,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     prompt.push({ type: 'text', text });
 
     try {
-      await conn.prompt({
-        sessionId,
-        prompt: prompt as Array<{ type: 'text'; text: string }>,
-        _meta: {
-          [CHANNEL_PROMPT_META_KEY]: true,
-          ...(options?.displayText !== undefined
-            ? {
-                [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
-              }
-            : {}),
-        },
-      });
+      // Inside the settle window: a child exit mid-prompt rejects here
+      // instead of hanging the turn (and with it the caller's pending-turn
+      // bookkeeping, which gates session rotation).
+      await this.settleOnChildExit(() =>
+        conn.prompt({
+          sessionId,
+          prompt: prompt as Array<{ type: 'text'; text: string }>,
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            ...(options?.displayText !== undefined
+              ? {
+                  [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                }
+              : {}),
+          },
+        }),
+      );
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
@@ -528,7 +546,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   private ensureConnection(): ClientSideConnection {
     if (!this.connection || !this.isConnected) {
-      throw new Error('Not connected to ACP agent');
+      throw new BridgeConnectivityError('Not connected to ACP agent');
     }
     return this.connection;
   }
@@ -559,7 +577,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private rejectPendingSessionRequests(): void {
     for (const pending of this.pendingSessionRequests) {
       pending.reject(
-        new Error(
+        new BridgeConnectivityError(
           'ACP agent process exited while a session request was in flight',
         ),
       );

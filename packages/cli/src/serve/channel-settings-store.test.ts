@@ -296,6 +296,14 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
       message: 'group "group1" cannot use groupHistoryLimit',
     },
+    {
+      label: 'session rotation',
+      type: 'user-default-management-test',
+      extra: {
+        sessionRotation: { maxTurns: 200 },
+      },
+      message: 'cannot use sessionRotation',
+    },
   ])('rejects multiSession with $label', async ({ type, extra, message }) => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 

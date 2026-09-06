@@ -548,6 +548,22 @@ describe('parseChannelConfig', () => {
         },
       }),
     ).rejects.toThrow('cannot use webhooks when multiSession is enabled');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        sessionRotation: { maxTurns: 200 },
+      }),
+    ).rejects.toThrow(
+      'cannot use sessionRotation when multiSession is enabled',
+    );
+    // A bound-less sessionRotation parses to undefined and stays compatible.
+    const withoutBounds = await parseChannelConfig('bot', {
+      type: 'bare',
+      multiSession: true,
+      sessionRotation: {},
+    });
+    expect(withoutBounds.sessionRotation).toBeUndefined();
   });
 
   it('rejects an unknown approvalMode', async () => {

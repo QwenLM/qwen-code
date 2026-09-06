@@ -1197,12 +1197,12 @@ describe('AcpBridge', () => {
     const proc = child.instances[0]!;
     const connection = child.connections[0] as unknown as {
       newSession: ReturnType<typeof vi.fn>;
-      loadSession: ReturnType<typeof vi.fn>;
+      unstable_resumeSession: ReturnType<typeof vi.fn>;
     };
     // The SDK never settles requests still awaiting a response once the
     // stream ends, so neither call can finish on its own.
     connection.newSession = vi.fn(() => new Promise(() => {}));
-    connection.loadSession = vi.fn(() => new Promise(() => {}));
+    connection.unstable_resumeSession = vi.fn(() => new Promise(() => {}));
 
     const pendingNew = bridge.newSession('/tmp');
     const pendingLoad = bridge.loadSession('s-1', '/tmp');
@@ -1216,6 +1216,79 @@ describe('AcpBridge', () => {
     expect(
       (bridge as unknown as TestableAcpBridge).pendingSessionRequests.size,
     ).toBe(0);
+  });
+
+  it('rejects a new session when the child exits mid-approval-mode', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    const connection = child.connections[0] as unknown as {
+      newSession: ReturnType<typeof vi.fn>;
+      setSessionMode: ReturnType<typeof vi.fn>;
+    };
+    connection.newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    connection.setSessionMode = vi.fn(() => new Promise(() => {}));
+
+    // The approval-mode call runs inside the settle window: a child exit
+    // mid-setSessionMode must reject the create, not hang its caller.
+    const pending = bridge.newSession('/tmp', { approvalMode: 'plan' });
+    proc.emit('exit', 1, null);
+
+    await expect(pending).rejects.toThrow(
+      'ACP agent process exited while a session request was in flight',
+    );
+  });
+
+  it('rejects a loaded session when the child exits mid-approval-mode', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    const connection = child.connections[0] as unknown as {
+      unstable_resumeSession: ReturnType<typeof vi.fn>;
+      setSessionMode: ReturnType<typeof vi.fn>;
+    };
+    connection.unstable_resumeSession = vi.fn().mockResolvedValue({});
+    connection.setSessionMode = vi.fn(() => new Promise(() => {}));
+
+    const pending = bridge.loadSession('s-1', '/tmp', {
+      approvalMode: 'plan',
+    });
+    proc.emit('exit', 1, null);
+
+    await expect(pending).rejects.toThrow(
+      'ACP agent process exited while a session request was in flight',
+    );
+  });
+
+  it('rejects an in-flight prompt when the ACP child exits', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    const connection = child.connections[0] as unknown as {
+      prompt: ReturnType<typeof vi.fn>;
+    };
+    connection.prompt = vi.fn(() => new Promise(() => {}));
+
+    // A child death mid-prompt rejects the turn instead of hanging it (and
+    // with it the caller's pending-turn bookkeeping).
+    const pending = bridge.prompt('s-1', 'hello');
+    proc.emit('exit', 1, null);
+
+    await expect(pending).rejects.toThrow(
+      'ACP agent process exited while a session request was in flight',
+    );
   });
 
   it('rejects in-flight session requests when the bridge stops', async () => {
