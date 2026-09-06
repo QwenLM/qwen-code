@@ -1076,6 +1076,81 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('reconciles a dropped session at once rather than waiting out the deferral', async () => {
+      // The probe is how the daemon reconciles a Session the child has already
+      // destroyed, and the deferral suppresses the probe. A child that finishes
+      // the close one beat late would therefore leave a ghost entry retained
+      // for the whole rung: one `maxSessions` slot, a channel that cannot
+      // retire, and a Session `spawnOrAttach`'s single-scope fast path hands to
+      // the next client because that path checks only daemon-side liveness.
+      //
+      // Absence from the snapshot is the one recovery signal that cannot be
+      // misread, and acting on it is free — the child answers an unknown id
+      // from `closeStoredSession`'s early return without entering the drain. A
+      // wedged child still *lists* the Session with no holds, so the deferral
+      // the wedge needs is untouched, as the suppressed snapshot below shows.
+      let closeAttempts = 0;
+      let wedged = true;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          closeAttempts++;
+          if (wedged) throw new Error('Session close timed out after 8000ms');
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await bridge.detachClient(session.sessionId, session.clientId);
+        await sendActiveWorkSnapshot(handle, 2, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await vi.waitFor(() => {
+          const failures = stderrSpy.mock.calls.filter((call) =>
+            String(call[0]).includes('did not resolve'),
+          ).length;
+          expect(failures).toBe(2);
+        });
+        expect(closeAttempts).toBe(2);
+
+        // Still listed, still deferred: the backoff is armed and biting.
+        await sendActiveWorkSnapshot(handle, 3, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(closeAttempts).toBe(2);
+        expect(bridge.sessionCount).toBe(1);
+
+        // The wedge clears and the child destroys the Session, so the next
+        // snapshot omits it. That reconciles now, not when the rung expires.
+        wedged = false;
+        await sendActiveWorkSnapshot(handle, 4, []);
+        await vi.waitFor(() => {
+          expect(bridge.sessionCount).toBe(0);
+        });
+        expect(closeAttempts).toBe(3);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+
+      await bridge.shutdown();
+    });
+
     it('keeps the deferred-close detail readable and the failure run reset', async () => {
       // A close the child grants can still fail its own local teardown:
       // `closeSessionImpl` asks the agent with `throwOnFailure`, a definitive

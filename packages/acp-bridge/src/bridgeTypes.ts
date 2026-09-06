@@ -339,9 +339,15 @@ export function sessionCloseDrainBudgetMs(outerWaitMs: number): number {
  * each time. Past `GRACE` consecutive failures the next probe is deferred
  * geometrically up to `CEILING`.
  *
- * The count resets whenever the child answers, so a transient wedge is never
- * stranded: the Session goes back to being probed on the next snapshot exactly
- * as it was before the run of failures began.
+ * The count resets on any evidence that the world moved on — the child
+ * answering a probe either way, a snapshot reporting held work, or a snapshot
+ * omitting the Session because the child has let go of it — so a wedge that
+ * resolves visibly is never stranded, and goes back to being probed on the
+ * next snapshot exactly as it was before the run of failures began. A wedge
+ * that resolves silently is not: work of a kind the child cannot report as a
+ * hold (see #11118) produces none of those signals, so such a Session is
+ * probed again when the rung expires instead, and `CEILING` is what bounds
+ * that rather than any reset.
  */
 export const ACTIVE_WORK_CLOSE_RETRY_GRACE = 1;
 export const ACTIVE_WORK_CLOSE_RETRY_BASE_MS = 60_000;

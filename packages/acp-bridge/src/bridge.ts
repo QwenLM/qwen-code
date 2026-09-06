@@ -1165,9 +1165,13 @@ interface SessionEntry {
   activeWorkCloseInFlight: boolean;
   /**
    * Consecutive conditional-close probes that produced no answer. A run
-   * counter, not a lifetime total: it resets to 0 as soon as the child answers
-   * either way, so a Session that recovers is probed on the next snapshot with
-   * no memory of the earlier failures.
+   * counter, not a lifetime total. Cleared whenever the daemon learns the
+   * world moved on — the child answering a probe either way, a snapshot
+   * reporting held work, or a snapshot omitting the Session because the child
+   * has let go of it — so a Session that recovers visibly is probed again on
+   * the next snapshot with no memory of the earlier failures. One that
+   * recovers silently produces none of those and is probed again when the
+   * rung expires instead; see `activeWorkCloseRetryAt`.
    */
   activeWorkCloseFailures: number;
   /**
@@ -3184,9 +3188,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // would otherwise be re-probed at the report cadence for the lifetime of
     // the daemon, each probe spending a full drain budget and each one holding
     // this Session closed to admission while it runs. The delay is derived
-    // from a run of consecutive failures and cleared the moment the child
-    // answers, so a transient wedge costs one deferral rather than being
-    // stranded.
+    // from a run of consecutive failures and cleared whenever the daemon
+    // learns the Session moved on — an answer, a hold report, or the child
+    // dropping it from a snapshot — so a wedge that resolves visibly costs one
+    // deferral rather than being stranded. One that resolves silently is
+    // re-probed when the delay expires, bounded by the ladder's ceiling.
     //
     // A condemned channel is exempt, and so is one that reports no active-work
     // capability — both are cases where `confirmChildUnheld` authorizes the
@@ -3571,6 +3577,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         touchActivity();
       }
       if (holds.size === 0) {
+        // Absence is the one recovery signal that cannot be misread: the child
+        // has let go of the Session entirely, so a probe can only answer
+        // `closed`, and it answers an unknown id from `closeStoredSession`'s
+        // early return without ever entering the drain. A backoff earned
+        // against a Session the child was still holding no longer applies, and
+        // keeping it would suppress exactly the reconciliation described above
+        // and strand a ghost entry the child has already destroyed.
+        //
+        // Deliberately not extended to `child_idle`: named with no holds is the
+        // wedge the backoff exists for, and clearing there pins the run at a
+        // single failure forever.
+        if (!reported.has(sessionId)) {
+          entry.activeWorkCloseFailures = 0;
+          entry.activeWorkCloseRetryAt = null;
+        }
         void maybeCloseIdleSession(
           entry,
           reported.has(sessionId) ? 'child_idle' : 'child_dropped',
