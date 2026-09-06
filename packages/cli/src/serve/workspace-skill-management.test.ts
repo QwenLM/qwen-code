@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
+  resolveLegacyArtifactNamedWorkspaceSkill,
 } from './workspace-skill-management.js';
 
 const temporaryDirectories: string[] = [];
@@ -583,6 +584,146 @@ describe('workspace Skill management', () => {
       deleted: true,
     });
     await expect(fs.stat(skillDir)).rejects.toThrow();
+  });
+
+  it('resolves legacy artifact-shaped Skills hidden from listings', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const globalDirectory = await temporaryDirectory('qwen-skill-global-');
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(globalDirectory);
+    const writeSkillDir = async (
+      baseDir: string,
+      name: string,
+      declaredName: string,
+    ) => {
+      const skillDir = path.join(baseDir, name);
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        skillMarkdown(declaredName),
+      );
+      return path.join(skillDir, 'SKILL.md');
+    };
+
+    const qwenLegacy = await writeSkillDir(
+      path.join(workspace, '.qwen', 'skills'),
+      'foo.backup-1-2',
+      'foo.backup-1-2',
+    );
+    const agentsLegacy = await writeSkillDir(
+      path.join(workspace, '.agents', 'skills'),
+      'legacy.installing-3-4',
+      'legacy.installing-3-4',
+    );
+    const globalLegacy = await writeSkillDir(
+      path.join(globalDirectory, 'skills'),
+      'foo.backup-1-2',
+      'foo.backup-1-2',
+    );
+    // A crashed swap artifact declares the base skill name, not its own
+    // directory name, so listing-based delete routes must NOT resolve it.
+    await writeSkillDir(
+      path.join(workspace, '.qwen', 'skills'),
+      'crashed.backup-5-6',
+      'crashed',
+    );
+
+    await expect(
+      resolveLegacyArtifactNamedWorkspaceSkill(
+        workspace,
+        'workspace',
+        'foo.backup-1-2',
+      ),
+    ).resolves.toBe(qwenLegacy);
+    await expect(
+      resolveLegacyArtifactNamedWorkspaceSkill(
+        workspace,
+        'workspace',
+        'legacy.installing-3-4',
+      ),
+    ).resolves.toBe(agentsLegacy);
+    await expect(
+      resolveLegacyArtifactNamedWorkspaceSkill(
+        workspace,
+        'global',
+        'foo.backup-1-2',
+      ),
+    ).resolves.toBe(globalLegacy);
+    await expect(
+      resolveLegacyArtifactNamedWorkspaceSkill(
+        workspace,
+        'workspace',
+        'crashed.backup-5-6',
+      ),
+    ).resolves.toBeUndefined();
+    // Non-artifact-shaped names are always visible to listings and must not
+    // bypass them.
+    await expect(
+      resolveLegacyArtifactNamedWorkspaceSkill(
+        workspace,
+        'workspace',
+        'demo-skill',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('warns on stderr when the rollback restore fails', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const replacement = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('stable-skill'),
+    );
+    await fs.writeFile(
+      path.join(replacement, 'SKILL.md'),
+      `${skillMarkdown('stable-skill')}Replacement instructions.`,
+    );
+    const installed = await installWorkspaceSkill(workspace, {
+      name: 'stable-skill',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+    const rename = fs.rename.bind(fs);
+    vi.spyOn(fs, 'rename').mockImplementation(
+      async (sourcePath, targetPath) => {
+        // Fail the staging → destination commit …
+        if (String(sourcePath).includes('.installing-')) {
+          throw new Error('commit failed');
+        }
+        // … and the backup → destination restore.
+        if (String(sourcePath).includes('.backup-')) {
+          throw new Error('restore failed');
+        }
+        await rename(sourcePath, targetPath);
+      },
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'stable-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: replacement },
+      }),
+    ).rejects.toThrow('commit failed');
+
+    const emitted = stderr.mock.calls.map((call) => String(call[0])).join('');
+    expect(emitted).toContain('Skill rollback failed for "stable-skill"');
+    expect(emitted).toContain('.skills-stable-skill.backup-');
+    // The failed install must not have destroyed the previous install:
+    // the original manifest is stranded inside the backup directory that
+    // the warning points at.
+    const backupEntries = await fs.readdir(path.join(workspace, '.qwen'));
+    const stranded = backupEntries.find((entry) =>
+      entry.startsWith('.skills-stable-skill.backup-'),
+    );
+    expect(stranded).toBeDefined();
+    await expect(
+      fs.readFile(path.join(workspace, '.qwen', stranded!, 'SKILL.md'), 'utf8'),
+    ).resolves.not.toContain('Replacement instructions.');
+    expect(installed.installedPath).toBeDefined();
   });
 
   it('keeps a committed replacement when backup cleanup fails', async () => {

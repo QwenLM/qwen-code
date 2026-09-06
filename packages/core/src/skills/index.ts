@@ -34,6 +34,16 @@ export { SkillError, validateSkillName } from './types.js';
 // Main management class
 export { SkillManager } from './skill-manager.js';
 
+// Install-artifact name contract shared by the loaders (filtering), the
+// installers (sweeping), and the management surfaces (legacy-name mapping)
+export {
+  isInstallArtifactName,
+  isInstallArtifactOfSkill,
+  installArtifactPid,
+  isSelfNamedSkillDirectory,
+  resolveLegacyArtifactNamedSkillFile,
+} from './skill-install-artifacts.js';
+
 // Priority normalization, shared with the `/skills` display sort
 export { normalizeSkillPriority } from './skill-load.js';
 

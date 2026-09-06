@@ -29,6 +29,7 @@ import {
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { parsePriorityField, validateConfig } from './skill-load.js';
+import { isInstallArtifactName } from './skill-install-artifacts.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
 import {
   SkillActivationRegistry,
@@ -1109,15 +1110,12 @@ export class SkillManager {
           // `.backup-*` sibling with a valid SKILL.md would be loaded as a
           // duplicate skill, and a "deleted" skill could reappear from its
           // backup sibling.
-          // Match only the actual artifact shape
+          // `isInstallArtifactName` matches only the actual artifact shape
           // (`.backup-<pid>-<timestamp>` / `.installing-<pid>-<timestamp>`,
           // anchored at the end of the entry name) so that legitimate skill
           // dirs whose names merely contain `.backup-` or `.installing-`
           // (e.g. `db.backup-2024`) are not skipped.
-          if (
-            /\.backup-\d+-\d+$/.test(entry.name) ||
-            /\.installing-\d+-\d+$/.test(entry.name)
-          ) {
+          if (isInstallArtifactName(entry.name)) {
             debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
             return null;
           }

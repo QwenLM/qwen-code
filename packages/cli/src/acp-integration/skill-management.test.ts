@@ -479,6 +479,255 @@ describe('managed Skill mutations', () => {
     }
   });
 
+  it('sweeps stale install artifacts before reinstalling', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillsDir = path.join(tempHome, 'skills');
+    // A dead-pid backup artifact from a crashed reinstall (manifest declares
+    // the base skill name, so it is garbage, not a legacy skill).
+    const staleBackup = path.join(
+      skillsDir,
+      'pptx.backup-4194301-1753901234567',
+    );
+    await fs.mkdir(staleBackup, { recursive: true });
+    await fs.writeFile(
+      path.join(staleBackup, 'SKILL.md'),
+      '---\nname: pptx\ndescription: Old install\n---\nBody\n',
+      'utf8',
+    );
+    // A dead-pid staging directory that never reached the swap.
+    const staleStaging = path.join(
+      skillsDir,
+      'pptx.installing-4194302-1753901234568',
+    );
+    await fs.mkdir(staleStaging, { recursive: true });
+    // An artifact whose embedded pid still belongs to a live process (the
+    // test runner's parent) — a concurrent install may be mid-swap, so the
+    // sweep must leave it alone.
+    const liveArtifact = path.join(
+      skillsDir,
+      `pptx.backup-${process.ppid}-1753901234569`,
+    );
+    await fs.mkdir(liveArtifact, { recursive: true });
+    await fs.writeFile(
+      path.join(liveArtifact, 'SKILL.md'),
+      '---\nname: pptx\ndescription: In-flight install\n---\nBody\n',
+      'utf8',
+    );
+    // A legacy self-named skill installed by an older version: its manifest
+    // declares the artifact-shaped directory name itself, so the sweep must
+    // keep it (management surfaces can still delete it deliberately).
+    const legacySkill = path.join(skillsDir, 'pptx.backup-1-2');
+    await fs.mkdir(legacySkill, { recursive: true });
+    await fs.writeFile(
+      path.join(legacySkill, 'SKILL.md'),
+      '---\nname: pptx.backup-1-2\ndescription: Legacy skill\n---\nBody\n',
+      'utf8',
+    );
+    const manager = managerFor('pptx');
+    downloadSkillMock.mockResolvedValue({
+      skillContent:
+        '---\nname: pptx\ndescription: Create slide decks\n---\nNew body\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from('---\nname: pptx\n---\nNew body\n'),
+        },
+      ],
+    });
+
+    try {
+      await installManagedSkill(configWith(manager), {
+        skill: {
+          id: 'pptx-id',
+          slug: 'pptx',
+          name: 'PPTX',
+          sourceUrl:
+            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+        },
+      });
+
+      const entries = (await fs.readdir(skillsDir)).sort();
+      expect(entries).toEqual(
+        [
+          'pptx',
+          'pptx.backup-1-2',
+          `pptx.backup-${process.ppid}-1753901234569`,
+        ].sort(),
+      );
+      await expect(
+        fs.readFile(path.join(skillsDir, 'pptx', 'SKILL.md'), 'utf8'),
+      ).resolves.toContain('New body');
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('warns on stderr when the rollback restore fails', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const { skillFile } = await writeSkill(tempHome, 'skills', 'pptx');
+    const originalContent =
+      '---\nname: pptx\ndescription: Original skill\n---\nOriginal body\n';
+    await fs.writeFile(skillFile, originalContent, 'utf8');
+
+    const manager = managerFor('pptx');
+    downloadSkillMock.mockResolvedValue({
+      skillContent:
+        '---\nname: pptx\ndescription: New version\n---\nNew body\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from('---\nname: pptx\n---\nNew body\n'),
+        },
+      ],
+    });
+
+    const realRename = renameOverride.realRename!;
+    const skillsRoot = path.join(tempHome, 'skills');
+    renameOverride.fn = (async (
+      oldPath: Parameters<RenameFn>[0],
+      newPath: Parameters<RenameFn>[1],
+    ) => {
+      const dest = String(newPath);
+      const source = String(oldPath);
+      // Fail the staging → final swap rename with EPERM …
+      if (
+        dest === path.join(skillsRoot, 'pptx') &&
+        source.includes('.installing-')
+      ) {
+        const err = new Error('EPERM') as NodeJS.ErrnoException;
+        err.code = 'EPERM';
+        throw err;
+      }
+      // … and the backup → final restore rename as well, so the previous
+      // install is stranded in the loader-filtered backup directory.
+      if (
+        dest === path.join(skillsRoot, 'pptx') &&
+        source.includes('.backup-')
+      ) {
+        const err = new Error('EACCES') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realRename(oldPath, newPath);
+    }) as RenameFn;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      // The caller must still see the original swap error, not the
+      // secondary rollback failure.
+      await expect(
+        installManagedSkill(configWith(manager), {
+          skill: {
+            id: 'pptx-id',
+            slug: 'pptx',
+            name: 'PPTX',
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          },
+        }),
+      ).rejects.toThrow('EPERM');
+
+      const emitted = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(emitted).toContain('skill rollback failed for "pptx"');
+      expect(emitted).toContain('pptx.backup-');
+      expect(emitted).toContain(
+        'The previous skill is stranded there and hidden from skill listings',
+      );
+
+      // The previous install is stranded in the backup directory the
+      // warning points at; the final skill directory no longer exists.
+      const entries = (await fs.readdir(skillsRoot)).sort();
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatch(/^pptx\.backup-\d+-\d+$/);
+      await expect(
+        fs.readFile(path.join(skillsRoot, entries[0], 'SKILL.md'), 'utf8'),
+      ).resolves.toBe(originalContent);
+    } finally {
+      renameOverride.fn = null;
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('toggles a legacy artifact-shaped project Skill hidden from listings', async () => {
+    const tempProject = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-project-legacy-skill-'),
+    );
+    const slug = 'foo.backup-1-2';
+    const skillDir = path.join(tempProject, '.qwen', 'skills', slug);
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      skillFile,
+      `---\nname: ${slug}\ndescription: Legacy skill\n---\nBody\n`,
+      'utf8',
+    );
+    const manager = managerFor(slug);
+    // The loader artifact filter hides the directory from the listing, so
+    // both listing-based resolution paths come back empty.
+    const loadSkillsFromDir = vi.fn().mockResolvedValue([]);
+    const listSkills = vi.fn().mockResolvedValue([]);
+    const config = configWith({ ...manager, loadSkillsFromDir, listSkills });
+
+    try {
+      await expect(
+        setManagedSkillEnabled(
+          config,
+          { skill: { slug, enabled: false, scope: 'project' } },
+          tempProject,
+        ),
+      ).resolves.toMatchObject({
+        slug,
+        enabled: false,
+        installedPath: skillFile,
+      });
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toContain(
+        'disable-model-invocation: true',
+      );
+    } finally {
+      await fs.rm(tempProject, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a project artifact-shaped directory is a crashed artifact', async () => {
+    const tempProject = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-project-crashed-skill-'),
+    );
+    const slug = 'foo.backup-1-2';
+    const skillDir = path.join(tempProject, '.qwen', 'skills', slug);
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    // Crashed swap artifact of `foo`: the manifest declares the base skill
+    // name, not the artifact-shaped directory name.
+    await fs.writeFile(
+      skillFile,
+      '---\nname: foo\ndescription: Previous install\n---\nBody\n',
+      'utf8',
+    );
+    const manager = managerFor('foo');
+    const loadSkillsFromDir = vi.fn().mockResolvedValue([]);
+    const listSkills = vi.fn().mockResolvedValue([]);
+    const config = configWith({ ...manager, loadSkillsFromDir, listSkills });
+
+    try {
+      await expect(
+        setManagedSkillEnabled(
+          config,
+          { skill: { slug, enabled: false, scope: 'project' } },
+          tempProject,
+        ),
+      ).rejects.toThrow('Project skill not found: foo.backup-1-2');
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.not.toContain(
+        'disable-model-invocation',
+      );
+    } finally {
+      await fs.rm(tempProject, { recursive: true, force: true });
+    }
+  });
+
   it('rejects traversal slugs before downloading or touching disk', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
