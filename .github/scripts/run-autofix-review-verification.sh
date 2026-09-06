@@ -1296,7 +1296,20 @@ weaken_auto_blob() {
   # emptiness as failure would attribute main's emptying to the round.
   git merge-file -p --ours "${p1}" "${base}" "${p2}" > "${out}" 2> /dev/null || weaken_rc=$?
   if (( weaken_rc > 127 )); then
-    cp "${p1}" "${out}"
+    # git refused to merge at all -- its negative return, which the shell
+    # reports as 255 (a NUL byte anywhere in the leading bytes makes the
+    # file binary to merge-file). Fall back to git's OWN trivial-merge
+    # rule, not to a fixed side: a side that did not move from the base
+    # contributes nothing, so the other side IS the result, and only a
+    # genuine two-sided change resolves for the branch the way `--ours`
+    # would have. Substituting the branch's side unconditionally would
+    # charge main's own weakening to the round whenever main is the side
+    # that moved.
+    if cmp -s "${p1}" "${base}"; then
+      cp "${p2}" "${out}"
+    else
+      cp "${p1}" "${out}"
+    fi
   fi
   printf '%s\n' "${out}"
 }

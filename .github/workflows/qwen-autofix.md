@@ -4276,6 +4276,20 @@ stamps `pre=none`: the pushed head did not start from the
 head prepare classified. A cancelled check is neither red
 (matching the scan's own N_RED_NOW filter) nor green: it
 classifies pending, like every other verdict-less state.
+
+GREEN is an ALLOWLIST on both axes, never a fall-through.
+The charge-enabling verdict requires every counted check to
+have FINISHED and to hold a conclusion the classifier
+recognises as passing (SUCCESS, NEUTRAL, SKIPPED); anything
+else — a conclusion it does not know, a verdict that never
+came, a re-run still in flight over a stale conclusion — is
+pending, and pending is never chargeable. Both axes are
+allowlists for the same reason: a denylist forgets the member
+it was not told about, which is how CANCELLED entered the
+green arm in the first place and how REQUESTED would have
+followed it. The status axis is `status == "COMPLETED"` with
+an absent field reading as finished, because a commit status
+carries no status field at all.
 When the push landed but the round report could not be
 posted, a marker-only comment carries the push marker, so
 the regression it may have caused can still be charged. The loop's own lanes are excluded wholesale

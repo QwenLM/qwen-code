@@ -25676,6 +25676,47 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- the same refusal, with MAIN as the side that moved: main drops an
+    //    assertion, the round only merges. Substituting the branch's side
+    //    unconditionally would read main's weakening as the round's and
+    //    reject an honest round, so the fallback has to follow git's own
+    //    trivial-merge rule instead of a fixed side.
+    'binary-merge-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the refusal with BOTH sides moved: the round weakens the file and
+    //    main edits it. Neither side is the base, so the result resolves
+    //    for the branch exactly as `--ours` would have, and the round is
+    //    charged for its OWN removal — no more, no less. Taking main's
+    //    side here would charge the round for main's edit as well.
+    'binary-merge-conflict': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-touches',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam round-weakens',
+        'git merge -q --no-edit -X ours origin/main',
+        AGENT_COMMIT,
+      ],
+    },
     'merge-delete-freight': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -26188,6 +26229,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'net 1 assertion(s) removed',
       );
       expect(binary.rejection).toContain('pkg/a.test.ts');
+      // ...and the substitution follows git's trivial-merge rule rather
+      // than a fixed side: the SAME refusal with main as the side that
+      // moved is main's own weakening, and charging it would reject a
+      // round whose only act was `git merge origin/main`.
+      acceptsWithoutCharge('binary-merge-freight');
+      // ...and with BOTH sides moved the branch's side stands, so the
+      // round is charged for its own removal and not for main's edit too.
+      const bothMoved = rejectsWeakening(
+        'binary-merge-conflict',
+        'net 1 assertion(s) removed',
+      );
+      expect(bothMoved.rejection).toContain('pkg/a.test.ts');
       // The round dropped an assertion, main edited it, and the merge
       // resolution took main's side: the tip carries the assertion.
       acceptsWithoutCharge('merge-restore');
@@ -27491,7 +27544,17 @@ describe('review-address: regression accounting (af-155)', () => {
     }
     // A check still in flight is pending even when it carries a conclusion
     // from an earlier attempt: the verdict on the head is not in yet.
-    for (const status of ['QUEUED', 'IN_PROGRESS', 'WAITING', 'PENDING']) {
+    // REQUESTED is in the enumeration too, and it is the member a denylist
+    // written from memory forgets — which is why this axis is an allowlist
+    // (`status == COMPLETED`) rather than a list of in-flight states.
+    for (const status of [
+      'QUEUED',
+      'IN_PROGRESS',
+      'WAITING',
+      'PENDING',
+      'REQUESTED',
+      'A_STATUS_GITHUB_ADDS_LATER',
+    ]) {
       expect(
         run({ checks: [{ name: 'a', status, conclusion: 'SUCCESS' }] }).state,
       ).toBe('pending');
