@@ -61,12 +61,11 @@ import {
   residueLineBreaks,
   severityOf,
   stripSeverityPrefix,
-  blockBoundaryIn,
   separatorColonAt,
-  indentColumns,
+  markerLineOpensHtmlBlock,
 } from './inline-counts.js';
 import { ledgerClaimLine, type FixedFinding } from '../compose-review.js';
-import { QUOTE_PREFIX_RE, stripForUnattributedPost } from './review-footer.js';
+import { blockSkeleton, stripForUnattributedPost } from './review-footer.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
 export interface ReviewThread {
@@ -333,6 +332,16 @@ export function stampCarriedId(body: string, id: string): string {
     maskedConsumed.lastIndexOf(CRITICAL_PREFIX),
     maskedConsumed.lastIndexOf(SUGGESTION_PREFIX),
   );
+  // Two shapes the stamp can write, in preference order: the canonical
+  // one-line `MARKER id: claim`, and — when the separator after the last
+  // marker carried a line-break run outside comments — the shape that
+  // keeps that run, so content that opened a block of its own on a later
+  // rendered line (a blank line then a code block, a blockquote under the
+  // marker's line) stays on its line. Only breaks AFTER the separator
+  // colon are the content's structure: a break before it is machine
+  // grammar around the colon, normalized away (re-attaching it posted a
+  // visible `:` line); with no colon the whole run is.
+  const candidates: string[] = [rest];
   if (lastMarker !== -1) {
     const separator = consumed.slice(
       lastMarker +
@@ -340,141 +349,48 @@ export function stampCarriedId(body: string, id: string): string {
           ? CRITICAL_PREFIX.length
           : SUGGESTION_PREFIX.length),
     );
-    // Only breaks AFTER the separator colon are the content's own line
-    // structure (a break before it is machine grammar around the colon,
-    // normalized away — re-attaching it posted a visible `:` line); with
-    // no colon the whole run is. And only when that structure matters: a
-    // block boundary in the run, a first content line that opens a
-    // construct, or a marker line that is itself an HTML block (a comment
-    // opens it — folding the content onto that line put the claim inside
-    // raw HTML) — plain prose under a single break keeps the canonical
-    // one-line shape (#9940 review, audit).
-    const colonAt = separatorColonAt(separator);
+    const colonAt = separatorColonAt(separator, markerLineOpensHtmlBlock(lead));
     const afterColon =
       colonAt === -1 ? separator : separator.slice(colonAt + 1);
     const sepBreaks = residueLineBreaks(afterColon);
     if (sepBreaks.length > 0) {
-      const candidate = afterColon.slice(sepBreaks[0]!.index) + rest;
-      const last = sepBreaks[sepBreaks.length - 1]!;
-      const contentLines = (
-        afterColon.slice(last.index + last.length) + rest
-      ).split(/\r\n?|\n/);
-      const leadBreaks = residueLineBreaks(lead);
-      const leadLast = leadBreaks[leadBreaks.length - 1];
-      const markerLine = lead.slice(
-        leadLast === undefined ? 0 : leadLast.index + leadLast.length,
-      );
-      // A block boundary in the run (not merely two breaks: a comment
-      // line four columns in is code, no boundary), or a first content
-      // line that opens a construct. Indentation alone is neither — under
-      // one break it is a lazy continuation, and re-attaching it refused
-      // a stamp that changes nothing (#9940 review, audit 4).
-      const htmlMarkerLine = /^ {0,3}<!--/.test(markerLine);
-      if (
-        blockBoundaryIn(afterColon) ||
-        lineOpensConstruct(contentLines[0]!, contentLines[1] ?? '') ||
-        htmlMarkerLine
-      ) {
-        // A four-column content line under an HTML-block marker line, with
-        // no boundary between: kept on its own line it is a code block on
-        // this projection and a lazy continuation of the id paragraph on
-        // the attribution-off one (the comment line is gone there) — no
-        // shape serves both, so the id-less degradation applies (#9940
-        // review, audit 6).
-        if (
-          htmlMarkerLine &&
-          !blockBoundaryIn(afterColon) &&
-          indentColumns(contentLines[0]!) >= 4
-        ) {
-          return body;
-        }
-        rest = candidate;
-      }
+      candidates.push(afterColon.slice(sepBreaks[0]!.index) + rest);
     }
   }
-  const residue = LEADING_INVISIBLE_RE.exec(rest)?.[0] ?? '';
-  const fromResidue = rest.slice(residue.length);
-  const [firstLine, secondLine = ''] = fromResidue.split(/\r\n?|\n/);
-  // Same-line residue is stripped again AFTER the unquote: a quoted
-  // opener led by an HTML comment (`> <!-- x -->` + fence) renders the
-  // comment as nothing, so the fence still opens the quoted line — and
-  // the `^`-anchored opener tests missed it (#9940 review, round 17).
-  // Confined to the already-split single line, the strip cannot cross a
-  // rendered line; on an unquoted line it is a no-op — the leading
-  // residue run above already consumed the maximal residue.
-  const unquoted = firstLine!
-    .replace(QUOTE_PREFIX_RE, '')
-    .replace(LEADING_INVISIBLE_RE, '');
-  // Through the line model's OWN opener rule (`fenceOpener`, the one
-  // `scanLines` applies), not a delimiter-only test: a backtick run whose
-  // info string carries a backtick opens no fence — the line is prose the
-  // stamp cannot break, and skipping it posted an id-less root behind a
-  // disclosure naming a fence that never existed (#9940 review, round
-  // 25).
-  const opensFence = fenceOpener(unquoted) !== null;
-  const opensHtmlBlock = HTML_BLOCK_OPEN_RE.test(unquoted.trimStart());
-  const breaks = residueLineBreaks(residue);
-  // Every OTHER line-leading construct the insertion demotes the same
-  // way: text before a `>` parses no blockquote at all (whatever the
-  // quote wraps — the unquote above serves the fence/HTML tests, the
-  // quote itself is the construct here), and an ATX heading, a list
-  // item, a thematic break, a link reference definition, a type-3/4/5
-  // raw-HTML opener (`<?…`, `<!DOCTYPE`, `<![CDATA[`) or a GFM table
-  // (a `|`-led row over a delimiter row) each turn into paragraph text
-  // under the attribution-off post, silently, in a structure the gate
-  // never validated (#9940 review, round 26). These are constructs ONLY
-  // at the start of the rendered line: after spaces or tabs, never after
-  // a format character, a no-break space or an HTML comment — CommonMark
-  // reads a `# Heading` behind a zero-width space as text, and a skip
-  // there lost the id for nothing (#9940 review, audit). Stamp-local on
-  // purpose: `HTML_BLOCK_OPEN_RE` stays the line model's (blank-line-
-  // terminated types 1/6), and a fresh draft leading with such a
-  // construct takes the documented id-less degradation instead of a
-  // flipped post.
-  const lastBreak = breaks[breaks.length - 1];
-  const sameLineResidue =
-    lastBreak === undefined
-      ? residue
-      : residue.slice(lastBreak.index + lastBreak.length);
-  const atLineStart = /^[ \t]*$/.test(sameLineResidue);
-  const opensBlockquote = atLineStart && QUOTE_PREFIX_RE.test(firstLine!);
-  const opensOtherLeader =
-    atLineStart &&
-    (OTHER_LEADER_RE.test(unquoted) ||
-      LINK_REF_DEF_RE.test(unquoted) ||
-      opensTable(unquoted, secondLine));
-  // A line break in the residue OUTSIDE comments pushes the construct to
-  // a later rendered line, which a line-1 insertion cannot flip — with
-  // one exception: a construct that CANNOT interrupt a paragraph directly
-  // under the marker was a block of its own behind the empty
-  // attribution-off first line, and becomes continuation text of the
-  // `R<n>-<k>:` paragraph the stamp writes above it — or, worse, turns
-  // that paragraph into a heading: indented code, an ordered list not
-  // starting at 1, an EMPTY list item, a link reference definition, a
-  // type-7 HTML block (a lone tag), and a setext underline (`---`, `===`,
-  // even a lone `-`), which CommonMark reads as the underline of the
-  // paragraph above it before it reads a thematic break or a list
-  // (#9940 review, round 26 and audit). A blank line — or an HTML
-  // comment line, itself a block — in between ends that paragraph first,
-  // so the construct survives and the stamp applies.
-  if (breaks.length === 0) {
-    if (opensFence || opensHtmlBlock || opensBlockquote || opensOtherLeader) {
-      return body;
-    }
-  } else {
-    // Indentation is not among the refusals: under a break with no boundary
-    // the indented line is a lazy continuation the stamp leaves as it
-    // found; behind a boundary it is a code block the re-attached break
-    // run keeps (#9940 review, audit 5).
-    const boundaryBetween = blockBoundaryIn(residue);
-    const constructLine = rest
-      .slice(lastBreak!.index + lastBreak!.length)
-      .split(/\r\n?|\n/)[0]!;
-    if (cannotInterruptUnindented(constructLine) && !boundaryBetween) {
-      return body;
+  // The CommonMark parser arbitrates — the ONE oracle, in place of the
+  // hand-listed constructs five review rounds kept finding holes in
+  // (fences, HTML blocks of seven kinds, setext underlines, list items
+  // that can or cannot interrupt, link reference definitions, tables
+  // with or without a leading `|`, lazy continuations …): a candidate is
+  // written only if the body's top-level block skeleton is the same
+  // before and after the insertion on BOTH projections — as drafted
+  // (attribution on) and as the attribution-off post strips it. "The
+  // same" is `keepsStructure`: every block after the first identical in
+  // kind and text, the first block identical once the inserted `id: ` and
+  // the normalized separator are discounted; the attribution-off
+  // projection may gain the id's own paragraph IN FRONT of an otherwise
+  // identical body (content that opens with a block no id can join, a
+  // code block). No candidate keeps the structure: the documented
+  // id-less degradation (#9940 review, round 28).
+  const skeletonOn = renderedBlocks(body);
+  const skeletonOff = renderedBlocks(stripForUnattributedPost(body));
+  let stamped: string | undefined;
+  for (const shape of candidates) {
+    const candidate = `${lead}${marker} ${id}: ${shape}`;
+    if (
+      keepsStructure(skeletonOn, renderedBlocks(candidate), id) &&
+      keepsStructure(
+        skeletonOff,
+        renderedBlocks(stripForUnattributedPost(candidate)),
+        id,
+      )
+    ) {
+      rest = shape;
+      stamped = candidate;
+      break;
     }
   }
-  const stamped = `${lead}${marker} ${id}: ${rest}`;
+  if (stamped === undefined) return body;
   // A FRESH claim that happens to carry the `(fix-induced)` prose token in
   // its head slot: read on the draft it is prose (no id for a marking to
   // hang on — the head-slot contract), but spliced behind the minted id
@@ -527,73 +443,56 @@ export function stampCarriedId(body: string, id: string): string {
   return out;
 }
 
-/**
- * Whether a line, standing directly under the `R<n>-<k>:` paragraph the
- * stamp writes, cannot interrupt that paragraph — so it would be absorbed
- * as continuation text, or (a setext underline) turn the paragraph into a
- * heading. Indented code (four columns), an ordered list not starting at
- * one, an EMPTY list item, a setext underline, a link reference
- * definition, a type-7 HTML block (a lone tag that is not a type-1/6
- * block-level one — those DO interrupt).
- */
-function cannotInterruptUnindented(line: string): boolean {
-  return (
-    (/^ {0,3}\d{1,9}[.)](?:[ \t]|$)/.test(line) &&
-      !/^ {0,3}0*1[.)]/.test(line)) ||
-    /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]*\r?$/.test(line) ||
-    /^ {0,3}(?:-+|=+)[ \t]*\r?$/.test(line) ||
-    LINK_REF_DEF_RE.test(line) ||
-    LONE_TAG_RE.test(line)
-  );
-}
+/** A top-level block the parser read, with its source text. */
+type RenderedBlock = { kind: string; text: string };
 
 /**
- * Whether a content line opens a block construct of its own — the line
- * structure the swallowed-separator re-attach exists to preserve.
+ * The body's top-level blocks as GitHub renders them — the parser's
+ * skeleton minus the HTML blocks that render NOTHING (a comment line, a
+ * processing instruction, a declaration): those the attribution-off strip
+ * removes as residue, and their absence changes no rendered structure.
+ * Two GFM-table readings where markdown-it and cmark-gfm (GitHub's engine)
+ * part are re-read the cmark way, measured against cmark-gfm on generated
+ * bodies (#9940 review, audit 7): a paragraph whose line is a delimiter
+ * row matching the line above it is that line's table (cmark needs no `|`
+ * in the header row); a table whose header line opens with `<!--` is an
+ * HTML block over a paragraph (cmark opens the block first).
  */
-function lineOpensConstruct(line: string, next: string): boolean {
-  const led = line.replace(/^ {0,3}/, '');
-  return (
-    fenceOpener(line) !== null ||
-    HTML_BLOCK_OPEN_RE.test(led) ||
-    QUOTE_PREFIX_RE.test(line) ||
-    OTHER_LEADER_RE.test(led) ||
-    // A type-2 HTML block (a comment) opens on its line and CAN interrupt
-    // a paragraph — folded onto the marker line the comment became inline
-    // and the text after it prose (#9940 review, audit 6).
-    /^ {0,3}<!--/.test(line) ||
-    cannotInterruptUnindented(line) ||
-    // A table header needs no leading `|` here — `a | b` over `---|---` is
-    // a table, and folded onto the marker line it became the header cell
-    // (#9940 review, audit). On the marker's OWN line a pipe-less header
-    // is stamped (`opensTable`): the id joins the first cell and the table
-    // stands, while a `|`-led one would gain a cell and lose the table.
-    tableHeaderOver(line, next)
-  );
+function renderedBlocks(body: string): RenderedBlock[] {
+  return blockSkeleton(body)
+    .flatMap((b) => {
+      if (b.kind === 'table_open' && /^ {0,3}<!--/.test(b.text)) {
+        const nl = b.text.search(/\r\n?|\n/);
+        const rest = nl === -1 ? '' : b.text.slice(nl + 1);
+        return [
+          {
+            kind: 'html_block',
+            text: nl === -1 ? b.text : b.text.slice(0, nl),
+          },
+          ...(rest.trim() === ''
+            ? []
+            : splitTable({ kind: 'paragraph_open', text: rest })),
+        ];
+      }
+      return b.kind === 'paragraph_open' ? splitTable(b) : [b];
+    })
+    .filter(
+      (b) =>
+        b.kind !== 'html_block' ||
+        maskHtmlComments(b.text)
+          .replace(
+            /<\?[\s\S]*?\?>|<![A-Za-z][\s\S]*?>|<!\[CDATA\[[\s\S]*?\]\]>/g,
+            '',
+          )
+          .trim() !== '',
+    );
 }
 
-/**
- * A GFM table the stamp would break: a `|`-LED header row over a delimiter
- * row with the SAME number of cells — GFM requires the counts to match, or
- * the rows are text — where `R<id>: ` in front adds a cell.
- */
-function opensTable(header: string, delimiter: string): boolean {
-  return /^\|/.test(header) && tableHeaderOver(header, delimiter);
-}
+/** A GFM delimiter row: `|`-separated cells of `-` runs, optional `:` ends. */
+const TABLE_DELIMITER_ROW_RE =
+  /^ {0,3}(?:\|[ \t]*)?:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*(?:\|[ \t]*)?\r?$/;
 
-/** A GFM table header (leading `|` or not) over its delimiter row. */
-function tableHeaderOver(header: string, delimiter: string): boolean {
-  // One of the two rows must hold a `|` — `the claim` over `|---|` is a
-  // one-column table on GitHub (#9940 review, audit 5).
-  if (
-    !TABLE_DELIMITER_ROW_RE.test(delimiter) ||
-    (!/\|/.test(header) && !/\|/.test(delimiter))
-  ) {
-    return false;
-  }
-  return tableCells(header) === tableCells(delimiter);
-}
-
+/** The cell count of a table row, leading and trailing `|` discounted. */
 function tableCells(row: string): number {
   const inner = row
     .trim()
@@ -603,106 +502,78 @@ function tableCells(row: string): number {
 }
 
 /**
- * A link reference definition: `[label]:` then ONE destination (angle-
- * bracketed or a run of non-space) and optionally a quoted or
- * parenthesised title — nothing else on the line. `[probe]: the guard
- * drops a valid case` is prose, not a definition (#9940 review, audit).
+ * The cmark-gfm reading of a paragraph: a line followed by a delimiter row
+ * of the same cell count opens a table there — the lines before stay a
+ * paragraph. A bare `---` never reaches here: markdown-it reads it as the
+ * setext underline it also is on GitHub, and the block is a heading.
  */
-const LINK_REF_DEF_RE =
-  // The label may hold an escaped `]`; the destination may sit on the NEXT
-  // line, so a `[label]:` with nothing after it is a definition too.
-  /^ {0,3}\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(?:(?:<[^<>\n]*>|\S+)[ \t]*(?:["'(][^\n]*)?)?\r?$/;
-
-/**
- * A GFM table's delimiter row — what makes the `|`-led line above it a
- * header row rather than text.
- */
-const TABLE_DELIMITER_ROW_RE =
-  /^[ \t]*(?:\|[ \t]*)?:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*(?:\|[ \t]*)?\r?$/;
-
-// ---------------------------------------------------------------------------
-// The stamp's line model. The strips in review-footer.ts classify whole
-// bodies with the CommonMark parser (`scanLines`); the stamp decides on ONE
-// line — the marker's, or the first content line under it — where the
-// block grammar is these start conditions, and the readback legs share the
-// same statements through inline-counts.ts. Verified against micromark,
-// markdown-it and marked on generated bodies (#9940 review, audits 1-6).
-// ---------------------------------------------------------------------------
-
-/** Fence delimiter runs (``` or ~~~), openers and closers alike. */
-const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
-
-/**
- * The fence OPENER rule — the ONE statement `scanLines` and the stamp skip
- * (`stampCarriedId`) both apply: a delimiter run of ``` or ~~~ after at
- * most three indentation characters opens a fence, EXCEPT a backtick run
- * whose info string carries a backtick — CommonMark forbids that spelling,
- * so the line is ordinary paragraph text (tilde fences may carry one). The
- * indentation count is the line model's own — a tab is one character
- * here, where CommonMark counts it as four columns — so both ends agree on
- * a tab-led run; the difference only ever widens a skip. A delimiter-only test over-skipped
- * exactly that line out of its id stamp, posting an id-less root behind
- * a disclosure naming a fence that does not exist (#9940 review, round
- * 25). Returns the opener's character and run length — the state a
- * closer must match — or null.
- */
-function fenceOpener(content: string): { char: string; len: number } | null {
-  const open = FENCE_RUN_RE.exec(content);
-  if (open === null) return null;
-  const run = open[1]!;
-  if (run[0] === '`' && content.slice(open[0].length).includes('`')) {
-    return null;
+function splitTable(block: RenderedBlock): RenderedBlock[] {
+  const lines = block.text.split(/\r\n?|\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const header = lines[i - 1]!;
+    const delimiter = lines[i]!;
+    if (
+      TABLE_DELIMITER_ROW_RE.test(delimiter) &&
+      tableCells(header) === tableCells(delimiter)
+    ) {
+      const before = lines.slice(0, i - 1).join('\n');
+      return [
+        ...(before.trim() === ''
+          ? []
+          : [{ kind: 'paragraph_open', text: before }]),
+        { kind: 'table_open', text: lines.slice(i - 1).join('\n') },
+      ];
+    }
   }
-  return { char: run[0]!, len: run.length };
+  return [block];
 }
 
-// The CommonMark type-6 block-level tag names, opening or closing.
-const HTML_BLOCK_TAG_NAMES =
-  '(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)';
+/**
+ * Rendered-equivalent text of the marker's block: soft breaks and runs of
+ * whitespace are one space. Comments and format characters need no rule
+ * of their own — the residue the marker strip discards carries them, and
+ * the stamp touches no other text.
+ */
+function normalizedText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
 
 /**
- * The simple HTML-block opener the line-map tracks (see `scanLines`): an
- * opening tag, or a CLOSING block-level tag — `</div>` alone on a line
- * starts a blank-line-terminated HTML block exactly as `<div>` does.
- * Exported for the id stamp's first-line guard (#9940 review): the type-1
- * end rule (`HTML_TYPE1_OPEN_RE`) does not matter there — open or close,
- * an opener the stamp breaks flips the block structure the gate
- * validated.
+ * The stamp's acceptance test — see `stampCarriedId`. `insert` is the id
+ * the candidate carries. The first block is compared through the marker
+ * strip: the canonical shape normalizes the separator away and folds a
+ * stacked marker run, and both are the stamp's own doing, not a change
+ * to what the content renders as.
  */
-const HTML_BLOCK_OPEN_RE = new RegExp(
-  // The type-1 (`<pre`, `<script`, `<style`, `<textarea`) and type-6
-  // (block-level tag name) start conditions end at the tag NAME — a
-  // space, `>`, `/>` or the line end after it — and the rest of the line
-  // is the block's own content: `<div class="x">foo` opens an HTML block
-  // (CommonMark 4.6). The whole-line alternatives below approximate type 7
-  // (a complete tag alone on its line); the round-27 review showed the
-  // type-6 line with trailing text escaping them (#9940 review).
-  //
-  // The unclosed-tag alternative carries no trailing `[ \t]*` of its own:
-  // with the `>` optional, `[^>]*` and the trailing whitespace class both
-  // matched spaces and the engine re-split them at every length — 60,000
-  // spaces after `<a` cost 1.7 s per call, paid by every posted comment
-  // twice (#9940 review, audit). One class per character keeps it linear.
-  `^(?:<(?:pre|script|style|textarea)(?:[ \\t>]|\\r?$)|</?${HTML_BLOCK_TAG_NAMES}(?:[ \\t]|/?>|\\r?$)|(?:<[A-Za-z][^>]*>[ \\t]*|<[A-Za-z][^>]*|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>[ \\t]*)\\r?$)`,
-  'i',
-);
-
-/**
- * A complete HTML tag alone on its line — the CommonMark type-7 HTML block
- * opener, which cannot interrupt a paragraph.
- */
-const LONE_TAG_RE = new RegExp(
-  // Not a type-1/6 tag (those interrupt a paragraph) — the exclusion ends
-  // where the tag NAME ends (`<div-x>` is a type-7 tag, not `<div`), and
-  // the attributes may quote `<` or `>`. One whitespace then the rest, the
-  // quoted runs disjoint from the bare class, so nothing re-splits a run
-  // of spaces (#9940 review, audit).
-  `^ {0,3}</?(?!(?:${HTML_BLOCK_TAG_NAMES}|pre|script|style|textarea)(?:[ \\t/>]|$))[A-Za-z][A-Za-z0-9-]*(?:\\s(?:[^<>"']|"[^"]*"|'[^']*')*)?/?>[ \\t]*\\r?$`,
-  'i',
-);
-
-const OTHER_LEADER_RE =
-  /^(?:#{1,6}(?:[ \t]|$)|(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|<\?|<!\[CDATA\[|<![A-Za-z])/i;
+function keepsStructure(
+  before: RenderedBlock[],
+  after: RenderedBlock[],
+  insert: string,
+): boolean {
+  // Blocks after the first compare by KIND: the stamp writes into the
+  // first block only, and a later block can change kind only through the
+  // first block's extent changing, which the text comparison on the first
+  // block already refuses — its text is the belt, this the braces.
+  const sameTail = (a: RenderedBlock[], b: RenderedBlock[]): boolean =>
+    a.length === b.length && a.every((x, i) => x.kind === b[i]!.kind);
+  const content = (text: string): string =>
+    normalizedText(stripSeverityPrefix(text));
+  if (before.length === 0) return false;
+  if (after.length === before.length) {
+    const [b0, a0] = [before[0]!, after[0]!];
+    return (
+      a0.kind === b0.kind &&
+      content(a0.text).replace(`${insert}:`, '').trim() === content(b0.text) &&
+      sameTail(after.slice(1), before.slice(1))
+    );
+  }
+  return (
+    after.length === before.length + 1 &&
+    after[0]!.kind === 'paragraph_open' &&
+    normalizedText(after[0]!.text) === `${insert}:` &&
+    sameTail(after.slice(1), before)
+  );
+}
 
 export interface ThreadActionPlan {
   /** Carried drafted-comment index → the original thread it replies into. */

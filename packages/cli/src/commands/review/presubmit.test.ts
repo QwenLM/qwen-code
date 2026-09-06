@@ -1202,6 +1202,44 @@ describe('presubmitCommand', () => {
       }
     });
 
+    it('an own carry-reply whose anchor a later commit unmapped (line: null) still carries — the join is the id (#9940 review, round 28)', async () => {
+      const unmapped = { line: undefined, original_line: 44 } as const;
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            ...unmapped,
+            id: 1,
+            commit_id: 'old-sha',
+            body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            ...unmapped,
+            id: 2,
+            commit_id: 'old-sha',
+            in_reply_to_id: 1,
+            body: '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 3,
+            body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+        ],
+      );
+      const matched = (
+        result.existingComments.repost as Array<{ matchedIds: string[] }>
+      )
+        .flatMap((r) => r.matchedIds)
+        .sort();
+      expect(matched).toEqual(['R1-2', 'R1-3']);
+    });
+
     it('an own carry-reply keeps carrying after new commits — the root is stale, the reply is not SHA-gated (#9940 review, round 25)', async () => {
       // A reply inherits its ROOT's commit id. Gated on the current SHA,
       // the carry-reply stopped carrying the moment any commit landed

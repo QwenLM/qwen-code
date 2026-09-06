@@ -170,7 +170,7 @@ export function separatorStrip(
   codeKept: boolean;
 } {
   const separator = MARKER_SEPARATOR_RE.exec(afterMarker)?.[0] ?? '';
-  const colonAt = separatorColonAt(separator);
+  const colonAt = separatorColonAt(separator, markerLineIsHtmlBlock);
   // With no colon the residue before the content is the separator only
   // where it carries a line break: the soft break and the continuation
   // indentation after it go (a lazy continuation folds onto the marker
@@ -200,13 +200,20 @@ export function separatorStrip(
  * separator — `\n\n    : colon-led` is a code block whose text starts with
  * a colon (#9940 review, audit 5).
  */
-export function separatorColonAt(separator: string): number {
+export function separatorColonAt(
+  separator: string,
+  /** Whether the marker's own line is an HTML block — see `separatorStrip`. */
+  boundaryBefore = false,
+): number {
   const colonAt = maskHtmlComments(separator).search(/[:：]/);
   if (colonAt === -1) return -1;
-  const before = separator.slice(0, colonAt);
-  return blockBoundaryIn(before) && codeIndentedAfter(before, false)
-    ? -1
-    : colonAt;
+  // A colon on, or after, an indented code block the residue opened is
+  // content — the block's first character, or a paragraph after the block
+  // — never the separator (#9940 review, round 28: the same boundary state
+  // `codeBlockStartIn` keeps, the marker line's HTML-block-ness included).
+  return codeBlockStartIn(separator.slice(0, colonAt), boundaryBefore) === -1
+    ? colonAt
+    : -1;
 }
 
 /**
@@ -220,6 +227,11 @@ export function separatorColonAt(separator: string): number {
  */
 export function codeBlockStartIn(run: string, boundaryBefore = false): number {
   const breaks = residueLineBreaks(run);
+  // The boundary is the state SINCE the last paragraph line: a line that is
+  // neither blank nor a comment block (a format character or NBSP alone
+  // is text) opens a paragraph, and an indented line after it is that
+  // paragraph's lazy continuation — a boundary seen earlier does not
+  // survive it (#9940 review, round 28).
   let boundary = boundaryBefore;
   for (let i = 0; i < breaks.length; i++) {
     const start = breaks[i]!.index + breaks[i]!.length;
@@ -232,8 +244,7 @@ export function codeBlockStartIn(run: string, boundaryBefore = false): number {
     ) {
       return start;
     }
-    if (/^[ \t]*$/.test(segment) || /^ {0,3}<!--/.test(segment))
-      boundary = true;
+    boundary = /^[ \t]*$/.test(segment) || /^ {0,3}<!--/.test(segment);
   }
   return -1;
 }
@@ -413,7 +424,10 @@ export function markerStrippedBody(body: string): string | null {
   let current = body;
   for (;;) {
     const sev = severityOf({ body: current });
-    if (sev === null) return current;
+    // At the fixpoint the readback reads past render-nothing residue the
+    // post keeps (a same-line comment before the claim renders as nothing
+    // either way); a kept code block returned above keeps its indentation.
+    if (sev === null) return current.replace(LEADING_INVISIBLE_RE, '');
     const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
     const leading = LEADING_INVISIBLE_RE.exec(current)?.[0] ?? '';
     const afterMarker = current.slice(leading.length + marker.length);
@@ -428,9 +442,11 @@ export function markerStrippedBody(body: string): string | null {
     );
     current = afterMarker.slice(strip);
     if (codeKept) return current;
-    // The readback reads past render-nothing residue the post keeps (a
-    // same-line comment before the claim renders as nothing either way).
-    current = current.replace(LEADING_INVISIBLE_RE, '');
+    // The residue stays between iterations — the NEXT marker's line is
+    // classified on it (a comment leading that line makes it an HTML
+    // block); stripping it here read the post's kept code block as prose
+    // (#9940 review, round 28). The readback reads past render-nothing
+    // residue at the fixpoint, below.
   }
 }
 

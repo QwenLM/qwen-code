@@ -127,7 +127,6 @@ import {
   stripSeverityPrefix,
   unmarkedComments,
   type DraftedComment,
-  codeIndentedAfter,
 } from './lib/inline-counts.js';
 import {
   MODEL_ID_MAX_CHARS,
@@ -509,11 +508,15 @@ function openLedgerCriticalEntries(
       ) {
         return null;
       }
-      if (seenIds.has(e.id)) return null;
-      seenIds.add(e.id);
+      // Deduplicated on the CANONICAL spelling: two rows that differ only
+      // in leading zeros are one id, and a grant keyed on one of them
+      // would silently cover the other (#9940 review, round 28).
+      const id = canonicalLedgerId(e.id);
+      if (seenIds.has(id)) return null;
+      seenIds.add(id);
       if (e.severity === 'Critical' && e.status === 'open') {
         entries.push({
-          id: e.id,
+          id,
           ...(typeof e.title === 'string' && e.title.trim() !== ''
             ? { title: e.title.trim() }
             : {}),
@@ -1172,9 +1175,17 @@ export function floorEnforcedReroute(
     const stripped = markerStrippedBody(body) ?? '';
     const nl = stripped.indexOf('\n');
     const first = nl === -1 ? stripped : stripped.slice(0, nl);
-    const record = critical
-      ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
-      : first;
+    // A body whose content opens as an indented code block has NO claim
+    // line (`carriedClaimLine` reads none, the thread matcher carries no
+    // id) — the record says so in front, so the collapsed title cannot
+    // lead with an id token the other readers never read (#9940 review,
+    // round 28).
+    const quotedCode = claim === '' && first.trim() !== '';
+    const record = quotedCode
+      ? `(quoted code) ${first.trim()}`
+      : critical
+        ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
+        : first;
     // Strip again AFTER the fold — the collapsed line is the shape that
     // posts, for the reason toDeferredEntries states.
     const title = stripReviewFooterLine(
@@ -3494,13 +3505,16 @@ function ledgerMarkerFor(
 // with no length cap — one such entry stalled a measured probe for seconds
 // at 80k characters.
 function collapseEntry(entry: string): string {
+  // Trimmed on the one-line shape too: an entry indented four columns
+  // renders as code inside its list item, and every id reader takes the
+  // id off the trimmed text (#9940 review, round 28).
   return entry.includes('\n')
     ? entry
         .split('\n')
         .map((seg) => seg.trim())
         .filter((seg) => seg !== '')
         .join(' ')
-    : entry;
+    : entry.trim();
 }
 
 /** A line that is a code-fence delimiter: a ``` or ~~~ run, any info string. */
@@ -3630,11 +3644,61 @@ export const DOWNGRADE_REASONS_TOTAL_MAX_CHARS = 2000;
  * span cap that strip enforces.
  */
 export function escapeTagOpeners(text: string): string {
-  return text.replace(
-    /(`+)(?:(?!\1)[^`]|(?!\1)`+)*\1(?!`)|<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>|<(?=[A-Za-z/?])/g,
-    // A code span or an autolink matched whole (longer than the lone `<`).
-    (m) => (m.length > 1 ? m : '&lt;'),
-  );
+  // Code spans by CommonMark 6.1: a MAXIMAL backtick run opens a span that
+  // the next run of exactly the same length closes; a run with no equal
+  // closer is literal text. A regex that let the opener shrink inside its
+  // run paired a 4-run opener with a 3-run closer — a span CommonMark
+  // never forms — and returned the tag openers inside it unescaped (#9940
+  // review, round 28).
+  // Linear: the closer for a run is looked up in the runs OF ITS LENGTH
+  // (one sorted list per length, a cursor per list), and the spans are
+  // walked with one cursor while the text is scanned — a per-run search
+  // from the start and a per-`<` span scan were quadratic (#9940 review,
+  // audit 7).
+  const runs: Array<{ start: number; end: number }> = [];
+  const byLength = new Map<number, number[]>();
+  for (const m of text.matchAll(/`+/g)) {
+    const len = m[0].length;
+    const list = byLength.get(len) ?? [];
+    list.push(runs.length);
+    byLength.set(len, list);
+    runs.push({ start: m.index, end: m.index + len });
+  }
+  const cursor = new Map<number, number>();
+  const spans: Array<[number, number]> = [];
+  for (let i = 0; i < runs.length; i++) {
+    const len = runs[i]!.end - runs[i]!.start;
+    const list = byLength.get(len)!;
+    let at = cursor.get(len) ?? 0;
+    while (at < list.length && list[at]! <= i) at++;
+    cursor.set(len, at);
+    if (at >= list.length) continue;
+    const j = list[at]!;
+    spans.push([runs[i]!.start, runs[j]!.end]);
+    i = j;
+  }
+  let span = 0;
+  const inSpan = (i: number): boolean => {
+    while (span < spans.length && spans[span]![1] <= i) span++;
+    return span < spans.length && i >= spans[span]![0];
+  };
+  const autolink =
+    /^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/;
+  let out = '';
+  let at = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '<' || inSpan(i) || !/[A-Za-z/?]/.test(text[i + 1] ?? '')) {
+      continue;
+    }
+    const link = autolink.exec(text.slice(i));
+    if (link !== null) {
+      i += link[0].length - 1;
+      continue;
+    }
+    out += text.slice(at, i) + '&lt;';
+    at = i + 1;
+  }
+  return out + text.slice(at);
 }
 
 /**
@@ -4468,12 +4532,19 @@ function composeReviewBody(
             'of still-stands, fixed, or superseded.',
         );
       }
-      if (stopRulings.has(d.id)) {
+      // The grant keys join the claim ids the readback canonicalizes, so
+      // they are canonical too — a disposition copied from a padded-id
+      // cache binds; two spellings of one id are a duplicate (#9940
+      // review, round 28).
+      const id = canonicalLedgerId(d.id);
+      if (stopRulings.has(id)) {
         throw new Error(
-          `stopReRule refused: duplicate disposition for ${d.id}.`,
+          `stopReRule refused: duplicate disposition for ${d.id}` +
+            (id === d.id ? '' : ` (${id})`) +
+            '.',
         );
       }
-      stopRulings.set(d.id, d.ruling as string);
+      stopRulings.set(id, d.ruling as string);
     }
     const ledgerSet = new Set(ledger.map((e) => e.id));
     for (const id of ledgerSet) {
@@ -5121,13 +5192,15 @@ function composeReviewBody(
     // One line of prose, like `by`: a line break in a reason put a fence
     // or a `<!DOCTYPE` at a line start, and the block it opened ran over
     // the footer and the ledger marker (#9940 review, audit 6).
-    const reason = escapeTagOpeners(
-      quotedProse(raw.replace(/\s+/g, ' ').trim(), attribution),
-    );
+    const reason = quotedProse(raw.replace(/\s+/g, ' ').trim(), attribution);
     const points = [...reason];
-    return points.length <= DOWNGRADE_REASON_MAX_CHARS
-      ? reason
-      : `${points.slice(0, DOWNGRADE_REASON_MAX_CHARS).join('').trimEnd()}…`;
+    // Capped BEFORE the escape: the cap bounds the model's text, and the
+    // escape's `&lt;` lengthens it (#9940 review, audit 7).
+    return escapeTagOpeners(
+      points.length <= DOWNGRADE_REASON_MAX_CHARS
+        ? reason
+        : `${points.slice(0, DOWNGRADE_REASON_MAX_CHARS).join('').trimEnd()}…`,
+    );
   });
   const downgradeReasons: string[] = [];
   let reasonBudget = DOWNGRADE_REASONS_TOTAL_MAX_CHARS;
@@ -8239,16 +8312,22 @@ export const composeReviewCommand: CommandModule = {
 export function bodyCriticalClaim(
   entry: unknown,
 ): ReturnType<typeof readClaim> {
-  const stripped = stripForUnattributedPost(
-    typeof entry === 'string' ? entry : '',
-  );
-  const leading = LEADING_INVISIBLE_RE.exec(stripped)?.[0] ?? '';
-  // An indented code line carries no claim — the rule every other id
-  // reader applies (`bareClaimLine`); reading one here carried an id the
-  // comment readback returned null for (#9940 review, audit 4).
-  return readClaim(
-    codeIndentedAfter(leading, true) ? '' : stripped.slice(leading.length),
-  );
+  return readClaim(bodyEntryHead(typeof entry === 'string' ? entry : ''));
+}
+
+/**
+ * A body-Critical entry's head as EVERY reader of the one-line channel
+ * takes it — the ledger builder's body leg and `bodyCriticalClaim` alike,
+ * stated once (#9940 review, round 28: two readers with two strips let the
+ * contradiction gate miss a re-post the same round's ledger recorded).
+ * The entry strips through the fixpoint chain the visible list uses, then
+ * loses its leading render-nothing residue: residue before a carried id
+ * would defeat the id anchor and silently renumber the finding. No
+ * indented-code rule applies here — the channel is ONE line rendered as a
+ * list item, where leading indentation is not a block.
+ */
+function bodyEntryHead(text: string): string {
+  return stripForUnattributedPost(text).replace(LEADING_INVISIBLE_RE, '');
 }
 
 /**
@@ -8521,7 +8600,7 @@ export function buildLedger(
     // Leading render-nothing residue goes too, for the same reason as the
     // drafted-comment leg: residue between the marker and a carried id
     // would defeat the id anchor and silently renumber the finding.
-    const head = stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, '');
+    const head = bodyEntryHead(b);
     const { id: carried, title } = readClaim(head);
     findings.push({
       id: idFor(carried),

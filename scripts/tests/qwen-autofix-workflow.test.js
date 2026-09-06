@@ -9799,6 +9799,129 @@ exit 1
     );
   });
 
+  it("does not count the review bot's fixed-ruling replies as feedback — matched by their posted shape, so a Critical quoting the marker still counts (#9940 review, round 28)", () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // The thread lifecycle replies `R<id> fixed by <what> <marker>` into a
+    // thread — the review bot's first inline reply class that is NOT a
+    // finding (FIXED_RULING_MARKER in lib/review-footer.ts). Counting it
+    // selected a just-approved PR for a review-address round with nothing
+    // to address. The filter matches the posted SHAPE anchored at the
+    // start: a real Critical that quotes the marker leads with its
+    // severity marker and keeps counting.
+    const shape = reviewScanStep.match(/FIXED_RULING_FILTER='([^\n]*)'/)?.[1];
+    expect(shape).toBeTruthy();
+    expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
+    const program = reviewScanStep.match(
+      /--arg frf "\$\{FIXED_RULING_FILTER\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(program).toBeTruthy();
+    const run = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-09-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'frf',
+          shape,
+          program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(comments) },
+      ).trim();
+    const after = { created_at: '2026-09-02T00:00:00Z' };
+    const bot = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+    };
+    const marker = '<!-- qwen-review-fixed-ruling -->';
+    // The ruling note, with and without a `by`, attribution on and off.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-2 fixed by the guard rewrite ${marker}\n\n_— m via Qwen Code /review (v1)_`,
+        },
+        { ...after, ...bot, in_reply_to_id: 1, body: `R1-3 fixed ${marker}` },
+      ]),
+    ).toBe('0');
+    // A Critical that QUOTES the marker — a review of the file defining it
+    // — is a finding: root, carried re-post reply, marker in a code block.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-1: the census filter \`${marker}\` is substring-anywhere`,
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `**[Critical]** R3-1: still stands — \`${marker}\``,
+        },
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-2: quoted\n\n    R1-2 fixed by x ${marker}`,
+        },
+      ]),
+    ).toBe('3');
+    // Every other reply and root keeps counting: a carried re-post, a
+    // bot reply in prose, a human reply, a human quoting the shape.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: '**[Critical]** R1-2: still stands at HEAD',
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: 'The assertion should cover the fallback path too.',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          in_reply_to_id: 1,
+          body: 'looks fine',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          body: `R1-2 fixed by me ${marker}`,
+        },
+      ]),
+    ).toBe('4');
+    // The two digest legs over $comments[] whose rows survive to the
+    // rendering, and the prepare job's LIVE_NEW revalidation, apply the
+    // same shape (the OVER_BUDGET leg drops every bot row later anyway).
+    expect(
+      workflow.split(
+        String.raw`| test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)`,
+      ).length - 1,
+    ).toBe(3);
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',

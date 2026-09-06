@@ -43,6 +43,17 @@ export function commentMarker(severity: 'critical' | 'suggestion'): string {
 /** The trailing shape `submit` posts on attribution-off comments. */
 const POSTED_MARKER_RE = /<!-- qwen-review (?:critical|suggestion) -->$/;
 
+/**
+ * The trailing marker the thread lifecycle's `R<id> fixed by <what>` reply
+ * carries — a NOTE the review bot posts inside a thread, not a finding.
+ * Machine-recognisable so the autofix census can skip it (a round that
+ * rules findings fixed and approves must not select the PR for a round
+ * with nothing to address), and deliberately NOT the posted comment-marker
+ * shape: `carriesCommentMarker` stays false on it, so presubmit reads no
+ * carried id off the ruling (#9940 review, round 28).
+ */
+export const FIXED_RULING_MARKER = '<!-- qwen-review-fixed-ruling -->';
+
 /** Whether the body ends with the posted marker shape. */
 export function carriesCommentMarker(body: string): boolean {
   return POSTED_MARKER_RE.test(body.trimEnd());
@@ -296,7 +307,10 @@ export function stripFooterSpans(text: string): string {
   // short of the word itself — and an entity reference can stand in for
   // any character of it, so an `&` must open the gate too.
   if (!text.includes('/review') && !text.includes('&')) return text;
-  if (!text.includes('\n')) {
+  // One line by the file's own line-ending model (`LINE_ENDING_RE`): a
+  // bare-CR body is multi-line here as everywhere else, or its first
+  // line's indentation judged every line (#9940 review, round 28).
+  if (!/[\r\n]/.test(text)) {
     // A single line indented four columns is an indented code block — the
     // span in it is quotation, as the multi-line path's line map already
     // treats it (a marker-stripped body whose kept code block is one line
@@ -580,6 +594,31 @@ const LINE_ENDING_RE = /\r\n?|\n/g;
  */
 const BLOCK_PARSER = new MarkdownIt({ html: true });
 BLOCK_PARSER.core.ruler.disable(['inline']);
+
+/**
+ * The top-level block kinds the CommonMark parser reads off a body, in
+ * order, each with the source lines it spans — the skeleton the id stamp
+ * compares before and after its insertion, on both projections (#9940
+ * review, round 28). Block-only, like every other read of the parser here;
+ * container contents are the container's own.
+ */
+export function blockSkeleton(
+  body: string,
+): Array<{ kind: string; text: string }> {
+  const lines = body.split(LINE_ENDING_RE);
+  return BLOCK_PARSER.parse(body, {})
+    .filter(
+      (t) =>
+        t.level === 0 &&
+        t.nesting !== -1 &&
+        t.type !== 'inline' &&
+        t.map !== null,
+    )
+    .map((t) => ({
+      kind: t.type,
+      text: lines.slice(t.map![0], t.map![1]).join('\n'),
+    }));
+}
 
 /** The blockquote prefix a line can carry, at any nesting depth. */
 export const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;

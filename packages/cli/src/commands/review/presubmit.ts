@@ -150,6 +150,8 @@ interface RawComment {
   path?: string;
   line?: number;
   start_line?: number;
+  /** The anchor's line at posting time — what GitHub keeps when a later commit unmaps `line`. */
+  original_line?: number;
   commit_id?: string;
   in_reply_to_id?: number;
   user?: { login?: string };
@@ -699,6 +701,21 @@ function classifyExistingComments(
     ids.set(canonical, raws);
     carriedIdsByLocation.set(key, ids);
   }
+  // Every wanted id regardless of location — the reply carrier's join
+  // (#9940 review, round 28): a later commit that ages a thread's root
+  // also unmaps its anchor, and GitHub then reports `line: null` on the
+  // root AND its replies, so a location key never matched the reply and
+  // the still-standing carry was dedup-dropped as its sibling's duplicate.
+  // A carry reply is posted in the thread of the id it carries, so the id
+  // is the join; the ROOT legs keep their location discipline.
+  const wantedById = new Map<string, Set<string>>();
+  for (const ids of carriedIdsByLocation.values()) {
+    for (const [canonical, raws] of ids) {
+      const all = wantedById.get(canonical) ?? new Set<string>();
+      for (const raw of raws) all.add(raw);
+      wantedById.set(canonical, all);
+    }
+  }
   /** Every spelling to report for a set of matched canonical ids. */
   const spellings = (
     wanted: Map<string, Set<string>>,
@@ -835,7 +852,8 @@ function classifyExistingComments(
   // the id-less ambiguity count (it is not an original), not the id-less
   // fallback (a reply carrying no id names nothing). Two gates from the
   // root match — this account only (ledger ids are per-account) and an
-  // id the findings actually carry — and deliberately NOT the SHA gate:
+  // id the findings actually carry, at ANY location (see `wantedById`)
+  // — and deliberately NOT the SHA gate:
   // a reply inherits its ROOT's commit id, so after any new commit the
   // carry-reply would fail a current-SHA test forever while its root
   // buckets `stale`, and a still-standing carried finding would be
@@ -844,28 +862,27 @@ function classifyExistingComments(
   // evidence that matters: the current round still carries the finding
   // at that location, and the lifecycle answers it inside the same
   // thread whatever commit the root was posted at. A fixed-ruling reply
-  // stays inert either way: it carries no marker, and its id is retired
-  // — no finding wants it.
+  // stays inert either way: it carries no POSTING marker (its own
+  // `FIXED_RULING_MARKER` is not the comment-marker shape), and its id is
+  // retired — no finding wants it.
   if (currentUserLogin !== '') {
     for (const c of ownReplies) {
       if (
         (c.user?.login ?? '').toLowerCase() !== currentUserLogin.toLowerCase()
       )
         continue;
-      const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
-      if (!wantedIds) continue;
       const matched = extractCarriedIds(c.body || '').filter((id) =>
-        wantedIds.has(id),
+        wantedById.has(id),
       );
       if (matched.length === 0) continue;
       buckets.repost.push({
         id: c.id,
         path: c.path ?? '',
-        line: c.line ?? 0,
+        line: c.line ?? c.original_line ?? 0,
         commit_id: c.commit_id ?? '',
         body: (c.body || '').slice(0, 80),
         ...(c.user?.login ? { user: c.user.login } : {}),
-        matchedIds: spellings(wantedIds, matched),
+        matchedIds: spellings(wantedById, matched),
       });
     }
   }

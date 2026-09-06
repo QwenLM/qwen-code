@@ -1189,6 +1189,19 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe(false);
     });
 
+    it('a bare-CR body takes the line-aware path — its first line cannot vouch for the rest (#9940 review, round 28)', () => {
+      expect(
+        stripForUnattributedPost(
+          '    quoted code\rmore prose _— gpt-5 via Qwen Code /review (v1.2.3)_ tail',
+        ),
+      ).toBe('    quoted code\nmore prose tail');
+      expect(
+        stripForUnattributedPost(
+          '    R1-2: the guard drops a case\rmore prose _— qwen3-max via Qwen Code /review (v0.21)_ tail',
+        ),
+      ).not.toContain('via Qwen Code /review');
+    });
+
     it('a >-only line is not blank — the HTML block continues past it', () => {
       expect(
         stripForgedFooterLines(

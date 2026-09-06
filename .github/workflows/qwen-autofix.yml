@@ -3394,12 +3394,23 @@ jobs:
             # extends that window. The scan still selects later feedback so
             # prepare can record and watermark its deferral; only the address
             # job filters what may drive code changes.
+            # The thread lifecycle's `R<id> fixed by <what>` reply is a NOTE the
+            # review bot posts inside a thread, never a finding: it carries
+            # its own marker (FIXED_RULING_MARKER in lib/review-footer.ts) at
+            # the end of its first line, and counting it selected a
+            # just-approved PR for a round with nothing to address (#9940
+            # review, round 28). Matched by its posted SHAPE, anchored at the
+            # start — a real Critical that QUOTES the marker (a review of the
+            # file defining it) leads with its severity marker and must keep
+            # counting; a substring test dropped it.
+            FIXED_RULING_FILTER='^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->'
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg frf "${FIXED_RULING_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not) ] | length' \
               "${WORKDIR}/rc.json")"
             # Issue-level PR comments are also actionable feedback. Exclude the
             # bot's own eval markers, and known non-actionable bot comments
@@ -4390,7 +4401,8 @@ jobs:
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
               + (.[1] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)) | length)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)) | length)
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
@@ -4815,6 +4827,7 @@ jobs:
                 | $comments[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((
                     ((.body // "") | leading_critical)
@@ -4936,6 +4949,7 @@ jobs:
               | $comments[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
+              | select((((.user.login // "") == $rb) and ((.body // "") | test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))

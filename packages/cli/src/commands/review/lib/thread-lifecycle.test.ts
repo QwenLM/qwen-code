@@ -856,14 +856,17 @@ describe('stampCarriedId — the write side of the readback', () => {
         '**[Critical]** R5-6: \u200B# Heading\nmore',
       ],
       ['**[Critical]** \u00A0- item', '**[Critical]** R5-6: \u00A0- item'],
-      [
-        '**[Critical]** <!-- x -->- item',
-        '**[Critical]** R5-6: <!-- x -->- item',
-      ],
       ['**[Critical]** \uFEFF> quoted', '**[Critical]** R5-6: \uFEFF> quoted'],
     ]) {
       expect(stampCarriedId(draft, 'R5-6')).toBe(stamped);
     }
+    // A comment glued to the marker is different: the attribution-off post
+    // opens its line with `<!--`, an HTML block whose trailing text renders
+    // raw, and the stamped line is a paragraph — the parser calls that a
+    // flip, so the stamp takes the id-less degradation (round 28).
+    expect(stampCarriedId('**[Critical]** <!-- x -->- item', 'R5-6')).toBe(
+      '**[Critical]** <!-- x -->- item',
+    );
     // The fence and HTML-block arms keep their residue tolerance (the
     // round-8 and round-11 pins).
     expect(
@@ -1000,15 +1003,24 @@ describe('stampCarriedId — the write side of the readback', () => {
     // the comment's tail (`-->`) as visible text.
     expect(
       stampCarriedId(
-        '**[Critical]**: <!-- **[Suggestion]**:\n\n --> content',
+        '**[Critical]**: <!-- **[Suggestion]**: --> content',
         'R1-5',
       ),
     ).toBe('**[Critical]** R1-5: content');
+    // A comment "spanning" a blank line is no comment to CommonMark — both
+    // halves are literal text in two paragraphs, which the one-line
+    // stamp would fold into one: the parser refuses it (round 28).
+    expect(
+      stampCarriedId(
+        '**[Critical]**: <!-- **[Suggestion]**:\n\n --> content',
+        'R1-5',
+      ),
+    ).toBe('**[Critical]**: <!-- **[Suggestion]**:\n\n --> content');
     // …and the separator colon likewise: a colon quoted in a comment
     // before the real one is not where the content's breaks start.
-    expect(
-      stampCarriedId('**[Critical]** <!-- a:\n\n --> : content', 'R1-5'),
-    ).toBe('**[Critical]** R1-5: content');
+    expect(stampCarriedId('**[Critical]** <!-- a: --> : content', 'R1-5')).toBe(
+      '**[Critical]** R1-5: content',
+    );
   });
 
   it('a colon, ONE line break and four columns is a lazy continuation, not code — both legs read the claim (#9940 review, audit 3)', () => {
@@ -1230,8 +1242,28 @@ describe('stampCarriedId — the write side of the readback', () => {
   });
 
   it('a one-column table needs a `|` in the delimiter row only — the header keeps its line (#9940 review, audit 5)', () => {
+    // cmark-gfm makes the paragraph's last line the header of the table
+    // the delimiter row opens (no `|` needed in the header row) — the
+    // oracle reads it the cmark way, so the header keeps its line (round
+    // 28, audit 7).
     expect(stampCarriedId('**[Critical]**:\nthe claim\n|---|', 'R3-7')).toBe(
       '**[Critical]** R3-7: \nthe claim\n|---|',
+    );
+    expect(stampCarriedId('**[Critical]**\nclaim\n|---|', 'R1-2')).toBe(
+      '**[Critical]** R1-2: \nclaim\n|---|',
+    );
+    // An indented header row is a table on GitHub too — the re-attached
+    // shape keeps it, no id is lost.
+    expect(
+      stampCarriedId('**[Critical]**\n    | a | b |\n|---|---|', 'R1-2'),
+    ).toBe('**[Critical]** R1-2: \n    | a | b |\n|---|---|');
+    // A comment-led header line is an HTML block on GitHub, not a table
+    // row: the stamped attribution-off line would become one — refused.
+    expect(
+      stampCarriedId('**[Critical]** <!-- s --> a | b\n--|--', 'R1-2'),
+    ).toBe('**[Critical]** <!-- s --> a | b\n--|--');
+    expect(stampCarriedId('**[Critical]**:\na | b\n---|---', 'R3-7')).toBe(
+      '**[Critical]** R3-7: \na | b\n---|---',
     );
     // `---` under the paragraph is a setext underline of the WHOLE
     // paragraph on both sides of the stamp — a heading either way.
@@ -1268,6 +1300,20 @@ describe('stampCarriedId — the write side of the readback', () => {
       id: 'R1-2',
       fixInduced: false,
     });
+  });
+
+  it('a paragraph line between the blank line and the indent ends the boundary — the carry is read (#9940 review, round 28)', () => {
+    expect(
+      carriedFindingOf('**[Critical]**\n\n\u200b\n    R1-2: the guard'),
+    ).toEqual({ id: 'R1-2', fixInduced: false });
+    expect(
+      carriedFindingOf(
+        '<!-- qwen-review id=R1-2 -->**[Critical]**\n    : R3-4: the guard',
+      ),
+    ).toBeNull();
+    expect(stampCarriedId('<!-- c -->**[Critical]**\n    : x', 'R9-9')).toBe(
+      '<!-- c -->**[Critical]**\n    : x',
+    );
   });
 
   it('a colon, one break and four columns is a lazy continuation for the stamp too — stamped on the marker line (#9940 review, audit 4)', () => {
@@ -1567,12 +1613,18 @@ describe('stampCarriedId — the write side of the readback', () => {
   it('the linear HTML-block opener test accepts and refuses the same lines as the overlapping form did (#9940 review, audit 2)', () => {
     for (const draft of [
       '**[Critical]** <a>  \nfoo',
-      '**[Critical]** <a  \nfoo',
       '**[Critical]** <a href="x">\nfoo',
       '**[Critical]** </div>\nfoo',
+      // A `>` inside a quoted attribute still completes the tag (round 28).
+      '**[Critical]** <a title="x>y">\nmore',
     ]) {
       expect(stampCarriedId(draft, 'R5-8')).toBe(draft);
     }
+    // An incomplete tag (`<a` and no `>`) opens no HTML block of any type —
+    // a paragraph on both projections, so the stamp proceeds (round 28).
+    expect(stampCarriedId('**[Critical]** <a  \nfoo', 'R5-8')).toBe(
+      '**[Critical]** R5-8: <a  \nfoo',
+    );
     expect(stampCarriedId('**[Critical]** <a>x', 'R5-8')).toBe(
       '**[Critical]** R5-8: <a>x',
     );
@@ -1688,11 +1740,19 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(stampCarriedId('\n**[Critical]** the claim', 'R1-1')).toBe(
       '\n**[Critical]** R1-1: the claim',
     );
-    const stamped = stampCarriedId(
+    // Residue AFTER the marker that leads the attribution-off line as a
+    // comment makes that line an HTML block (its trailing text renders
+    // raw); the stamped line is a paragraph — the parser refuses the flip
+    // and the id-less degradation applies (round 28). Residue that renders
+    // nothing on its own line is fine.
+    expect(stampCarriedId('**[Critical]** <!-- x --> the claim', 'R1-1')).toBe(
       '**[Critical]** <!-- x --> the claim',
+    );
+    const stamped = stampCarriedId(
+      '**[Critical]**\n<!-- x -->\nthe claim',
       'R1-1',
     );
-    expect(stamped).toBe('**[Critical]** R1-1: <!-- x --> the claim');
+    expect(stamped).toBe('**[Critical]** R1-1: \n<!-- x -->\nthe claim');
     expect(carriedFindingOf(stamped)).toEqual({
       id: 'R1-1',
       fixInduced: false,
@@ -1763,9 +1823,11 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(stampCarriedId(body, 'R2-1')).toBe(body);
   });
 
-  it('stamps a glued multi-line comment — the id still reads back', () => {
+  it('a glued multi-line comment leads the attribution-off line — an HTML block, so the stamp degrades; on its own lines it stamps (round 28)', () => {
+    const glued = '**[Critical]**<!--\nrender-note\n-->the claim';
+    expect(stampCarriedId(glued, 'R2-1')).toBe(glued);
     const stamped = stampCarriedId(
-      '**[Critical]**<!--\nrender-note\n-->the claim',
+      '**[Critical]**\n<!--\nrender-note\n-->\nthe claim',
       'R2-1',
     );
     expect(carriedFindingOf(stamped)).toEqual({

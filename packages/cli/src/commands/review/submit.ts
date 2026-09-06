@@ -122,6 +122,7 @@ import {
   stripReviewFooter,
   stripReviewFooterLine,
   swallowsAppendedMarker,
+  FIXED_RULING_MARKER,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -1805,7 +1806,10 @@ function submit(
                     attribution ? r.by : stripForUnattributedPost(r.by),
                   ).trim(),
                 );
-          const line = fixedRulingLine(r.id, by);
+          // The ruling note carries its own invisible marker — the autofix
+          // census filters the review bot's inline replies by it, and it is
+          // not the posted comment-marker shape presubmit reads ids by.
+          const line = `${fixedRulingLine(r.id, by)} ${FIXED_RULING_MARKER}`;
           return {
             threadId: r.threadId,
             commentId: r.commentId,

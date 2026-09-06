@@ -9,6 +9,10 @@
 // rather than merely stubbed, and a call to it is a failure unless the test
 // says otherwise.
 
+import {
+  FIXED_RULING_MARKER,
+  carriesCommentMarker,
+} from './lib/review-footer.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
@@ -4558,6 +4562,15 @@ describe('the thread lifecycle', () => {
       '_— qwen3.7-max via Qwen Code /review (v0.21.2)_',
     );
     expect(String(replyCalls()[0]![2])).toContain('/comments/1009/replies');
+    // The ruling reply is a NOTE, not a finding: it carries its own
+    // invisible marker (the autofix census skips the review bot's replies
+    // by it) and neither a severity marker nor the posted comment marker
+    // presubmit reads ids by (#9940 review, round 28).
+    expect(String(replyCalls()[0]![0])).toContain(FIXED_RULING_MARKER);
+    expect(carriesCommentMarker(String(replyCalls()[0]![0]))).toBe(false);
+    expect(String(replyCalls()[0]![0])).not.toMatch(
+      /\*\*\[(?:Critical|Suggestion)\]\*\*|<!-- qwen-review (?:critical|suggestion) -->/,
+    );
     expect(resolveCalls()).toHaveLength(1);
     expect(String(resolveCalls()[0]![5])).toBe('threadId=T9');
     expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 1 });

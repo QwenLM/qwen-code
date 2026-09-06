@@ -38,7 +38,7 @@ import {
   parseLedger,
   serializeLedger,
 } from './lib/ledger.js';
-import { countInlineFindings } from './lib/inline-counts.js';
+import { countInlineFindings, readClaimHead } from './lib/inline-counts.js';
 import {
   aboveChurnBar,
   CHURN_MIN_FRESH,
@@ -6592,8 +6592,27 @@ describe('composeReview — fixedFindings', () => {
       ['mail <dev@example.com>', 'mail <dev@example.com>'],
       ['<?php echo 1 ?> and </div>', '&lt;?php echo 1 ?> and &lt;/div>'],
       ['`unclosed <b>', '`unclosed &lt;b>'],
+      // A 4-run opener with no 4-run closer is literal — the tag between
+      // it and a 3-run pair is raw HTML and goes inert (CommonMark 6.1).
+      [
+        'repro: ````md <details> ``` more',
+        'repro: ````md &lt;details> ``` more',
+      ],
+      ['````md <b>x</b>```` done <i>', '````md <b>x</b>```` done &lt;i>'],
+      ['a ``x` <b>y</b> `` z <b>', 'a ``x` <b>y</b> `` z &lt;b>'],
     ] as const) {
       expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // Linear on a hundred thousand characters of runs and openers.
+    for (const text of [
+      '`x`<a'.repeat(20000),
+      '` '.repeat(50000),
+      '`<a`x` '.repeat(14000),
+      '``'.concat('`x`'.repeat(30000)),
+    ]) {
+      const t0 = performance.now();
+      escapeTagOpeners(text);
+      expect(performance.now() - t0).toBeLessThan(2000);
     }
   });
 
@@ -6634,14 +6653,25 @@ describe('composeReview — fixedFindings', () => {
     }
   });
 
-  it('bodyCriticalClaim reads no id off an indented code line — the rule the comment readback applies (#9940 review, audit 4)', () => {
-    expect(
-      bodyCriticalClaim('**[Critical]**:\n\n    R1-2: code').id,
-    ).toBeUndefined();
-    expect(bodyCriticalClaim('    R1-2: code').id).toBeUndefined();
-    expect(bodyCriticalClaim('**[Critical]**: R1-2: the guard').id).toBe(
-      'R1-2',
+  it('bodyCriticalClaim and the ledger builder read the one-line entry channel through ONE head — indentation is not a block there (#9940 review, round 28)', () => {
+    for (const entry of [
+      '    R1-2: the guard is still missing',
+      '**[Critical]**:\n\n    R1-2: code',
+      '**[Critical]**: R1-2: the guard',
+    ]) {
+      expect(bodyCriticalClaim(entry).id).toBe('R1-2');
+      expect(
+        buildLedger(5, [], [entry], { ids: new Set(['R1-2']), complete: true })
+          .findings[0]!.id,
+      ).toBe('R1-2');
+    }
+    // The one-line entry posts trimmed: indented four columns it rendered
+    // as code inside its list item.
+    const r = composeReview(
+      base({ bodyCriticals: ['    R1-2: the guard is still missing'] }),
     );
+    expect(r.body).toContain('R1-2: the guard is still missing');
+    expect(r.body).not.toContain('    R1-2: the guard');
   });
 
   it('caps the downgrade-reason LIST too, disclosing what it left out, and makes tag openers inert (#9940 review, audit 5)', () => {
@@ -16889,6 +16919,36 @@ describe('composeReview — the decided-stop re-rule', () => {
     expect(line).not.toMatch(/NOT available:\s*$/);
   });
 
+  it('binds a padded-id cache and its dispositions to the canonical claim id (#9940 review, round 28)', () => {
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'padded',
+        ledger: [
+          {
+            id: 'R01-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+      }),
+      stopReRule: { dispositions: [{ id: 'R01-1', ruling: 'still-stands' }] },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // Two spellings of one id are one disposition — refused as a duplicate.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'padded-dup' }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R01-1', ruling: 'still-stands' },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate disposition for R01-1 \(R1-1\)/);
+  });
+
   it('refuses a decided-stop plan composed WITHOUT stopReRule', () => {
     // The mirror of the forged-flag refusal above: a stop plan walked
     // through the regular floors would compose a non-blocking artifact,
@@ -18256,6 +18316,19 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
     for (const e of entries) {
       expect(e.title).not.toContain('via Qwen Code /review');
     }
+  });
+
+  it('floorEnforcedReroute records a code-led body as quoted code — its title carries no id the readers never read (#9940 review, round 28)', () => {
+    const { entries } = floorEnforcedReroute('critical', false, 3, [
+      {
+        path: 'a.ts',
+        line: 3,
+        body: '**[Suggestion]**\n\n    R1-2: quoted fixture line',
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(readClaimHead(entries[0]!.title).id).toBeUndefined();
+    expect(entries[0]!.title).toContain('R1-2: quoted fixture line');
   });
 
   it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {

@@ -13,6 +13,8 @@ import {
   stripSeverityPrefix,
   unmarkedComments,
   readClaimHead,
+  codeBlockStartIn,
+  separatorColonAt,
 } from './inline-counts.js';
 import {
   FINDING_BASELINES,
@@ -148,6 +150,39 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
 });
 
 describe('carriedClaimLine — the shared readback strip', () => {
+  it('the boundary state is the state since the last paragraph line — a text line between boundary and indent is seen (#9940 review, round 28)', () => {
+    expect(codeBlockStartIn('\n\n\u200b\n    ')).toBe(-1);
+    expect(codeBlockStartIn('\n\n    ')).toBe(2);
+    // The colon's own index — after the NBSP line the indent is a lazy
+    // continuation, so the colon is the separator.
+    expect(separatorColonAt('\n\n\u00a0\n    :')).toBe(8);
+    expect(separatorColonAt('\n\n    :')).toBe(-1);
+    // The marker line's own HTML-block-ness reaches the colon search.
+    expect(stripSeverityPrefix('<!-- c -->**[Critical]**\n    : x')).toBe(
+      '    : x',
+    );
+    expect(stripSeverityPrefix('<!-- c -->**[Critical]**\n    x')).toBe(
+      '    x',
+    );
+    expect(
+      carriedClaimLine('<!-- c -->**[Critical]**\n    : R3-4: the guard'),
+    ).toBe('');
+    expect(
+      carriedClaimLine('**[Critical]**\n\n\u00a0\n    : R1-2: the guard'),
+    ).toBe('R1-2: the guard');
+  });
+
+  it('the post and readback fixpoints agree on a stacked marker under a comment-led line (#9940 review, round 28)', () => {
+    const body = '**[Critical]**\n<!-- c -->**[Suggestion]**\n    R1-2: claim';
+    expect(stripSeverityPrefix(body)).toBe('    R1-2: claim');
+    expect(markerStrippedBody(body)).toBe(stripSeverityPrefix(body));
+    expect(carriedClaimLine(body)).toBe('');
+    // A same-line comment before the claim is still read past.
+    expect(
+      markerStrippedBody('**[Critical]** <!-- x --> R1-2: the claim'),
+    ).toBe('R1-2: the claim');
+  });
+
   it('reads no claim off an indented code block, and a canonical id off a variant spelling (#9940 review, audit)', () => {
     expect(carriedClaimLine('**[Critical]**\n\n    R1-2: code')).toBe('');
     // One break and a tab is a lazy continuation, not code (audit 5).
