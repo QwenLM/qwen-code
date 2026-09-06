@@ -835,7 +835,7 @@ describe('resolve-health: assessment', () => {
     // the body.
     const recorded = readState([filed.record]).requests;
     assert.deepEqual(recorded, [
-      [asked.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR'],
+      [asked.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR', 71],
     ]);
     // ...so the mid-window promotion admits nothing — neither the roster nor
     // the barrier.
@@ -1036,7 +1036,7 @@ describe('resolve-health: decisions', () => {
       streak: 0,
       unanswered: stale.unanswered.map((u) => u.id),
       newestRequest: stale.unanswered.at(-1).at,
-      requests: stale.unanswered.map((u) => [u.id, u.at, 'COLLABORATOR']),
+      requests: stale.unanswered.map((u) => [u.id, u.at, 'COLLABORATOR', u.pr]),
       latest: null,
     });
   });
@@ -1645,6 +1645,157 @@ describe('resolve-health: decisions', () => {
     );
   });
 
+  it('keeps a vanished request paired with its own result', () => {
+    // The pairing set is built from the live comment view, while the barrier
+    // is carried forward. When the older request leaves that view its result
+    // is donated to the retry behind it, `unserved` clears, and the gate
+    // certifies a push that left before the request it is being spent on.
+    // Neither arm needs an adversary: one is the author deleting their own
+    // comment, the other is only the clock reaching the slot between the two
+    // requests ageing out — `R2 - R1` wide, against a six-hourly tick.
+    const r1 = request('2026-08-27T00:00:00Z', 31);
+    // Typed inside run A's push→comment lag; its own run never reports.
+    const r2 = request('2026-08-27T05:00:00Z', 31);
+    const report = result('2026-08-27T05:05:00Z', PUSHED, 31);
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 31],
+      [r2.id, r2.created_at, 'COLLABORATOR', 31],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    const tick = (comments, at) =>
+      assess([{ number: 31, state: 'open', comments }], {
+        now: new Date(at),
+        recorded,
+      });
+    // Both live: the retry has no result of its own, so no close.
+    const live = tick([r1, r2, report], '2026-08-27T12:00:00Z');
+    assert.equal(live.unserved, r2.created_at);
+    assert.deepEqual(decide(live, existing), []);
+    // The first request's author deletes it. The record still holds its claim.
+    const deleted = tick([r2, report], '2026-08-27T12:00:00Z');
+    assert.equal(deleted.unserved, r2.created_at);
+    assert.deepEqual(decide(deleted, existing), []);
+    // Nothing deleted: the tick simply lands after the first request aged out
+    // of the comment window and before the second does.
+    const ageing = tick([r1, r2, report], '2026-09-03T02:00:00Z');
+    assert.equal(ageing.unserved, r2.created_at);
+    assert.deepEqual(decide(ageing, existing), []);
+    // ...and the claim has to SURVIVE that tick's write, or the next one
+    // loses it: the prune cannot run on the same window that hid the comment
+    // while a result on its PR can still be spent on it.
+    const written = decide(
+      assess(
+        [
+          { number: 31, state: 'open', comments: [r1, r2, report] },
+          // A newer request elsewhere, so the quiet tick records something.
+          {
+            number: 32,
+            state: 'open',
+            comments: [request('2026-09-03T01:00:00Z', 32)],
+          },
+        ],
+        { now: new Date('2026-09-03T02:00:00Z'), recorded },
+      ),
+      existing,
+    );
+    assert.deepEqual(
+      written.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(
+      readState([written[0].body]).requests.some((e) => e[0] === r1.id),
+      'the aged-out request keeps its entry while its result can still be spent',
+    );
+  });
+
+  it('fills the PR into a judgment recorded before this file wrote one', () => {
+    // Markers written by the previous version carry [id, at, association] and
+    // no PR, so their entries can never claim their own result. While the
+    // comment is still live the record is healed in place — first sight still
+    // wins for the judgment, only the PR is filled in.
+    const asks = [0, 1, 2].map((h) =>
+      request(`2026-08-27T0${h}:00:00Z`, 31 + h),
+    );
+    const legacy = asks.map((r) => [r.id, r.created_at, 'COLLABORATOR']);
+    const seen = assess(
+      asks.map((r, i) => ({
+        number: 31 + i,
+        state: 'open',
+        comments: [r],
+      })),
+      { now, recorded: legacy },
+    );
+    assert.equal(seen.alarm, true);
+    // Read back the way production does: the legacy entries arrive in the
+    // marker the previous version wrote, not as an option.
+    const stale = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: 0,
+      unanswered: [],
+      newestRequest: null,
+      requests: legacy,
+      latest: null,
+    })} -->`;
+    const written = decide(seen, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [stale],
+    })[0];
+    assert.equal(written.type, 'comment');
+    assert.deepEqual(
+      readState([written.body]).requests,
+      asks.map((r, i) => [r.id, r.created_at, 'COLLABORATOR', 31 + i]),
+    );
+  });
+
+  it('reads a request the producer would have run, whatever its case', () => {
+    // The producer's gate is a GitHub Actions expression — `==` and
+    // `startsWith(...)`, both case-insensitive — so `@Qwen-Code /Resolve`
+    // runs the lane. Read case-sensitively here it would leave the roster,
+    // the barrier and the sighting record at once, and the never-ran outage
+    // it belongs to would go unalarmed.
+    for (const body of [
+      '@qwen-code /resolve',
+      '@Qwen-Code /Resolve',
+      '@QWEN-CODE /RESOLVE please',
+    ]) {
+      assert.equal(isRequest(body), true, body);
+    }
+    for (const body of [
+      '@qwen-code /resolved',
+      '@qwen-code /resolvex',
+      'see @qwen-code /resolve',
+    ]) {
+      assert.equal(isRequest(body), false, body);
+    }
+    const shifted = comment(
+      'maintainer',
+      '2026-08-27T05:00:00Z',
+      '@Qwen-Code /Resolve',
+      31,
+    );
+    const lane = assess([{ number: 31, state: 'open', comments: [shifted] }], {
+      now,
+    });
+    assert.equal(lane.unanswered.length, 1, 'it is on the roster');
+    assert.equal(
+      lane.newestRequest,
+      '2026-08-27T05:00:00Z',
+      'and floors the barrier',
+    );
+  });
+
   it('will not read a push as recovery while a request has no result at all', () => {
     // The barrier compares COMMENT times, and the producer pushes before it
     // posts: a request typed inside that lag raises the barrier only to its
@@ -2000,7 +2151,7 @@ describe('resolve-health: decisions', () => {
     // one and this tick's sighting carry forward, in (created_at, id) order.
     assert.deepEqual(readState([written.body]).requests, [
       [56, '2026-08-25T00:00:00Z', 'CONTRIBUTOR'],
-      [fresh.id, '2026-08-27T06:00:00Z', 'COLLABORATOR'],
+      [fresh.id, '2026-08-27T06:00:00Z', 'COLLABORATOR', 31],
     ]);
   });
 
@@ -2036,7 +2187,7 @@ describe('resolve-health: decisions', () => {
     );
     assert.match(actions[0].body, /State refresh:/);
     assert.deepEqual(readState([actions[0].body]).requests, [
-      [refused.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR'],
+      [refused.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR', 31],
     ]);
     // One per newly sighted id, never one per tick: the marker now carries
     // the judgment, so the same picture again writes nothing.
@@ -2086,7 +2237,7 @@ describe('resolve-health: decisions', () => {
     );
     assert.ok(actions[0].body.includes('the same picture'), actions[0].body);
     assert.deepEqual(readState([actions[0].body]).requests, [
-      [refused.id, '2026-08-27T10:00:00Z', 'CONTRIBUTOR'],
+      [refused.id, '2026-08-27T10:00:00Z', 'CONTRIBUTOR', 50],
     ]);
     // The write carries the id, so the same tick again writes nothing.
     assert.deepEqual(
@@ -3187,7 +3338,7 @@ describe('resolve-health: end to end against a recording gh', () => {
     const record = readState(store.comments[filed.number].map((c) => c.body));
     assert.deepEqual(
       record.requests,
-      asks.map((r) => [r.id, r.created_at, 'COLLABORATOR']),
+      asks.map((r, i) => [r.id, r.created_at, 'COLLABORATOR', 60 + i]),
     );
     // Tick 2: one requester's membership lapsed, so the live field reads
     // NONE. Judged live the roster drops below the threshold; judged by

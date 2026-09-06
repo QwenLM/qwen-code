@@ -39,13 +39,25 @@ export const DEFAULTS = Object.freeze({
 // Mirrors the workflow's own trigger shape (exact body, or the command
 // followed by a space / newline / CR), so a comment counts as a request here
 // exactly when it counted as one there.
+//
+// Case-insensitively, because the producer's gate is a GitHub Actions
+// expression — `github.event.comment.body == '@qwen-code /resolve'` and three
+// `startsWith(...)` arms — and Actions expressions ignore case in both. One
+// mobile autocapital produces `@Qwen-Code /Resolve`, which runs the lane; a
+// case-sensitive reading here would drop it from the roster, the barrier and
+// the sighting record at once, so the never-ran outage it belongs to would go
+// unalarmed. Folded on the command only: what follows it is never compared.
 export function isRequest(body) {
   const command = '@qwen-code /resolve';
+  if (body.slice(0, command.length).toLowerCase() !== command) {
+    return false;
+  }
+  const rest = body.slice(command.length);
   return (
-    body === command ||
-    body.startsWith(`${command} `) ||
-    body.startsWith(`${command}\n`) ||
-    body.startsWith(`${command}\r`)
+    rest === '' ||
+    rest.startsWith(' ') ||
+    rest.startsWith('\n') ||
+    rest.startsWith('\r')
   );
 }
 
@@ -269,6 +281,7 @@ export function assess(prs, options = {}) {
           id: c.id,
           at: c.created_at,
           association: c.author_association ?? '',
+          pr: pr.number,
         });
       }
       if (
@@ -324,7 +337,20 @@ export function assess(prs, options = {}) {
     // only REFUSE a close — by claiming a result of its own or holding the
     // gate as unserved — never certify one.
     const requests = comments.filter(isAnswerableRequest);
-    const gateRequests = comments.filter(isRequestShaped);
+    // The pairing set is the live requests plus the ones the record still
+    // holds for this PR that have left the comment filter: a request that
+    // vanished — aged out, or deleted by its own author — keeps its claim on
+    // its own result, so the result is not donated to the next request in
+    // line. Recorded entries are already judged answerable-or-not; only their
+    // identity and time matter here.
+    const liveIds = new Set(comments.map((c) => c.id));
+    const vanished = (opts.recorded ?? [])
+      .filter((e) => e.length > 3 && e[3] === pr.number && !liveIds.has(e[0]))
+      .map((e) => ({ id: e[0], created_at: e[1] }));
+    const gateRequests = [
+      ...comments.filter(isRequestShaped),
+      ...vanished,
+    ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
     // The close gate's own attribution, which the roster's proxy below cannot
     // give it. Match each request, oldest first, to the earliest result that
     // postdates it and no earlier request has taken. Runs on one PR are
@@ -457,14 +483,31 @@ function stateOf(assessment, previous = null) {
   // entry could never apply again, and an unbounded record would eventually
   // overflow the comment the state rides in.
   const judgments = new Map();
+  // An entry outlives the comment filter when a result on its own PR still
+  // postdates it: the close gate pairs requests to results, and a request that
+  // has aged out of the live view while its result has not would otherwise
+  // hand that result to a LATER request on the same PR — spending one comment
+  // twice, as proof the lane recovered and again as proof the later request
+  // was served. Once no in-window result can be claimed by it, the entry can
+  // never change a decision again and goes.
+  const claimable = (entry) =>
+    entry.length > 3 &&
+    assessment.attempts.some((a) => a.pr === entry[3] && a.at > entry[1]);
   for (const entry of previous?.requests ?? []) {
-    if (entry[1] >= assessment.windowStart) {
+    if (entry[1] >= assessment.windowStart || claimable(entry)) {
       judgments.set(entry[0], entry);
     }
   }
   for (const s of assessment.requestSightings) {
-    if (!judgments.has(s.id)) {
-      judgments.set(s.id, [s.id, s.at, s.association]);
+    const held = judgments.get(s.id);
+    if (!held) {
+      judgments.set(s.id, [s.id, s.at, s.association, s.pr]);
+    } else if (held.length < 4) {
+      // A marker written before this file recorded the PR. Heal it while the
+      // comment is still live — first sight still wins for the judgment, only
+      // the PR is filled in — or the entry could never claim its own result
+      // and the gate would keep donating it to the next request.
+      judgments.set(s.id, [held[0], held[1], held[2], s.pr]);
     }
   }
   const kept = [...judgments.values()].sort(
@@ -543,10 +586,14 @@ function validState(state) {
       requests.some(
         (v) =>
           !Array.isArray(v) ||
-          v.length !== 3 ||
+          // Three elements is the shape this file wrote before it recorded
+          // the PR; those markers must keep reading, or every tracking issue
+          // open at the upgrade loses its barrier to the creation-time floor.
+          (v.length !== 3 && v.length !== 4) ||
           typeof v[0] !== 'number' ||
           typeof v[1] !== 'string' ||
-          typeof v[2] !== 'string',
+          typeof v[2] !== 'string' ||
+          (v.length === 4 && typeof v[3] !== 'number'),
       ))
   ) {
     return null;
