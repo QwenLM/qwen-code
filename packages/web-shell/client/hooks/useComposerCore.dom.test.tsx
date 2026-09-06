@@ -2268,4 +2268,49 @@ describe('useComposerCore attachment chip deletion keys', () => {
     // proving Delete removed the first one.
     expect(atob(latest!.pastedImages[0].data as string)).toBe('png2');
   });
+
+  it('keeps normal Delete editing when text is present with an image attached', async () => {
+    // Review follow-up on the #10794 fix: the attachment fallback must fire
+    // only on an empty composer, so Delete at position 0 still deletes the
+    // character after the caret instead of eating the first chip.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const view = latest!.viewRef.current!;
+    act(() => {
+      latest!.setText('abc');
+      view.dispatch({ selection: { anchor: 0 } });
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
+      );
+    });
+
+    expect(view.state.doc.toString()).toBe('bc');
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('keeps Backspace a no-op at position 0 when text is present with an image attached', async () => {
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const view = latest!.viewRef.current!;
+    act(() => {
+      latest!.setText('abc');
+      view.dispatch({ selection: { anchor: 0 } });
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(view.state.doc.toString()).toBe('abc');
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
 });

@@ -2909,6 +2909,9 @@ export function useComposerCore(
           if (removableIndex < 0) {
             // No @-tags to remove: fall back to the last pasted attachment
             // (files render after images) so Backspace still deletes a chip.
+            // Only on an otherwise-empty composer: with text present, Backspace
+            // at position 0 is a no-op and must stay one.
+            if (view.state.doc.length !== 0) return false;
             if (pastedFilesRef.current.length > 0) {
               removeFile(pastedFilesRef.current.length - 1);
               return true;
@@ -2941,6 +2944,9 @@ export function useComposerCore(
           if (removableIndex < 0) {
             // No @-tags to remove: fall back to the first pasted attachment
             // (images render before files) so Delete still deletes a chip.
+            // Only on an otherwise-empty composer: with text present, Delete at
+            // position 0 must keep deleting the character after the caret.
+            if (view.state.doc.length !== 0) return false;
             if (pastedImagesRef.current.length > 0) {
               removeImage(0);
               return true;
