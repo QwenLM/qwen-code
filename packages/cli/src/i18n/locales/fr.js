@@ -484,6 +484,7 @@ export default {
   'Hide Window Title': 'Masquer le titre de la fenêtre',
   'Show Status in Title': 'Afficher le statut dans le titre',
   'Hide Tips': 'Masquer les conseils',
+  'Show Tool Call Arguments': 'Afficher les arguments des appels d’outils',
   'Show Line Numbers in Code': 'Afficher les numéros de ligne dans le code',
   'Show Citations': 'Afficher les citations',
   'Custom Witty Phrases': 'Phrases personnalisées spirituelles',

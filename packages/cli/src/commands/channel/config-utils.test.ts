@@ -178,9 +178,22 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
     expect(result.dmPolicy).toBe('open');
+    expect(result.messagePrefix).toBeUndefined();
     expect(result.groups).toEqual({});
     expect(result.identity).toBeUndefined();
     expect(result.memoryScope).toBeUndefined();
+  });
+
+  it('validates and normalizes the shared message prefix', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      messagePrefix: '  /review  ',
+    });
+
+    expect(result.messagePrefix).toBe('/review');
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', messagePrefix: false }),
+    ).rejects.toThrow('field "messagePrefix" must be a string');
   });
 
   it('resolves env vars in token, clientId, clientSecret', async () => {

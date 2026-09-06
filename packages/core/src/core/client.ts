@@ -365,6 +365,7 @@ type MainSessionPromptConfig = Pick<
   | 'getExperimentalZedIntegration'
   | 'getInputFormat'
   | 'isInteractive'
+  | 'isTodoWriteEnabled'
 > &
   // A project style stops applying the moment the workspace loses trust, so
   // the resolver reads the live verdict on this path too. Optional, because
@@ -388,6 +389,7 @@ export function getMainSessionBaseSystemPrompt(
         // `getOutputStyle()` directly — a prompt override carries no style
         // section, and a session must not be reminded of one it lacks.
         resolveMainSessionOutputStyle(config),
+        config.isTodoWriteEnabled(),
       );
 }
 

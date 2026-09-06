@@ -142,10 +142,23 @@ interface MockClient {
   workspaceMcpTools: () => Promise<unknown>;
   restartMcpServer: () => Promise<unknown>;
   workspaceSkills: () => Promise<unknown>;
+  workspaceConfigSkills: () => Promise<unknown>;
+  workspaceRuntimeSkills: () => Promise<unknown>;
+  ensureRuntime: () => Promise<unknown>;
+  runtimeStatus: () => Promise<unknown>;
   workspaceAcpStatus: () => Promise<unknown>;
   workspaceAcpPreheat: () => Promise<unknown>;
   workspaceGit: () => Promise<unknown>;
-  workspaceByCwd: (workspaceCwd: string) => Pick<MockClient, 'workspaceGit'>;
+  workspaceByCwd: (
+    workspaceCwd: string,
+  ) => Pick<
+    MockClient,
+    | 'workspaceGit'
+    | 'workspaceConfigSkills'
+    | 'workspaceRuntimeSkills'
+    | 'ensureRuntime'
+    | 'runtimeStatus'
+  >;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -198,10 +211,20 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpTools = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceConfigSkills = vi.fn();
+  const workspaceRuntimeSkills = vi.fn();
+  const ensureRuntime = vi.fn();
+  const runtimeStatus = vi.fn();
   const workspaceAcpStatus = vi.fn();
   const workspaceAcpPreheat = vi.fn();
   const workspaceGit = vi.fn();
-  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({ workspaceGit }));
+  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({
+    workspaceGit,
+    workspaceConfigSkills,
+    workspaceRuntimeSkills,
+    ensureRuntime,
+    runtimeStatus,
+  }));
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -236,6 +259,10 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpTools = workspaceMcpTools;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceConfigSkills = workspaceConfigSkills;
+    workspaceRuntimeSkills = workspaceRuntimeSkills;
+    ensureRuntime = ensureRuntime;
+    runtimeStatus = runtimeStatus;
     workspaceAcpStatus = workspaceAcpStatus;
     workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceGit = workspaceGit;
@@ -313,6 +340,10 @@ const sdkMocks = vi.hoisted(() => {
     capabilities,
     workspaceProviders,
     workspaceSkills,
+    workspaceConfigSkills,
+    workspaceRuntimeSkills,
+    ensureRuntime,
+    runtimeStatus,
     listStandaloneSessions,
     getStandaloneSessionOptions,
     workspaceAcpStatus,
@@ -378,6 +409,43 @@ const sdkMocks = vi.hoisted(() => {
         initialized: true,
         skills: [],
       });
+      workspaceConfigSkills.mockReset();
+      workspaceConfigSkills.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [],
+      });
+      workspaceRuntimeSkills.mockReset();
+      workspaceRuntimeSkills.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        runtimeEpoch: 1,
+        skills: [],
+      });
+      ensureRuntime.mockReset();
+      ensureRuntime.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        capabilities: {
+          skills: { state: 'ready', revision: 0, runtimeEpoch: 1 },
+        },
+      });
+      runtimeStatus.mockReset();
+      runtimeStatus.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        capabilities: {
+          skills: { state: 'ready', revision: 0, runtimeEpoch: 1 },
+        },
+      });
       workspaceAcpStatus.mockReset();
       workspaceAcpStatus.mockResolvedValue({ channelLive: true });
       workspaceAcpPreheat.mockReset();
@@ -395,6 +463,10 @@ const sdkMocks = vi.hoisted(() => {
       workspaceByCwd.mockReset();
       workspaceByCwd.mockImplementation((_workspaceCwd: string) => ({
         workspaceGit,
+        workspaceConfigSkills,
+        workspaceRuntimeSkills,
+        ensureRuntime,
+        runtimeStatus,
       }));
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -2502,6 +2574,90 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.skills).toEqual(['review', 'pdf']);
   });
 
+  it('uses the Skills runtime API for a new task when advertised', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: [
+        'workspace_skills_config_runtime',
+        'workspace_acp_preheat',
+        'workspace_acp_status',
+      ],
+    });
+    sdkMocks.workspaceConfigSkills.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review code',
+          level: 'bundled',
+          modelInvocable: true,
+        },
+      ],
+    });
+    sdkMocks.workspaceRuntimeSkills.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      runtimeEpoch: 1,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review code',
+          level: 'bundled',
+          modelInvocable: true,
+        },
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'pdf',
+          description: 'Work with PDFs',
+          level: 'extension',
+          modelInvocable: true,
+        },
+      ],
+    });
+    sdkMocks.ensureRuntime.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+      capabilities: {
+        skills: { state: 'starting', revision: 0, runtimeEpoch: 1 },
+      },
+    });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.workspaceConfigSkills).toHaveBeenCalledOnce();
+    expect(sdkMocks.ensureRuntime).toHaveBeenCalledOnce();
+    expect(sdkMocks.runtimeStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceRuntimeSkills).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+    expect(connection?.skills).toEqual(['review', 'pdf']);
+  });
+
   it('clears deferred skills when ACP refresh returns an empty list', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -3576,6 +3732,173 @@ describe('DaemonSessionProvider', () => {
         objective: 'ship goal sync',
       },
     });
+  });
+
+  it('restores usage-limited semantics from canonical goal state metadata', async () => {
+    const session = createMockSession({
+      events: async function* goalStatusEvents() {
+        yield {
+          id: 13,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-limited',
+                    revision: 2,
+                    objective: 'finish the evaluation',
+                    status: 'usage_limited',
+                    limitKind: 'token_budget',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 4,
+                    activeTimeMs: 5000,
+                    tokensUsed: 1000,
+                    createdAt: 1234,
+                    updatedAt: 2345,
+                    lastReason: 'token budget reached',
+                  },
+                },
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'finish the evaluation',
+                  iterations: 4,
+                  durationMs: 5000,
+                  lastReason: 'token budget reached',
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'usage_limited',
+          condition: 'finish the evaluation',
+          iterations: 4,
+          durationMs: 5000,
+          lastReason: 'token budget reached',
+        },
+      }),
+    );
+  });
+
+  it('keeps legacy aborted semantics without a usage-limited canonical state', async () => {
+    const session = createMockSession({
+      events: async function* goalStatusEvents() {
+        yield {
+          id: 14,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-blocked',
+                    revision: 2,
+                    objective: 'wait for approval',
+                    status: 'blocked',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 4,
+                    activeTimeMs: 5000,
+                    createdAt: 1234,
+                    updatedAt: 2345,
+                    lastReason: 'approval required',
+                  },
+                },
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'wait for approval',
+                  lastReason: 'approval required',
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 15,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'stop the legacy run',
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'aborted',
+          condition: 'wait for approval',
+          lastReason: 'approval required',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'aborted',
+          condition: 'stop the legacy run',
+        },
+      }),
+    ]);
   });
 
   it('does not overwrite a streamed goal update with the session-load snapshot', async () => {
