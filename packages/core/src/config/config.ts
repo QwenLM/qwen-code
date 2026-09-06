@@ -1801,6 +1801,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getDisableAllHooks'
     | 'getHookSystem'
     | 'getMessageBus'
+    | 'getToolInvocationGuard'
     | 'getAutoMemoryPrompt'
     | 'getUserMemory'
   >

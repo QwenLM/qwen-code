@@ -110,6 +110,8 @@ export function getAgentMetaPath(
 
 export interface AgentMeta {
   agentId: string;
+  /** Durable mesh identity when this runtime belongs to the shared-thread mesh. */
+  meshAgentId?: string;
   agentType: string;
   description: string;
   /** SessionId of the user session that launched this agent. */

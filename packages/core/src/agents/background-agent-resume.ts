@@ -7,7 +7,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Content, Part } from '@google/genai';
-import type { ApprovalModeValue, Config } from '../config/config.js';
+import {
+  deriveConfig,
+  type ApprovalModeValue,
+  type Config,
+} from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -82,6 +86,10 @@ import type {
   AgentBootstrapRecordPayload,
   NotificationRecordPayload,
 } from '../services/chatRecordingService.js';
+import {
+  buildMeshToolConfig,
+  createMeshToolInvocationGuard,
+} from './mesh/capability.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
@@ -915,7 +923,15 @@ export class BackgroundAgentResumeService {
         resolvedApprovalMode as ApprovalMode,
         { persistedCliFlags: meta.persistedCliFlags },
       );
-      const activeAgentConfig = approvalOverride.config;
+      const approvalConfig = approvalOverride.config;
+      const activeAgentConfig = meta.meshAgentId
+        ? deriveConfig(approvalConfig, {
+            getToolInvocationGuard: () =>
+              createMeshToolInvocationGuard(
+                approvalConfig.getToolInvocationGuard(),
+              ),
+          })
+        : approvalConfig;
       const activeRestoreParentPM = approvalOverride.cleanup;
       agentConfig = activeAgentConfig;
       restoreParentPM = activeRestoreParentPM;
@@ -1008,6 +1024,14 @@ export class BackgroundAgentResumeService {
           launchModel && meta.persistedCliFlags?.authType
             ? { ...target.subagentConfig!, model: 'inherit' }
             : target.subagentConfig!;
+        const meshRuntimeConfig = meta.meshAgentId
+          ? await this.config
+              .getSubagentManager()
+              .convertToRuntimeConfig(target.subagentConfig!, activeAgentConfig)
+          : undefined;
+        const meshToolConfig = meta.meshAgentId
+          ? buildMeshToolConfig(meshRuntimeConfig?.toolConfig)
+          : undefined;
         const result = await this.config
           .getSubagentManager()
           .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
@@ -1032,6 +1056,7 @@ export class BackgroundAgentResumeService {
                   },
                 }
               : {}),
+            ...(meshToolConfig ? { toolConfigOverride: meshToolConfig } : {}),
           });
         subagent = result.subagent;
         // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
