@@ -174,6 +174,38 @@ function overviewRequests(
     .map((request) => request.path.slice(prefix.length));
 }
 
+/**
+ * Waits until `count()` reports the same value for a quiet window of real
+ * time, then returns it. Startup fires several request bursts that the fake
+ * clock cannot gate (the StrictMode double mount, the composer skill loader,
+ * and one more facet round when the connection settles), so the polling
+ * baseline must be taken after those bursts have landed.
+ */
+async function waitForStableOverviewCount(
+  count: () => number,
+  quietWindowMs = 2_000,
+): Promise<number> {
+  const deadline = Date.now() + 15_000;
+  let last = count();
+  let quietSince = Date.now();
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const now = Date.now();
+    const current = count();
+    if (current !== last) {
+      last = current;
+      quietSince = now;
+    } else if (now - quietSince >= quietWindowMs) {
+      return current;
+    }
+    if (now > deadline) {
+      throw new Error(
+        `overview request count never stabilised (last count: ${current})`,
+      );
+    }
+  }
+}
+
 test('shows workspace details on hover and no counts in the header', async ({
   page,
 }, testInfo) => {
@@ -332,22 +364,37 @@ test('opens the workspace menu with management entries on the primary workspace 
   await expect(page.getByRole('region', { name: 'MCP Servers' })).toBeVisible();
 });
 
-test('polls an expanded workspace once per 30 s tick and not faster', async ({
+test('polls an expanded workspace once per 30 s tick and not faster @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   // A fake clock lets the spec observe the 30 s cadence without waiting.
+  // Pausing it keeps startup (StrictMode double mount, the composer skill
+  // loader, any connection-settle re-fetch) from eating into the interval
+  // the assertions measure: every startup timer is pinned to one fake
+  // instant, and nothing fires until runFor below.
   await page.clock.install();
+  await page.clock.pauseAt(Date.now());
   await gotoSession(page, scenario, daemon);
   const facets = (cwd: string) =>
     [...new Set(overviewRequests(daemon, cwd))].sort();
   await expect
     .poll(() => facets(PRIMARY_CWD))
     .toEqual(['channels', 'extensions', 'mcp', 'memory', 'skills']);
-  const settled = overviewRequests(daemon, PRIMARY_CWD).length;
+  // Let the real-time startup bursts land before counting.
+  await waitForStableOverviewCount(
+    () => overviewRequests(daemon, PRIMARY_CWD).length,
+  );
+  // Flush everything the paused startup scheduled below one cadence,
+  // including the first poll tick itself, so the baseline sits on a known
+  // interval phase.
+  await page.clock.runFor(30_500);
+  const settled = await waitForStableOverviewCount(
+    () => overviewRequests(daemon, PRIMARY_CWD).length,
+  );
 
-  // Just short of a tick: no new facet requests.
+  // Just short of the next tick: no new facet requests.
   await page.clock.runFor(29_000);
   await page.waitForTimeout(200);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);

@@ -28,6 +28,22 @@ export interface GitBranchInfo {
   upstreamGone?: boolean;
   ahead: number;
   behind: number;
+  /**
+   * Where `git push` would push, by git's own resolution
+   * (`branch.<name>.pushRemote` / `remote.pushDefault` / the upstream via
+   * `push.default`). Absent when git cannot resolve a push destination.
+   * Differs from `upstream` in triangular (fork) workflows.
+   */
+  pushTarget?: string;
+  /** Commits ahead of the push target; absent when `pushTarget` is. */
+  pushAhead?: number;
+  /** Commits behind the push target; absent when `pushTarget` is. */
+  pushBehind?: number;
+  /**
+   * Push destination resolves but its ref does not exist yet (`git push`
+   * would create the remote branch). `pushAhead`/`pushBehind` are absent.
+   */
+  pushGone?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;
@@ -127,7 +143,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/heads/',
       ],
       env,
@@ -136,7 +152,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/remotes/',
       ],
       env,
@@ -210,6 +226,22 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
         // configured but its ref is missing; ahead/behind are meaningless then.
         const upstreamGone = upstream !== undefined && /\bgone\b/.test(track);
 
+        // Push-side counterpart: `%(push)` is git's own answer to "where
+        // would `git push` go", honoring pushRemote/pushDefault — the same
+        // resolution a plain `git push` uses, so no precedence is re-derived
+        // here. Empty when unresolvable (e.g. `push.default` cannot pick).
+        const pushTarget = parts[7] || undefined;
+        const pushTrack = parts[8] ?? '';
+        const pushGone = pushTarget !== undefined && /\bgone\b/.test(pushTrack);
+        let pushAhead: number | undefined;
+        let pushBehind: number | undefined;
+        if (pushTarget !== undefined && !pushGone) {
+          const pa = /ahead (\d+)/.exec(pushTrack);
+          const pb = /behind (\d+)/.exec(pushTrack);
+          pushAhead = pa ? parseInt(pa[1], 10) : 0;
+          pushBehind = pb ? parseInt(pb[1], 10) : 0;
+        }
+
         return {
           name,
           isHead,
@@ -217,6 +249,10 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
           ...(upstreamGone ? { upstreamGone } : {}),
           ahead,
           behind,
+          ...(pushTarget !== undefined ? { pushTarget } : {}),
+          ...(pushAhead !== undefined ? { pushAhead } : {}),
+          ...(pushBehind !== undefined ? { pushBehind } : {}),
+          ...(pushGone ? { pushGone } : {}),
           commitDate,
           commitSubject,
         };

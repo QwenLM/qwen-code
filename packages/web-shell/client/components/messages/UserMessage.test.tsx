@@ -4,6 +4,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { UserMessage } from './UserMessage';
 
 (
@@ -17,6 +18,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.restoreAllMocks();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -67,6 +69,20 @@ describe('UserMessage', () => {
   it('renders content', () => {
     const container = render(<UserMessage content="hello world" />);
     expect(container.textContent).toContain('hello world');
+  });
+
+  it('does not visually clip an overflowing message in document mode', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(500);
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content="full exported prompt" />
+      </TranscriptRenderModeProvider>,
+    );
+    const content = container.querySelector('[class*="chatContent"]');
+
+    expect(content?.className).not.toContain('chatContentCollapsed');
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.textContent).toContain('full exported prompt');
   });
 
   it('renders scheduled-task context as a compact localized card', () => {
@@ -388,6 +404,31 @@ describe('UserMessage', () => {
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,abc',
       expect.any(String),
+      undefined,
+    );
+  });
+
+  it('keeps uploaded images attachment-backed when opening the preview', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content=""
+        images={[
+          {
+            data: 'abc',
+            mimeType: 'image/png',
+            attachmentId: 'photo.png',
+          },
+        ]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    act(() => container.querySelector('img')?.click());
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,abc',
+      expect.any(String),
+      { kind: 'attachment', attachmentId: 'photo.png' },
     );
   });
 

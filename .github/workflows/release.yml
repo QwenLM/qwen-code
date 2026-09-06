@@ -337,7 +337,27 @@ jobs:
   quality_static:
     name: 'Quality Checks (Static)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Priced from the reserved host, not the suite: the same steps measured
+    # 17s + 141s on a quiet hk4 runner (run 33741188587), and on a contended
+    # one `npm run format` alone took 21 minutes — run 33963757913 lost this
+    # lane at 30m13s in Run Lint and quality_build at 45m13s in Pack Build
+    # Outputs with no failing step, a timeout kill reports as 'cancelled',
+    # and the quality aggregate fails closed on it, which opened #11121. The
+    # worst measured composition is ~40 minutes, so the default moved 30 ->
+    # 60: ~50% headroom over the worst the pool has done to this lane, still
+    # under the 90 ci.yml gives its heavier static lane on the same pool.
+    # Same knob as workspace_tests: an operator can retune it without a PR,
+    # because this number tracks how busy the pool is, not the tree.
+    # The knob is free text under a name ending in MINUTES: a bare positive
+    # integer. `1h` is an expression error — GitHub never creates the job and
+    # the run blames 'a workflow file issue' instead of the variable — while
+    # `70 minutes` silently means 70, because fromJSON keeps the leading
+    # number and drops the rest. The aggregate still fails closed on a lane
+    # that never ran, so a bad value refuses a release rather than shipping
+    # one unvalidated. `0` is not 'no limit' either — the string '0' is
+    # truthy in a GitHub `||`, so the knob wins and GitHub then ignores the
+    # zero bound it was handed.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -352,6 +372,17 @@ jobs:
       # Shared ECS runners can retain root-owned files from an earlier
       # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
+
+      # A budget the run never states is indistinguishable from a budget
+      # nobody set: a misspelled variable name renders '' and this lane
+      # dies at its default again, with nothing in the log to reconcile
+      # the two.
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_static timeout budget: ${BUDGET} minutes (QWEN_RELEASE_STATIC_TIMEOUT_MINUTES set=${VARIABLE_SET})"
 
       - &checkout_release_validation
         name: 'Checkout'
@@ -401,7 +432,9 @@ jobs:
   quality_build:
     name: 'Quality Checks (Build)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 45
+    # Same operator knob as quality_static, including the value format and
+    # the failure modes its comment names.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -411,6 +444,14 @@ jobs:
 
     steps:
       - *restore_release_workspace
+
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_build timeout budget: ${BUDGET} minutes (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES set=${VARIABLE_SET})"
+
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
@@ -537,6 +578,14 @@ jobs:
       - *unpack_release_build
 
       - name: 'Run Workspace Tests'
+        # GitHub's default for `run:` is `bash -e {0}` — no `pipefail` — so
+        # `npm … | tee` yields tee's status, the `||` handler never fires and
+        # every branch below is dead code: a shard with a genuinely failing
+        # test exits 0 and the release proceeds. Measured on release run
+        # 33806806226, job 100824085040, which reports
+        # `shell: /usr/bin/bash -e {0}`. Naming the shell is what makes `$?`
+        # npm's.
+        shell: 'bash'
         env:
           # Match the tunable per-process bound used by the main CI gate.
           VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
@@ -558,6 +607,14 @@ jobs:
           # release lane alone, and an empty variable just falls back to the
           # default.
           VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
+          # The guard below reads this log line by line. Vitest colours its
+          # output from the mere presence of CI, and a coloured summary sits
+          # escapes between a label and its value
+          # (`ESC[2m      Tests ESC[22m ESC[1mESC[32m394 passed`), which no
+          # anchored pattern can match — on real release bytes three of the
+          # four conditions return 0 and the guard never reaches the fourth.
+          # ci.yml already sets this on three steps for the same reason.
+          NO_COLOR: 'true'
         run: |-
           retry_arg=()
           if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
@@ -567,29 +624,45 @@ jobs:
           # killed by Vitest's own worker RPC timing out reads identically to
           # a real break, and this release lost two attempts to that
           # (run 33713579913). The status is re-raised untouched either way;
-          # `-o pipefail` is the step default, so `$?` is npm's.
+          # `shell: bash` above supplies `-o pipefail`, so `$?` is npm's.
           log="${RUNNER_TEMP:-/tmp}/workspace-tests-${{ matrix.shard }}.log"
           npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}" 2>&1 | tee "${log}" || {
             status=$?
             if grep -qE '^[[:space:]]*FAIL ' "${log}"; then
               : # A failing test names itself; an annotation adds nothing.
-            elif grep -q 'Timeout calling' "${log}"; then
-              # Passed only with proof the run reached its end and nothing
-              # else broke: a normal exit (a signal death is 128+N), a
-              # passing tally, no failing tally, and no unhandled error that
-              # is not the transport. Vitest's worker RPC giving up says
-              # nothing about the product, and --retry cannot cover it —
-              # retries re-run failing TESTS while an unhandled error fails
-              # the run outright. It has now cost this release three
-              # attempts (run 33713579913).
+            elif grep -q '\[vitest-worker\]: Timeout calling' "${log}"; then
+              # Vitest's worker RPC giving up says nothing about the product,
+              # and --retry cannot cover it — retries re-run failing TESTS
+              # while an unhandled error fails the run outright. It has now
+              # cost this release three attempts (run 33713579913).
+              #
+              # Passed only with proof the run reached its end and that every
+              # unhandled error WAS the transport. That proof is Vitest's own
+              # count rather than a reading of the crash: it prints
+              # `Errors  N errors` whenever unhandled errors occurred, so the
+              # guard compares that count with how many carried the
+              # transport's own `[vitest-worker]: Timeout calling` message.
+              # Recognising a crash by its header cannot be made to work — the
+              # header is producer-chosen (26 of this repo's 293 Error
+              # subclasses have no Error/Exception suffix, and four assign
+              # that bare name to err.name), so any pattern over headers is
+              # incomplete by construction, while the count needs no pattern.
+              #
+              # `--workspaces` prints one summary per workspace into one log,
+              # so both figures are whole-file sums and a passing tally cannot
+              # cover a later workspace's crash. Reaching this branch means at
+              # least one transport line, so a log with no `Errors` summary at
+              # all counts 0 against it and the pass is refused, not granted.
+              errors=$(awk '/^[[:space:]]*Errors[[:space:]]+[0-9]+ errors?$/ { total += $2 } END { print total + 0 }' "${log}")
+              timeouts=$(grep -cE '\[vitest-worker\]: Timeout calling' "${log}" || true)
               if [ "${status}" -lt 128 ] \
                 && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
                 && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
-                && ! grep -E '^[[:space:]]*Error:' "${log}" | grep -qv 'Timeout calling'; then
-                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
+                && [ "${errors}" -eq "${timeouts}" ]; then
+                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and all ${errors} unhandled error(s) Vitest counted were its own worker RPC timing out. Treated as a pass."
                 exit 0
               fi
-              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout with no passing tally to back it, so the failure stands. Rerun the job."
+              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status ${status}, ${errors} counted error(s) vs ${timeouts} transport line(s)); rerun the job."
             else
               echo "::error title=Workspace tests exited ${status} with no failing test::No FAIL line and no transport timeout in the log. Look for a Vitest Unhandled Errors section, or a worker killed before it could report."
             fi

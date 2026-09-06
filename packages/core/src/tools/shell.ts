@@ -1781,6 +1781,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         'Proposed',
       ),
       fileName: edit.fileName,
+      filePath: edit.filePath,
       originalContent: edit.originalContent,
       newContent: edit.newContent,
       diffStat,

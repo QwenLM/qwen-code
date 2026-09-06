@@ -7,6 +7,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
+import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -218,6 +219,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // distributed to every workspace's session children — reopening the #8653
   // vector for any repo whose .env happens to carry DEV=true.
   'DEV',
+  // The Conversations provenance marker is a private daemon-to-child signal:
+  // a project `.env` or settings.env must never mark an ordinary workspace
+  // child as Conversations-hosted (it would force the writer lease and the
+  // unbound-durable-task skip onto sessions the contract does not cover).
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -251,6 +257,20 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
       pattern.test(lowerKey),
     )
   );
+}
+
+// Private daemon→child provenance markers. Unlike the private ACP capability
+// (a random per-spawn nonce), these are fixed constants, so a home-scoped
+// `.env` could forge one — and home-scoped files are deliberately exempt from
+// the hardcoded project exclusions above. No env file at any scope may set
+// them: the only legitimate carrier is the spawner's child env, which the CLI
+// entry point captures and deletes before any environment-file load.
+const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+]);
+
+export function isPrivateProvenanceEnvKey(key: string): boolean {
+  return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
 }
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [

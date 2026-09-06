@@ -72,6 +72,15 @@ export interface GoalSnapshotV2 {
   };
 }
 
+/**
+ * The reason a `/goal pause` records, duplicated here for the same reason the
+ * Goal wire types are: the SDK stays independent of Core. It must match
+ * `GOAL_PAUSE_REASON_COMMAND` in
+ * `packages/core/src/goals/goal-protocol.ts`, and stay within that file's
+ * `GOAL_PAUSE_REASON_MAX_CHARACTERS`, or the daemon rejects the request.
+ */
+export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+
 export type GoalControlRequest =
   | { action: 'create'; objective: string }
   | {
@@ -81,7 +90,18 @@ export type GoalControlRequest =
       expectedRevision: number;
     }
   | {
-      action: 'pause' | 'resume' | 'clear';
+      action: 'pause';
+      expectedGoalId: string;
+      expectedRevision: number;
+      /**
+       * Why the Goal is being paused, in the user's words. Accepted on
+       * `pause` alone: the daemon rejects any other key on `resume`/`clear`,
+       * so this must not be folded back into a shared union member.
+       */
+      reason?: string;
+    }
+  | {
+      action: 'resume' | 'clear';
       expectedGoalId: string;
       expectedRevision: number;
     };
@@ -310,6 +330,15 @@ export interface DaemonGitBranchInfo {
   upstreamGone?: boolean;
   ahead: number;
   behind: number;
+  /** Where `git push` would push (git's own resolution); may differ from
+   *  `upstream` in triangular workflows. Absent when unresolvable. */
+  pushTarget?: string;
+  /** Commits ahead of the push target; absent when `pushTarget` is. */
+  pushAhead?: number;
+  /** Commits behind the push target; absent when `pushTarget` is. */
+  pushBehind?: number;
+  /** Push destination resolves but its ref is missing (push creates it). */
+  pushGone?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;
@@ -1121,6 +1150,8 @@ export interface DaemonSession {
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
+  /** Durable worktree metadata/ownership attestation from the daemon. */
+  worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
 }
@@ -1348,8 +1379,14 @@ export interface DaemonSessionExportResult {
 
 export interface DaemonSessionTranscriptPageOptions {
   cursor?: string;
+  /** Start a forward page containing this persisted navigation turn UUID. */
+  atRecordId?: string;
+  /** Turn-index snapshot required by explicit record anchors. */
+  snapshot?: string;
   /** Start a newest-to-oldest page before this persisted record UUID. */
   beforeRecordId?: string;
+  /** Read pages from newest to oldest. */
+  direction?: 'backward';
   limit?: number;
   clientId?: string;
 }
@@ -1364,6 +1401,36 @@ export interface DaemonSessionTranscriptPage {
   lastUpdated?: string;
   partial?: true;
   replayError?: string;
+  targetRecordId?: string;
+  hasOlder?: boolean;
+}
+
+export interface DaemonSessionTurnIndexPageOptions {
+  snapshot?: string;
+  start?: number;
+  limit?: number;
+  clientId?: string;
+}
+
+export interface DaemonSessionTurnIndexEntry {
+  ordinal: number;
+  turnId: string;
+  kind: 'prompt' | 'realtime' | 'scheduled';
+  promptId?: string;
+  timestamp?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface DaemonSessionTurnIndexPage {
+  v: 1;
+  sessionId: string;
+  snapshot: string;
+  totalTurns: number;
+  start: number;
+  turns: DaemonSessionTurnIndexEntry[];
+  startTime?: string;
+  lastUpdated?: string;
 }
 
 export interface DaemonSubagentSessionResolution {
@@ -1988,8 +2055,26 @@ export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
+}
+
+/** Sanitized Skill and MCP snapshots built from one live session's Config. */
+export interface DaemonSessionResourcesStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: DaemonWorkspaceSkillsStatus;
+  /**
+   * Session-scoped MCP snapshot. Status, discovery, and accounting come from
+   * the selected session's manager; workspace-owned pool, budget, and
+   * discovery-error enrichments are absent. The name-keyed `hasOAuthTokens`,
+   * `requiresAuth`, `authenticationState`, and `authenticationError` fields
+   * are always absent; consumers must not treat their absence as a negative
+   * authentication state.
+   */
+  mcp: DaemonWorkspaceMcpStatus;
 }
 
 export interface DaemonWorkspaceAcpStatusResult {
@@ -2012,6 +2097,12 @@ export interface DaemonWorkspaceRuntimeStatus {
   runtimeEpoch: number;
   capabilities?: {
     mcp?: {
+      state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+      revision: number;
+      runtimeEpoch?: number;
+      error?: { code: string; message: string };
+    };
+    skills?: {
       state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
       revision: number;
       runtimeEpoch?: number;
@@ -2889,6 +2980,37 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
 }
 
+export interface DaemonSessionAgentsStatus {
+  v: 1;
+  sessionId: string;
+  now: number;
+  tasks: DaemonSessionAgentTaskStatus[];
+}
+
+export interface DaemonAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface DaemonAgentTrace {
+  v: 1;
+  sessionId: string;
+  nodes: DaemonAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
+}
+
 export interface DaemonSessionWorkflowTasksStatus {
   v: 1;
   sessionId: string;
@@ -3165,7 +3287,11 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
-export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type DaemonSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface DaemonSkillToggleMutationSkill {
   name: string;
@@ -3237,6 +3363,7 @@ export interface DaemonSkillMutationResult {
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
+  activation?: DaemonSkillToggleActivation;
 }
 
 export interface DaemonSettingDescriptor {

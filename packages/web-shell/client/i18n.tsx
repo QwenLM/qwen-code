@@ -69,8 +69,9 @@ const EN: Messages = {
   'branchPicker.hint.behindDirty': (v) =>
     `↓${v?.count ?? 0} · uncommitted changes`,
   'branchPicker.hint.setsUpstream': 'Sets upstream on push',
+  'branchPicker.hint.createsPushBranch': (v) => `Creates ${v?.target ?? ''}`,
   'branchPicker.hint.aheadBehind': (v) =>
-    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · update first`,
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · diverged`,
   'branchPicker.hint.nothingToPush': 'Nothing to push',
   'branchPicker.hint.noChanges': 'No changes',
   'branchPicker.hint.changes': (v) =>
@@ -1398,6 +1399,36 @@ const EN: Messages = {
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'localFiles.title': 'Local files',
+  'localFiles.trigger': 'Local files',
+  'localFiles.hint':
+    'Lets this session read and write one directory on your own machine. Files stay on your computer; only what the agent asks for is sent to it.',
+  'localFiles.connect': 'Connect a directory…',
+  'localFiles.reconnect': 'Reconnect',
+  'localFiles.disconnect': 'Disconnect',
+  'localFiles.openInNewTab': 'Open in a new tab',
+  'localFiles.directory': 'Directory',
+  'localFiles.tools': (v) => `${v?.count ?? 0} tools`,
+  'localFiles.status.idle': 'Not connected',
+  'localFiles.status.connecting': 'Connecting…',
+  'localFiles.status.registering': 'Registering…',
+  'localFiles.status.connected': 'Connected',
+  'localFiles.status.reconnecting': 'Reconnecting…',
+  'localFiles.status.heldElsewhere': 'Connected in another tab',
+  'localFiles.status.needsSession': 'Waiting for a session',
+  'localFiles.status.needsGesture': 'Reconnect to continue',
+  'localFiles.status.failed': 'Failed',
+  'localFiles.status.unavailable': 'Unavailable here',
+  'localFiles.needsSessionHint':
+    'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
+  'localFiles.blocker.insecureContext':
+    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+  'localFiles.blocker.crossOriginFrame':
+    'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
+  'localFiles.blocker.unsupportedBrowser':
+    'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
+  'localFiles.blocker.workspaceIneligible':
+    "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2294,6 +2325,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.usageLimited': 'Goal usage limited',
   'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
   'goal.check': 'Goal check',
@@ -2808,7 +2840,20 @@ const EN: Messages = {
   'environment.history': 'Commit history',
   'environment.agents': 'Subagents',
   'environment.unnamedAgent': (v) => `Agent (${v?.index ?? 0})`,
+  'workflow.open': 'Open agent workflow',
+  'workflow.mainAgent': 'Main agent',
+  'workflow.empty': 'No subagents in this workflow',
+  'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
+  'environment.attachments': 'Attachments',
+  'environment.artifacts': 'Artifacts',
+  'environment.artifactsEmpty':
+    'Artifacts generated in this session will appear here.',
+  'rightPanel.attachmentLoadFailed': (v) =>
+    `Failed to load attachment: ${v?.error ?? 'Unknown error'}`,
+  'rightPanel.savedContentUnavailable': 'Saved panel content is unavailable',
+  'rightPanel.restoreFailed': (v) =>
+    `Failed to restore panel: ${v?.error ?? 'Unknown error'}`,
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
   'userMessage.sendFailed': 'Failed to send',
@@ -3472,6 +3517,9 @@ const EN: Messages = {
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
+  'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
+  'settings.description.ui.enableFollowupSuggestions':
+    'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
   'settings.option.ui.chatWidth.1000': 'Regular',
   'settings.option.ui.chatWidth.wide': 'Ultra wide',
   'settings.label.visionModel': 'Vision Model',
@@ -3539,8 +3587,9 @@ const ZH: Messages = {
   'branchPicker.hint.upstreamGone': '上游分支已不存在',
   'branchPicker.hint.behindDirty': (v) => `↓${v?.count ?? 0} · 有未提交更改`,
   'branchPicker.hint.setsUpstream': '推送时设置上游',
+  'branchPicker.hint.createsPushBranch': (v) => `将创建 ${v?.target ?? ''}`,
   'branchPicker.hint.aheadBehind': (v) =>
-    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 请先更新`,
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 已分叉`,
   'branchPicker.hint.nothingToPush': '无待推送',
   'branchPicker.hint.noChanges': '无更改',
   'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
@@ -4848,6 +4897,36 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'localFiles.title': '本地文件',
+  'localFiles.trigger': '本地文件',
+  'localFiles.hint':
+    '让当前会话读写你本机的一个目录。文件留在你的电脑上，只有 agent 主动索取的内容会发给它。',
+  'localFiles.connect': '连接目录…',
+  'localFiles.reconnect': '重新连接',
+  'localFiles.disconnect': '断开',
+  'localFiles.openInNewTab': '在新标签页打开',
+  'localFiles.directory': '目录',
+  'localFiles.tools': (v) => `${v?.count ?? 0} 个工具`,
+  'localFiles.status.idle': '未连接',
+  'localFiles.status.connecting': '连接中…',
+  'localFiles.status.registering': '注册中…',
+  'localFiles.status.connected': '已连接',
+  'localFiles.status.reconnecting': '重连中…',
+  'localFiles.status.heldElsewhere': '已在其他标签页连接',
+  'localFiles.status.needsSession': '等待会话',
+  'localFiles.status.needsGesture': '需要重新连接',
+  'localFiles.status.failed': '连接失败',
+  'localFiles.status.unavailable': '当前环境不可用',
+  'localFiles.needsSessionHint':
+    '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
+  'localFiles.blocker.insecureContext':
+    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
+  'localFiles.blocker.crossOriginFrame':
+    '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
+  'localFiles.blocker.unsupportedBrowser':
+    '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
+  'localFiles.blocker.workspaceIneligible':
+    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -5663,6 +5742,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.usageLimited': '目标用量受限',
   'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
   'goal.check': '目标检查',
@@ -6150,7 +6230,18 @@ const ZH: Messages = {
   'environment.history': '提交历史',
   'environment.agents': '子智能体',
   'environment.unnamedAgent': (v) => `智能体（${v?.index ?? 0}）`,
+  'workflow.open': '打开智能体工作流',
+  'workflow.mainAgent': '主智能体',
+  'workflow.empty': '此工作流中暂无子智能体',
+  'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
+  'environment.attachments': '附件',
+  'environment.artifacts': '产物',
+  'environment.artifactsEmpty': '此会话生成的产物会显示在这里。',
+  'rightPanel.attachmentLoadFailed': (v) =>
+    `附件加载失败：${v?.error ?? '未知错误'}`,
+  'rightPanel.savedContentUnavailable': '保存的面板内容已不可用',
+  'rightPanel.restoreFailed': (v) => `面板恢复失败：${v?.error ?? '未知错误'}`,
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
   'userMessage.sendFailed': '发送失败',
@@ -6820,7 +6911,7 @@ const ZH: Messages = {
     '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
+    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',

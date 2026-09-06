@@ -134,6 +134,36 @@ describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
       sentToModel: false,
     });
   });
+
+  it('collapses the same user text folded twice in a row', () => {
+    // ink's addItem drops a user item identical to its predecessor; steering
+    // the same text twice mid-turn reaches this fold as two events.
+    const steer = {
+      type: 'user',
+      text: 'continue',
+      sentToModel: false,
+    } as const;
+    let items = foldLiveEvent([], steer);
+    items = foldLiveEvent(items, steer);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'continue' });
+  });
+
+  it('keeps two different user texts folded in a row', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: 'first',
+      sentToModel: false,
+    });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: 'second',
+      sentToModel: false,
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'first' });
+    expect(items[1]).toMatchObject({ kind: 'user', text: 'second' });
+  });
 });
 
 describe('foldLiveEvent image', () => {

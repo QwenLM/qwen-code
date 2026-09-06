@@ -103,7 +103,7 @@ export function unresolvedWorkspaceDeps(
 ): string[] {
   const known = new Map(packages.map((p) => [p.name, p.dir]));
   const found = new Set<string>();
-  // `error TS2307: Cannot find module '@qwen-code/webui' or its corresponding
+  // `error TS2307: Cannot find module '@scope/workspace' or its corresponding
   // type declarations.` — and the same shape from a bundler.
   const re = /Cannot find module '([^']+)'|Could not resolve "([^"]+)"/g;
   let m: RegExpExecArray | null;
