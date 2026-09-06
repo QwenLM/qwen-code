@@ -1296,6 +1296,67 @@ describe('StreamingToolCallParser', () => {
       expect(new Set(completed.map((call) => call.index)).size).toBe(2);
     });
 
+    it('does not place a bogus-index new call onto an occupied in-flight slot', () => {
+      // Slot 0 holds an in-flight call (depth > 0). findNextAvailableIndex()
+      // treats such a slot as reusable because it is written for continuation
+      // chunks, but this is a NEW call placement: reusing slot 0 would append
+      // call_b's argument JSON onto call_a's buffer, and both calls would
+      // then execute with concatenated garbage arguments.
+      parser.addChunk(0, '{"path":"a', 'call_a', 'read_file');
+
+      const salvaged = parser.addChunk(-1, '{"query":"b"}', 'call_b', 'search');
+
+      expect(salvaged.actualIndex).toBe(1);
+      expect(salvaged.complete).toBe(true);
+      expect(salvaged.value).toEqual({ query: 'b' });
+      // The in-flight slot must be untouched by the salvage placement.
+      expect(parser.getBuffer(0)).toBe('{"path":"a');
+
+      const finished = parser.addChunk(0, '.ts"}');
+      expect(finished.complete).toBe(true);
+      expect(finished.value).toEqual({ path: 'a.ts' });
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed.find((call) => call.id === 'call_a')?.args).toEqual({
+        path: 'a.ts',
+      });
+      expect(completed.find((call) => call.id === 'call_b')?.args).toEqual({
+        query: 'b',
+      });
+    });
+
+    it('does not drop a first-seen id as a replay when salvaging beside an id-less slot', () => {
+      // Slot 0 holds a complete, id-less call (name streamed first, arguments
+      // followed without an id) — exactly the slot findNextAvailableIndex()
+      // considered available (!meta.id). Pre-registering the fresh id in the
+      // salvage branch made the body's replay guard treat the FIRST-SEEN id
+      // as known, silently discarding its opener together with
+      // function.name and leaving no invalidToolCallIndex flag behind.
+      parser.addChunk(0, '', undefined, 'read_file');
+      parser.addChunk(0, '{"path":"a.ts"}');
+
+      const salvaged = parser.addChunk(-1, '{"query":"b"}', 'call_b', 'search');
+
+      expect(salvaged.actualIndex).toBe(1);
+      expect(salvaged.complete).toBe(true);
+
+      const completed = parser.getCompletedToolCalls();
+      // The salvaged call must survive with its name intact...
+      expect(completed).toContainEqual({
+        id: 'call_b',
+        name: 'search',
+        args: { query: 'b' },
+        index: 1,
+      });
+      // ...and the id-less slot 0 call must be untouched.
+      expect(completed).toContainEqual({
+        name: 'read_file',
+        args: { path: 'a.ts' },
+        index: 0,
+      });
+      expect(parser.hasInvalidToolCallIndex()).toBe(false);
+    });
+
     it('still flags an invalid index that cannot be routed', () => {
       // No id and no registered remap: there is no safe slot for the chunk.
       const result = parser.addChunk(-1, '{"path":"a.ts"}');

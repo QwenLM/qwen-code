@@ -629,6 +629,53 @@ describe('OpenAIContentConverter', () => {
         ]);
       });
 
+      it('releases held untrusted text alongside a salvaged call', () => {
+        // Text streamed while a nameless tool call was in flight is held in
+        // pendingUntrustedResponseParts mid-stream (shouldHoldParts). When
+        // the finish chunk salvages the valid sibling call, the hold releases
+        // that text instead of discarding it — the pre-salvage behavior
+        // cleared the buffer and failed the turn.
+        //
+        // This fail-open is deliberate and safe: the held parts are plain
+        // visible text destined for display and chat history only. Tool
+        // execution is driven exclusively by the functionCall parts built
+        // from named completed calls, and the thinking-tag leak guards run
+        // before the release, so released text cannot influence execution.
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('text-beside-calls', {
+            content: 'Let me look at that file.',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_good',
+                function: { name: 'read_file', arguments: '{}' },
+              },
+              {
+                index: 1,
+                id: 'call_nameless',
+                function: { arguments: '{"path":"b.ts"}' },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        const result = converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        );
+
+        // The held text ships with the salvaged call, in hold order.
+        expect(result.candidates?.[0]?.content?.parts).toEqual([
+          { text: 'Let me look at that file.' },
+          {
+            functionCall: { id: 'call_good', name: 'read_file', args: {} },
+          },
+        ]);
+        expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      });
+
       it('names the nameless condition in the thrown error', () => {
         const stream = withStreamParser();
         converter.convertOpenAIChunkToLlm(

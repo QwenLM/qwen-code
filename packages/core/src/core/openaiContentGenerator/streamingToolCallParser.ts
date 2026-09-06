@@ -110,7 +110,13 @@ export class StreamingToolCallParser {
           : id !== undefined
             ? remapAdoptable
               ? remappedSlot
-              : this.findNextAvailableIndex()
+              : // This is a NEW call placement, not a continuation: the slot
+                // must be strictly unoccupied. findNextAvailableIndex() is
+                // written for continuation chunks and can hand back a slot
+                // another call is still assembling (no name, no id, or
+                // incomplete JSON), which would concatenate two calls'
+                // argument fragments into one buffer.
+                this.findFirstUnoccupiedIndex()
             : remappedSlot;
       if (salvageSlot === undefined) {
         this.conflictingToolCallIdentity = true;
@@ -121,9 +127,11 @@ export class StreamingToolCallParser {
         };
       }
       index = salvageSlot;
-      if (id !== undefined && knownSlot === undefined) {
-        this.idToIndexMap.set(id, salvageSlot);
-      }
+      // The id→index registration is deliberately left to the routing logic
+      // below, which registers a new id only after deciding it is a new call.
+      // Pre-registering here would make a first-seen id look "known", so the
+      // replay guard in the body would silently discard its opener (including
+      // function.name) if the salvaged slot already held complete JSON.
       this.pendingIndexRemaps.set(rawIndex, salvageSlot);
     }
     if (!id && !validName && !chunk.trim()) {
@@ -180,8 +188,9 @@ export class StreamingToolCallParser {
               }
             }
             if (existingComplete) {
-              actualIndex = 0;
-              while (this.buffers.has(actualIndex)) actualIndex += 1;
+              // Relocate to the first strictly unoccupied slot so the new
+              // call never lands on another call's buffer.
+              actualIndex = this.findFirstUnoccupiedIndex();
               if (!existingMeta.name) {
                 this.conflictingToolCallIdentity = true;
               }
@@ -501,6 +510,26 @@ export class StreamingToolCallParser {
     }
 
     return completed;
+  }
+
+  /**
+   * Finds the first strictly unoccupied index: a slot with no buffer at all.
+   *
+   * Unlike {@link findNextAvailableIndex}, which is written for continuation
+   * chunks and may hand back a slot another call is still assembling (no
+   * name, no id, or incomplete JSON), this never returns an occupied slot.
+   * Placing a NEW tool call into an occupied slot would append its argument
+   * fragments onto the other call's buffer, which then parses to garbage or
+   * collapses to `{}` and executes with wrong arguments.
+   *
+   * @returns The first index with no buffer registered for it
+   */
+  private findFirstUnoccupiedIndex(): number {
+    let candidate = 0;
+    while (this.buffers.has(candidate)) {
+      candidate += 1;
+    }
+    return candidate;
   }
 
   /**
