@@ -1404,6 +1404,20 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
+  it('names the CI salvage contract as the one exception to the drift restart', () => {
+    // The workflow's supersede watcher arms a salvage past its threshold
+    // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
+    // exception the anchorsAtRisk=true rule commands abandon-and-restart in
+    // exactly the drifted state a salvage creates (R32-2). Cross-pinned with
+    // scripts/tests/qwen-pr-review-workflow.test.js, which pins the export.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**One exception — the CI salvage contract:** when the environment carries `QWEN_REVIEW_SALVAGE_POST=1` **and** the file named by `QWEN_CI_REVIEW_SALVAGE_OK_FILE` exists with content equal to `headDrift.reviewedSha`',
+    );
+    expect(posting).toContain('do **not** restart: submit as planned');
+    expect(posting).toContain('this consumes no restart');
+  });
+
   it('gates every reference file on the verdict in the core body', () => {
     // A run must learn from the injected core alone WHICH file to read and
     // when; a gate that moved into the file it gates would be unreadable.
