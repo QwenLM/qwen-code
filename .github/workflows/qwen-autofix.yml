@@ -89,6 +89,19 @@ env:
   # is the prompt-injection trust gate: feedback from anyone else is ignored so a
   # hostile commenter cannot steer the agent.
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
+  # The review bot's thread lifecycle replies `R<id> fixed by <what>` into a
+  # thread — a NOTE, never a finding: it carries its own marker
+  # (FIXED_RULING_MARKER in lib/review-footer.ts) at the end of its first
+  # line, and counting it selected a just-approved PR for a round with
+  # nothing to address (#9940 review, round 28). Matched by its posted SHAPE,
+  # anchored at the start, so a real Critical that QUOTES the marker (a
+  # review of the file defining it) leads with its severity marker and keeps
+  # counting. Defined ONCE and handed to every jq site as `--arg frf`: an
+  # `--arg` value is the regex verbatim, so the class is spelled `[^\n]` with
+  # ONE backslash here — the `[^\\n]` a jq string literal needs compiled, as a
+  # shell value, to "neither backslash nor n" and let a `by` clause with an
+  # `n` in it count (#9940 review, round 29).
+  FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\n]*)? <!-- qwen-review-fixed-ruling -->'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
   # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
@@ -3395,16 +3408,8 @@ jobs:
             # extends that window. The scan still selects later feedback so
             # prepare can record and watermark its deferral; only the address
             # job filters what may drive code changes.
-            # The thread lifecycle's `R<id> fixed by <what>` reply is a NOTE the
-            # review bot posts inside a thread, never a finding: it carries
-            # its own marker (FIXED_RULING_MARKER in lib/review-footer.ts) at
-            # the end of its first line, and counting it selected a
-            # just-approved PR for a round with nothing to address (#9940
-            # review, round 28). Matched by its posted SHAPE, anchored at the
-            # start — a real Critical that QUOTES the marker (a review of the
-            # file defining it) leads with its severity marker and must keep
-            # counting; a substring test dropped it.
-            FIXED_RULING_FILTER='^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->'
+            # The review bot's fixed-ruling NOTE is not feedback — matched by
+            # the workflow-level FIXED_RULING_FILTER shape (see env).
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" --arg frf "${FIXED_RULING_FILTER}" '
               [ .[]
@@ -4395,7 +4400,7 @@ jobs:
               || { [[ -n "${LIVE_RED_HEAD}" ]] && [[ "${LIVE_RED_HEAD}" == "${CHECKED_OUT_HEAD}" ]]; }; }; then
             LIVE_NEW="$(jq -rs \
               --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg frf "${FIXED_RULING_FILTER}" '
               (.[0] | map(select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
@@ -4403,7 +4408,7 @@ jobs:
               + (.[1] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((((.user.login // "") == $rb) and ((.body // "") | test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)) | length)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not)) | length)
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
@@ -4819,6 +4824,7 @@ jobs:
                 "${WORKDIR}/rv.json"
               jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" \
+                --arg frf "${FIXED_RULING_FILTER}" \
                 --slurpfile reviews "${WORKDIR}/rv.json" '
                 def leading_critical:
                   gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
@@ -4828,7 +4834,7 @@ jobs:
                 | $comments[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select((((.user.login // "") == $rb) and ((.body // "") | test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((
                     ((.body // "") | leading_critical)
@@ -4940,7 +4946,7 @@ jobs:
             echo "## Inline comments"
             jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
-              --argjson over "${OVER_BUDGET_AUTHORS}" \
+              --argjson over "${OVER_BUDGET_AUTHORS}" --arg frf "${FIXED_RULING_FILTER}" \
               --slurpfile reviews "${WORKDIR}/rv.json" '
               def leading_critical:
                 gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
@@ -4950,7 +4956,7 @@ jobs:
               | $comments[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
-              | select((((.user.login // "") == $rb) and ((.body // "") | test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)
+              | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))

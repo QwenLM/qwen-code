@@ -33,6 +33,11 @@ const subprocessTimeoutMs = Number(
 );
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// The review bot's fixed-ruling NOTE shape, defined ONCE at the workflow
+// level and handed to every jq site as `--arg frf` (#9940 review, rounds
+// 28-29); the runners below pass it exactly as the workflow does.
+const fixedRulingShape =
+  workflow.match(/^ {2}FIXED_RULING_FILTER: '([^\n]*)'$/m)?.[1] ?? '';
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
 // than a code line) read it here.
@@ -7122,6 +7127,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -7393,7 +7401,7 @@ exit 1
     expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
-      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--arg frf "\$\{FIXED_RULING_FILTER\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
     expect(deferredInlineFilter).toBeTruthy();
     const countDeferredInline = (over = []) =>
@@ -7417,6 +7425,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -9820,9 +9831,17 @@ exit 1
     // to address. The filter matches the posted SHAPE anchored at the
     // start: a real Critical that quotes the marker leads with its
     // severity marker and keeps counting.
-    const shape = reviewScanStep.match(/FIXED_RULING_FILTER='([^\n]*)'/)?.[1];
+    // Defined once, at the workflow level; the scan step no longer spells
+    // its own copy. An `--arg` value reaches jq verbatim, so the `[^\n]`
+    // class carries ONE backslash — the `[^\\n]` a jq string literal needs
+    // compiled, as a shell value, to "neither backslash nor n" and let a
+    // `by` clause with an `n` in it count (#9940 review, round 29).
+    const shape = fixedRulingShape;
     expect(shape).toBeTruthy();
     expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
+    expect(shape).toContain('[^\\n]');
+    expect(shape).not.toContain('\\\\');
+    expect(reviewScanStep).not.toContain("FIXED_RULING_FILTER='");
     const program = reviewScanStep.match(
       /--arg frf "\$\{FIXED_RULING_FILTER\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
@@ -9866,6 +9885,14 @@ exit 1
           body: `R1-2 fixed by the guard rewrite ${marker}\n\n_— m via Qwen Code /review (v1)_`,
         },
         { ...after, ...bot, in_reply_to_id: 1, body: `R1-3 fixed ${marker}` },
+        // A `by` clause with an `n` in it — the double-backslash class let
+        // this one count (#9940 review, round 29).
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-4 fixed by the new parser ${marker}`,
+        },
       ]),
     ).toBe('0');
     // A Critical that QUOTES the marker — a review of the file defining it
@@ -9921,14 +9948,16 @@ exit 1
         },
       ]),
     ).toBe('4');
-    // The two digest legs over $comments[] whose rows survive to the
-    // rendering, and the prepare job's LIVE_NEW revalidation, apply the
-    // same shape (the OVER_BUDGET leg drops every bot row later anyway).
+    // The scan count, the two digest legs over $comments[] whose rows
+    // survive to the rendering, and the prepare job's LIVE_NEW revalidation
+    // apply the ONE shape, each handed the env value as `--arg frf` (the
+    // OVER_BUDGET leg drops every bot row later anyway); no site spells a
+    // copy of its own.
+    expect(workflow.split('test($frf)').length - 1).toBe(4);
     expect(
-      workflow.split(
-        String.raw`| test("^R[0-9]+-[0-9]+ fixed(?: by [^\\n]*)? <!-- qwen-review-fixed-ruling -->"))) | not)`,
-      ).length - 1,
-    ).toBe(3);
+      workflow.split('--arg frf "${FIXED_RULING_FILTER}"').length - 1,
+    ).toBe(4);
+    expect(workflow.split('qwen-review-fixed-ruling -->').length - 1).toBe(1);
   });
 
   it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {

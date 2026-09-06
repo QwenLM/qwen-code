@@ -81,11 +81,17 @@ interface CommentSummary {
    */
   user?: string;
   /**
-   * Set only on `repost` entries: the carried ledger ids a new finding at the
-   * same location re-posts (#9208). Usually the ids carried in this comment's
-   * body; on the id-less fallback (a truly id-less own-account original at an
-   * unambiguous location) it is the location's single wanted id instead
-   * (#9212 review).
+   * Set only on `repost` entries: the carried ledger ids a new finding
+   * re-posts into this comment's thread (#9208). Usually the ids carried in
+   * this comment's body; on the id-less fallback (a truly id-less own-account
+   * original at an unambiguous location) it is the location's single wanted
+   * id instead (#9212 review). A root leg matches at the finding's own
+   * `(path, line)`;
+   * the pipeline's own carry-REPLY leg matches on the id alone, and its
+   * `path`/`line` are the reply's own — an anchor GitHub may have unmapped
+   * (`line: null`) or a line the finding no longer sits on — so the
+   * orchestrator's exemption joins on the id, never on the entry's location
+   * (#9940 review, round 29).
    */
   matchedIds?: string[];
 }
@@ -1202,15 +1208,16 @@ function writePresubmitReport(input: {
         noConflict: buckets.noConflict.length,
       },
       overlap: buckets.overlap,
-      // Overlap comments that a new finding at the same location re-posts —
-      // the drop rule exempts those findings (#9208). Matched by the carried
-      // ledger id the comment's claim line leads with, or — when the target
-      // is unambiguous — by the id-less fallback for a truly id-less
-      // own-account original (#9212 review). A top-level comment appears
-      // here IN ADDITION TO `overlap`; the double count is deliberate (one
-      // comment, two roles). An own-account REPLY carrying a wanted id
-      // appears here ONLY — the thread lifecycle's carry re-post is an
-      // exemption carrier, never an overlap (#9940 review, round 24).
+      // Comments a new finding re-posts into — the drop rule exempts those
+      // findings by id (#9208). A top-level comment matches at the finding's
+      // location, by the carried ledger id its claim line leads with, or —
+      // when the target is unambiguous — by the id-less fallback for a truly
+      // id-less own-account original (#9212 review), and appears here IN
+      // ADDITION TO `overlap`; the double count is deliberate (one comment,
+      // two roles). An own-account REPLY carrying a wanted id matches on the
+      // id alone, at any location, and appears here ONLY — the thread
+      // lifecycle's carry re-post is an exemption carrier, never an overlap
+      // (#9940 review, rounds 24 and 29).
       repost: buckets.repost,
       stale: buckets.stale,
       resolved: buckets.resolved,
@@ -1447,7 +1454,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     const host = (argv as { host?: string }).host;

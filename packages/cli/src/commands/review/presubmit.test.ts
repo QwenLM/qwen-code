@@ -1240,6 +1240,60 @@ describe('presubmitCommand', () => {
       expect(matched).toEqual(['R1-2', 'R1-3']);
     });
 
+    it("an own carry-reply's entry reports the reply's own location — the exemption joins on the id, the finding sits on another line (#9940 review, round 29)", async () => {
+      // R1-2 moved from line 44 to 51 while its thread's anchor was
+      // unmapped; a sibling own root at 51 overlaps the moved finding, so
+      // the only thing keeping R1-2 out of the dedup drop is the carry
+      // reply's id match — reported at the REPLY's location, not the
+      // finding's. The orchestrator's rule reads `matchedIds` of ANY repost
+      // entry (posting.md); a location-qualified reading denied it.
+      const unmapped = { line: undefined, original_line: 44 } as const;
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            ...unmapped,
+            id: 1,
+            commit_id: 'old-sha',
+            body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            ...unmapped,
+            id: 2,
+            commit_id: 'old-sha',
+            in_reply_to_id: 1,
+            body: '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 3,
+            line: 51,
+            body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 51, id: 'R1-2' },
+          { path: 'src/parse-args.ts', line: 51, id: 'R1-3' },
+        ],
+      );
+      expect(
+        (result.existingComments.overlap as Array<{ id: number }>).map(
+          (o) => o.id,
+        ),
+      ).toEqual([3]);
+      expect(result.blockOnExistingComments).toBe(true);
+      const repost = result.existingComments.repost as Array<{
+        id: number;
+        line: number;
+        matchedIds: string[];
+      }>;
+      expect(repost.map((r) => [r.id, r.line, r.matchedIds])).toEqual([
+        [3, 51, ['R1-3']],
+        [2, 44, ['R1-2']],
+      ]);
+    });
+
     it('an own carry-reply keeps carrying after new commits — the root is stale, the reply is not SHA-gated (#9940 review, round 25)', async () => {
       // A reply inherits its ROOT's commit id. Gated on the current SHA,
       // the carry-reply stopped carrying the moment any commit landed

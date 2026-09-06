@@ -182,9 +182,26 @@ export function separatorStrip(
       ? (LEADING_INVISIBLE_RE.exec(afterMarker)?.[0] ?? '')
       : separator.slice(colonAt + 1);
   const base = colonAt === -1 ? 0 : colonAt + 1;
-  const codeAt = codeBlockStartIn(run, markerLineIsHtmlBlock);
+  // The run's first line is the COLON's line when a colon precedes it: the
+  // marker line's HTML-block-ness seeds the walk only while the colon sits
+  // on the marker line; a colon on a later line is that line's visible
+  // text — a paragraph line unless a comment leads it (an HTML block that
+  // ends on the line carrying its `-->`), and an indented line under a
+  // paragraph line is its lazy continuation, not code — so the seed is the
+  // walk's own state after the residue before the colon (#9940 review,
+  // round 29).
+  const boundaryBefore = scanResidue(
+    separator.slice(0, base),
+    markerLineIsHtmlBlock,
+  ).boundary;
+  const codeAt = codeBlockStartIn(run, boundaryBefore);
   if (codeAt !== -1) return { strip: base + codeAt, codeKept: true };
-  if (colonAt === -1 && residueLineBreaks(run).length === 0) {
+  // "Same line" is physical: a comment there that spans a break would,
+  // once the marker before it is gone, lead its line as an HTML block that
+  // ends on that first line and re-shape the line after it into a block of
+  // its own (indented: code) — the residue goes with the rest of the run
+  // (#9940 review, round 29 audit).
+  if (colonAt === -1 && !/\r\n?|\n/.test(run)) {
     return {
       strip: /^[ \t]*/.exec(afterMarker)?.[0].length ?? 0,
       codeKept: false,
@@ -226,27 +243,80 @@ export function separatorColonAt(
  * (#9940 review, audit 6).
  */
 export function codeBlockStartIn(run: string, boundaryBefore = false): number {
-  const breaks = residueLineBreaks(run);
-  // The boundary is the state SINCE the last paragraph line: a line that is
-  // neither blank nor a comment block (a format character or NBSP alone
-  // is text) opens a paragraph, and an indented line after it is that
-  // paragraph's lazy continuation — a boundary seen earlier does not
-  // survive it (#9940 review, round 28).
+  return scanResidue(run, boundaryBefore).codeAt;
+}
+
+/**
+ * The block structure of a run of residue, walked over its PHYSICAL lines
+ * from the state of the line the run starts on: `codeAt` is where an
+ * indented code block begins (-1: nowhere), `boundary` whether an indented
+ * line after the run's last line would be one.
+ *
+ * The boundary is the state SINCE the last paragraph line: a line that is
+ * neither blank nor an HTML block (a format character or NBSP alone is
+ * text) opens a paragraph, and an indented line after it is that
+ * paragraph's lazy continuation — a boundary seen earlier does not survive
+ * it (#9940 review, round 28). A comment up to three columns in opens an
+ * HTML block that runs to the first line containing `-->` — the opener's
+ * own line included — and every line of it is the block's; but a comment
+ * that opens LATER on a line hides no break: the block that line was, if
+ * any, closed on it, and the lines the comment runs on are lines of their
+ * own — a paragraph line under an already-closed block, a blank line, a
+ * fresh block — which the comment-span view `residueLineBreaks` takes
+ * misread as one HTML-block line (#9940 review, round 29 audit).
+ */
+function scanResidue(
+  run: string,
+  boundaryBefore: boolean,
+): { codeAt: number; boundary: boolean; lastIsCode: boolean } {
+  const breaks = [...run.matchAll(/\r\n?|\n/g)];
+  // Blank by CommonMark's rule — spaces and tabs only. `trim()` also eats
+  // an NBSP or a BOM, and a line of those under a boundary is an indented
+  // code line, not a paragraph line (#9940 review, round 29 audit).
+  const blank = (line: string) => /^[ \t]*$/.test(line);
   let boundary = boundaryBefore;
+  let inBlock = false;
+  let inCode = false;
+  let codeAt = -1;
+  let lastIsCode = false;
   for (let i = 0; i < breaks.length; i++) {
-    const start = breaks[i]!.index + breaks[i]!.length;
+    const start = breaks[i]!.index + breaks[i]![0].length;
     const last = i === breaks.length - 1;
     const segment = run.slice(start, last ? run.length : breaks[i + 1]!.index);
-    if (
-      boundary &&
-      indentColumns(segment) >= 4 &&
-      (last || segment.trim() !== '')
-    ) {
-      return start;
+    // The run's last line is the indentation the CONTENT sits on — never
+    // blank, whatever follows it.
+    const indented = indentColumns(segment) >= 4 && (last || !blank(segment));
+    if (inCode) {
+      // A code block runs on through indented lines (and blank ones — a
+      // boundary that re-opens it, the same state either way); a line under
+      // four columns with text ends it.
+      if (indented) {
+        if (last) lastIsCode = true;
+        continue;
+      }
+      inCode = false;
     }
-    boundary = /^[ \t]*$/.test(segment) || /^ {0,3}<!--/.test(segment);
+    if (inBlock) {
+      if (segment.includes('-->')) {
+        inBlock = false;
+        boundary = true;
+      }
+      continue;
+    }
+    if (boundary && indented) {
+      if (codeAt === -1) codeAt = start;
+      inCode = true;
+      if (last) lastIsCode = true;
+    } else if (!last && blank(segment)) {
+      boundary = true;
+    } else if (/^ {0,3}<!--/.test(segment)) {
+      if (segment.includes('-->')) boundary = true;
+      else inBlock = true;
+    } else {
+      boundary = false;
+    }
   }
-  return -1;
+  return { codeAt, boundary, lastIsCode };
 }
 
 /**
@@ -255,10 +325,20 @@ export function codeBlockStartIn(run: string, boundaryBefore = false): number {
  * three columns in (#9940 review, audit 6).
  */
 export function markerLineOpensHtmlBlock(leading: string): boolean {
-  const breaks = residueLineBreaks(leading);
-  const last = breaks[breaks.length - 1];
-  const line = leading.slice(last === undefined ? 0 : last.index + last.length);
-  return /^ {0,3}<!--/.test(line);
+  // Physical lines: a comment that opens mid-line hides no break (see
+  // `scanResidue`), and the marker's line is an HTML block's when a
+  // comment-led line above it is still open on it (#9940 review, round 29
+  // audit).
+  const lines = leading.split(/\r\n?|\n/);
+  let inBlock = false;
+  for (const line of lines.slice(0, -1)) {
+    if (inBlock) {
+      if (line.includes('-->')) inBlock = false;
+    } else if (/^ {0,3}<!--/.test(line) && !line.includes('-->')) {
+      inBlock = true;
+    }
+  }
+  return inBlock || /^ {0,3}<!--/.test(lines[lines.length - 1]!);
 }
 
 /**
@@ -313,17 +393,17 @@ export function codeIndentedAfter(
   residue: string,
   atLineStart: boolean,
 ): boolean {
-  const breaks = residueLineBreaks(residue);
-  let tail: string;
-  if (breaks.length > 0) {
-    const last = breaks[breaks.length - 1]!;
-    tail = residue.slice(last.index + last.length);
-  } else if (atLineStart) {
-    tail = residue;
-  } else {
-    return false;
-  }
-  return indentColumns(tail) >= 4;
+  // The residue's last line is the content's; the lines before it are
+  // classified by the one walk (`scanResidue`) — from the document start
+  // (a boundary; the first line is a line of its own, hence the break put
+  // in front of it), or from the state of the paragraph line the residue
+  // follows visible text on. A tail of four columns is code only under a
+  // boundary or inside a code block a line above opened; under a
+  // paragraph line — a format character alone — it is a lazy continuation
+  // (#9940 review, round 29 audit).
+  return atLineStart
+    ? scanResidue(`\n${residue}`, true).lastIsCode
+    : scanResidue(residue, false).lastIsCode;
 }
 
 /**
@@ -336,7 +416,12 @@ export function codeIndentedAfter(
  */
 export function bareClaimLine(body: string): string | null {
   const lead = LEADING_INVISIBLE_RE.exec(body)?.[0] ?? '';
-  if (codeIndentedAfter(lead, true)) return null;
+  // The first rendered line is code when ANY line of the residue is — an
+  // indented comment line, or an indented line of format characters — not
+  // only when the content's own line is: the marked leg keeps the code
+  // block from its first line and reads no claim off it, and the two legs
+  // must agree (#9940 review, round 29 audit).
+  if (codeBlockStartIn(`\n${lead}`, true) !== -1) return null;
   return body
     .slice(lead.length)
     .split(/\r\n?|\n/)[0]!

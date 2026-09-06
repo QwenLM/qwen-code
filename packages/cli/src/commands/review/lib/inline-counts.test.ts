@@ -15,7 +15,11 @@ import {
   readClaimHead,
   codeBlockStartIn,
   separatorColonAt,
+  separatorStrip,
+  markerLineOpensHtmlBlock,
+  bareClaimLine,
 } from './inline-counts.js';
+import { stripForUnattributedPost } from './review-footer.js';
 import {
   FINDING_BASELINES,
   FINDING_DIRECTIONS,
@@ -181,6 +185,146 @@ describe('carriedClaimLine — the shared readback strip', () => {
     expect(
       markerStrippedBody('**[Critical]** <!-- x --> R1-2: the claim'),
     ).toBe('R1-2: the claim');
+  });
+
+  it("the post-colon walk is seeded from the colon's own line, not the marker line (#9940 review, round 29)", () => {
+    // A comment-led marker line is an HTML block, but a colon on the NEXT
+    // line is a paragraph line of its own: the indented claim under it is
+    // that paragraph's lazy continuation, and the carry must read it.
+    const body = '<!-- c -->**[Critical]**\n:\n    R1-2: the claim';
+    expect(stripSeverityPrefix(body)).toBe('R1-2: the claim');
+    expect(markerStrippedBody(body)).toBe(stripSeverityPrefix(body));
+    expect(carriedClaimLine(body)).toBe('R1-2: the claim');
+    expect(separatorStrip('\n:\n    ', true)).toEqual({
+      strip: 7,
+      codeKept: false,
+    });
+    // The marker line's state still seeds a run that STARTS on it …
+    expect(separatorStrip(':\n    ', true)).toEqual({
+      strip: 2,
+      codeKept: true,
+    });
+    expect(carriedClaimLine('<!-- c -->**[Critical]**:\n    R1-2: code')).toBe(
+      '',
+    );
+    // … a blank line under the colon is a boundary of its own …
+    expect(
+      carriedClaimLine('<!-- c -->**[Critical]**\n:\n\n    R1-2: code'),
+    ).toBe('');
+    // … and a comment-led colon line is an HTML block that ends on the line
+    // carrying its `-->`, so the indented line under it is code.
+    expect(
+      carriedClaimLine('<!-- c -->**[Critical]**\n<!-- x -->:\n    R1-2: code'),
+    ).toBe('');
+    expect(separatorStrip('\n<!-- x -->:\n    ', true)).toEqual({
+      strip: 13,
+      codeKept: true,
+    });
+    // The attribution-off post of the round-29 shape reads the same id.
+    expect(readClaimHead(stripForUnattributedPost(body)).id).toBe('R1-2');
+    // A plain marker line, then a comment-led colon line: the HTML block
+    // interrupts the paragraph and ends on its line — the indented line
+    // under it is code (it read as a claim before the seed moved).
+    expect(
+      carriedClaimLine('**[Critical]**\n<!-- x -->:\n    R1-2: code'),
+    ).toBe('');
+    expect(separatorStrip('\n<!-- x -->:\n    ', false)).toEqual({
+      strip: 13,
+      codeKept: true,
+    });
+    expect(
+      carriedClaimLine('<!-- c -->**[Critical]**\r\n:\r\n    R1-2: the claim'),
+    ).toBe('R1-2: the claim');
+  });
+
+  it('a comment that opens mid-line hides no line break — the lines it runs on are lines of their own (#9940 review, round 29 audit)', () => {
+    // A comment-led line's HTML block ends on the first line containing
+    // `-->` (CommonMark 4.6, type 2). A second comment opening later on that
+    // line spans into a NEW line, which is a paragraph line — and the
+    // indented line under it a lazy continuation, not code.
+    for (const body of [
+      '**[Critical]**\n<!-- a --><!-- b\n-->:\n    R1-2: the claim',
+      '**[Critical]**\n<!-- a -->:<!-- b\nc -->\n    R1-2: the claim',
+      '<!-- c -->**[Critical]**<!-- a\nb -->:\n    R1-2: the claim',
+      '<!-- c -->**[Critical]**:<!-- b\nc -->\n    R1-2: the claim',
+      '<!-- a --><!-- b\n-->**[Critical]**\n    R1-2: the claim',
+    ]) {
+      expect(carriedClaimLine(body)).toBe('R1-2: the claim');
+      expect(markerStrippedBody(body)).toBe(stripSeverityPrefix(body));
+      expect(readClaimHead(stripForUnattributedPost(body)).id).toBe('R1-2');
+    }
+    // A comment-led line's block DOES run to the line carrying its `-->`,
+    // the marker's own line included, and the line after it is code …
+    expect(
+      carriedClaimLine('**[Critical]**\n<!-- a\nb -->:\n    R1-2: code'),
+    ).toBe('');
+    expect(
+      carriedClaimLine('<!-- a\nb -->**[Critical]**\n    R1-2: code'),
+    ).toBe('');
+    expect(codeBlockStartIn('\n<!-- a\n    b -->\n    ')).toBe(18);
+    // … a blank line inside a mid-line comment still ends the paragraph,
+    // so the comment's own closing line is code …
+    expect(
+      carriedClaimLine('**[Critical]** <!-- a\n\n    b -->:\n    R1-2: code'),
+    ).toBe('');
+    // … and a comment opening after the colon on an HTML-block line
+    // spans into a paragraph line.
+    expect(codeBlockStartIn('<!-- b\nc -->\n    ', true)).toBe(-1);
+    expect(separatorStrip('\n<!-- a --><!-- b\n-->:\n    ', false)).toEqual({
+      strip: 27,
+      codeKept: false,
+    });
+    expect(markerLineOpensHtmlBlock('<!-- a\nb -->')).toBe(true);
+    expect(markerLineOpensHtmlBlock('<!-- a --><!-- b\n-->')).toBe(false);
+    expect(markerLineOpensHtmlBlock('x\n<!-- c -->')).toBe(true);
+    expect(markerLineOpensHtmlBlock('')).toBe(false);
+  });
+
+  it('blank is spaces and tabs only, and the bare leg reads no claim past a code line in its lead (#9940 review, round 29 audit)', () => {
+    // An indented line of an NBSP under a boundary is indented code
+    // (`trim()` would have eaten the NBSP and called the line blank).
+    expect(
+      carriedClaimLine('**[Critical]**\n\n\t\u00a0\n    R1-2: the claim'),
+    ).toBe('');
+    expect(codeBlockStartIn('\n\n\t\u00a0\n    ')).toBe(2);
+    // The bare leg — the attribution-off post read back — agrees with the
+    // marked leg on a code line inside the leading residue …
+    expect(bareClaimLine('\t\u200b\nR1-2: the claim')).toBeNull();
+    expect(bareClaimLine('    <!-- x -->\nR1-2: the claim')).toBeNull();
+    // … and on a lazy continuation under a format-character line.
+    expect(bareClaimLine('\u200b\n    R1-2: the claim')).toBe(
+      'R1-2: the claim',
+    );
+    expect(bareClaimLine('    R1-2: code')).toBeNull();
+    // The marker-line guard asks whether the MARKER's line is code: not
+    // after a code line it ends, not as a lazy continuation, yes inside a
+    // code block that runs on to it, yes under a boundary.
+    expect(severityOf({ body: '    <!-- x -->\n**[Critical]** x' })).toBe(
+      'critical',
+    );
+    expect(severityOf({ body: '\u200b\n    **[Critical]** x' })).toBe(
+      'critical',
+    );
+    expect(
+      severityOf({ body: '    <!-- x -->\n    **[Critical]** x' }),
+    ).toBeNull();
+    expect(severityOf({ body: '\n    **[Critical]** x' })).toBeNull();
+  });
+
+  it('same-line residue is same-line physically — a comment spanning a break after the marker goes with the run (#9940 review, round 29 audit)', () => {
+    // Kept, the residue would lead the attribution-off post's first line as
+    // an HTML block that ends on that line, and the indented `-->` line
+    // under it would be code: the claim vanished from the bare readback.
+    const body = '**[Critical]**<!-- x --><!-- x\n\t-->R1-2: the claim';
+    expect(stripSeverityPrefix(body)).toBe('R1-2: the claim');
+    expect(markerStrippedBody(body)).toBe('R1-2: the claim');
+    expect(bareClaimLine(stripForUnattributedPost(body))).toBe(
+      'R1-2: the claim',
+    );
+    // A comment that closes on the marker's line stays model text.
+    expect(
+      stripSeverityPrefix('**[Critical]** <!-- x --> R1-2: the claim'),
+    ).toBe('<!-- x --> R1-2: the claim');
   });
 
   it('reads no claim off an indented code block, and a canonical id off a variant spelling (#9940 review, audit)', () => {

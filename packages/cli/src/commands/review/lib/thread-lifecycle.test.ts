@@ -1823,9 +1823,17 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(stampCarriedId(body, 'R2-1')).toBe(body);
   });
 
-  it('a glued multi-line comment leads the attribution-off line — an HTML block, so the stamp degrades; on its own lines it stamps (round 28)', () => {
+  it('a glued multi-line comment after the marker goes with the separator — both projections stay one paragraph and the stamp lands; on its own lines it stamps too (round 28, revised in round 29)', () => {
+    // Kept as same-line model text (round 28), the comment led the
+    // attribution-off line as an HTML block and the stamp degraded; the
+    // strip now sees the physical break inside it and folds it away.
     const glued = '**[Critical]**<!--\nrender-note\n-->the claim';
-    expect(stampCarriedId(glued, 'R2-1')).toBe(glued);
+    const gluedStamped = stampCarriedId(glued, 'R2-1');
+    expect(gluedStamped).toBe('**[Critical]** R2-1: the claim');
+    expect(carriedFindingOf(gluedStamped)).toEqual({
+      id: 'R2-1',
+      fixInduced: false,
+    });
     const stamped = stampCarriedId(
       '**[Critical]**\n<!--\nrender-note\n-->\nthe claim',
       'R2-1',

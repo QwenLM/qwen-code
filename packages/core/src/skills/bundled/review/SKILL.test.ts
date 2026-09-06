@@ -1404,6 +1404,26 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
+  it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
+    // presubmit's reply carrier matches a wanted id at ANY location (its
+    // anchor may be unmapped or the finding moved); a location-qualified
+    // drop rule denied exactly the exemption that entry exists to grant.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**except a finding whose `id` appears in `matchedIds` of ANY `existingComments.repost` entry**',
+    );
+    expect(posting).toContain('so never re-check the location');
+    expect(posting).toContain('id appears in matchedIds of ANY repost');
+    expect(posting).not.toContain('entry at the same location');
+    expect(posting).not.toContain('repost entry at the same');
+    // The anchors-file and Exclusion-Criteria restatements of the rule.
+    expect(posting).toContain(
+      'the carried-id re-post exemption joins on the id',
+    );
+    expect(posting).not.toContain('intersects on `(path, line)` plus id');
+    expect(posting).not.toContain('at its location is exempted');
+  });
+
   it('names the CI salvage contract as the one exception to the drift restart', () => {
     // The workflow's supersede watcher arms a salvage past its threshold
     // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
