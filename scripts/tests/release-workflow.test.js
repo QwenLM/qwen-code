@@ -548,6 +548,20 @@ describe('release workflow', () => {
     expect(testStep.env.VITEST_RETRY).toBe(
       "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}",
     );
+    // `shell: 'bash'` is this step's only source of `-o pipefail` — the
+    // workflow has no `defaults:` block — so it is what makes the guard live
+    // rather than dead code. Drop it and GitHub falls back to `bash -e {0}`,
+    // where `npm … | tee` reports tee's status 0, the `||` handler never
+    // fires, and a shard with genuinely failing tests exits 0 into the
+    // release. The probe harness below passes `-o pipefail` itself, so no
+    // behavioural row would notice the line being cleaned up as redundant.
+    expect(testStep.shell).toBe('bash');
+    // Vitest colours its summaries from the mere presence of CI, and a
+    // coloured summary sits escape bytes between a label and its value, so
+    // every anchored pattern in the guard matches nothing: the pass-through
+    // is never granted again and each transport timeout reddens the release.
+    // Quoted in YAML, so it parses to the string rather than a boolean.
+    expect(testStep.env.NO_COLOR).toBe('true');
 
     const workspacePackages = getTestCiWorkspaces();
 
@@ -639,48 +653,235 @@ describe('release workflow', () => {
     );
   });
 
+  it('lets an operator retune the quality lane timeouts without a PR', () => {
+    // Run 33963757913 lost both lanes at their timeout boundary on a
+    // contended hk4 with no failing step: quality_static at 30m13s in Run
+    // Lint, quality_build at 45m13s in Pack Build Outputs. A timeout kill
+    // reports as 'cancelled', the quality aggregate fails closed on it, and
+    // the release failure was filed against a tree with nothing to fix. Same
+    // remedy as workspace_tests: a runtime knob. The static default moved
+    // 30 -> 60 on the pricing evidence its lane comment records (#11121);
+    // the build default stays a fleet-load call for the operator.
+    expect(releaseYaml.jobs.quality_static['timeout-minutes']).toBe(
+      "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
+    );
+    expect(releaseYaml.jobs.quality_build['timeout-minutes']).toBe(
+      "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
+    );
+    // A budget the run never states is indistinguishable from a budget nobody
+    // set: a misspelled variable name renders '' and the lane dies at its
+    // default again, with nothing in the log to reconcile the two. Each
+    // tunable lane reports the bound it resolved — through the SAME expression
+    // the timeout uses, so the trace cannot drift from what the runner
+    // enforces — and whether the variable reached the job at all.
+    for (const [id, variable] of [
+      ['quality_static', 'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES'],
+      ['quality_build', 'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES'],
+    ]) {
+      const bound = releaseYaml.jobs[id]['timeout-minutes'];
+      const report = releaseYaml.jobs[id].steps.find(
+        (step) => step.env?.BUDGET === bound,
+      );
+      expect(report?.name, id).toBe('Report timeout budget');
+      expect(report.run, id).toContain(`::notice::${id} timeout budget`);
+      expect(report.run, id).toContain(`${variable} set=\${VARIABLE_SET}`);
+      expect(report.env.VARIABLE_SET, id).toBe(
+        `\${{ vars.${variable} != '' }}`,
+      );
+    }
+  });
+
   it('names which failure this is, and never changes the exit code', () => {
     // A shard that died on Vitest's own worker RPC timing out reads
     // identically to a real break, and this release lost two attempts before
     // anyone could tell them apart (run 33713579913). The annotation says
-    // which; the child's status is re-raised untouched either way, so no
-    // reading of the log can turn a failure green.
+    // which; the child's status is re-raised untouched, so no reading of the
+    // log can turn a failure green except the one deliberate pass-through.
+    //
+    // That pass-through is granted by Vitest's own count of unhandled errors
+    // (`Errors  N errors`) matching how many carried the transport's message
+    // — not by recognising a crash from its header. The header is
+    // producer-chosen, so a pattern over headers is incomplete by
+    // construction; the rows below carry the shapes that defeat one
+    // (suffix-less class, no class at all) and the shapes that defeat the
+    // count (an extra error the timeouts do not account for, a summary the
+    // run never reached, words a test merely printed).
     const testStep = releaseYaml.jobs.workspace_tests.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
     const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+    const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
+    const tally = ' Tests  10614 passed (10614)';
+    const passedThrough =
+      '::warning title=Workspace tests passed through a Vitest transport timeout::';
+    const stands =
+      '::warning title=Workspace tests exited 1 on a Vitest transport timeout::';
 
     for (const [label, stub, code, annotation, expected] of [
       // A failing test names itself; an annotation would only add noise.
       ['failing test', ' FAIL  src/a.test.ts > boom', 1, null],
       // Vitest's worker RPC giving up says nothing about the product, and
-      // --retry cannot cover it. Passed only with proof the run reached its
-      // end: a normal exit, a passing tally, no failing tally, and no other
-      // unhandled error. It cost this release three attempts before that.
+      // --retry cannot cover it — retries re-run failing TESTS while an
+      // unhandled error fails the run outright. Passed only with proof the
+      // run reached its end and that the transport accounts for every
+      // unhandled error Vitest counted. It cost this release three attempts.
       [
         'transport timeout, run completed',
-        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        `${timeout}\n${tally}\n     Errors  1 error`,
         1,
-        '::warning title=Workspace tests passed through a Vitest transport timeout::',
+        passedThrough,
         0,
       ],
       [
         'transport timeout, killed by a signal',
-        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        `${timeout}\n${tally}\n     Errors  1 error`,
         137,
         '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
       ],
+      // One more error than the transport accounts for: the run broke on
+      // something else as well, whatever its header said.
       [
         'transport timeout beside a real one',
-        'Error: [vitest-worker]: Timeout calling "x"\nError: write after end\n Tests  10614 passed (10614)',
+        `${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+        stands,
+      ],
+      // The counts can also disagree with no crash in the log at all — the
+      // same transport message on two lines inflates `timeouts` past what
+      // Vitest counted. That is a fifth way to reach this refusal, so the
+      // annotation names it and prints both figures it compared; without
+      // them the oncall is told one of four things happened when none did.
+      [
+        'transport timeout counted twice against one unhandled error',
+        `${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status 1, 1 counted error(s) vs 2 transport line(s)); rerun the job.',
+      ],
+      // The two shapes no header pattern reaches. A class whose name carries
+      // no Error/Exception suffix is not hypothetical — 26 of this repo's 293
+      // Error subclasses are named that way, four of them assigning the bare
+      // name to err.name — and a bare string throw prints under Vitest's own
+      // `Unknown Error:` heading, which a header matcher misses on the space.
+      // The count sees both, because it never looks at the header.
+      [
+        'transport timeout beside a suffix-less crash header',
+        `${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
+        1,
+        stands,
+      ],
+      [
+        'transport timeout beside a bare string throw',
+        `${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
+        1,
+        stands,
+      ],
+      // Ordinary `Error:` lines are test output, not evidence of a break: the
+      // log of the run this guard was written for carries three of them as
+      // fixture data. A matcher over headers refuses the pass-through on
+      // those and reddens a release the guard exists to save; the count is
+      // unmoved by them.
+      [
+        'transport timeout beside Error: lines a test printed',
+        `${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // `--workspaces` prints one summary per workspace into one log, so both
+      // figures are whole-file sums: a passing tally cannot cover a later
+      // workspace's crash, and two transport deaths in two workspaces still
+      // pass.
+      [
+        'tally, then a later workspace crashing',
+        `${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
+        1,
+        stands,
+      ],
+      // The shape of the log this guard was written for: several transport
+      // deaths in one run, and the plural summary Vitest prints for more than
+      // one of them (run 33713579913).
+      [
+        'four transport deaths, four unhandled errors',
+        `${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
+        1,
+        passedThrough,
+        0,
+      ],
+      [
+        'two workspaces, both lost to the transport',
+        `${timeout}\n Tests  5 passed (5)\n     Errors  1 error\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // Absent evidence refuses the pass rather than granting it: no summary
+      // line at all, no passing tally, or a failing tally.
+      [
+        'transport timeout, no error summary to count',
+        `${timeout}\n${tally}`,
+        1,
+        stands,
       ],
       [
         'transport timeout, no tally to back it',
         'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
         1,
-        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+        stands,
+      ],
+      // Vitest's own summary is the only thing that grants the pass, so a
+      // run that never printed a tally does not get one even when its error
+      // count is all transport.
+      [
+        'error summary with no tally to back it',
+        `${timeout}\n     Errors  1 error`,
+        1,
+        stands,
+      ],
+      // `Timeout calling` in a test's own output is not the transport dying:
+      // the branch is entered on Vitest's own `[vitest-worker]:` message, so
+      // a log carrying only the words is unexplained, not passed through.
+      [
+        'Timeout calling printed by a test',
+        `Timeout calling the vendor API\n${tally}`,
+        1,
+        '::error title=Workspace tests exited 1 with no failing test::',
+      ],
+      // ...and the count is anchored on the same message, so those words
+      // beside a real transport death do not inflate it into a mismatch.
+      [
+        'transport timeout, and Timeout calling printed by a test',
+        `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // ...and the summary sum is anchored on the section-line shape for the
+      // same reason. Vitest echoes a test's console output at column 0, so a
+      // workspace printing summary-shaped fixture data lands there; an
+      // unanchored `Errors  N errors` match would add it to the sum, inflate
+      // `errors` past `timeouts`, and refuse a pass-through every test
+      // earned — the false-red this PR exists to remove, back again.
+      [
+        'transport timeout, and a summary-shaped line a test printed',
+        `${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      [
+        'transport timeout, failing tally',
+        `${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
+        1,
+        stands,
+      ],
+      // One workspace can print a passing tally while a later one fails
+      // without ever emitting a FAIL line, so the failing tally is checked
+      // across the whole log rather than trusted to the branch above.
+      [
+        'passing tally in one workspace, failing tally in another',
+        `${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
+        1,
+        stands,
       ],
       [
         'unexplained',
@@ -1433,11 +1634,13 @@ describe('release workflow', () => {
       ),
     ).toEqual({
       prepare: 30,
-      quality_static: 30,
-      quality_build: 45,
+      // The three bounds an operator can retune without a PR; their defaults
+      // are pinned by their own tests above.
+      quality_static:
+        "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
+      quality_build:
+        "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
       quality_typecheck: 30,
-      // The one bound an operator can retune without a PR; its default is
-      // pinned by its own test above.
       workspace_tests:
         "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}",
       quality_scripts: 30,
