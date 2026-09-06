@@ -16660,6 +16660,26 @@ exit 1
     ).toBeLessThan(
       stageStep.indexOf('cp .github/scripts/autofix-status-heartbeat.sh'),
     );
+    // count-test-surface.mjs carries the SAME absent-from-base exposure:
+    // it is new in this PR, so the trusted base lacks it until the merge
+    // and a bare cp would exit this -e step, killing every pre-merge
+    // round whose workflow resolves from the PR's own ref (the D23/D24
+    // deferral). The staged copy takes the heartbeat guard verbatim:
+    // rm -rf first (a planted leftover must not survive the tolerant cp
+    // to be executed as trusted — the probe tree below lacks the script,
+    // so the verbatim run proves the pair together), then `|| true`; the
+    // gate fails open on absence (WEAKEN_MEASURED=false).
+    expect(stageStep).toContain(
+      'rm -rf "${RUNNER_TEMP}/count-test-surface.mjs"',
+    );
+    expect(stageStep).toContain(
+      'cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs" 2> /dev/null || true',
+    );
+    expect(
+      stageStep.indexOf('rm -rf "${RUNNER_TEMP}/count-test-surface.mjs"'),
+    ).toBeLessThan(
+      stageStep.indexOf('cp .github/scripts/count-test-surface.mjs'),
+    );
     const stageProbeDir = mkdtempSync(join(tmpdir(), 'hb-stage-probe-'));
     const stageRunnerTemp = mkdtempSync(join(tmpdir(), 'hb-stage-temp-'));
     try {

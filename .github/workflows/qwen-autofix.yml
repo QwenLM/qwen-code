@@ -3873,7 +3873,11 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
-          cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs"
+          # NEW in this PR: absent from the trusted base until it merges, so
+          # a bare cp would kill every pre-merge round — same guard as the
+          # heartbeat below (af-149); the gate fails open on absence.
+          rm -rf "${RUNNER_TEMP}/count-test-surface.mjs"
+          cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs" 2> /dev/null || true
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # Absent from the trusted base until this PR merges, and this step
           # runs under -e: a hard failure here would kill every pre-merge
