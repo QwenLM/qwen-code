@@ -60,6 +60,12 @@ interface PersistedVerdict
     | 'terminalState'
     | 'capAxes'
     | 'chunkLedger'
+    // Dropped at this boundary on purpose: it is a compose-time input to
+    // WORDING, and the words it produced — the body's gap sentence and the
+    // rendered `verdictLine` — are persisted already. An artifact carrying
+    // the flag beside those strings would be a second derivation of one
+    // fact, which is how the two come to disagree.
+    | 'coverageIdentityUnreadable'
   > {
   verdictLine: string;
   /**

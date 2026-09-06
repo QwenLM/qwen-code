@@ -109,9 +109,14 @@ export function buildSelectionIdentity(
  * seal reads it back (`launchPlanToken`) and refuses a launch marked with
  * another plan's token.
  *
- * `null` on absence and on any shape `selectionDrift` would not read — the
- * seal fails open on token absence exactly the way the drift check does:
- * absence of evidence, not evidence of staleness.
+ * `null` on absence and on any shape `selectionDrift` would not read. The
+ * two nulls are not the same to the seal: on ABSENCE it fails open exactly
+ * the way the drift check does — absence of evidence, not evidence of
+ * staleness — while a `selection` that is present but unreadable (a schema
+ * this build does not know, a missing digest) is the shape the drift check
+ * reports as a defect, and there the seal fails CLOSED: `coverageFromTranscripts`
+ * tells the two apart (`identityUnreadable`) and refuses every record until
+ * the plan is re-captured.
  */
 export function planIdentityToken(selection: unknown): string | null {
   if (selection === undefined || selection === null) return null;
@@ -204,6 +209,20 @@ export function selectionDrift(
       `the plan's selection identity is schema ` +
       `${JSON.stringify(id.schemaVersion)}, which this build cannot read ` +
       `(it knows ${SELECTION_SCHEMA_VERSION})`
+    );
+  }
+  if (
+    typeof id.sourceArtifactSha256 !== 'string' ||
+    typeof id.selectionSha256 !== 'string'
+  ) {
+    // Named for what it is, not read as drift: a digest that is missing or
+    // not a string is an identity this build cannot read — hand-edited or
+    // half-written — and comparing `undefined` against the actual hash
+    // reported it as "the diff file has changed", sending the operator to
+    // re-capture a diff that never moved (R34-4).
+    return (
+      'the plan\u2019s selection identity is missing its digests, so this ' +
+      'build cannot read it — re-plan'
     );
   }
   const actualSource = sha256(actualDiffText);

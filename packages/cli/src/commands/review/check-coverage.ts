@@ -136,9 +136,30 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   // 7 was reviewed" is a statement about a chunk 7 that no longer exists.
   if (report.selectionDrift !== null) {
     writeStderrLine(
-      `NOTE: ${report.selectionDrift}. The chunk coverage in this report — ` +
-        `including the summary above — is reported against the plan as ` +
-        `written; it does not yet account for this.`,
+      report.identityUnreadable
+        ? // The report DID account for this one: every record was refused,
+          // so the coverage above is the refusal, not a reading to caveat.
+          `NOTE: ${report.selectionDrift}. Re-capture the diff and re-plan; ` +
+            `a relaunch under this plan is refused the same way. The ` +
+            `agent-level lines below are reported for the record: with every ` +
+            `record refused, the run cannot tell a bad delivery from a good ` +
+            `one it may not credit, and none of their repairs applies until ` +
+            `the plan is re-captured.`
+        : `NOTE: ${report.selectionDrift}. The chunk coverage in this report — ` +
+            `including the summary above — is reported against the plan as ` +
+            `written; it does not yet account for this.`,
+    );
+  }
+
+  if (report.staleTranscripts.length > 0) {
+    // A NOTE, not an error, and no repair: these transcripts belong to an
+    // earlier plan of this diff, and nothing in this plan can be relaunched
+    // to satisfy them. They count for nothing above.
+    writeStderrLine(
+      `NOTE: ${report.staleTranscripts.length} transcript(s) name a chunk ` +
+        `this plan does not carry — ${report.staleTranscripts.join(', ')}. ` +
+        `Left over from an earlier plan of this diff; they count for ` +
+        `nothing in the coverage above and need no repair.`,
     );
   }
 
@@ -243,7 +264,10 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `at all. Relaunch each once.`,
     );
   }
-  if (report.missingChunks.length > 0) {
+  // Not under an unreadable plan identity: the rebuild-and-relaunch this
+  // explainer prescribes is refused by the seal the same way, and the drift
+  // NOTE above already carries the repair.
+  if (report.missingChunks.length > 0 && !report.identityUnreadable) {
     writeStderrLine(
       'NOTE: a chunk counts as read when an agent was pointed at its lines AND ' +
         'the harness recorded that agent opening the diff. An agent handed the ' +
@@ -275,9 +299,19 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   }
   if (report.missingChunks.length > 0) {
     writeStderrLine(
-      `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
-        `${report.missingChunks.join(', ')}. Nobody read those lines. Do not ` +
-        `aggregate findings over a diff that was not read.`,
+      report.identityUnreadable
+        ? // Not "nobody read": the owners' reads are on record — they could
+          // not be credited to a plan whose identity cannot be read, and a
+          // relaunch is refused the same way. The repair is the NOTE's.
+          `ERROR: ${report.missingChunks.length} chunk(s) could not be ` +
+            `credited to this plan — ${report.missingChunks.join(', ')}. ` +
+            `No read can be tied to a plan whose identity this build cannot ` +
+            `read (the owners' reads, where any exist, are on record but ` +
+            `uncredited); re-plan rather than relaunch. Do not aggregate ` +
+            `findings over a diff whose reading cannot be shown.`
+        : `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
+            `${report.missingChunks.join(', ')}. Nobody read those lines. Do not ` +
+            `aggregate findings over a diff that was not read.`,
     );
   }
   // A NOTE, never an error, and never a relaunch: a disclosed gap is the soft

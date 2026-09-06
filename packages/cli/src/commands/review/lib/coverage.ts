@@ -82,6 +82,7 @@ import { BRIEFS } from './agent-briefs.js';
 import {
   CHUNK_ROLE_SLOT_SOURCE,
   chunkAssignmentFromLaunchPrompt,
+  identityRoleSlot,
   labelFromLaunchPrompt,
 } from './agent-identity.js';
 import {
@@ -185,6 +186,11 @@ export interface ChunkCoverageItem {
    * `covered` outcome is what records the read. Settled as the ledger's
    * contract on #9768 (R8-4 / R19-2, owner-only) and pinned by
    * `names owners, not spanning readers` in `check-coverage.test.ts`.
+   *
+   * Named as "who was sent" even when the plan-identity seal refuses every
+   * record — an identity this build cannot read — so the entry says an
+   * owner ran and the class reads `unknown`, not `no-agent`: the field is
+   * diagnostic, never credit.
    */
   agents: string[];
 }
@@ -412,6 +418,22 @@ export interface CoverageFromTranscripts {
   missingChunks: number[];
   /** Chunk ids an agent declared unreachable. */
   uncoverableChunks: number[];
+  /**
+   * Transcripts whose identity line names a chunk this plan does not carry
+   * (`chunk 9 of 2`) — left over from an earlier plan of this diff. They
+   * count for nothing here: not agents, not owners, not readers, and not a
+   * gap, since no repair exists for a chunk that is not in the plan. A
+   * run-level NOTE, never a cap (R34-5).
+   */
+  staleTranscripts: string[];
+  /**
+   * The plan carries a `selection` identity this build cannot read, so the
+   * plan-identity seal refused every record: no chunk below is credited, and
+   * the `missing` chunks are not "unread" — their owners' reads could not be
+   * tied to this plan. Readers word their output off this flag rather than
+   * prescribing a relaunch the seal would refuse the same way (R34-4).
+   */
+  identityUnreadable: boolean;
   /**
    * `Budget gap: <the check>` lines parsed from agent returns — the fixed
    * disclosure format the tool-budget brief mandates when an agent's soft
@@ -784,7 +806,7 @@ export function coverageFromTranscripts(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
-  const { plan, mtimeMs, drift: selectionDriftReason } = readPlan(planPath);
+  const { plan, mtimeMs, drift } = readPlan(planPath);
   // The RUN's transcripts, not the session's: a resumed run (`--resume`)
   // continues in a new session, and the interrupted attempt's evidence lives
   // under the session id the run ledger recorded. Same fence (the plan's
@@ -800,14 +822,53 @@ export function coverageFromTranscripts(
     plan.diffPathAbsolute,
     { currentDirOptional: true },
   );
-  const records = liveRecords(allRecords);
+  // A record whose identity line names a chunk this plan does not carry —
+  // `chunk 9 of 2`, left over from a re-plan that shrank nine chunks to two,
+  // or from a resumed attempt over a re-chunked diff — is about a plan this
+  // run is not computing. It leaves the walk HERE, once, and is disclosed as
+  // a run-level NOTE, because every channel it could otherwise feed either
+  // cannot be repaired or lies: the rewritten-launch flag it earned had no
+  // reachable suppressor (`chunkSatisfied(9)` starts with `builtOf('chunk-9')
+  // === undefined`, and no prompt is ever built for a chunk the plan lacks),
+  // so `ok` stayed false for a run that covered every planned chunk; its
+  // remediation named `agent-prompt --chunk 9`, which refuses; the posted
+  // body counted "1 of the diff's 2 sections" against lines that were read;
+  // and it was counted among the run's agents. The ledger channels already
+  // carried this membership conjunct through `sealedToThisPlan`; the prose
+  // channel and `records` itself did not (R34-5). A record with a planned id but the
+  // wrong `of M` count stays: the count conjunct disqualifies it from the
+  // ledger, and a compliant relaunch of the planned chunk suppresses its
+  // prose flag, so that shape converges.
+  const staleTranscripts: string[] = [];
+  // The chunks each record's ranges earned coverage for — the recovered
+  // count reads it against the FINAL `covered` set, see below.
+  const creditedChunks = new Map<AgentRecord, Set<number>>();
+  const records = liveRecords(allRecords).filter((r) => {
+    const c = assignedChunk(r);
+    if (c === null || plan.chunks.some((k) => k.id === c)) return true;
+    staleTranscripts.push(`chunk ${c} of ${assignedChunkTotal(r)}`);
+    return false;
+  });
   const built = readRecordedPrompts(planPath);
   // The plan's epoch token — see `planIdentityToken`. `null` on a plan with
-  // no readable identity: the seal below fails open on absence, the same
-  // rule the drift check states.
-  const planToken = planIdentityToken(
-    (plan as { selection?: unknown }).selection,
-  );
+  // no identity: the seal below fails open on ABSENCE, the same rule the
+  // drift check states.
+  const identity = (plan as { selection?: unknown }).selection;
+  const planToken = planIdentityToken(identity);
+  // Present but unreadable is not absent. `planIdentityToken` returns null
+  // for a `selection` this build cannot parse — a schema this build does not
+  // know, a hand-edited or half-written field — the same shapes
+  // `selectionDrift` has just reported as a defect. Read as "no identity",
+  // that null switched the token seal OFF run-wide on exactly the plans the
+  // drift check flagged: a fence-surviving record of the previous plan
+  // passed count and territory over unchanged windows, was credited, and
+  // the review certified coverage earned by another plan's agent behind a
+  // non-capping NOTE. The launch side fails CLOSED on a marker-less prompt
+  // over an identity-carrying plan; the plan side must not invert that. An
+  // ABSENT identity keeps failing open — every plan written before the
+  // field stays silent (R34-4).
+  const identityUnreadable =
+    identity !== undefined && identity !== null && planToken === null;
 
   const blindAgents: string[] = [];
   const idleAgents: string[] = [];
@@ -884,7 +945,9 @@ export function coverageFromTranscripts(
   // exactly the arms still riding it admitting stale records (R20-6,
   // R21-8, R22-1, R22-3).
   const markedOfThisPlan = (launch: string): boolean =>
-    planToken === null || launchPlanToken(launch) === planToken;
+    identityUnreadable
+      ? false
+      : planToken === null || launchPlanToken(launch) === planToken;
   // The plan identity a `chunk N of M` launch was written against. A stale
   // record's id can collide with a planned chunk's, and a cause or agent
   // keyed through the collision writes an old plan's diagnosis into this
@@ -916,7 +979,23 @@ export function coverageFromTranscripts(
     c: number | null,
     name: string,
   ): void => {
-    if (c === null || !sealedToThisPlan(rec, c)) return;
+    // Under an unreadable plan identity the seal refuses EVERY record, so
+    // the usual gate would leave each chunk with no agent and `classify()`
+    // would answer `no-agent` — "nothing was launched for it" — beside
+    // launches that demonstrably ran. `agents` is diagnostic (who was SENT
+    // for these lines), not credit, and with every record refused alike
+    // there is no stale-vs-live split to protect: name the assigned owners
+    // so the class reads `unknown` (the run cannot say) and the operator is
+    // sent to the NOTE, not to a relaunch (audit finding on R34-4's fix).
+    if (c === null) return;
+    if (
+      identityUnreadable
+        ? !plan.chunks.some((k) => k.id === c) ||
+          assignedChunkTotal(rec) !== plan.chunks.length
+        : !sealedToThisPlan(rec, c)
+    ) {
+      return;
+    }
     const seen = chunkAgents.get(c);
     if (seen === undefined) chunkAgents.set(c, [name]);
     else if (!seen.includes(name)) seen.push(name);
@@ -949,6 +1028,59 @@ export function coverageFromTranscripts(
   const builtOf = (key: string): string | undefined => {
     const b = built.get(key);
     return b !== undefined && b.trim() !== '' ? b : undefined;
+  };
+  // Which records are ROLE launches — a verifier, an auditor, a dimension
+  // agent — is decided off the prompts this run actually built, not off the
+  // shape of the launch text: a role launch carries the label of a built
+  // non-chunk prompt (`buildRoleLaunchPrompt` puts the identity line first,
+  // and a launcher-prepended context line does not move it). "Has an
+  // identity line" was the previous test, and it misfiled the drifted chunk
+  // launch — `chunk 20`, `chunk 20 / 25`, `chunk 3 of 33 (round 2)` — whose
+  // slot the assignment grammar refuses while the label parser still reads
+  // it as `agent chunk 20`: taken for a role, it was refused at the
+  // chunk-less declarer's entrance, its honest `Uncoverable:` was never
+  // adjudicated, and its truncated read certified the chunk (R34-1). A
+  // label no built prompt carries is not a role; such a record walks the
+  // chunk-less arm like any other launch the orchestrator wrote itself.
+  const builtRoleLabels = new Set<string>();
+  for (const key of built.keys()) {
+    if (key.startsWith('chunk-')) continue;
+    const b = builtOf(key);
+    if (b === undefined) continue;
+    const l = labelFromLaunchPrompt(b);
+    if (l !== null) builtRoleLabels.add(l);
+  }
+  // A label no built prompt carries is NOT automatically a chunk launch,
+  // though: `recordPrompt` swallows write failures by design (a read-only
+  // tmp dir must not stop a review), and a launcher may append `(round 2)`
+  // to a round-1 identity line — either way a GENUINE role would have lost
+  // its role-ness and walked the declarer arm, where a per-chunk auditor's
+  // quotation of a declaration passes the containment shape and is admitted
+  // as its own, erasing live coverage (audit finding on R34-1's fix). So the
+  // built set decides where it can, and where it cannot the slot itself
+  // does: the drifted CHUNK launches R34-1 names are all chunk designations
+  // in the role slot (`chunk 20`, `chunk-20`, `chunk 20 / 25`,
+  // `territory chunk 20 of 25`, `chunk 3 of 33 (round 2)`); no role this
+  // skill builds does, and a hand-labelled role that merely mentions a
+  // chunk — before it (`reverse-audit chunk 2`, `chunk auditor`) or after
+  // it (`chunk 2 auditor`, `chunk 2 verifier`) — is still a role: its
+  // quotation must not become a declaration. So the slot must be a chunk
+  // DESIGNATION and nothing more: the number, an optional `of M` / `/ M`,
+  // an optional `(round N)`. That is a drifted chunk launch; any other
+  // unrecognised identity line is a role. Role posture — quotes declare
+  // nothing — refuses the fabricated cap; the record's coverage rides the
+  // same told-range presumption as any role's.
+  const isRoleLaunch = (rec: AgentRecord): boolean => {
+    const l = labelFromLaunchPrompt(rec.launchPrompt);
+    if (l === null) return false;
+    if (builtRoleLabels.has(l)) return true;
+    const slot = identityRoleSlot(rec.launchPrompt);
+    return (
+      slot !== null &&
+      !/^\s*(?:territory\s+)?chunk[\s-]*\d+(?:\s*(?:of|\/)\s*\d+)?\s*(?:\(round \d+\))?\s*$/i.test(
+        slot,
+      )
+    );
   };
   const nothingBuiltAtAll =
     rosterForRun.length > 1 && rosterForRun.every((r) => !builtOf(r.key));
@@ -1141,6 +1273,16 @@ export function coverageFromTranscripts(
     if (rec.diffReads.length === 0) return true;
     const c = plan.chunks.find((k) => k.id === chunkId);
     if (c === undefined) return false;
+    // A chunk the plan's own measurement proves unspannable is the ONE
+    // shape ever handed the declaration template, and its brief tells the
+    // agent not to review it — so an honest declarer confirms the over-cap
+    // line with a read of its own choosing, a partial one. Demanding a full
+    // span there refused the declaration the plan itself corroborates,
+    // classified the chunk `unknown`, and prescribed a relaunch the code
+    // already knows cannot span it — a loop to the round cap (R34-3). The
+    // guard's job — a declarer told the right window but demonstrably
+    // reading elsewhere — is a question about a chunk a read COULD span.
+    if (chunkTruncatableByPlan(chunkId)) return true;
     return merge(rec.diffReads).some(
       ([s, e]) => s <= c.startLine && e >= c.endLine,
     );
@@ -1440,7 +1582,39 @@ export function coverageFromTranscripts(
     // already flagged rewritten: the repairs contradict (rebuild the prompt vs.
     // relaunch the same one), the rebuild subsumes the relaunch, and an operator
     // handed both for one agent follows whichever came last.
-    if (told.length > 0 && rec.diffToolCalls === 0) {
+    // ...unless it RETURNED its own chunk's declaration: the brief for an
+    // unreachable chunk says "Do not claim to have reviewed it. Return
+    // exactly: `Uncoverable: chunk N`" and drops the review block whose
+    // reads name the diff pages, so an agent that obeys it opens its brief
+    // and makes no diff call. Filed here as `unopened`, the declaration was
+    // never adjudicated, the chunk landed `missing` and the operator was told
+    // to relaunch with the same prompt — a transcript the relaunch
+    // reproduces verbatim, forever (R34-6). Such a record goes on to the
+    // declaration arm, where the seals rule on it; the zero-call arm above
+    // still refuses a record that made no call at all.
+    // Scoped to the ONE shape the template is handed to — a chunk the plan
+    // proves unspannable — and to a record the plan-identity seal admits.
+    // Unscoped, a zero-diff-call record on an untrusted-metadata plan (whose
+    // brief tells the agent to READ its chunk) walked through: the assigned
+    // arm then passed every seal on an empty read — `declarerReadItsChunk`
+    // fails open on absent reads, `planContradictsDeclaration` is false on
+    // `0`, refutation is off — and the copied template line pinned
+    // `declared-uncoverable` and erased a whole-diff reader's live coverage:
+    // the whiff wearing a costume the idle arm's comment forbids (audit
+    // finding on R34-6's fix). No seal conjunct rides here: a record the
+    // declaration arm's seal would refuse — a stale count, another plan's
+    // token, a moved window — is by construction not a verbatim delivery of
+    // this plan's built prompt (or the plan's identity is unreadable, where
+    // every record is refused alike and lands `missing`/`unknown` under the
+    // drift NOTE), so the rewritten arm above has already
+    // disclosed it and the operator holds the rebuild that subsumes this
+    // arm's relaunch; the declaration arm then refuses it on its own terms.
+    const declaringOwnChunk =
+      rec.returned &&
+      chunk !== null &&
+      chunkTruncatableByPlan(chunk) &&
+      declaresOwnUncoverable(rec, chunk);
+    if (told.length > 0 && rec.diffToolCalls === 0 && !declaringOwnChunk) {
       if (!rewrittenThisRecord && !superseded(rec, chunk)) {
         unopenedAgents.push(name);
       }
@@ -1504,32 +1678,6 @@ export function coverageFromTranscripts(
     // exactly the lines it opened and for no others.
     const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
-
-    // The declared chunks THIS record's reads may not certify, whatever the
-    // declarer arms below decide about the declaration itself. A record
-    // carrying `Uncoverable: chunk N` — its own line or a quotation — for a
-    // chunk the plan's own measurement proves unspannable holds a read of
-    // that chunk that is a truncated view by construction (the refutation
-    // guard's `> CAP` arm): the read certifies nothing about N. Excluding
-    // the CHUNK rather than dropping the RECORD keeps the reads' credit for
-    // every other chunk they demonstrably spanned — the no-reads quoter that
-    // lost its whole-diff credit (R28-1) and the overshooting declarer that
-    // fell through to the credit gate and certified the chunk it declared
-    // (R27-1) are the two shapes this one exclusion closes. A chunk whose
-    // metadata is absent or hand-zeroed is not excluded: there the plan
-    // cannot say the read was truncated, and the declaration rides the
-    // untrusted-metadata arms instead. Identity-less records only — the
-    // paraphrased chunk launch the branch below exists for. A record still
-    // carrying an identity line is an assigned agent (its own declaration is
-    // ruled on by the assigned arm) or a role agent, and a role agent
-    // quoting a declaration keeps the live coverage its read earned: that
-    // is the R20-4 posture, pinned by `a role agent quoting the declaration
-    // is not an unassigned declarer`, and this exclusion does not move it.
-    const creditExcluded = new Set(
-      labelFromLaunchPrompt(rec.launchPrompt) === null
-        ? declaredUncoverableChunkIds(rec).filter(chunkTruncatableByPlan)
-        : [],
-    );
 
     if (chunk !== null && declaresOwnUncoverable(rec, chunk)) {
       // The same supersession guard the sibling flags carry. Without it a
@@ -1642,14 +1790,14 @@ export function coverageFromTranscripts(
       const declaredIds = declaredUncoverableChunkIds(rec);
       if (
         declaredIds.length > 0 &&
-        // Refuse role launches at the entrance: a role agent carries an
-        // intact identity line (never CHUNK_RE-matched), walks chunk-less,
-        // and can spell exactly the declared chunk's window — so a
-        // QUOTATION in its return passes the shape checks below. Role
-        // agents never declare chunks; a launch still carrying ANY
-        // identity line is not the paraphrased chunk launch this branch
-        // exists for (R20-4).
-        labelFromLaunchPrompt(rec.launchPrompt) === null
+        // Refuse role launches at the entrance: a role agent walks
+        // chunk-less and can spell exactly the declared chunk's window — so
+        // a QUOTATION in its return passes the shape checks below. Role
+        // agents never declare chunks (R20-4). A role is a record carrying
+        // the label of a prompt this run BUILT for a role — not any record
+        // carrying an identity line: a drifted chunk launch carries one too,
+        // and reading it as a role dropped its honest declaration (R34-1).
+        !isRoleLaunch(rec)
       ) {
         // Adjudicate the candidates in text order and route on the FIRST
         // that fits the declarer shape: an earlier quotation of another
@@ -1717,11 +1865,11 @@ export function coverageFromTranscripts(
           }
           // A refused declarer — no spelled reads, or reads overshooting
           // the declared window — falls through to the credit gate on
-          // purpose: `creditExcluded` above already withholds the declared
-          // truncatable chunk from this record's credit, so the fall-through
-          // certifies nothing the declaration names (R20-4's drop, R27-1's
-          // overshoot) while the record's other reads keep their credit
-          // (R28-1). Dropping the record here was the R28-1 defect.
+          // purpose: the credit loop never certifies a chunk the plan proves
+          // unspannable, so the fall-through certifies nothing the
+          // declaration names (R20-4's drop, R27-1's overshoot) while the
+          // record's other reads keep their credit (R28-1). Dropping the
+          // record here was the R28-1 defect.
         }
         if (declarerRouted) continue;
       }
@@ -1755,9 +1903,23 @@ export function coverageFromTranscripts(
           declarationStillOnTerritory([...told, ...rec.diffReads], chunk)
     ) {
       for (const c of plan.chunks) {
-        if (creditExcluded.has(c.id)) continue;
+        // Never off a spanning read for a chunk the plan's own measurement
+        // proves no read can return: `rangeOf` records the REQUESTED range,
+        // so a read of an over-cap line records the whole window while
+        // returning a truncated view — "demonstrably spanned nothing", as
+        // the refutation guard already rules for the same shape. Crediting
+        // it certified as reviewed the one chunk whose own brief says no
+        // read reaches it, whenever no declaration was admitted — no chunk
+        // agent launched, or an honest one refused by a seal (R27-1). Such a
+        // chunk is `uncoverable` when its agent declares it and `missing`
+        // otherwise, never `covered`; the per-record exclusion this replaces
+        // (a declared truncatable chunk, R28-1) is a subset of this rule.
+        if (chunkTruncatableByPlan(c.id)) continue;
         if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {
           covered.add(c.id);
+          const mine = creditedChunks.get(rec) ?? new Set<number>();
+          mine.add(c.id);
+          creditedChunks.set(rec, mine);
           // A whole-diff agent spans every chunk, so this credits chunks it was
           // never assigned — which is the point, and why `chunkAgents` is fed
           // from the assignment above rather than from here: the ledger's
@@ -2176,15 +2338,35 @@ export function coverageFromTranscripts(
   // compose-review reads the count off this report and renders its own
   // non-capping continuity note, beside the other disclosed-but-not-capping
   // blocks (deferred lint, test-plan notes).
-  const recoveredAgents = records.filter(
-    (r) =>
+  // ...and none under an unreadable plan identity: a prior-session record
+  // that cannot be sealed to this plan is not work this run reused, and the
+  // continuity note must not announce re-certified results beside a ledger
+  // that credits nothing (audit finding on R34-4's fix).
+  // ...nor for a reader of a chunk the plan proves unspannable that credited
+  // nothing: such a chunk is never credited off a read (see the credit
+  // loop), so a prior verbatim reader that did not declare it contributed
+  // nothing this run can count — the continuity note must not say
+  // "re-certified, counted as reviewed" beside a ledger that lists the chunk
+  // `missing` (audit finding on R27-1's fix). A reader whose ranges did earn
+  // another chunk that is STILL covered — not one a later declaration took
+  // out of coverage — stays counted: the count follows the credit that
+  // survived.
+  const recoveredAgents = records.filter((r) => {
+    const c = assignedChunk(r);
+    const stillCredited = [...(creditedChunks.get(r) ?? [])].some((id) =>
+      covered.has(id),
+    );
+    return (
+      !identityUnreadable &&
       r.fromPriorSession &&
+      !(c !== null && chunkTruncatableByPlan(c) && !stillCredited) &&
       certifies(r) &&
       // Not if a CURRENT record already satisfied the same obligation: the
       // count is what the continuity note reports, and announcing recovery
       // for superseded work would misdescribe what this run reused.
-      !supersededByCurrent(r, assignedChunk(r)),
-  ).length;
+      !supersededByCurrent(r, c)
+    );
+  }).length;
 
   return {
     ok:
@@ -2219,7 +2401,14 @@ export function coverageFromTranscripts(
       files: filesOfChunk.get(c.id) ?? [],
     })),
     chunkItems,
-    selectionDrift: selectionDriftReason,
+    selectionDrift:
+      drift !== null && identityUnreadable
+        ? `${drift}. Until the plan is re-captured, no transcript can prove ` +
+          'it belongs to this plan, so the plan-identity seal refuses every ' +
+          'record and this report credits no coverage'
+        : drift,
+    identityUnreadable,
+    staleTranscripts,
   };
 }
 

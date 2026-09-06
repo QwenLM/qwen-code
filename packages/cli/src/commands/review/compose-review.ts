@@ -222,6 +222,17 @@ export function groupCapAxes(
  * set is built ("a disclosed gap, not coverage") and enforced in `ok`, is that
  * a diff with a line no read can reach was not fully reviewed. A terminal state
  * that called such a run `complete` would contradict the report it ships in.
+ *
+ * "The ledger and nothing else" includes the caller's `uncoverableChunks`:
+ * an orchestrator-relayed declaration caps the verdict (fail-closed on prose,
+ * as every relayed gap does) but does not move this state, because it is the
+ * orchestrator's claim about coverage, and the whole point of this field is
+ * that the orchestrator is not the one who reports what was read. When the
+ * two disagree — `complete` beside a `uncoverable-chunk` cap — the transcripts
+ * refused or refuted the relayed declaration, and the disagreement is the
+ * report saying so. The persistence boundary (`save-artifact`) re-derives
+ * this state from the persisted ledger alone and refuses a value it cannot
+ * reproduce, which pins the contract from the other side (R34-7, held).
  */
 export function deriveTerminalState(
   ledger: readonly ChunkCoverageItem[],
@@ -1498,6 +1509,13 @@ export interface ComposeReviewResult {
    * and a caller's surface, not a PR comment's.
    */
   terminalState: TerminalState;
+  /**
+   * The plan carries a `selection` identity this build cannot read, so the
+   * coverage walk refused every record (`identityUnreadable` on the coverage
+   * report). Readers word the `chunk-nobody-read` cap off it: the diff was
+   * not "never read" — its reads could not be credited to this plan.
+   */
+  coverageIdentityUnreadable: boolean;
   /**
    * `cappedBy`, split by what kind of fact each cap is. A view over that
    * array, so the two can never disagree about which caps fired.
@@ -3987,6 +4005,8 @@ function composeReviewBody(
   // zero-certified test falls to the `coverage` disclosure instead.
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
+  /** Every record refused by the plan-identity seal — see `identityUnreadable`. */
+  let coverageSealRefusedAll = false;
   /**
    * The per-chunk ledger, and why coverage could not be computed at all.
    *
@@ -4492,6 +4512,7 @@ function composeReviewBody(
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
       chunkLedger = cov.chunkItems;
+      coverageSealRefusedAll = cov.identityUnreadable;
       // Operator register only, and NOT pushed through `coverageEntries`: that
       // channel caps (compose-review folds every entry into the
       // unreviewed-dimension cap and the posted "Not reviewed:" list), and a
@@ -4500,8 +4521,19 @@ function composeReviewBody(
       // and re-plan — so it belongs where the other repairs are.
       if (cov.selectionDrift !== null) {
         remediation.push(
-          `selection drift: ${cov.selectionDrift}. The coverage below is ` +
-            `reported against the plan as written.`,
+          cov.identityUnreadable
+            ? // The refusal IS the accounting; no "reported as written" tail.
+              `selection drift: ${cov.selectionDrift}.`
+            : `selection drift: ${cov.selectionDrift}. The coverage below is ` +
+                `reported against the plan as written.`,
+        );
+      }
+      // Same parity for stale transcripts: a NOTE for the operator, no cap,
+      // no repair — they belong to an earlier plan of this diff (R34-5).
+      if (cov.staleTranscripts.length > 0) {
+        remediation.push(
+          `stale transcripts: ${cov.staleTranscripts.join(', ')} name a ` +
+            `chunk this plan does not carry and count for nothing here.`,
         );
       }
       for (const id of cov.missingChunks) missingReceipts.push(id);
@@ -5039,8 +5071,31 @@ function composeReviewBody(
           (e.subjectZh !== undefined &&
             e.reasonZh !== undefined &&
             echoesSentence(entry, `${e.subjectZh}——${e.reasonZh}`)) ||
-          (!verificationFloorEntries.has(e) &&
-            (entry === e.subject || entry === e.subjectZh))),
+          // The bare-subject arms are exempt for ONE floor entry only: the
+          // reverse audit's, whose subject is also the subject the
+          // orchestrator gives a WHIFFED reverse audit — there a bare
+          // `reverse audit` is the whiff's only detector, not an echo
+          // (R22-4). Written over every floor entry, the exemption also let
+          // a bare relay of the `verification` floor through: rendered as
+          // "returned no evidence of its walk twice" — an agent accused of
+          // whiffing when none was launched — beside the structural sentence
+          // for the same fact, and routing a verification-only doubt to the
+          // coverage axis (R34-2). While the verification floor is unmet, a
+          // bare `verification` names that floor entry and nothing else; with
+          // the verifier delivered no such entry exists, and the bare name
+          // renders as any other whiff, as before.
+          (!(
+            verificationFloorEntries.has(e) && e.subject === 'reverse audit'
+          ) &&
+            (entry === e.subject || entry === e.subjectZh)) ||
+          // The floor's COMBINED entry (`verification and reverse audit`,
+          // minted when both are unmet) is the verification floor too: a
+          // bare `verification` relay names it and nothing else, so it is
+          // an echo here exactly as it is against the single entry. A bare
+          // `reverse audit` is not: that is the whiff's subject (R22-4).
+          (verificationFloorEntries.has(e) &&
+            e.subject === 'verification and reverse audit' &&
+            (entry === 'verification' || entry === '验证'))),
     );
   const nonEchoedDimensionGaps = [
     ...unreviewed,
@@ -5887,12 +5942,17 @@ function composeReviewBody(
     // One block for both channels, so an edit cannot touch the disclosure and
     // miss its repair (or vice versa) — the drift the rest of this file exists
     // to prevent.
-    remediation.push(
-      'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
-        `agent-prompt --plan ${planRef} --chunk <id> [--rules <rules file>]\` — or ` +
-        'the whole fan-out with `--roster` — and launch one agent per block, ' +
-        'verbatim',
-    );
+    // Not when the plan's identity could not be read: every record was
+    // refused by the seal, a relaunch is refused the same way, and the drift
+    // line above already names the repair — re-capture and re-plan (R34-4).
+    if (!coverageSealRefusedAll) {
+      remediation.push(
+        'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
+          `agent-prompt --plan ${planRef} --chunk <id> [--rules <rules file>]\` — or ` +
+          'the whole fan-out with `--roster` — and launch one agent per block, ' +
+          'verbatim',
+      );
+    }
     // Its own sentence, because its own cause. The clause below explains a gap
     // as a line too long to read, which is true of an *uncoverable* chunk and a
     // fabrication about one nobody receipted — the author would be told the diff
@@ -5913,10 +5973,19 @@ function composeReviewBody(
     if (unexplainedReceipts.length > 0) {
       const gap = describeChunkGap(unexplainedReceipts, plannedChunks);
       const pron = gap.plural ? 'them' : 'it';
-      notReviewedParts.push({
-        en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
-        zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
-      });
+      notReviewedParts.push(
+        coverageSealRefusedAll
+          ? {
+              // The owners' reads are on record; what failed is tying them
+              // to this plan. Saying "nobody read it" would be false.
+              en: `Not reviewed: ${gap.phrase} — no read of ${pron} could be credited to this plan, whose identity this build cannot read.`,
+              zh: `未审查：${gap.phraseZh}——本 plan 的身份无法被本版本读取，因此没有任何读取能记入它。`,
+            }
+          : {
+              en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
+              zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
+            },
+      );
     }
   }
   if (uncoverable.length > 0) {
@@ -6734,6 +6803,7 @@ function composeReviewBody(
       event,
       body,
       terminalState,
+      coverageIdentityUnreadable: coverageSealRefusedAll,
       capAxes,
       chunkLedger,
       baseEvent,
@@ -6831,6 +6901,7 @@ function composeReviewBody(
       event,
       body,
       terminalState,
+      coverageIdentityUnreadable: coverageSealRefusedAll,
       capAxes,
       chunkLedger,
       baseEvent,
@@ -7115,6 +7186,7 @@ function composeReviewBody(
     event,
     body: visibleBody,
     terminalState,
+    coverageIdentityUnreadable: coverageSealRefusedAll,
     capAxes,
     chunkLedger,
     baseEvent,
@@ -8335,7 +8407,9 @@ export function verdictLine(r: ComposeReviewResult): string {
   const why: Record<string, string> = {
     'cannot-tell-existing-critical':
       'an existing blocker could not be ruled on',
-    'chunk-nobody-read': 'part of the diff was never read',
+    'chunk-nobody-read': r.coverageIdentityUnreadable
+      ? 'part of the diff could not be credited to this plan, whose identity could not be read'
+      : 'part of the diff was never read',
     'uncoverable-chunk': 'part of the diff cannot be read at all',
     'unreviewed-dimension': 'a dimension nobody reviewed',
     'context-unavailable': "the PR's existing discussion could not be read",

@@ -6132,9 +6132,12 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
     verdictLine({
       event: 'COMMENT',
       body: '',
-      // `verdictLine` reads neither of these; they are here because the result
-      // type carries them and this literal stands in for a real compose.
+      // `verdictLine` reads none of these except the coverage flag (the
+      // `chunk-nobody-read` reason branches on it); they are here because the
+      // result type carries them and this literal stands in for a real
+      // compose.
       terminalState: 'complete',
+      coverageIdentityUnreadable: false,
       capAxes: { coverage: [], verification: [], posture: [], other: [] },
       chunkLedger: [],
       baseEvent: 'COMMENT',
@@ -6240,6 +6243,27 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
         cappedBy: ['unreviewed-dimension'],
       }),
     ).toBe('Verdict: Request changes');
+  });
+
+  it('words the unread-chunk cap by whether the plan identity could be read', () => {
+    // The same cap, two causes: a diff nobody opened, and a diff whose reads
+    // could not be tied to a plan this build cannot read. The body says the
+    // second one; the verdict line must not say the first (R34-4, audit).
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['chunk-nobody-read'],
+      }),
+    ).toContain('part of the diff was never read');
+    const sealed = line({
+      event: 'COMMENT',
+      baseEvent: 'APPROVE',
+      cappedBy: ['chunk-nobody-read'],
+      coverageIdentityUnreadable: true,
+    });
+    expect(sealed).toContain('could not be credited to this plan');
+    expect(sealed).not.toContain('never read');
   });
 
   it('is bare for a clean Approve', () => {
@@ -16028,6 +16052,28 @@ describe('terminalState — coverage, not verdict', () => {
     ).toBe('partial');
   });
 
+  it('is not moved by the caller\u2019s relayed uncoverable chunks either — they cap', () => {
+    // The orchestrator relays `Uncoverable: chunk 5` into the state file;
+    // the transcripts never admitted it (no chunk 5 in this plan). The cap
+    // fires — fail-closed on prose, like every relayed gap — while the state
+    // stays the ledger's: the orchestrator is not the one who reports what
+    // was read, and `save-artifact` re-derives the state from the ledger
+    // alone. The disagreement is the report saying the relay was refused
+    // (R34-7, held by design).
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 5 (src/big.min.js)'],
+    });
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+    expect(r.capAxes.coverage).toContain('uncoverable-chunk');
+    expect(r.terminalState).toBe('complete');
+    expect(r.chunkLedger.every((i) => i.outcome === 'covered')).toBe(true);
+  });
+
   it('reads nothing but the ledger — findings do not move it', () => {
     // The property that makes it worth having. A run that read all 18 chunks
     // covered 18 chunks whether it found a blocker in them or nothing at all.
@@ -16538,6 +16584,110 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.capAxes.coverage).toContain('unreviewed-dimension');
     expect(r.capAxes.verification).toEqual([]);
     expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('dedups a bare relay of the verification floor — no agent is accused of whiffing', () => {
+    // The bare-subject exemption is for the reverse audit's floor entry
+    // alone (its subject is also a whiff's). Written over every floor entry,
+    // it let a bare `verification` relay through: rendered as "returned no
+    // evidence of its walk twice" beside the structural sentence for the
+    // same fact, and routed to the coverage axis (R34-2).
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['verification'],
+    });
+    expect(r.body).toMatch(/verification — the review posts findings/);
+    expect(r.body).not.toContain('returned no evidence of its walk twice');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('dedups a bare verification relay against the COMBINED floor entry too', () => {
+    // Both Step 4/5 legs unmet mint one combined entry whose subject is
+    // `verification and reverse audit`; a bare `verification` (or `验证`)
+    // relay names that entry and nothing else, so it is an echo there as it
+    // is against the single entry (audit of R34-2's fix). A bare `reverse
+    // audit` stays a whiff.
+    for (const relay of ['verification', '验证']) {
+      const r = composeReview({
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        planPath: coveredPlan([]), // neither leg launched
+        env: ENV,
+        modelId: MODEL,
+        unreviewedDimensions: [relay],
+      });
+      expect(r.body).toMatch(/verification and reverse audit — neither/);
+      expect(r.body).not.toContain('returned no evidence of its walk twice');
+      expect(r.capAxes.coverage).toEqual([]);
+    }
+    const whiff = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan([]),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(whiff.body).toContain('returned no evidence of its walk twice');
+    expect(whiff.capAxes.coverage).toContain('unreviewed-dimension');
+  });
+
+  it('relays a stale out-of-plan transcript to the orchestrator as a note, not a gap', () => {
+    // Parity with the drift NOTE: the operator learns on stderr that a
+    // transcript belongs to an earlier plan; the body and the verdict do not
+    // move (R34-5).
+    const p = coveredPlan(['verify', 'reverse-audit']);
+    transcript('stale', goodPrompt(2).replace('chunk 2 of 2', 'chunk 9 of 2'), {
+      toolCalls: 1,
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.remediation.join('\n')).toMatch(/stale transcripts: chunk 9 of 2/);
+    expect(r.terminalState).toBe('complete');
+    expect(r.body).not.toContain('ran on a prompt the run wrote itself');
+    expect(r.cappedBy).not.toContain('unreviewed-dimension');
+  });
+
+  it('names the seal refusal, not an unread diff, when the plan identity cannot be read', () => {
+    // Every record was refused, so "nobody read it" would be false and the
+    // chunk relaunch the remediation normally prescribes is refused the same
+    // way; the drift line carries the repair (R34-4, audit).
+    const p = coveredPlan(['verify', 'reverse-audit']);
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>;
+    raw['selection'] = { schemaVersion: 'qwen.review-selection/v99' };
+    writeFileSync(p, JSON.stringify(raw));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.terminalState).toBe('failed');
+    expect(r.coverageIdentityUnreadable).toBe(true);
+    expect(r.body).toContain('could be credited to this plan');
+    expect(r.body).not.toContain('nobody read');
+    expect(r.remediation.join('\n')).toMatch(/selection drift: .*cannot read/);
+    expect(r.remediation.join('\n')).not.toMatch(/chunks nobody read/);
+    expect(r.remediation.join('\n')).not.toMatch(
+      /reported against the plan as written/,
+    );
+    // The operator-facing verdict line says the same thing the body does.
+    expect(verdictLine(r)).toContain('could not be credited to this plan');
+    expect(verdictLine(r)).not.toContain('never read');
   });
 
   it('puts the medium tier by-design reverse-audit skip on the posture axis', () => {

@@ -137,3 +137,17 @@ export function labelFromLaunchPrompt(prompt: string): string | null {
   const line = firstIdentityLine(prompt);
   return line === null ? null : labelFromIdentityLine(line);
 }
+
+/**
+ * The raw role slot of a launch's first identity line — the text between the
+ * backticks, untrimmed — or null when the launch carries none. For a caller
+ * that must decide what KIND of launch an unrecognised identity line names
+ * (coverage's role-vs-drifted-chunk-launch question) without re-deriving the
+ * label grammar.
+ */
+export function identityRoleSlot(prompt: string): string | null {
+  const line = firstIdentityLine(prompt);
+  if (line === null) return null;
+  const m = IDENTITY_LINE_RE.exec(line.replace(/\r$/, ''));
+  return m ? m[1] : null;
+}
