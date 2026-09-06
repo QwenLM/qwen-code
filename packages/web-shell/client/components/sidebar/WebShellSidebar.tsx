@@ -132,6 +132,7 @@ import {
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import { useIsLargeScreen } from '../../hooks/useIsLargeScreen';
 import {
   useSessionCatalogController,
   useSessionCatalogPolling,
@@ -156,6 +157,9 @@ const SIDEBAR_COLLAPSE_DRAG_WIDTH =
   SIDEBAR_DRAG_VISUAL_MIN_WIDTH - SIDEBAR_COLLAPSE_DRAG_THRESHOLD;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
+// Mirrors the mobile drawer breakpoint App.tsx uses to switch the sidebar
+// between the inline rail and the overlay drawer.
+const MOBILE_DRAWER_QUERY = '(max-width: 760px)';
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
@@ -2315,9 +2319,20 @@ export function WebShellSidebar({
             : 'sidebar.completedUnread',
       )
     : undefined;
+  // Mobile drawer gate (#6181): with the drawer closed the whole sidebar is
+  // translated off-canvas, so a 2s active cadence refetches data nobody can
+  // see — exactly the post-switch window that must stay smooth. Degrade to
+  // the idle cadence instead of pausing so collapsed status badges and the
+  // reopen snapshot stay eventually correct. Desktop never matches the
+  // mobile breakpoint, and where matchMedia is unavailable (SSR, jsdom) the
+  // hook reports false, keeping polling exactly as before.
+  const mobileDrawerHidden =
+    useIsLargeScreen(MOBILE_DRAWER_QUERY) && !mobileOpen;
   const sessionPollInterval =
     projectExpanded || hasRunningSession || selectedSessionSource === 'channel'
-      ? (hasRunningSession || selectedSessionSource === 'channel') && !error
+      ? (hasRunningSession || selectedSessionSource === 'channel') &&
+        !error &&
+        !mobileDrawerHidden
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
         : IDLE_SESSION_POLL_INTERVAL_MS
       : undefined;

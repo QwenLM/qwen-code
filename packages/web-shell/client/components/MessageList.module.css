@@ -80,6 +80,23 @@
   transition: width 320ms ease;
 }
 
+/*
+ * The non-virtualized path mounts every row eagerly (below
+ * VIRTUAL_SCROLL_THRESHOLD — common on mobile, where the collapse rework
+ * shrank row counts). content-visibility: auto lets the engine skip layout
+ * and paint for rows outside the viewport while keeping them reachable by
+ * scroll-into-view and find-in-page; the `auto` prefix on
+ * contain-intrinsic-size makes the engine remember each row's real height
+ * once rendered, falling back to the ESTIMATE_MESSAGE-sized placeholder
+ * (80px, matching the virtualizer's own estimate) for never-rendered rows.
+ * Applied only here: virtualized rows are absolutely positioned and measured
+ * dynamically, and a skipped row there would poison the size cache.
+ */
+.nonVirtualRow {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;
+}
+
 .loadingSkeleton {
   display: flex;
   flex-direction: column;

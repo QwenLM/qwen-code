@@ -353,6 +353,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    virtualScrollThreshold?: number;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -392,6 +393,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                virtualScrollThreshold={opts.virtualScrollThreshold}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -4408,6 +4410,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelectorAll(`.${styles.virtualRow}`).length).toBeGreaterThan(
       0,
     );
+  });
+
+  it('marks non-virtualized rows with content-visibility containment', () => {
+    const messages = [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(messages);
+
+    // Below the threshold every row mounts eagerly; each carries the
+    // content-visibility class so the engine skips offscreen layout/paint.
+    const rows = c.querySelectorAll('[data-web-shell-message-row]');
+    expect(rows.length).toBe(messages.length);
+    expect(c.querySelectorAll(`.${styles.nonVirtualRow}`).length).toBe(
+      rows.length,
+    );
+
+    // The virtualized path measures rows dynamically and must not opt in —
+    // a skipped (containment-sized) row would poison the size cache.
+    const virtual = mount([...messages], undefined, {
+      virtualScrollThreshold: 1,
+    });
+    expect(virtual.querySelectorAll(`.${styles.nonVirtualRow}`).length).toBe(0);
+    expect(virtual.querySelector(`.${styles.virtualSizer}`)).not.toBeNull();
   });
 
   it('renders the session timeline in the left gutter without expanding turns', async () => {
