@@ -601,6 +601,65 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(store.hasLiveSessions('/work')).toBe(true);
   });
 
+  it('keeps a recovered snapshot when an older duplicate poller fails', async () => {
+    getLiveState.mockResolvedValue(liveState(1, true));
+    await act(async () => {
+      root.render(
+        <>
+          <Probe />
+          <Probe />
+        </>,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const store = getSessionCatalogStore(client);
+
+    getLiveState.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_STALE_AFTER_FAILURES *
+          (SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS),
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(false);
+
+    let resolveRecovery!: (state: DaemonWorkspaceSessionLiveState) => void;
+    let rejectOlderPoll!: (error: Error) => void;
+    getLiveState.mockReset();
+    getLiveState
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRecovery = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          rejectOlderPoll = reject;
+        }),
+      );
+    act(() => {
+      vi.advanceTimersByTime(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    await act(async () => {
+      resolveRecovery(liveState(1, true));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    await act(async () => {
+      rejectOlderPoll(new Error('stale poller'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+  });
+
   it('does not count interactive refreshes toward staleness', async () => {
     // Interactive refreshes bypass the error backoff, so they can fail seconds
     // apart. Counting them would drop the snapshot inside the very blip the

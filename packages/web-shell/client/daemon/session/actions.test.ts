@@ -344,6 +344,23 @@ describe('createDaemonSessionActions', () => {
       expect(setPromptStatus).toHaveBeenCalledTimes(1);
     });
 
+    it('does not carry a true-to-false edge across sessions', () => {
+      const sessionA = createMockSession('session-a');
+      const sessionB = createMockSession('session-b');
+      const { actions, sessionRef, setPromptStatus } = createActionsHarness({
+        session: sessionA,
+      });
+
+      actions.setDaemonActivePrompt(true);
+      sessionRef.current = sessionB as unknown as DaemonSessionClient;
+      actions.setDaemonActivePrompt(false);
+      expect(setPromptStatus).not.toHaveBeenCalled();
+
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(false);
+      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+    });
+
     it.each([
       ['a conversation turn', (sessionId: string) => sessionId],
       ['a shell command', (sessionId: string) => `${sessionId}:shell`],

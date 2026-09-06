@@ -2274,6 +2274,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // controller/promise to put in `activePromptsRef`. Keep that restored
           // live state separately so `session.replay_complete` (history caught
           // up) does not get mistaken for `turn_complete` (prompt finished).
+          if (daemonActivePromptRef.current === false) {
+            settledRestoredActivePromptSessionsRef.current.add(activeSession);
+          }
           const restoredActivePromptSettled =
             settledRestoredActivePromptSessionsRef.current.has(activeSession);
           let restoredActivePrompt =
@@ -3578,6 +3581,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
+              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               if (maySettleToIdle()) {
                 // A transport close is only a safe "done" signal for passive
                 // observers. When a local/restored prompt is still active, the
@@ -3589,7 +3593,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // timeout mid silent tool gap) must not settle the pane — the
                 // resume finds no new events inside the gap to revive it
                 // (#9487).
-                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 setPromptStatus('idle');
                 dispatchTranscriptNow({
                   type: 'assistant.done',
@@ -3740,8 +3743,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // observed turn the daemon still reports in flight: the reconnect
           // resumes into the same silent gap with no events to revive a
           // settled indicator (#9487).
+          clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
           if (isAuthFailure || isTerminal || maySettleToIdle()) {
-            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
           if (

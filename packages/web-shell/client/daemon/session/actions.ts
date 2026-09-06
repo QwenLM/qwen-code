@@ -405,6 +405,7 @@ export function createDaemonSessionActions({
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
+  let daemonActivePromptSessionId = sessionRef.current?.sessionId;
 
   function publishStandaloneWorkingDirectoryError(
     sessionId: string,
@@ -888,7 +889,10 @@ export function createDaemonSessionActions({
   return {
     setDaemonActivePrompt(active) {
       const previous = daemonActivePromptRef.current;
+      const previousSessionId = daemonActivePromptSessionId;
+      const backstopSessionId = sessionRef.current?.sessionId;
       daemonActivePromptRef.current = active;
+      daemonActivePromptSessionId = backstopSessionId;
       // Losing `true` is the settle signal — whether the daemon reported the
       // turn finished, or the authority itself went unknown because its
       // channel stopped answering. Either way nothing vouches for the turn any
@@ -898,7 +902,13 @@ export function createDaemonSessionActions({
       // for one poll interval after every turn_complete. A turn that really is
       // still running is revived by its next event, as it was before this
       // signal existed.
-      if (previous !== true || active === true) return;
+      if (
+        previousSessionId !== backstopSessionId ||
+        previous !== true ||
+        active === true
+      ) {
+        return;
+      }
       // Terminal events normally settle the turn well before this. This is the
       // backstop for the ones that never arrive (dropped stream, daemon
       // restart mid-turn), so a pane held alive through silent tool gaps
@@ -908,7 +918,6 @@ export function createDaemonSessionActions({
       // (the /load snapshot after a refresh) has no local terminal handling —
       // the event stream is its only settle path, which is exactly the failure
       // this backstop covers — so settle it here rather than deferring to it.
-      const backstopSessionId = sessionRef.current?.sessionId;
       if (
         backstopSessionId !== undefined &&
         hasLocallySubmittedPrompt(activePromptsRef.current, backstopSessionId)

@@ -212,6 +212,7 @@ export class SessionCatalogStore {
     string,
     Map<string, number>
   >();
+  private readonly liveStateFailureStreaks = new Map<string, number>();
   private readonly liveSessionsByWorkspace = new Map<
     string,
     ReadonlyMap<string, DaemonSessionLiveState>
@@ -246,6 +247,7 @@ export class SessionCatalogStore {
         this.liveStateWorkspaceUsers.delete(workspaceCwd);
         this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
         this.liveStatePendingActivity.delete(workspaceCwd);
+        this.liveStateFailureStreaks.delete(workspaceCwd);
         this.clearLiveSessions(workspaceCwd);
         for (const entry of this.entries.values()) {
           if (entry.query.workspaceCwd !== workspaceCwd) continue;
@@ -641,6 +643,12 @@ export class SessionCatalogStore {
     this.clearLiveSessions(workspaceCwd);
   }
 
+  recordLiveStateFailure(workspaceCwd: string): number {
+    const streak = (this.liveStateFailureStreaks.get(workspaceCwd) ?? 0) + 1;
+    this.liveStateFailureStreaks.set(workspaceCwd, streak);
+    return streak;
+  }
+
   subscribeLiveSessions(
     workspaceCwd: string,
     listener: () => void,
@@ -751,6 +759,7 @@ export class SessionCatalogStore {
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
   ): void {
+    this.liveStateFailureStreaks.delete(workspaceCwd);
     const next = new Map<string, DaemonSessionLiveState>();
     for (const session of liveSessions) {
       next.set(session.sessionId, session);
@@ -946,6 +955,7 @@ export class SessionCatalogStore {
     this.liveStateWorkspaceUsers.clear();
     this.liveStateWorkspaceRefreshRequests.clear();
     this.liveStatePendingActivity.clear();
+    this.liveStateFailureStreaks.clear();
     this.liveSessionsByWorkspace.clear();
     this.liveSessionListeners.clear();
     this.entries.clear();

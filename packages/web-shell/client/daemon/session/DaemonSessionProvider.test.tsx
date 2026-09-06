@@ -11340,6 +11340,118 @@ describe('DaemonSessionProvider', () => {
       }
     });
 
+    it('does not settle a new session from the previous session signal', async () => {
+      vi.useFakeTimers();
+      try {
+        const gapA = createDeferred<void>();
+        const gapB = createDeferred<void>();
+        sdkMocks.sessions.push(
+          createObservedSparseTurnSession(gapA, 'session-a'),
+        );
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        const sessionB = createObservedSparseTurnSession(gapB, 'session-b');
+        sessionB.hasActivePrompt = true;
+        sdkMocks.sessions.push(sessionB);
+        let switched: Promise<void> | undefined;
+        act(() => {
+          switched = requireActions(actions).loadSession('session-b');
+        });
+        if (!switched) throw new Error('Session switch was not started');
+        await act(async () => {
+          await switched;
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(streamingAssistantBlocks()).toHaveLength(1);
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(undefined);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingAssistantBlocks()).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not restore a prompt after live state settled during load', async () => {
+      const pendingLoad = createDeferred<MockSession>();
+      const streamEnd = createDeferred<void>();
+      const reattached = createDeferred<void>();
+      let attach = 0;
+      sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+        async () => pendingLoad.promise,
+      );
+
+      let switched: Promise<void> | undefined;
+      act(() => {
+        switched = requireActions(actions).loadSession('session-b');
+      });
+      if (!switched) throw new Error('Session switch was not started');
+      await act(async () => {
+        await flushPromises();
+        actions?.setDaemonActivePrompt(true);
+        actions?.setDaemonActivePrompt(false);
+        pendingLoad.resolve(
+          createMockSession({
+            sessionId: 'session-b',
+            hasActivePrompt: true,
+            events: async function* reconnectAfterLateLoad(
+              opts: { signal?: AbortSignal } = {},
+            ) {
+              attach += 1;
+              if (attach === 1) {
+                await streamEnd.promise;
+                return;
+              }
+              reattached.resolve();
+              await new Promise<void>((resolve) => {
+                if (opts.signal?.aborted) {
+                  resolve();
+                  return;
+                }
+                opts.signal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              });
+              yield* [];
+            },
+          }),
+        );
+        await switched;
+        await flushPromises();
+      });
+
+      expect(promptStatus).toBe('idle');
+      expect(streamingState).toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(undefined);
+        streamEnd.resolve();
+        await reattached.promise;
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('idle');
+      expect(streamingState).toBe('idle');
+    });
+
     it('keeps an observed turn loading across a transport close', async () => {
       vi.useFakeTimers();
       try {
@@ -11349,6 +11461,7 @@ describe('DaemonSessionProvider', () => {
         // gap to revive a settled indicator (#9487).
         const streamEnded = createDeferred<void>();
         const releaseStreamEnd = createDeferred<void>();
+        const releaseResumedChunk = createDeferred<void>();
         const events = vi.fn(async function* observedTurnThenStreamEnd(
           opts: { signal?: AbortSignal } = {},
         ) {
@@ -11381,6 +11494,20 @@ describe('DaemonSessionProvider', () => {
             streamEnded.resolve();
             return;
           }
+          await releaseResumedChunk.promise;
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: ' resumed' },
+              },
+            },
+          };
           await new Promise<void>((resolve) => {
             if (opts.signal?.aborted) {
               resolve();
@@ -11424,6 +11551,16 @@ describe('DaemonSessionProvider', () => {
         });
         expect(promptStatus).not.toBe('idle');
 
+        await act(async () => {
+          releaseResumedChunk.resolve();
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(
+          blocks.filter((block) => block.kind === 'assistant'),
+        ).toMatchObject([{ text: 'starting resumed', streaming: true }]);
+
         // The authority's own channel then stops answering too — a dead daemon,
         // not a long tool call. Once the live-state poll gives up on its
         // snapshot the bridge publishes `undefined`, and the pane must be
@@ -11445,6 +11582,7 @@ describe('DaemonSessionProvider', () => {
         // terminal either: while the daemon reports the turn in flight, the
         // pane must stay loading until the reconnect catches up (#9487).
         const releaseTransportError = createDeferred<void>();
+        const releaseResumedChunk = createDeferred<void>();
         const events = vi.fn(async function* observedTurnThenTransportError(
           opts: { signal?: AbortSignal } = {},
         ) {
@@ -11476,6 +11614,20 @@ describe('DaemonSessionProvider', () => {
             if (opts.signal?.aborted) return;
             throw new Error('network blip');
           }
+          await releaseResumedChunk.promise;
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: ' resumed' },
+              },
+            },
+          };
           await new Promise<void>((resolve) => {
             if (opts.signal?.aborted) {
               resolve();
@@ -11514,10 +11666,20 @@ describe('DaemonSessionProvider', () => {
 
         // The passive settle window passes while reconnecting.
         await act(async () => {
-          vi.advanceTimersByTime(10_000);
+          await vi.advanceTimersByTimeAsync(10_000);
           await flushPromises();
         });
         expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          releaseResumedChunk.resolve();
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(
+          blocks.filter((block) => block.kind === 'assistant'),
+        ).toMatchObject([{ text: 'starting resumed', streaming: true }]);
       } finally {
         vi.useRealTimers();
       }

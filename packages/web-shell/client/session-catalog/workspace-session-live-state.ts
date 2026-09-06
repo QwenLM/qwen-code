@@ -28,7 +28,6 @@ interface WorkspacePollState {
   acceptedVersion?: DaemonSessionCatalogVersion;
   inFlight: boolean;
   liveRetryAt: number;
-  liveFailureStreak: number;
   reconcileRetryAt: number;
   lastReconcileAt: number;
   fallbackAttempted: boolean;
@@ -145,7 +144,6 @@ export function useWorkspaceSessionLiveState(
       workspaceCwd,
       inFlight: false,
       liveRetryAt: 0,
-      liveFailureStreak: 0,
       reconcileRetryAt: 0,
       lastReconcileAt: Number.NEGATIVE_INFINITY,
       fallbackAttempted: false,
@@ -291,9 +289,10 @@ export function useWorkspaceSessionLiveState(
         // a 10s daemon restart could otherwise push the streak to the
         // threshold seconds apart — dropping the snapshot inside the very blip
         // the threshold exists to ride out.
-        if (!bypassRetry) state.liveFailureStreak += 1;
         if (
-          state.liveFailureStreak >= SESSION_LIVE_STATE_STALE_AFTER_FAILURES
+          !bypassRetry &&
+          catalogStore.recordLiveStateFailure(state.workspaceCwd) ===
+            SESSION_LIVE_STATE_STALE_AFTER_FAILURES
         ) {
           // The channel has stopped answering. Retaining the last snapshot
           // would let a reader keep vouching for a turn nobody can confirm.
@@ -326,7 +325,6 @@ export function useWorkspaceSessionLiveState(
         live.sessions,
       );
       state.liveRetryAt = 0;
-      state.liveFailureStreak = 0;
       if (pendingActivity) {
         for (const [sessionId, sequence] of pendingActivity) {
           // applyLiveState reports which sessions absorbed a usable watermark
