@@ -128,6 +128,60 @@ describe('buildSessionAgentsStatus', () => {
     }
   });
 
+  it('still reports team members when the shared task board is unreadable', async () => {
+    const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'team-status-'));
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    const teamName = 'review-team';
+    // A file where the task directory belongs: `listTasks` treats every
+    // non-ENOENT readdir failure as "the board is unreadable" and throws
+    // rather than reporting an empty board. The roster must degrade to
+    // rows without a shared task instead of failing the whole snapshot.
+    fs.mkdirSync(path.join(qwenHome, 'tasks'), { recursive: true });
+    fs.writeFileSync(path.join(qwenHome, 'tasks', teamName), 'not a directory');
+    const teammate = { getStatus: () => AgentStatus.RUNNING };
+    const teamManager = {
+      getTeamFile: () => ({
+        name: teamName,
+        createdAt: 500,
+        leadAgentId: 'leader',
+        members: [
+          {
+            agentId: 'reviewer@review-team',
+            name: 'reviewer',
+            joinedAt: 1_000,
+            cwd: '/work/qwen-code',
+            tmuxPaneId: '',
+            subscriptions: [],
+          },
+        ],
+      }),
+      getAgentFromBackend: () => teammate,
+    } as unknown as TeamManager;
+
+    try {
+      const snapshot = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], qwenHome, teamManager),
+        4_000,
+      );
+
+      expect(snapshot.tasks).toEqual([
+        expect.objectContaining({
+          id: 'reviewer@review-team',
+          label: 'reviewer',
+          status: 'running',
+          teamName,
+        }),
+      ]);
+      expect(snapshot.tasks[0]).not.toHaveProperty('teamTask');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      fs.rmSync(qwenHome, { recursive: true, force: true });
+    }
+  });
+
   it('merges persisted agents with live registry entries by id', async () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
     const sessionDir = path.join(projectDir, 'subagents', 'session-1');

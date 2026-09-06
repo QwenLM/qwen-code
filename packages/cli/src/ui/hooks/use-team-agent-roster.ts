@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentTask } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import {
   AgentStatus,
@@ -100,13 +100,22 @@ export function buildTeamAgentRosterEntries(
   });
 }
 
+/**
+ * Shared identity for the no-team case. Returning a fresh `[]` would make
+ * this hook's result change on every render, and `LiveAgentPanel` keys its
+ * one-second elapsed-time interval on that array — a new identity each
+ * render tears the interval down and recreates it before it can ever fire,
+ * freezing elapsed times for every user, team or not.
+ */
+const NO_TEAM_ENTRIES: TeamAgentDialogEntry[] = [];
+
 export function useTeamAgentRoster(
   config: Config | null,
   registeredAgents: ReadonlyMap<string, unknown>,
 ): TeamAgentDialogEntry[] {
   const [manager, setManager] = useState<TeamManager | null>(null);
   const [tasks, setTasks] = useState<SwarmTask[]>([]);
-  const [, setRevision] = useState(0);
+  const [revision, setRevision] = useState(0);
   const terminalEndTimes = useRef(new Map<string, number>());
 
   useEffect(() => {
@@ -170,12 +179,20 @@ export function useTeamAgentRoster(
     };
   }, [config]);
 
-  return manager
-    ? buildTeamAgentRosterEntries(
-        manager,
-        tasks,
-        terminalEndTimes.current,
-        new Set(registeredAgents.keys()),
-      )
-    : [];
+  return useMemo(
+    () =>
+      manager
+        ? buildTeamAgentRosterEntries(
+            manager,
+            tasks,
+            terminalEndTimes.current,
+            new Set(registeredAgents.keys()),
+          )
+        : NO_TEAM_ENTRIES,
+    // `revision` is a change token, not an input: a teammate's status lives
+    // on its backend agent rather than in props, so a lifecycle event is the
+    // only thing that can tell this memo to re-read it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [manager, tasks, registeredAgents, revision],
+  );
 }
