@@ -20,7 +20,8 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { LiveHistoryItem, WaitingCallInfo } from './live-session-model.js';
+import type { WaitingCallInfo } from './live-session.js';
+import type { LiveHistoryItem } from './live-session-model.js';
 
 export interface FollowupGenerationParams {
   config: Config;

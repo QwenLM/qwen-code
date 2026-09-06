@@ -37,6 +37,7 @@ import {
   useFollowupSuggestionGeneration,
   type FollowupGenerationParams,
 } from './followup-generation.js';
+import type { WaitingCallInfo } from './live-session.js';
 
 function buildConfig(overrides: Record<string, unknown> = {}): Config {
   return {
@@ -59,6 +60,12 @@ const NO_CACHE_SHARING = {
 const ERROR_ITEMS = [
   { kind: 'error', id: '1', text: 'boom' },
 ] as unknown as readonly LiveHistoryItem[];
+
+const PARKED_CALL = {
+  callId: 'c1',
+  name: 'test_tool',
+  confirmationDetails: {},
+} as unknown as WaitingCallInfo;
 
 function props(overrides: Partial<FollowupGenerationParams> = {}) {
   return {
@@ -121,7 +128,7 @@ describe('useFollowupSuggestionGeneration', () => {
 
   it.each([
     ['an error as the last item', { items: ERROR_ITEMS }],
-    ['parked confirmations', { waitingCalls: [{}] }],
+    ['parked confirmations', { waitingCalls: [PARKED_CALL] }],
     [
       'plan mode',
       { config: buildConfig({ getApprovalMode: () => ApprovalMode.PLAN }) },
@@ -131,13 +138,16 @@ describe('useFollowupSuggestionGeneration', () => {
       { config: buildConfig({ isInteractive: () => false }) },
     ],
     ['sdk mode', { config: buildConfig({ getSdkMode: () => 'sdk' }) }],
-  ])('skips generation with %s', async (_label, overrides) => {
-    const { rerender } = renderGeneration(props(overrides));
-    await act(async () => {
-      rerender(props({ ...overrides, streaming: false }));
-    });
-    expect(mocks.generate).not.toHaveBeenCalled();
-  });
+  ] as ReadonlyArray<[string, Partial<FollowupGenerationParams>]>)(
+    'skips generation with %s',
+    async (_label, overrides) => {
+      const { rerender } = renderGeneration(props(overrides));
+      await act(async () => {
+        rerender(props({ ...overrides, streaming: false }));
+      });
+      expect(mocks.generate).not.toHaveBeenCalled();
+    },
+  );
 
   it('disabled by settings never generates and clears on edges', async () => {
     const config = buildConfig();
