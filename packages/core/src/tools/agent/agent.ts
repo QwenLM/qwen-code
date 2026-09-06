@@ -3773,11 +3773,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const residentController: ResidentBackgroundAgent = {
           continue: (input) => {
             if (!canStayResident || disposeRequested || runtimeDisposed) {
-              return false;
+              return 'fallback';
             }
             if (needsAutoPermissionLease()) {
               requestRuntimeDisposal();
-              return false;
+              return 'fallback';
+            }
+
+            const currentEntry = registry.get(hookOpts.agentId);
+            if (!registry.canStartBackgroundAgent(currentEntry?.model)) {
+              return 'capacity_wait';
             }
 
             const nextAbortController = new AbortController();
@@ -3791,7 +3796,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               debugLogger.warn(
                 `[Agent] Could not continue resident background agent ${hookOpts.agentId}: ${error instanceof Error ? error.message : String(error)}`,
               );
-              return false;
+              return registry.canStartBackgroundAgent(currentEntry?.model)
+                ? 'fallback'
+                : 'capacity_wait';
             }
             if (
               !restarted ||
@@ -3800,7 +3807,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               registry.get(hookOpts.agentId) !== restarted ||
               restarted.status !== 'running'
             ) {
-              return false;
+              return 'fallback';
             }
 
             liveToolCallCount = 0;
@@ -3839,7 +3846,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 );
               });
             currentTurnPromise.catch(reportUnexpectedBackgroundError);
-            return true;
+            return 'continued';
           },
           dispose: requestRuntimeDisposal,
         };

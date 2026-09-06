@@ -3362,7 +3362,7 @@ describe('BackgroundAgentResumeService', () => {
         'tighten the summary',
         'delivery-2',
       ),
-    ).toBe(true);
+    ).toBe('continued');
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
@@ -3384,7 +3384,9 @@ describe('BackgroundAgentResumeService', () => {
     registry.reset();
 
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(
+      'not_completed',
+    );
   });
 
   it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
@@ -3689,7 +3691,7 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe('fallback');
     expect(dispose).toHaveBeenCalledOnce();
   });
 

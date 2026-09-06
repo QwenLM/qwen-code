@@ -1418,11 +1418,15 @@ export class BackgroundAgentResumeService {
       const residentController: ResidentBackgroundAgent = {
         continue: (input) => {
           if (!canStayResident || disposeRequested || runtimeDisposed) {
-            return false;
+            return 'fallback';
           }
           if (needsAutoPermissionLease()) {
             requestRuntimeDisposal();
-            return false;
+            return 'fallback';
+          }
+
+          if (!registry.canStartBackgroundAgent(meta.model)) {
+            return 'capacity_wait';
           }
 
           const nextAbortController = new AbortController();
@@ -1438,7 +1442,9 @@ export class BackgroundAgentResumeService {
                 meta.agentId
               }: ${error instanceof Error ? error.message : String(error)}`,
             );
-            return false;
+            return registry.canStartBackgroundAgent(meta.model)
+              ? 'fallback'
+              : 'capacity_wait';
           }
           if (
             !restarted ||
@@ -1447,7 +1453,7 @@ export class BackgroundAgentResumeService {
             registry.get(meta.agentId) !== restarted ||
             restarted.status !== 'running'
           ) {
-            return false;
+            return 'fallback';
           }
 
           liveToolCallCount = 0;
@@ -1483,7 +1489,7 @@ export class BackgroundAgentResumeService {
               );
             });
           currentTurnPromise.catch(reportUnexpectedBackgroundError);
-          return true;
+          return 'continued';
         },
         dispose: requestRuntimeDisposal,
       };
