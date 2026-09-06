@@ -265,13 +265,18 @@ export class BackgroundShellRegistry {
     // this serves out-of-tree consumers of the exported class. The terminal
     // retention cap bounds what can be replayed.
     if (!cb) return;
-    for (const entry of this.entries.values()) {
-      if (entry.status !== 'running' && !entry.notified) {
-        debugLogger.debug(
-          `Redelivering retained terminal notification for shell ${entry.shellId}`,
-        );
-        this.emitNotification(entry);
-      }
+    const replayableEntries = Array.from(this.entries.values())
+      .filter((entry) => entry.status !== 'running' && !entry.notified)
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+    for (const entry of replayableEntries) {
+      debugLogger.debug(
+        `Redelivering retained terminal notification for shell ${entry.shellId}`,
+      );
+      this.emitNotification(entry);
     }
   }
 

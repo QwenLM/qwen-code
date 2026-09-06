@@ -760,24 +760,24 @@ describe('BackgroundShellRegistry', () => {
       expect(reg.get('a')!.notified).toBe(true);
     });
 
-    it('redelivers retained terminal states once and suppresses shutdown cancellations', () => {
+    it('redelivers retained terminal states in settle order once and suppresses shutdown cancellations', () => {
       const reg = new BackgroundShellRegistry();
       reg.register(makeEntry({ shellId: 'a' }));
       reg.register(makeEntry({ shellId: 'b' }));
       reg.register(makeEntry({ shellId: 'c' }));
       reg.register(makeEntry({ shellId: 'shutdown' }));
-      reg.complete('a', 0, 2000);
+      reg.cancel('c', 2000);
       reg.fail('b', 'boom', 2001);
-      reg.cancel('c', 2002);
+      reg.complete('a', 0, 2002);
       reg.abortAll();
 
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
 
       expect(callback.mock.calls.map((call) => call[2])).toEqual([
-        { shellId: 'a', status: 'completed', exitCode: 0 },
-        { shellId: 'b', status: 'failed' },
         { shellId: 'c', status: 'cancelled' },
+        { shellId: 'b', status: 'failed' },
+        { shellId: 'a', status: 'completed', exitCode: 0 },
       ]);
       expect(reg.get('shutdown')!.notified).toBe(true);
 
