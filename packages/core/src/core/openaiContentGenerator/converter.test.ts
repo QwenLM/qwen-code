@@ -498,6 +498,186 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
     });
 
+    describe('malformed tool call salvage (#10689)', () => {
+      it('salvages a completed named call beside a nameless one', () => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('open', {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_good',
+                function: { name: 'edit', arguments: '{"path":"a.ts"}' },
+              },
+              {
+                index: 1,
+                id: 'call_nameless',
+                function: { arguments: '{"path":"b.ts"}' },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        const result = converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        );
+
+        expect(result.candidates?.[0]?.content?.parts).toEqual([
+          {
+            functionCall: {
+              id: 'call_good',
+              name: 'edit',
+              args: { path: 'a.ts' },
+            },
+          },
+        ]);
+        expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      });
+
+      it('salvages a completed named call when the malformed sibling reports finish_reason "stop"', () => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('open', {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_good',
+                function: { name: 'read_file', arguments: '{}' },
+              },
+              {
+                index: 1,
+                id: 'call_nameless',
+                function: { arguments: '{"path":"b.ts"}' },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        const result = converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'stop'),
+          stream,
+        );
+
+        expect(result.candidates?.[0]?.content?.parts).toEqual([
+          {
+            functionCall: { id: 'call_good', name: 'read_file', args: {} },
+          },
+        ]);
+      });
+
+      it('salvages a completed named call beside an unroutable invalid index', () => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('open', {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_good',
+                function: { name: 'read_file', arguments: '{}' },
+              },
+              // No id and a bogus index: the parser cannot place the chunk,
+              // but the named call beside it must still be emitted.
+              { index: -1, function: { arguments: '{"path":"b.ts"}' } },
+            ],
+          }),
+          stream,
+        );
+
+        const result = converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        );
+
+        expect(result.candidates?.[0]?.content?.parts).toEqual([
+          {
+            functionCall: { id: 'call_good', name: 'read_file', args: {} },
+          },
+        ]);
+      });
+
+      it('emits a tool call whose invalid index was salvaged by its id', () => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('open', {
+            tool_calls: [
+              {
+                index: -1,
+                id: 'call_bad_index',
+                function: { name: 'read_file', arguments: '{"path":"a.ts"}' },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        const result = converter.convertOpenAIChunkToLlm(
+          streamChunk('finish', {}, 'tool_calls'),
+          stream,
+        );
+
+        expect(result.candidates?.[0]?.content?.parts).toEqual([
+          {
+            functionCall: {
+              id: 'call_bad_index',
+              name: 'read_file',
+              args: { path: 'a.ts' },
+            },
+          },
+        ]);
+      });
+
+      it('names the nameless condition in the thrown error', () => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('open', {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_without_name',
+                function: { arguments: '{"path":"a.ts"}' },
+              },
+            ],
+          }),
+          stream,
+        );
+
+        expect(() =>
+          converter.convertOpenAIChunkToLlm(
+            streamChunk('finish', {}, 'stop'),
+            stream,
+          ),
+        ).toThrowError(
+          expect.objectContaining({
+            type: 'MALFORMED_TOOL_CALL',
+            message: expect.stringContaining('never delivered a function name'),
+          }),
+        );
+      });
+
+      it('names the zero-completed condition in the thrown error', () => {
+        const stream = withStreamParser();
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('open', { tool_calls: [{ index: 0, function: {} }] }),
+          stream,
+        );
+
+        expect(() =>
+          converter.convertOpenAIChunkToLlm(
+            streamChunk('finish', {}, 'tool_calls'),
+            stream,
+          ),
+        ).toThrowError(
+          expect.objectContaining({
+            type: 'MALFORMED_TOOL_CALL',
+            message: expect.stringContaining('no assemblable tool call'),
+          }),
+        );
+      });
+    });
+
     it('rejects a protocol-tag recovery with a whitespace-only function name', () => {
       const stream = withStreamParser();
       emitReasoning(stream);
@@ -1084,7 +1264,10 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
-    it('rejects an invalid tool-call index on a stop finish', () => {
+    it('salvages an invalid tool-call index when the call carries an id', () => {
+      // A bogus provider index alone no longer fails the turn when the id
+      // still identifies the call unambiguously (#10689): the parser reroutes
+      // the chunk to a fresh slot and the call completes normally.
       const stream = withStreamParser();
       converter.convertOpenAIChunkToLlm(
         streamChunk('invalid-tool-call', {
@@ -1099,12 +1282,19 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
-      expect(() => finishStream(stream, 'stop')).toThrowError(
-        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
-      );
+      const result = finishStream(stream, 'stop');
+
+      expect(result.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_invalid', name: 'read_file', args: {} },
+        },
+      ]);
     });
 
-    it('rejects valid tool calls accompanied by an invalid index', () => {
+    it('emits valid tool calls accompanied by an invalid-index call', () => {
+      // The valid call keeps its slot and the invalid-index call gets its own
+      // salvaged slot, so the turn completes with both calls instead of
+      // failing outright (#10689).
       const stream = withStreamParser();
       converter.convertOpenAIChunkToLlm(
         streamChunk('mixed-tool-calls', {
@@ -1124,9 +1314,16 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
-      expect(() => finishStream(stream)).toThrowError(
-        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
-      );
+      const result = finishStream(stream);
+
+      expect(result.candidates?.[0]?.content?.parts).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+        {
+          functionCall: { id: 'call_invalid', name: 'write_file', args: {} },
+        },
+      ]);
     });
 
     it('releases a split tag-like prefix when it becomes ordinary text', () => {

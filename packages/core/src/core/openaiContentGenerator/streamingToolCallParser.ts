@@ -85,13 +85,46 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     const validName = name?.trim() || undefined;
+    // Some OpenAI-compatible proxies stamp tool-call chunks with an invalid
+    // index (e.g. -1 or a float). An id still identifies the call
+    // unambiguously, and an id-less continuation can follow the remap a
+    // salvaged opener registered, so route those to a real slot instead of
+    // dropping the chunk and failing the whole turn with a malformed tool
+    // call (#10689). Without either signal there is no safe routing; keep
+    // dropping the chunk and flagging the stream as invalid.
     if (!Number.isSafeInteger(index) || index < 0) {
-      this.conflictingToolCallIdentity = true;
-      this.invalidToolCallIndex = true;
-      return {
-        complete: false,
-        error: new Error(`Invalid tool call index: ${index}`),
-      };
+      const rawIndex = index;
+      const knownSlot =
+        id !== undefined ? this.idToIndexMap.get(id) : undefined;
+      const remappedSlot = this.pendingIndexRemaps.get(rawIndex);
+      // A remapped slot is only adoptable by a NEW id while it has not been
+      // claimed by one yet — mirrors the pendingIndexRemaps adoption rule
+      // below, so a second call reusing the bogus index cannot hijack the
+      // first call's slot.
+      const remapAdoptable =
+        remappedSlot !== undefined &&
+        this.toolCallMeta.get(remappedSlot)?.id === undefined;
+      const salvageSlot =
+        knownSlot !== undefined
+          ? knownSlot
+          : id !== undefined
+            ? remapAdoptable
+              ? remappedSlot
+              : this.findNextAvailableIndex()
+            : remappedSlot;
+      if (salvageSlot === undefined) {
+        this.conflictingToolCallIdentity = true;
+        this.invalidToolCallIndex = true;
+        return {
+          complete: false,
+          error: new Error(`Invalid tool call index: ${rawIndex}`),
+        };
+      }
+      index = salvageSlot;
+      if (id !== undefined && knownSlot === undefined) {
+        this.idToIndexMap.set(id, salvageSlot);
+      }
+      this.pendingIndexRemaps.set(rawIndex, salvageSlot);
     }
     if (!id && !validName && !chunk.trim()) {
       const depth = this.depths.get(index) ?? 0;
@@ -415,6 +448,28 @@ export class StreamingToolCallParser {
               }
             } else {
               args = safeJsonParse(buffer, {});
+            }
+          }
+          // Some proxies double-encode the arguments: the buffer parses to a
+          // JSON *string* whose contents are the real arguments object. Parse
+          // that string exactly once and keep it only when it yields a JSON
+          // object; anything else falls through to the collapse below (#10689).
+          const parsedArgs: unknown = args;
+          if (typeof parsedArgs === 'string') {
+            try {
+              const unwrapped: unknown = JSON.parse(parsedArgs);
+              if (
+                typeof unwrapped === 'object' &&
+                unwrapped !== null &&
+                !Array.isArray(unwrapped)
+              ) {
+                args = unwrapped as Record<string, unknown>;
+                debugLogger.debug(
+                  `Unwrapped JSON-encoded string arguments for tool call ${meta.name} (id=${meta.id}) at index ${index}`,
+                );
+              }
+            } catch {
+              // Not JSON inside the string either; collapse below.
             }
           }
           // Tool arguments are always JSON objects; a corrupted buffer can

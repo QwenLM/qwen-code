@@ -1233,4 +1233,103 @@ describe('StreamingToolCallParser', () => {
       expect(parser.hasInvalidToolCallArguments()).toBe(invalid);
     });
   });
+
+  describe('malformed tool call salvage (#10689)', () => {
+    it('routes an opener with an invalid index and an id to a fresh slot', () => {
+      const result = parser.addChunk(
+        -1,
+        '{"path":"a.ts"}',
+        'call_salvaged',
+        'read_file',
+      );
+
+      expect(result.actualIndex).toBe(0);
+      expect(parser.hasInvalidToolCallIndex()).toBe(false);
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_salvaged',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+          index: 0,
+        },
+      ]);
+    });
+
+    it('routes id-less continuation chunks stamped with the invalid index to the salvaged slot', () => {
+      parser.addChunk(-1, '{"path":"a', 'call_salvaged', 'read_file');
+      // Continuation arrives with the same bogus index and no id.
+      parser.addChunk(-1, '.ts"}');
+
+      expect(parser.hasInvalidToolCallIndex()).toBe(false);
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_salvaged',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+          index: 0,
+        },
+      ]);
+    });
+
+    it('routes a known id on an invalid index back to its own slot', () => {
+      parser.addChunk(0, '{"path":"a.ts"}', 'call_a', 'read_file');
+      // A later fragment for the same call arrives with a bogus index.
+      parser.addChunk(-1, '{"extra":true}', 'call_a', 'read_file');
+
+      expect(parser.hasInvalidToolCallIndex()).toBe(false);
+      expect(parser.getToolCallMeta(0)).toEqual({
+        id: 'call_a',
+        name: 'read_file',
+      });
+    });
+
+    it('gives a second id on the same invalid index its own slot', () => {
+      parser.addChunk(-1, '{"path":"a.ts"}', 'call_a', 'read_file');
+      parser.addChunk(-1, '{"query":"b"}', 'call_b', 'search');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(2);
+      expect(completed.map((call) => call.id).sort()).toEqual([
+        'call_a',
+        'call_b',
+      ]);
+      expect(new Set(completed.map((call) => call.index)).size).toBe(2);
+    });
+
+    it('still flags an invalid index that cannot be routed', () => {
+      // No id and no registered remap: there is no safe slot for the chunk.
+      const result = parser.addChunk(-1, '{"path":"a.ts"}');
+
+      expect(result.error?.message).toBe('Invalid tool call index: -1');
+      expect(parser.hasInvalidToolCallIndex()).toBe(true);
+    });
+
+    it('unwraps arguments delivered as a JSON-encoded string', () => {
+      // Some proxies double-encode: the arguments field parses to a JSON
+      // string whose contents are the real object.
+      parser.addChunk(
+        0,
+        '"{\\"path\\":\\"a.ts\\"}"',
+        'call_double_encoded',
+        'read_file',
+      );
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_double_encoded',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+          index: 0,
+        },
+      ]);
+    });
+
+    it('collapses a JSON-encoded string that does not wrap an object', () => {
+      parser.addChunk(0, '"just text"', 'call_string', 'read_file');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        { id: 'call_string', name: 'read_file', args: {}, index: 0 },
+      ]);
+    });
+  });
 });

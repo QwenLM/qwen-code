@@ -541,6 +541,12 @@ interface TryCompressOptions {
 const INVALID_STREAM_RETRY_CONFIG = {
   transientMaxRetries: 4,
   protocolTagLeakMaxRetries: 2,
+  // A malformed tool call is a deterministic provider defect, not a transient
+  // glitch: re-sending the identical request usually reproduces the same
+  // malformed output. Blind retries just burn generation round-trips before
+  // the turn fails anyway (#10689), so allow exactly one retry — armed with
+  // a repair instruction — instead of the full transient budget.
+  malformedToolCallMaxRetries: 1,
   initialDelayMs: 2000,
 };
 
@@ -621,6 +627,23 @@ const OUTPUT_RECOVERY_MESSAGE = `Output token limit hit. ${RECOVERY_RESUME_INSTR
  * off and must not restart.
  */
 const TRANSPORT_CONTINUATION_MESSAGE = `The connection dropped mid-response. ${RECOVERY_RESUME_INSTRUCTION}`;
+
+/**
+ * Instruction appended — as a synthetic, non-durable user turn — to the single
+ * repair retry allowed after a MALFORMED_TOOL_CALL stream (#10689). Providers
+ * behind OpenAI-compatible proxies occasionally emit a tool call whose
+ * metadata or arguments cannot be assembled; a blind re-send usually
+ * reproduces the same malformed output, so the one permitted retry tells the
+ * model exactly what to fix instead of burning the transient retry budget.
+ * Fixed wording on purpose: nothing model-derived is fed back into the prompt.
+ */
+const MALFORMED_TOOL_CALL_REPAIR_MESSAGE =
+  'Your previous response contained a tool call that could not be parsed ' +
+  '(missing function name, invalid tool-call index, or arguments that do not ' +
+  'form a JSON object). Re-issue the tool call you intended: emit the tool ' +
+  'name in the function-name field and the arguments as a single valid JSON ' +
+  'object. Do not apologize or restate earlier work — just emit the corrected ' +
+  'tool call.';
 
 /**
  * Maximum length of the previous-response tail embedded inside the
@@ -3130,8 +3153,11 @@ export class LlmChat {
         let rateLimitRetryCount = 0;
         let transientInvalidStreamRetryCount = 0;
         let protocolTagLeakRetryCount = 0;
+        let malformedToolCallRetryCount = 0;
         const totalInvalidStreamRetryCount = () =>
-          transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
+          transientInvalidStreamRetryCount +
+          protocolTagLeakRetryCount +
+          malformedToolCallRetryCount;
         // The armed attempt can be rescheduled by a competing retry path
         // (rate limit, transport replay/continuation, reactive compression)
         // before its outcome is known; the rescheduled attempt is still the
@@ -3175,6 +3201,11 @@ export class LlmChat {
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
+        // Set when the previous attempt failed with MALFORMED_TOOL_CALL and
+        // the single repair retry is scheduled. One-shot: consumed by the next
+        // buildAttemptContents() call so exactly one attempt carries the
+        // instruction and a later, unrelated retry cannot inherit it.
+        let malformedToolCallRepairPending = false;
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig =
@@ -3230,24 +3261,34 @@ export class LlmChat {
          * unlike the MAX_TOKENS recovery loop, which has to route through
          * history and clean up afterwards with `coalesceRecoveryPairs`.
          */
-        const buildAttemptContents = (): Content[] =>
-          transportContinuationPrefix.length > 0
-            ? [
-                ...requestContents,
-                {
-                  role: 'model',
-                  parts: [{ text: transportContinuationPrefix }],
-                },
-                createUserContent([
+        const buildAttemptContents = (): Content[] => {
+          const base: Content[] =
+            transportContinuationPrefix.length > 0
+              ? [
+                  ...requestContents,
                   {
-                    text: buildRecoveryMessageFromText(
-                      TRANSPORT_CONTINUATION_MESSAGE,
-                      transportContinuationPrefix,
-                    ),
+                    role: 'model',
+                    parts: [{ text: transportContinuationPrefix }],
                   },
-                ]),
-              ]
-            : requestContents;
+                  createUserContent([
+                    {
+                      text: buildRecoveryMessageFromText(
+                        TRANSPORT_CONTINUATION_MESSAGE,
+                        transportContinuationPrefix,
+                      ),
+                    },
+                  ]),
+                ]
+              : requestContents;
+          if (!malformedToolCallRepairPending) {
+            return base;
+          }
+          malformedToolCallRepairPending = false;
+          return [
+            ...base,
+            createUserContent([{ text: MALFORMED_TOOL_CALL_REPAIR_MESSAGE }]),
+          ];
+        };
 
         /**
          * Forget any in-flight continuation.
@@ -3861,14 +3902,26 @@ export class LlmChat {
             // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
             // is independent from HTTP retries handled by retryWithBackoff.
             const isInvalidStreamError = error instanceof InvalidStreamError;
-            const maxInvalidStreamRetries =
-              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+            // Malformed tool calls get a single, repair-instruction-armed
+            // retry instead of the full transient budget (#10689): the
+            // malformation is a deterministic provider defect, so blind
+            // re-sends mostly reproduce it and just burn round-trips.
+            const isMalformedToolCallRetry =
+              isInvalidStreamError && error.type === 'MALFORMED_TOOL_CALL';
+            const maxInvalidStreamRetries = !isInvalidStreamError
+              ? INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+              : error.type === 'PROTOCOL_TAG_LEAK'
                 ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
-                : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
-            const invalidStreamRetryCount =
-              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                : isMalformedToolCallRetry
+                  ? INVALID_STREAM_RETRY_CONFIG.malformedToolCallMaxRetries
+                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+            const invalidStreamRetryCount = !isInvalidStreamError
+              ? transientInvalidStreamRetryCount
+              : error.type === 'PROTOCOL_TAG_LEAK'
                 ? protocolTagLeakRetryCount
-                : transientInvalidStreamRetryCount;
+                : isMalformedToolCallRetry
+                  ? malformedToolCallRetryCount
+                  : transientInvalidStreamRetryCount;
             if (
               isInvalidStreamError &&
               invalidStreamRetryCount < maxInvalidStreamRetries
@@ -3877,6 +3930,11 @@ export class LlmChat {
               const nextInvalidStreamRetryCount = invalidStreamRetryCount + 1;
               if (error.type === 'PROTOCOL_TAG_LEAK') {
                 protocolTagLeakRetryCount = nextInvalidStreamRetryCount;
+              } else if (isMalformedToolCallRetry) {
+                malformedToolCallRetryCount = nextInvalidStreamRetryCount;
+                // Arm the repair attempt: the next attempt's contents carry
+                // the repair instruction as a synthetic user turn.
+                malformedToolCallRepairPending = true;
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
               }
@@ -3973,6 +4031,7 @@ export class LlmChat {
         ): AsyncGenerator<InvalidStreamRetryEvent> {
           let transientRetryCount = 0;
           let protocolTagLeakRetryCount = 0;
+          let malformedToolCallRetryCount = 0;
           let acceptQuietToolResultCompletionOnNextAttempt = false;
           for (;;) {
             const attemptState = buildAttempt();
@@ -3999,14 +4058,20 @@ export class LlmChat {
               attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
 
+              const isMalformedToolCallRetry =
+                error.type === 'MALFORMED_TOOL_CALL';
               const maxContinuationRetries =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
-                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+                  : isMalformedToolCallRetry
+                    ? INVALID_STREAM_RETRY_CONFIG.malformedToolCallMaxRetries
+                    : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
               const continuationRetryCount =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? protocolTagLeakRetryCount
-                  : transientRetryCount;
+                  : isMalformedToolCallRetry
+                    ? malformedToolCallRetryCount
+                    : transientRetryCount;
               if (continuationRetryCount >= maxContinuationRetries) {
                 throw error;
               }
@@ -4014,6 +4079,10 @@ export class LlmChat {
               const nextContinuationRetryCount = continuationRetryCount + 1;
               if (error.type === 'PROTOCOL_TAG_LEAK') {
                 protocolTagLeakRetryCount = nextContinuationRetryCount;
+              } else if (isMalformedToolCallRetry) {
+                // No repair instruction on this secondary path: the wrapper's
+                // attempts are built by callers from already-final contents.
+                malformedToolCallRetryCount = nextContinuationRetryCount;
               } else {
                 transientRetryCount = nextContinuationRetryCount;
               }

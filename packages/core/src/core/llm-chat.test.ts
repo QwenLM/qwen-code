@@ -7561,7 +7561,7 @@ describe('LlmChat', async () => {
           ],
         },
         finishReason: 'tool_calls',
-        retryCount: 4,
+        retryCount: 1,
       },
     ] as const)(
       'should retry $name through the OpenAI pipeline',
@@ -7627,6 +7627,183 @@ describe('LlmChat', async () => {
         }
       },
     );
+
+    it('arms the single malformed-tool-call retry with a repair instruction', async () => {
+      vi.useFakeTimers();
+      try {
+        const create = vi.fn().mockImplementation(async () =>
+          (async function* () {
+            yield {
+              id: 'malformed-tool-call',
+              created: 1,
+              model: 'test-model',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_without_name',
+                        type: 'function',
+                        function: { arguments: '{}' },
+                      },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            } as unknown as OpenAI.Chat.ChatCompletionChunk;
+          })(),
+        );
+        const provider = {
+          buildClient: () =>
+            ({ chat: { completions: { create } } }) as unknown as OpenAI,
+          buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+            request,
+          buildHeaders: () => ({}),
+          getDefaultGenerationConfig: () => ({}),
+        } as OpenAICompatibleProvider;
+        const generator = new OpenAIContentGenerator(
+          { model: 'test-model', authType: AuthType.USE_OPENAI },
+          mockConfig,
+          provider,
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-malformed-repair-armed',
+        );
+        await expectStreamExhaustion(stream);
+
+        // Initial attempt + exactly one repair retry, not the full
+        // transient budget of five attempts.
+        expect(create).toHaveBeenCalledTimes(2);
+        const retryRequest = create.mock
+          .calls[1]?.[0] as OpenAI.Chat.ChatCompletionCreateParams;
+        expect(JSON.stringify(retryRequest.messages)).toContain(
+          'could not be parsed',
+        );
+        // The repair turn is synthetic and must never reach durable history.
+        expect(JSON.stringify(chat.getHistory())).not.toContain(
+          'could not be parsed',
+        );
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            total_attempts: 2,
+            final_error_type: 'MALFORMED_TOOL_CALL',
+            model: 'test-model',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('recovers on the malformed-tool-call repair retry', async () => {
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        const create = vi.fn().mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return (async function* () {
+              yield {
+                id: 'malformed-tool-call',
+                created: 1,
+                model: 'test-model',
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_without_name',
+                          type: 'function',
+                          function: { arguments: '{}' },
+                        },
+                      ],
+                    },
+                    finish_reason: 'tool_calls',
+                  },
+                ],
+              } as unknown as OpenAI.Chat.ChatCompletionChunk;
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              id: 'malformed-tool-call-recovered',
+              created: 2,
+              model: 'test-model',
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: 'Recovered response' },
+                  finish_reason: 'stop',
+                },
+              ],
+            } as unknown as OpenAI.Chat.ChatCompletionChunk;
+          })();
+        });
+        const provider = {
+          buildClient: () =>
+            ({ chat: { completions: { create } } }) as unknown as OpenAI,
+          buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+            request,
+          buildHeaders: () => ({}),
+          getDefaultGenerationConfig: () => ({}),
+        } as OpenAICompatibleProvider;
+        const generator = new OpenAIContentGenerator(
+          { model: 'test-model', authType: AuthType.USE_OPENAI },
+          mockConfig,
+          provider,
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-malformed-repair-recovers',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(create).toHaveBeenCalledTimes(2);
+        const retryRequest = create.mock
+          .calls[1]?.[0] as OpenAI.Chat.ChatCompletionCreateParams;
+        expect(JSON.stringify(retryRequest.messages)).toContain(
+          'could not be parsed',
+        );
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered response',
+          ),
+        ).toBe(true);
+        expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it('keeps invalid stream retry budgets independent across error types', async () => {
       vi.useFakeTimers();
