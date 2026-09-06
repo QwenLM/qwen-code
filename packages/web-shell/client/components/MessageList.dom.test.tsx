@@ -529,6 +529,26 @@ const waitForFrames = async (predicate: () => boolean) => {
     await nextFrame();
   }
 };
+// `handleScroll` only paginates while the reader is at the top
+// (MessageList.tsx:4862, `curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX`), and the
+// auto-scroll driver keeps snapping the container back to the bottom for as
+// long as it is following (MessageList.tsx:5542 -> 4123). jsdom stores
+// `scrollTop` rather than recomputing it, so a single commit landing after the
+// one-frame `scrollCooldown` releases (4119/4148) parks the list at the bottom
+// and silently swallows every later scroll dispatch — and because that position
+// reads back as "near bottom", it re-arms the driver, so the state absorbs
+// instead of recovering. Whether the cooldown has released by then is a race
+// between jsdom's ~16.7ms rAF interval and React `act`'s macrotask yield, which
+// an idle host wins and a contended one (load 218-270) loses deterministically.
+// Re-assert the reader's position inside the same `act` as the dispatch so no
+// commit can slip a re-follow in between.
+const dispatchTopScroll = async (list: HTMLElement) => {
+  await act(async () => {
+    list.scrollTop = 0;
+    list.dispatchEvent(new Event('scroll'));
+    await Promise.resolve();
+  });
+};
 const mockMessageListWidth = (width: number) =>
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
     width,
@@ -1417,8 +1437,6 @@ describe('MessageList — turn collapse (DOM)', () => {
       hasOlderHistory: true,
       onLoadOlderHistory,
     });
-    const waitForLoadCount = (count: number) =>
-      waitForFrames(() => onLoadOlderHistory.mock.calls.length >= count);
     const list = c.querySelector(
       '[data-web-shell-message-list]',
     ) as HTMLElement;
@@ -1427,13 +1445,34 @@ describe('MessageList — turn collapse (DOM)', () => {
       writable: true,
       value: 0,
     });
+    // Re-drives rather than only ticking frames: when a commit has parked the
+    // list at the bottom, the dispatch meant to start this page never reached
+    // `loadOlderHistory`, and no number of frames recovers it. Idempotent by
+    // construction — `loadOlderHistory` rejects a duplicate at its own
+    // in-flight guard (MessageList.tsx:4596), and this page's promise stays
+    // pending until the test calls `resolveLoad()`, so re-driving cannot
+    // inflate the exact counts asserted below. Exhaustion throws naming the
+    // position that caused it, instead of falling through to an assertion that
+    // reads like a product bug.
+    const waitForLoadCount = async (count: number) => {
+      const deadline = Date.now() + FLUSH_DEADLINE_MS;
+      while (onLoadOlderHistory.mock.calls.length < count) {
+        await dispatchTopScroll(list);
+        if (onLoadOlderHistory.mock.calls.length >= count) return;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `waitForLoadCount(${count}) exhausted ${FLUSH_DEADLINE_MS}ms at ` +
+              `${onLoadOlderHistory.mock.calls.length} call(s), ` +
+              `scrollTop=${list.scrollTop}`,
+          );
+        }
+        await nextFrame();
+      }
+    };
 
     try {
       // Page 1 completes the split turn's head: the keep-open expands it.
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      await dispatchTopScroll(list);
       rerenderMessages(c, completed, {
         hasOlderHistory: true,
         onLoadOlderHistory,
@@ -1447,10 +1486,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       expect(has(c, 't1')).toBe(true);
 
       // Page 2 anchors on the now-visible t1 row while the fetch is in flight.
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      await dispatchTopScroll(list);
       await waitForLoadCount(2);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
 
@@ -1469,10 +1505,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       expect(isCollapsed(c, 't1')).toBe(true);
 
       // ...and pagination is not stuck: a third load still fires.
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      await dispatchTopScroll(list);
       await waitForLoadCount(3);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
 
@@ -1489,14 +1522,10 @@ describe('MessageList — turn collapse (DOM)', () => {
       await nextFrame();
       await nextFrame();
       // ...page 4 then completes that turn's head while its tail is already
-      // on screen, so it stays expanded.
-      // Re-top the container: re-renders snap it to the bottom while
-      // following; the scroll event must start near the top to trigger.
-      list.scrollTop = 0;
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      // on screen, so it stays expanded. This dispatch already re-topped the
+      // container before the other three did; `dispatchTopScroll` is that
+      // workaround promoted to the only way this test scrolls.
+      await dispatchTopScroll(list);
       await waitForLoadCount(4);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(4);
       rerenderMessages(

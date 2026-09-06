@@ -117,6 +117,7 @@ export { parseSseStream, SseFramingError } from './sse.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
+  createDaemonToolResultPreview,
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
   DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
@@ -182,6 +183,9 @@ export type {
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
+  DaemonToolResultPreview,
+  DaemonTodoListPreview,
+  DaemonTranscriptTodoItem,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
   DaemonTranscriptBlockChangeSummary,
