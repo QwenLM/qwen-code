@@ -3338,9 +3338,13 @@ describe('BackgroundAgentResumeService', () => {
       oldSessionMtime.getTime(),
     );
 
-    expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
-      true,
-    );
+    expect(
+      registry.continueResidentAgent(
+        agentId,
+        'tighten the summary',
+        'delivery-2',
+      ),
+    ).toBe(true);
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
@@ -3348,7 +3352,14 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     const hotContextArg = execute.mock.calls[1]?.[0];
-    expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
+    expect(hotContextArg?.get('task_prompt')).toBeUndefined();
+    expect(hotContextArg?.get('external_inputs_override')).toEqual([
+      {
+        kind: 'message',
+        text: 'tighten the summary',
+        deliveryId: 'delivery-2',
+      },
+    ]);
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
     expect(dispose).not.toHaveBeenCalled();
 

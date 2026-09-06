@@ -456,7 +456,7 @@ export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
  * task state is serializable, while the live runtime is process-local.
  */
 export interface ResidentBackgroundAgent {
-  continue(message: string): boolean;
+  continue(input: AgentExternalInput): boolean;
   dispose(): void;
 }
 
@@ -787,11 +787,19 @@ export class BackgroundTaskRegistry {
     this.residentAgents.set(agentId, resident);
   }
 
-  continueResidentAgent(agentId: string, message: string): boolean {
+  continueResidentAgent(
+    agentId: string,
+    message: string,
+    deliveryId?: string,
+  ): boolean {
     const entry = this.agents.get(agentId);
     const resident = this.residentAgents.get(agentId);
     if (!resident || entry?.status !== 'completed') return false;
-    return resident.continue(message);
+    return resident.continue(
+      deliveryId !== undefined
+        ? { kind: 'message', text: message, deliveryId }
+        : message,
+    );
   }
 
   unregisterResidentAgent(
