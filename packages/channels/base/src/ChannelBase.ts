@@ -1232,6 +1232,10 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
+
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
    * on a specific issue/PR. The default falls through to sendMessage(chatId,
@@ -4658,6 +4662,8 @@ export abstract class ChannelBase {
       return false;
     }
 
+    this.forgetPendingGroupHistory(envelope);
+
     // Surface the drop — otherwise an unanswered queued message vanishes
     // silently, making "my message was never answered" undiagnosable.
     // envelope.text is attacker-controlled, so neutralize it with the shared
@@ -5652,7 +5658,7 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
@@ -5704,12 +5710,28 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
       );
       return [];
+    }
+  }
+
+  private forgetPendingGroupHistory(envelope: Envelope): void {
+    if (envelope.messageId === undefined) return;
+    try {
+      this.groupHistory.forget(
+        this.groupHistoryKey(envelope),
+        truncateGroupHistoryField(envelope.messageId),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to forget group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -6183,6 +6205,7 @@ export abstract class ChannelBase {
         suppressSaveConfirmation: memorySaveIsSideEffect,
       });
       if (!memorySaveIsSideEffect) {
+        this.forgetPendingGroupHistory(envelope);
         return;
       }
     }
@@ -6193,7 +6216,10 @@ export abstract class ChannelBase {
       const handler = this.commands.get(parsed.command);
       if (handler) {
         const handled = await handler(envelope, parsed.args);
-        if (handled) return;
+        if (handled) {
+          this.forgetPendingGroupHistory(envelope);
+          return;
+        }
       }
       // Unrecognized commands fall through to the agent
       // Intercept /btw only where the bridge can answer it out of band. With no
@@ -6762,6 +6788,9 @@ export abstract class ChannelBase {
         recallRead?.generation === recallRead?.state.generation
           ? recallContext
           : undefined;
+      if (recognizedSlashCommand) {
+        this.forgetPendingGroupHistory(envelope);
+      }
       const groupHistoryEntries = recognizedSlashCommand
         ? []
         : this.drainPendingGroupHistory(envelope);
