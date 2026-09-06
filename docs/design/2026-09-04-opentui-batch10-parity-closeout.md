@@ -191,7 +191,7 @@ per-item height distribution itself stays open as transcript-region work.
 
 ## The nine ledger items (to be recorded as they land)
 
-U-6/G-1 (landed — Decision 8), U-7/G-2 (follow-up suggestions),
+U-6/G-1 (landed — Decision 8), U-7/G-2 (landed — Decision 11),
 U-9 (landed — Decision 10), G-3 (landed —
 Decision 9), U-33 (the `!` shell row), U-34 (four row shapes), U-32 (steer
 recording), U-11 (queue separator decision), U-13 (landed — Decision 5).
@@ -277,6 +277,47 @@ fill through a pre-attached handle (real-timer poll, 40ms budget); the
 mount test pins the no-owner notify fallback (pre-existing) and that an
 owner-present selection does not close. 43 tests across the two suites,
 typecheck and eslint clean.
+
+## Decision 11 — U-7/G-2: follow-up suggestions, generation at the entry, consumption at the composer
+
+Ink splits the feature in two: AppContainer generates on the
+Responding→Idle edge and InputPrompt consumes it (ghost placeholder,
+Tab/Right/Enter accept, typing dismiss, submit clear). The OpenTUI split
+follows the same ownership: the generation effect is ported into a new
+`useFollowupSuggestionGeneration` hook called from the entry (the entry owns
+`live.streaming` — the shell deliberately holds no stream state), and the
+composer consumes it through the renderer-neutral
+`useFollowupSuggestionsCLI` hook that ink already shares from core. The
+entry publishes `promptSuggestion` + `onPromptSuggestionDismiss` through the
+shell into the prompt; acceptance inserts into the edit buffer (never
+submits — Enter on an empty buffer with a ghost fills it, so `/clear` cannot
+execute by accident), and the ghost rides the existing placeholder slot
+(`placeholder={availableSuggestion ?? placeholder}`, ink's exact shape).
+
+Gates mirror AppContainer verbatim: unset `enableFollowupSuggestions` is
+enabled (schema defaults don't apply through `mergeSettings`), plus
+`isInteractive`, no SDK mode, no PLAN mode, last live item not an error, and
+no parked confirmations (`waitingCalls.length === 0` ≙ ink's confirmation
+requests). Two accepted deviations: ink also scans pending items for errors
+— the merged live fold makes the last-item check the reachable equivalent;
+and a slash dialog the shell opened mid-turn is invisible to the entry, so a
+suggestion may generate while a dialog is open — the composer is unmounted
+then (ghost not visible) and the next turn boundary clears it. Speculation
+(`enableSpeculation`) is ink-extra and stays out. The abort semantics are
+the ink ones: any turn boundary or unmount aborts the in-flight
+`generatePromptSuggestion` call, and a `filterReason` result logs the
+suppressed analytics event.
+
+Coverage: `followup-generation.test.ts` (12 renderHook tests) pins the
+edge trigger, the cache-sharing flag passthrough, the five gates, the
+disabled-settings clear, the turn-boundary clear, the suppressed event, and
+the unmount abort. `input-prompt.test.tsx` gains 7 tests (ghost placeholder
+observed through the fake textarea's captured props, Enter fills-not-submits,
+Tab/Right fills, typing dismisses-but-inserts, submit clears).
+`opentui-app-shell.test.tsx` pins the prop pass-through. The entry-side hook
+call itself is untestable in its harness (no effects run — same boundary as
+Decisions 8/9) and is review-pinned against AppContainer's generation
+effect.
 
 ## Coverage boundary
 

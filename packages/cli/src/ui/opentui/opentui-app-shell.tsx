@@ -155,6 +155,10 @@ export interface OpenTuiAppProps {
   composerHandle?: {
     current: { getText: () => string; setText: (text: string) => void } | null;
   };
+  /** U-7: finished follow-up suggestion, shown as the ghost placeholder. */
+  promptSuggestion?: string | null;
+  /** U-7: clears the published suggestion (accept/typing/submit). */
+  onPromptSuggestionDismiss?: () => void;
 }
 
 interface ShellModal {
@@ -197,6 +201,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     waitingToolCalls,
     onToolCallSettled,
     onRenderError,
+    promptSuggestion,
+    onPromptSuggestionDismiss,
   } = props;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
@@ -594,6 +600,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             queueLength={queueLength}
             onPopQueue={onPopQueue}
             composerHandle={props.composerHandle}
+            promptSuggestion={promptSuggestion}
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
           />
         )}
       </box>

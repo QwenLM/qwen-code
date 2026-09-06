@@ -72,6 +72,7 @@ import { setUpdateHandler } from '../handleAutoUpdate.js';
 import { useLogger } from '../hooks/useLogger.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import { useFollowupSuggestionGeneration } from './followup-generation.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
@@ -121,6 +122,17 @@ function OpenTuiEntryApp({
   const live = useOpenTuiLiveTurn({ config });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
+
+  // U-7: generate follow-up suggestions on the streaming→idle edge — the
+  // entry owns that edge, the shell stays stream-state-free.
+  const { promptSuggestion, dismissPromptSuggestion } =
+    useFollowupSuggestionGeneration({
+      config,
+      settings,
+      streaming: live.streaming,
+      items: live.items,
+      waitingCalls: live.waitingCalls,
+    });
 
   const statsRef = useRef(stats);
   useEffect(() => {
@@ -296,6 +308,8 @@ function OpenTuiEntryApp({
       onToolCallSettled={live.settleWaitingCall}
       onRenderError={handleRenderError}
       composerHandle={composerHandle}
+      promptSuggestion={promptSuggestion}
+      onPromptSuggestionDismiss={dismissPromptSuggestion}
     />
   );
 }

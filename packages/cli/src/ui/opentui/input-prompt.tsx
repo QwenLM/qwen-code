@@ -68,6 +68,7 @@ import type { Suggestion } from '../utils/suggestions.js';
 import { cpLen, toCodePoints } from '../utils/textUtils.js';
 import { t } from '../../i18n/index.js';
 import { C } from './theme.js';
+import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
@@ -199,6 +200,10 @@ export interface InputPromptProps {
   onPopQueue?: () => string | null;
   /** Recently used slash commands feeding recency-weighted ranking. */
   recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
+  /** U-7: finished follow-up suggestion published by the entry layer. */
+  promptSuggestion?: string | null;
+  /** U-7: clears the published suggestion (accept/typing/submit). */
+  onPromptSuggestionDismiss?: () => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -215,6 +220,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     queueLength = 0,
     onPopQueue,
     recentSlashCommands,
+    promptSuggestion,
+    onPromptSuggestionDismiss,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -279,6 +286,36 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // submit (ink pendingPastes).
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
+
+  // U-7: follow-up suggestion lifecycle, shared with ink via the
+  // renderer-neutral controller hook. Acceptance inserts into the composer
+  // buffer (never submits — /clear must not fire on Enter).
+  const {
+    state: followupState,
+    accept: acceptFollowup,
+    dismiss: dismissFollowup,
+    recordKeystroke: recordFollowupKeystroke,
+    setSuggestion: setFollowupSuggestion,
+  } = useFollowupSuggestionsCLI({
+    config,
+    isFocused: focus,
+    onAccept: (suggestion) => {
+      const el = editorRef.current;
+      if (!el) return;
+      el.insertText(suggestion);
+      setTextVersion((v) => v + 1);
+    },
+  });
+  useEffect(() => {
+    setFollowupSuggestion(promptSuggestion ?? null);
+  }, [setFollowupSuggestion, promptSuggestion]);
+  // Single source of truth for "is there a suggestion the user can accept
+  // right now" (ink availableSuggestion): the live controller suggestion if
+  // visible, otherwise the persisted prop (pre-show delay / type-then-delete).
+  const availableSuggestion: string | null =
+    followupState.isVisible || promptSuggestion
+      ? (followupState.suggestion ?? promptSuggestion ?? null)
+      : null;
 
   const chrome = promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
@@ -717,6 +754,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
 
+      // Ghost follow-up: an empty buffer with an available suggestion fills
+      // the composer instead of submitting — Enter on "/clear" must fill,
+      // not execute (ink SUBMIT parity).
+      if (el.plainText.length === 0 && availableSuggestion) {
+        key.preventDefault();
+        acceptFollowup('enter', {
+          fallbackText: promptSuggestion ?? undefined,
+        });
+        onPromptSuggestionDismiss?.();
+        return;
+      }
+
       // decideSubmit owns the whitespace guard and the `\`+Enter
       // continuation: a trailing backslash before the caret is removed and
       // becomes a newline instead of submitting (ink InputPrompt parity).
@@ -754,6 +803,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setSuggestions([]);
       setLoadingSuggestions(false);
       onSubmit(finalText, images.length > 0 ? images : undefined);
+      // Ink dismisses on submit so a synchronous command (/clear, /help)
+      // can't leave the stale suggestion as the ghost placeholder.
+      dismissFollowup();
+      onPromptSuggestionDismiss?.();
       key.preventDefault();
       return;
     }
@@ -777,6 +830,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
     if (isPrintableKeyInput(key)) {
+      // Typing over a ghost suggestion dismisses it but still inserts the
+      // character (ink parity: no preventDefault on the dismiss itself).
+      if (el.plainText.length === 0 && availableSuggestion) {
+        recordFollowupKeystroke();
+        dismissFollowup();
+        onPromptSuggestionDismiss?.();
+      }
       el.insertText(key.sequence);
       setTextVersion((v) => v + 1);
       key.preventDefault();
@@ -863,6 +923,34 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     if (showing && key.name === 'tab' && !key.shift) {
       key.preventDefault();
       acceptSuggestion(activeIndex, false);
+      return;
+    }
+
+    // Ghost follow-up accepts: Tab / Right fill an empty buffer without
+    // submitting (ink parity — acceptance needs an explicit action, and
+    // /clear or /quit must never execute by accident).
+    if (
+      !showing &&
+      key.name === 'tab' &&
+      !key.shift &&
+      el.plainText.length === 0 &&
+      availableSuggestion
+    ) {
+      key.preventDefault();
+      acceptFollowup('tab', { fallbackText: promptSuggestion ?? undefined });
+      onPromptSuggestionDismiss?.();
+      return;
+    }
+    if (
+      key.name === 'right' &&
+      !key.ctrl &&
+      !key.meta &&
+      el.plainText.length === 0 &&
+      availableSuggestion
+    ) {
+      key.preventDefault();
+      acceptFollowup('right', { fallbackText: promptSuggestion ?? undefined });
+      onPromptSuggestionDismiss?.();
       return;
     }
 
@@ -1042,7 +1130,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           flexGrow={1}
           minHeight={1}
           maxHeight={8}
-          placeholder={placeholder}
+          placeholder={availableSuggestion ?? placeholder}
           placeholderColor={C.dim}
           textColor={C.text}
           cursorColor={C.accent}

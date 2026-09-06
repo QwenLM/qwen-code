@@ -650,6 +650,15 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onInterrupt).toHaveBeenCalled();
   });
 
+  it('passes the follow-up suggestion and its dismiss through (U-7)', async () => {
+    const onPromptSuggestionDismiss = vi.fn();
+    renderApp({ promptSuggestion: 'Run the tests', onPromptSuggestionDismiss });
+    await settle();
+    expect(mocks.state.inputProps?.['promptSuggestion']).toBe('Run the tests');
+    (mocks.state.inputProps?.['onPromptSuggestionDismiss'] as () => void)();
+    expect(onPromptSuggestionDismiss).toHaveBeenCalledTimes(1);
+  });
+
   it('holds a mid-turn slash command until the turn ends', async () => {
     mocks.state.deferDuringStreaming = true;
     const props = {

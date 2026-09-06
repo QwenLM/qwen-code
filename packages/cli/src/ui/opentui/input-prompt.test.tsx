@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => {
     slashCommands: [] as unknown[],
     fileSearchResults: [] as string[],
     fileSearchDelay: Promise.resolve() as Promise<void>,
+    textareaProps: null as Record<string, unknown> | null,
   };
 
   function createFakeEditor() {
@@ -169,7 +170,8 @@ const mocks = vi.hoisted(() => {
   async function buildJsxRuntime() {
     const React = await import('react');
     const FakeTextarea = React.forwardRef(
-      (_props: unknown, ref: React.Ref<unknown>) => {
+      (props: Record<string, unknown>, ref: React.Ref<unknown>) => {
+        state.textareaProps = props;
         const editor = React.useMemo(() => {
           const created = createFakeEditor();
           state.editors.push(created);
@@ -1125,4 +1127,97 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
       }
     },
   );
+});
+
+describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
+  const SUGGESTION = 'Try /model fast';
+
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+    mocks.state.fileSearchResults = [];
+    mocks.state.fileSearchDelay = Promise.resolve();
+    mocks.state.textareaProps = null;
+  });
+
+  function renderWithSuggestion(
+    overrides: {
+      onSubmit?: (text: string) => void;
+      onPromptSuggestionDismiss?: () => void;
+    } = {},
+  ) {
+    const dismiss = vi.fn();
+    const submitted: string[] = [];
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={(text) => {
+          submitted.push(text);
+          overrides.onSubmit?.(text);
+        }}
+        userMessages={[]}
+        promptSuggestion={SUGGESTION}
+        onPromptSuggestionDismiss={
+          overrides.onPromptSuggestionDismiss ?? dismiss
+        }
+      />,
+    );
+    return { dismiss, submitted };
+  }
+
+  it('shows the suggestion as the ghost placeholder', () => {
+    renderWithSuggestion();
+    expect(mocks.state.textareaProps?.['placeholder']).toBe(SUGGESTION);
+  });
+
+  it('keeps the default placeholder without a suggestion', () => {
+    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    const placeholder = mocks.state.textareaProps?.['placeholder'];
+    expect(typeof placeholder).toBe('string');
+    expect(placeholder).not.toBe(SUGGESTION);
+  });
+
+  it('Enter fills the suggestion instead of submitting', async () => {
+    const { dismiss, submitted } = renderWithSuggestion();
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(editor.plainText).toBe(SUGGESTION);
+    expect(submitted).toEqual([]);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['tab', '\t'],
+    ['right', '\x1b[C'],
+  ])('%s fills the suggestion without submitting', async (name, sequence) => {
+    const { dismiss, submitted } = renderWithSuggestion();
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name, sequence }));
+    });
+    expect(editor.plainText).toBe(SUGGESTION);
+    expect(submitted).toEqual([]);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('typing over the ghost dismisses it but still inserts the character', async () => {
+    const { dismiss } = renderWithSuggestion();
+    const editor = currentEditor();
+    await typeText('x');
+    expect(editor.plainText).toBe('x');
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('submit clears the persisted suggestion', async () => {
+    const { dismiss } = renderWithSuggestion();
+    await typeText('hi');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(dismiss).toHaveBeenCalled();
+  });
 });
