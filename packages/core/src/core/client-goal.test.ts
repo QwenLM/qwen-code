@@ -13,11 +13,17 @@ import {
   type GoalJournal,
   type GoalRuntime,
 } from '../goals/goal-runtime.js';
-import type {
-  GoalSnapshotV2,
-  GoalStateCause,
-  GoalStateRecordPayloadV2,
-  GoalTurnPermit,
+import {
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
+  goalPauseReasonForHeadlessFailure,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type GoalStateRecordPayloadV2,
+  type GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
@@ -797,6 +803,7 @@ describe('LlmClient Goal admission', () => {
       action: 'pause',
       expectedGoalId: appliedGoal.goalId,
       expectedRevision: appliedGoal.revision,
+      reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
     });
   });
 
@@ -1342,10 +1349,12 @@ describe('LlmClient Goal admission', () => {
       ),
     ).rejects.toThrow('hook exploded');
 
+    // The hook threw; the caller never aborted.
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: goalPauseReasonForFailure('the turn was interrupted'),
     });
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(turnMocks.run).not.toHaveBeenCalled();
@@ -1497,6 +1506,7 @@ describe('LlmClient Goal admission', () => {
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
     });
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(goalStateEvents(events).map((event) => event.cause)).toEqual([
@@ -1538,10 +1548,13 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(error).toBe(setupError);
+    // Model setup threw; the caller never aborted, so this is a failure
+    // rather than a user interrupt.
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: goalPauseReasonForFailure('the turn was interrupted'),
     });
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(goalStateEvents(events).map((event) => event.cause)).toEqual([
@@ -1549,6 +1562,95 @@ describe('LlmClient Goal admission', () => {
       'pause',
       'turn_finished',
     ]);
+  });
+
+  it('uses the host reason when an interrupted Goal send releases its permit', async () => {
+    const { client, runtime } = setupGoalClient();
+    const setupError = new Error('model setup exploded');
+    const getInterruptedGoalPauseReason = vi.fn(
+      () => GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    );
+    turnMocks.run.mockImplementationOnce(() => {
+      throw setupError;
+    });
+
+    const { error } = await collectOutcome(
+      client.sendMessageStream(
+        [{ text: 'start work' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getInterruptedGoalPauseReason,
+        },
+      ),
+    );
+
+    expect(error).toBe(setupError);
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledOnce();
+    // The host needs the error to tell a turn that died from one that merely
+    // stopped; without it every failure reads as a clean stop.
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledWith({
+      failure: 'model setup exploded',
+    });
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    });
+  });
+
+  it('passes loop detection failures to the host pause-reason resolver', async () => {
+    const { client, runtime } = setupGoalClient();
+    vi.spyOn(
+      client['loopDetector'],
+      'checkAlwaysOnSafeties',
+    ).mockReturnValueOnce(true);
+    turnMocks.run.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'loop-tool',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'goal-prompt',
+          },
+        };
+      })(),
+    );
+    const getInterruptedGoalPauseReason = vi.fn(
+      (interruption?: { failure?: string }) =>
+        goalPauseReasonForHeadlessFailure(interruption?.failure ?? ''),
+    );
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'start work' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getInterruptedGoalPauseReason,
+        },
+      ),
+    );
+
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledWith({
+      failure: 'loop detected',
+    });
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: goalPauseReasonForHeadlessFailure('loop detected'),
+    });
   });
 
   it('drains a concurrent pause before a blocking Stop hook recurses', async () => {
@@ -1791,10 +1893,14 @@ describe('LlmClient Goal admission', () => {
       ),
     );
 
+    // The cap is the reason the Goal stopped, and this dispatch is the
+    // one that reaches the record -- a later reasoned pause on a paused
+    // Goal throws.
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
     });
     expect(runtime.getSnapshot()).toMatchObject({
       goal: { status: 'paused' },
@@ -1805,6 +1911,84 @@ describe('LlmClient Goal admission', () => {
       type: LlmEventType.HookSystemMessage,
       value:
         'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+    });
+  });
+
+  it('records the session token limit when it stops a Goal before sampling', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getSessionTokenLimit).mockReturnValue(100);
+    Object.assign(config, {
+      getModelRouteIdentity: vi.fn(() => 'test-route'),
+    });
+    Object.assign(client.getChat(), {
+      getLastPromptTokenCount: vi.fn(() => 101),
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+      ),
+    );
+
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+    });
+    expect(turnMocks.run).not.toHaveBeenCalled();
+  });
+
+  it('lets the host name a Stop-hook cap pause in its own register', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    const messageBus = {
+      request: vi.fn(async () => ({
+        output: { decision: 'block', reason: 'still blocked' },
+        stopHookCount: 1,
+      })),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    vi.mocked(config.getStopHookBlockingCap).mockReturnValue(1);
+    const hostReason =
+      'The headless run stopped after the Stop hook cap. Resume the Goal in a later run.';
+    const getInterruptedGoalPauseReason = vi.fn(() => hostReason);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getInterruptedGoalPauseReason,
+        },
+      ),
+    );
+
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledWith({
+      failure: undefined,
+      cause: 'stop-hook-cap',
+    });
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: hostReason,
     });
   });
 
@@ -1918,8 +2102,14 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(turnMocks.run).not.toHaveBeenCalled();
+    // A spent recursion budget is not a user interrupt: the caller signal is
+    // never aborted here, so this pause has to read as a turn that could not
+    // finish.
     expect(runtime.dispatch).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'pause' }),
+      expect.objectContaining({
+        action: 'pause',
+        reason: goalPauseReasonForFailure('the turn was interrupted'),
+      }),
     );
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
     expect(events).not.toContainEqual(
