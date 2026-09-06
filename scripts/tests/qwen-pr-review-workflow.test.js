@@ -39,6 +39,70 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+// Capability probe, not a platform check: the FIFO wedge tests need
+// mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
+// gated test_macos lane runs this suite too, and a host without mkfifo
+// would throw ENOENT or vacuously pass (R11-7). Probe PRESENCE, not
+// GNU-ness: BSD mkfifo rejects `--help`, so an exit-code probe skipped the
+// whole FIFO coverage on every macOS host although macOS ships
+// /usr/bin/mkfifo. With no operand both implementations print usage and
+// exit non-zero without spawning anything; only ENOENT means "absent".
+const hasMkfifo = (() => {
+  const probe = spawnSync('mkfifo', [], { stdio: 'ignore' });
+  return probe.error?.code !== 'ENOENT';
+})();
+
+// The truthful id(1) for the watcher-replay pin: production captures it
+// before the $proxy_bin prepend; a hardcoded path is not portable to the
+// BSD lane, so resolve it once like the mkfifo probe above.
+const realIdPath = (() => {
+  try {
+    return execFileSync('bash', ['-c', 'command -v id'], {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return 'id';
+  }
+})();
+
+// The truthful path of a utility production captures before the $proxy_bin
+// prepend — realIdPath's portability rationale, for the rest of the sweep.
+function realUtilityPath(name) {
+  try {
+    return execFileSync('bash', ['-c', `command -v "${name}"`], {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+// The review lane exports the production QWEN_CI_REAL_* captures into the
+// reviewed agent's environment, and every replay harness below spreads
+// process.env: inherited, a capture resolves a replayed
+// `"${QWEN_CI_REAL_X:-x}"` read to the REAL utility instead of the
+// bin-planted stub — the FIFO wedge tests then pass without a FIFO ever
+// being swapped in, and a bound-removing regression ships green on exactly
+// the lane the suite is documented to run on (R28-1). Neutralize EVERY
+// inherited capture up front (empty reads as unset to the :- fallbacks,
+// restoring PATH-stub resolution); the per-harness pins after the spread
+// still override. A sweep, not a name list: the next capture production
+// adds must not reopen the door.
+function neutralizedRealPins() {
+  return Object.fromEntries(
+    Object.keys(process.env)
+      .filter((k) => k.startsWith('QWEN_CI_REAL_'))
+      .map((k) => [k, '']),
+  );
+}
+
+// The CEDE kill-scope replay signals real processes, so it needs a real
+// pkill(1) plus the real pgrep(1) that resolves the process group the
+// escalation signals (R25-1). Capability probe, not a platform check
+// (R11-7's rationale).
+const realPkillPath = realUtilityPath('pkill');
+const realPgrepPath = realUtilityPath('pgrep');
+
 describe('qwen pr review runner routing', () => {
   it('isolates the long-running review job on the agent pool', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
@@ -75,9 +139,79 @@ function retryLoopSource() {
   return run.slice(start, end);
 }
 
+// A forged-date shim for $proxy_bin plants: answers `date -d <ts> +%s` with
+// a FUTURE epoch — the hijacked agent's lift of server-side timestamps past
+// the supersede window bound (R16-3) — and the bare `+%s` the run's own
+// timeline baseline reads with a PAST one, which drops both window bounds and
+// admits every event in the timeline (R23-3). Every other call passes
+// through; /bin/date keeps that lane-independent.
+function forgedDateShim() {
+  return (
+    [
+      '#!/bin/bash',
+      'if [ "${1:-}" = "-d" ] && [ "$#" -eq 3 ] && [ "${3:-}" = "+%s" ]; then',
+      '  echo $(( $(/bin/date +%s) + 1000 ))',
+      '  exit 0',
+      'fi',
+      'if [ "${1:-}" = "+%s" ]; then',
+      '  echo $(( $(/bin/date +%s) - 100000 ))',
+      '  exit 0',
+      'fi',
+      'exec /bin/date "$@"',
+    ].join('\n') + '\n'
+  );
+}
+
+// A timeout(1) stub that ENFORCES the bound, for the replay harnesses: the
+// workflow's salvage-signal reads are `timeout 5 head/node ...` opens, and a
+// lane without GNU coreutils (macOS) ships no timeout(1) — without the stub
+// the bounded-read condition exits 127 instead of resolving (R6-3). Run the
+// child, SIGKILL it past the leading duration, exit 124 like the real tool.
+// A bare pass-through is not sufficient: a rename-swapped FIFO then blocks
+// the open forever.
+function boundedTimeoutStub() {
+  const js =
+    'const [dur, ...cmd] = process.argv.slice(1);' +
+    'const ms = Math.max(0, Number.parseFloat(dur) || 0) * 1000;' +
+    'const child = require("child_process").spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });' +
+    'let killed = false;' +
+    'const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL"); } catch (e) {} }, ms);' +
+    'child.on("exit", (code, signal) => { clearTimeout(timer); process.exit(killed ? 124 : code === null ? (signal ? 137 : 1) : code); });';
+  return `#!/bin/bash\nexec "${process.execPath}" -e '${js}' "$@"\n`;
+}
+
+// A reader stub (installed as head AND cat) that rename-swaps a FIFO onto
+// its target at open time — the exact check-then-open window a [ -f ] gate
+// cannot refuse — then blocks exactly like a real open would (no writer).
+// Only a timeout bound resolves the read (R8-10). Shimming both readers
+// keeps the wedge witness red even for a regression that swaps the bounded
+// `timeout 5 head -c N` back to a bare `cat`.
+function swapAtOpenStub() {
+  return (
+    [
+      '#!/bin/bash',
+      'for last in "$@"; do :; done',
+      'if [ -n "$last" ] && [ -f "$last" ]; then',
+      '  rm -f "$last"',
+      '  mkfifo "$last"',
+      'fi',
+      'exec cat "$last"',
+    ].join('\n') + '\n'
+  );
+}
+
 // Drive the extracted loop with a stub qwen whose stream-json `result` event is
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
-function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
+function runScenario(
+  scenario,
+  {
+    timeoutMinutes = 180,
+    logPath,
+    extraEnv = {},
+    armWatcher = false,
+    proxyPlants = {},
+  } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'review-retry-'));
   try {
     const bin = join(dir, 'bin');
@@ -93,6 +227,17 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       chmodSync(p, 0o755);
     };
     execFileSync('mkdir', ['-p', bin]);
+    // Production prepends the agent-writable $proxy_bin to PATH before the
+    // loop (configure_qwen_network); the replay mirrors that layout so a
+    // plant there resolves ahead of the bin stubs, exactly like a hijacked
+    // agent's (R16-3).
+    const proxyBin = join(dir, 'proxy-bin');
+    execFileSync('mkdir', ['-p', proxyBin]);
+    for (const [name, body] of Object.entries(proxyPlants)) {
+      const plant = join(proxyBin, name);
+      writeFileSync(plant, body);
+      chmodSync(plant, 0o755);
+    }
     // timeout: record the per-attempt duration (`$2`, e.g. `10800s`) so tests
     // can assert the budget each attempt was given, then drop
     // `--kill-after=Xs` and that duration and exec the rest.
@@ -104,15 +249,169 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       'timeout',
       [
         '#!/bin/bash',
-        'echo "$2" >> "$DUR"',
-        'if [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi',
-        'shift',
-        'shift',
-        'if [ "${SCENARIO:-}" = "timeout_partial_line" ]; then "$@"; exit 124; fi',
-        'exec "$@"',
+        // The attempt wrapper always leads with --kill-after; the watcher's
+        // bounded signal reads lead with a bare duration (timeout 5 head
+        // ...). Record only the attempt budgets — anything else in $DUR
+        // would poison the duration assertions.
+        'case "${1:-}" in',
+        '--kill-after*)',
+        '  echo "$2" >> "$DUR"',
+        '  if [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi',
+        '  shift',
+        '  shift',
+        '  if [ "${SCENARIO:-}" = "timeout_partial_line" ]; then "$@"; exit 124; fi',
+        '  exec "$@"',
+        '  ;;',
+        '*)',
+        '  shift',
+        '  exec "$@"',
+        '  ;;',
+        'esac',
       ].join('\n') + '\n',
     );
-    write('sleep', '#!/bin/bash\nexit 0\n');
+    // The retry backoff and the watcher's poll loop are the sleeps in the
+    // extraction window (a replay arms the watcher only by armWatcher
+    // opt-in — see the AUTO_REVIEW pin below). The opt-in envs turn the
+    // backoff into "the watcher cedes while qwen is down" and observe the
+    // salvage state the watcher would poll through it.
+    write(
+      'sleep',
+      [
+        '#!/bin/bash',
+        // The R4-2 witness needs the spent watcher STILL DRAINING its
+        // TERM→15s→KILL wind-down when the retry branch probes it, so the
+        // wind-down sleep (arg 15) really sleeps in that scenario; a
+        // liveness-probed relaunch then skips it and attempt 2 runs
+        // unwatched, while kill+wait reaps it and relaunches.
+        'if [ "${SCENARIO:-}" = "retry_watcher_relaunch" ] && [ "${1:-}" = "15" ]; then',
+        '  /bin/sleep 0.4',
+        'fi',
+        'if [ -n "${SUPERSEDE_DURING_BACKOFF:-}" ]; then',
+        '  printf "head-b" > "$SUPERSEDE_DURING_BACKOFF"',
+        'fi',
+        // The observation stands in for the watcher's poll THROUGH the
+        // backoff, so it must see the RESET state — gate it on the marker
+        // the scenario's attempt-1 stub drops at its exit: no observation
+        // during attempt 1 (a watcher's early poll there would race the
+        // compose writes), every observation after is post-reset.
+        'if [ -n "${BACKOFF_OBS:-}" ] && [ -f "${BACKOFF_OBS}.ready" ]; then',
+        '  if [ -f "$SALVAGE_DIR/compose-seen" ] || [ -e "$COMPOSED_ARTIFACT" ]; then',
+        '    echo present >> "$BACKOFF_OBS"',
+        '  else',
+        '    echo absent >> "$BACKOFF_OBS"',
+        '  fi',
+        'fi',
+        // SLEEP_FAIL_AFTER=N exits 0 for the first N calls and 1 after:
+        // `while sleep ...; do` ends the watcher's loop deterministically,
+        // so an AUTO_REVIEW replay can run a watcher that never polls (the
+        // extreme poll gap) without leaking a background job. The ordinal
+        // claim is a mkdir — atomic, unlike the old cat/echo counter, which
+        // let concurrent sleepers (the retry backoff and a relaunched
+        // watcher polling THROUGH it) both claim "first" under load and
+        // fail the backoff sleep itself.
+        'if [ -n "${SLEEP_FAIL_AFTER:-}" ] || [ -n "${SLEEP_FAIL_ONLY_FIRST:-}" ]; then',
+        '  SLC="$ATT.sleep-count"',
+        '  n=0',
+        '  while ! mkdir "$SLC.$(( n + 1 ))" 2>/dev/null; do n=$(( n + 1 )); done',
+        '  n=$(( n + 1 ))',
+        'fi',
+        'if [ -n "${SLEEP_FAIL_AFTER:-}" ]; then',
+        '  [ "$n" -le "$SLEEP_FAIL_AFTER" ] || exit 1',
+        'fi',
+        // The inverse of SLEEP_FAIL_AFTER: ONLY the first sleep fails. The
+        // watcher is launched before the loop, so its first poll-sleep is
+        // the first sleep in the window — it ends without ever polling gh,
+        // while the retry backoff (and a relaunched watcher) still sleep
+        // normally. That gives a backoff-cede replay an AUTO_REVIEW=true
+        // run whose watcher deterministically misses the attempt.
+        'if [ -n "${SLEEP_FAIL_ONLY_FIRST:-}" ]; then',
+        '  [ "$n" -gt 1 ] || exit 1',
+        'fi',
+        'exit 0',
+      ].join('\n') + '\n',
+    );
+    // The cede exits re-read the live head before trusting their marker
+    // files; scripted per test (empty output = failed read / unmoved head,
+    // which must NOT cede). `api` answers the timeline verification
+    // (STUB_TIMELINE lines, STUB_TIMELINE_STATUS for an unavailable API).
+    // STUB_LIVE_HEAD_A1 answers the FIRST pr-view call and
+    // STUB_LIVE_HEAD_A2 every call from attempt 2 on, so one replay can
+    // script the watcher's poll and the loop's later re-checks
+    // differently.
+    // The macOS lane runs this suite in BSD userland, where `date -d <ts>`
+    // does not parse — supersede_reverted_during_run's timestamp read would
+    // silently degrade to 0 and the replay would flip red there on every
+    // run. Emulate the one GNU shape the workflow uses (fleet-shepherd's
+    // gnuDateShim precedent) and pass every other call through, so the
+    // coverage stays live on every lane.
+    write(
+      'date',
+      [
+        '#!/bin/bash',
+        // R19-1 replays a run whose attempt 1 burned 6480s (60%) of the
+        // default 180-minute budget: from attempt 1 on (the qwen stub owns
+        // the attempt counter), the truthful clock reports the advanced
+        // time, so the retry gate, the reset rewrite, and the watcher's
+        // eligibility all measure the simulated run depth.
+        'if [ "${1:-}" = "+%s" ] && [ "${SCENARIO:-}" = "retry_planted_attempt_start" ]; then',
+        '  att="$(cat "$ATT" 2>/dev/null || echo 0)"',
+        '  if [ "${att:-0}" -ge 1 ]; then',
+        '    echo $(( $(/bin/date +%s) + 6480 ))',
+        '    exit 0',
+        '  fi',
+        'fi',
+        'if [ "${1:-}" = "-d" ] && [ "$#" -eq 3 ] && [ "${3:-}" = "+%s" ]; then',
+        '  node -e \'const t=Date.parse(process.argv[1]);if(Number.isNaN(t))process.exit(1);console.log(Math.floor(t/1000))\' "$2"',
+        'else',
+        '  /bin/date "$@"',
+        'fi',
+      ].join('\n') + '\n',
+    );
+    write(
+      'gh',
+      [
+        '#!/bin/bash',
+        'if [ "${1:-}" = "api" ]; then',
+        // supersede_reverted_during_run resolves the credential's own login
+        // so it can refuse force-push events the reviewed agent authored
+        // with the GH_TOKEN it inherits (R22-1).
+        '  if [ "${2:-}" = "user" ]; then',
+        // A failed identity read yields no stdout, like the real gh: exit
+        // status alone would still leave the login captured.
+        '    [ "${STUB_BOT_LOGIN_STATUS:-0}" = "0" ] || exit "${STUB_BOT_LOGIN_STATUS}"',
+        '    printf \'%s\\n\' "${STUB_BOT_LOGIN:-qwen-ci-bot}"',
+        '    exit 0',
+        '  fi',
+        // The real API returns only the columns the query selects, so the
+        // actor column appears only once the workflow asks for it: a
+        // pre-actor build still sees the three-column shape it requested.
+        '  case "$*" in',
+        '    *actor*)',
+        '      printf \'%s\\n\' "${STUB_TIMELINE:-}" | while IFS= read -r line; do',
+        '        [ -n "$line" ] && printf \'%s %s\\n\' "$line" "${STUB_TIMELINE_ACTOR-pr-author}"',
+        '      done',
+        '      ;;',
+        '    *) printf \'%s\\n\' "${STUB_TIMELINE:-}" ;;',
+        '  esac',
+        '  exit "${STUB_TIMELINE_STATUS:-0}"',
+        'fi',
+        'att="$(cat "$ATT" 2>/dev/null || echo 0)"',
+        'if [ "$att" -ge 2 ] && [ -n "${STUB_LIVE_HEAD_A2:-}" ]; then',
+        '  echo "$STUB_LIVE_HEAD_A2"',
+        '  exit 0',
+        'fi',
+        'if [ -n "${STUB_GH_COUNT:-}" ]; then',
+        '  n=0',
+        '  while ! mkdir "${STUB_GH_COUNT}.$(( n + 1 ))" 2>/dev/null; do n=$(( n + 1 )); done',
+        '  n=$(( n + 1 ))',
+        '  if [ "$n" -eq 1 ] && [ -n "${STUB_LIVE_HEAD_A1:-}" ]; then',
+        '    echo "$STUB_LIVE_HEAD_A1"',
+        '    exit 0',
+        '  fi',
+        'fi',
+        'echo "${STUB_LIVE_HEAD:-}"',
+      ].join('\n') + '\n',
+    );
     write(
       'qwen',
       [
@@ -147,6 +446,50 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
         // Killed mid-write: the last line reaches stdout WITHOUT its newline,
         // so whatever the step prints next lands on the same line.
         '  timeout_partial_line) printf \'{"type":"assistant","content":"90-    core.info(`##[add-matcher]x`);"}\\n{"type":"assistant","content":"91- trunc\' ;;',
+        '  supersede_mid_attempt) r success false "[API Error: 503 upstream overloaded]"; printf "head-b\\n::error::injected forged annotation" > "$SUPERSEDE_FILE" ;;',
+        // Hostile salvage-state shapes during a retryable attempt 1 (the
+        // reviewed agent derives every path from its exported environment):
+        // planted DIRECTORIES at the signal names, attempt-start included
+        // (a surviving directory swallows the rewrite's mv -f, R19-1) —
+        // rm -f would abort the reset under errexit — and a deleted
+        // SALVAGE_DIR (the rewrite must not abort it either). Attempt 2
+        // must run and win.
+        '  retry_planted_dirs) if [ "$n" -eq 1 ]; then rm -rf "$SALVAGE_DIR/attempt-start"; mkdir -p "$SALVAGE_DIR/attempt-start" "$SALVAGE_DIR/compose-seen" "$SALVAGE_DIR/moved-to" "$SALVAGE_DIR/salvage-ok" "$COMPOSED_ARTIFACT"; [ -z "${SUPERSEDE_FILE:-}" ] || mkdir -p "$SUPERSEDE_FILE"; r success false "[API Error: 503 upstream overloaded]"; else r success false "ok after hostile reset"; fi ;;',
+        // R19-1: the reset's missing operand — attempt 1 replaces
+        // attempt-start with a DIRECTORY (the rewrite's mv -f renames the
+        // fresh temp INTO the directory: exit 0, silent) and dies
+        // retryable past the salvage threshold (the date stub advances the
+        // truthful clock with the attempt counter); the head moves early
+        // in attempt 2, which waits for the watcher's CEDE. A reset that
+        // never removes the plant keeps the watcher on the START_TS
+        // fallback — run-level elapsed — and arms KEEP instead.
+        '  retry_planted_attempt_start) if [ "$n" -eq 1 ]; then rm -rf "$SALVAGE_DIR/attempt-start"; mkdir -p "$SALVAGE_DIR/attempt-start"; r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
+        '  retry_deleted_salvage_dir) if [ "$n" -eq 1 ]; then rm -rf "$SALVAGE_DIR"; r success false "[API Error: 503 upstream overloaded]"; else r success false "ok after salvage dir vanished"; fi ;;',
+        // The watcher arms the salvage marker mid-attempt (simulated here by
+        // the stub: the replay keeps the honest clock, so a below-threshold
+        // watcher never arms on its own) and the attempt still dies
+        // retryable.
+        '  salvage_armed_then_die) printf "head-a" > "$QWEN_CI_REVIEW_SALVAGE_OK_FILE"; r success false "[API Error: 503 upstream overloaded]" ;;',
+        '  supersede_forge_mid_attempt) printf "head-b" > "$SUPERSEDE_FILE"; r success false "Reviewed." ;;',
+        '  supersede_during_backoff) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else r success false "attempt 2 must not run"; fi ;;',
+        '  compose_then_backoff_supersede) if [ "$n" -eq 1 ]; then : > "$SALVAGE_DIR/compose-seen"; printf "{}" > "$COMPOSED_ARTIFACT"; r success false "[API Error: 503 upstream overloaded]"; [ -z "${BACKOFF_OBS:-}" ] || touch "${BACKOFF_OBS}.ready"; else r success false "attempt 2 must not run"; fi ;;',
+        '  supersede_after_success) printf "head-b" > "$SUPERSEDE_FILE"; r success false "Reviewed." ;;',
+        '  cede_revert_kill) exit 143 ;;',
+        // The FF-departure shape of a supersede-then-revert: attempt 1
+        // waits for the watcher's cede (the SUPERSEDE_FILE write) and then
+        // dies as killed — the watcher's local kill record is the only
+        // departure witness, since a normal push emits no force-push event.
+        '  cede_revert_ff_kill) if [ "$n" -eq 1 ]; then i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 400 ]; do /bin/sleep 0.05; i=$((i+1)); done; exit 143; else r success false "attempt 2 must not run"; fi ;;',
+        // R4-1 agent-side forgery: the kill dir is never exported, but it
+        // is minted under the enumerable RUNNER_TEMP with a fixed prefix —
+        // the stub DISCOVERS it by listing (no derivation), plants the kill
+        // record plus SUPERSEDE_FILE, and dies non-retryably (a fatal
+        // skips the retry reset that clears plants).
+        '  supersede_forged_kill_record) for d in "${RUNNER_TEMP}"/qwen-review-supersede-kill.*; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
+        '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
+        '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
+        '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
+        '  compose_artifact_reset) if [ "$n" -eq 1 ]; then printf \'{"downgraded":false}\' > "$COMPOSED_ARTIFACT"; r success false "[API Error: 503 upstream overloaded]"; else { [ -e "$COMPOSED_ARTIFACT" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -159,30 +502,104 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       `LOG_PATH="${logPath ?? join(dir, 'log')}"`,
       `GITHUB_OUTPUT="${join(dir, 'gho')}"; GITHUB_STEP_SUMMARY="${join(dir, 'gss')}"`,
       ': > "$GITHUB_OUTPUT"; : > "$GITHUB_STEP_SUMMARY"',
+      // The retry loop keeps per-attempt salvage state here; exported so
+      // the stub qwen can simulate the watcher's compose latch.
+      `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"; export SALVAGE_DIR`,
+      `COMPOSED_ARTIFACT="${join(dir, 'composed.json')}"; export COMPOSED_ARTIFACT`,
       'fail(){ echo "FAIL kind=[${3:-}] reason=[$1]"; exit "${2:-1}"; }',
+      // The extraction window starts at OUTCOME='', past the eligibility
+      // function's definition; a replayed watcher that can only CEDE could
+      // never witness a plant that arms KEEP (R19-1).
+      runReviewStep().match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '',
       retryLoopSource(),
       'echo "OK outcome=$OUTCOME"',
     ].join('\n');
     let stdout = '';
+    let timedOut = false;
+    let status = 0;
     try {
       stdout = execFileSync('bash', ['-c', harness], {
         encoding: 'utf8',
+        // A planted-FIFO regression blocks the child instead of failing
+        // it; the bound turns the hang into a red test.
+        timeout: 30_000,
         env: {
           ...process.env,
-          PATH: `${bin}:${process.env.PATH}`,
+          // Every inherited QWEN_CI_REAL_* capture neutralized first
+          // (R28-1); the pins below re-establish the ones this replay
+          // needs to point somewhere specific.
+          ...neutralizedRealPins(),
+          // The review lane exports QWEN_CI_REAL_GH; inherited, it would
+          // bypass the PATH gh stub every replay decides through. Empty
+          // restores the stub — the production :-gh fallback treats it as
+          // unset — while extraEnv's R14-1 arms still override. Same for
+          // QWEN_CI_REAL_DATE, pinned to the truthful bin/date stub the
+          // loop's conversions must read (R16-1, R16-3).
+          QWEN_CI_REAL_GH: '',
+          QWEN_CI_REAL_DATE: join(bin, 'date'),
+          // Same for the R18-4 rm/tee pins: production captures absolute
+          // paths before the $proxy_bin prepend; the replay pins the real
+          // utilities so proxyPlants shadow bare-command resolution only.
+          // Resolved, not hardcoded: /bin/tee does not exist on macOS
+          // (/usr/bin/tee), and the replayed cede's tee then exited 127
+          // under errexit on the test_macos lane.
+          QWEN_CI_REAL_RM: realUtilityPath('rm'),
+          QWEN_CI_REAL_TEE: realUtilityPath('tee'),
+          // The review lane exports this marker path into the agent
+          // environment (R21-1); inherited through the spread, the
+          // retry-branch reset rm-rfs and the watcher rewrite writes the
+          // PARENT run's live marker. Empty restores plain-lane behaviour
+          // (every in-window consumer is a :- / [ -f ] gate) while
+          // extraEnv's scenario overrides still win after the spread.
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: '',
+          // Same for the R21-2 sleep pin: inherited from a review lane
+          // that exports the production capture, the real sleep 60 would
+          // stall every armWatcher replay's poll loop; the harness stub is
+          // the replay's truthful sleep (pkill/id stay inherited-harmless:
+          // the armWatcher's REVIEW_URL pattern matches nothing here).
+          QWEN_CI_REAL_SLEEP: join(bin, 'sleep'),
+          PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
           SCENARIO: scenario,
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          ...(armWatcher
+            ? {
+                // The watcher polls and pkills with these; the stubs make
+                // every call inert except the decision itself.
+                PR_NUMBER: '1',
+                REPO: 'o/r',
+                REVIEW_URL: 'zz-no-such-review-url',
+                DOCS_ONLY_MEDIUM: 'false',
+                SALVAGE_ELAPSED_PERCENT: '50',
+              }
+            : {}),
+          ...extraEnv,
+          // The extraction window contains the watcher's AUTO_REVIEW-gated
+          // arming and the spread above inherits the parent environment, so
+          // pin AFTER it: an exported AUTO_REVIEW=true (this workflow's own
+          // review lane exports one) would arm a watcher with no REPO to
+          // poll and hang every replay. The production arming stays pinned
+          // by the shape tests; a replay arms it only by armWatcher opt-in,
+          // with the stub environment above.
+          AUTO_REVIEW: armWatcher ? 'true' : 'false',
           // The step initializes PROXY_BIN before the retry loop and the
           // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
           // it; the extraction starts at OUTCOME='', past the init, so the
           // harness must supply it (set -u would otherwise abort the loop).
-          PROXY_BIN: join(dir, 'proxy-bin'),
+          PROXY_BIN: proxyBin,
         },
       });
     } catch (e) {
-      stdout = `${e.stdout ?? ''}`;
+      if (`${e?.error?.code ?? ''}` === 'ETIMEDOUT') {
+        timedOut = true;
+      } else {
+        stdout = `${e.stdout ?? ''}`;
+        // The cede exits are load-bearing clean — a non-zero cede opens
+        // the failure-fallback gate — so a swallowed exit code would
+        // hide the regression this harness exists to catch.
+        status = e.status ?? 1;
+      }
     }
     const line =
       stdout
@@ -202,6 +619,8 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       attempts: Number(readFileSync(attemptFile, 'utf8').trim()),
       durations,
       prompts: readFileSync(promptFile, 'utf8').split('\n').filter(Boolean),
+      timedOut,
+      status,
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -4137,4 +4556,2701 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.posted).toBe('');
     expect(r.summary).toContain('deferring to the fallback-comment job');
   });
+});
+
+describe('review supersede salvage (#10110)', () => {
+  // cancel-in-progress no longer fires on synchronize (that pin lives in the
+  // resolve suite next to the wrapper-guard replays); the supersede decision
+  // moved into the in-flight run. These tests pin the three moving parts:
+  // the watcher that decides KEEP vs CEDE, the retry loop's early exits, and
+  // the posting path for a salvaged run.
+  const doc = parse(workflow);
+  const run = runReviewStep();
+
+  it('arms the watcher only for automatic lifecycle reviews', () => {
+    // Explicit runs (/review, review_requested, dispatch) were never
+    // synchronize-cancellable; killing a review a human just asked for over
+    // a push would be a regression, so the watcher must stay AUTO-gated.
+    expect(run).toContain('supersede_watcher()');
+    expect(run).toContain('if [ "${AUTO_REVIEW:-false}" = "true" ]; then');
+    expect(run).toContain('supersede_watcher &');
+    // The revert cede's kill-record dir is minted at arming and NEVER
+    // exported — an exported path would be agent-derivable like every
+    // SALVAGE_DIR signal (R4-1).
+    expect(run).toContain(
+      'SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d',
+    );
+    expect(run).not.toContain('export SUPERSEDE_KILL_DIR');
+    // Defined and armed before the retry loop starts.
+    expect(run.indexOf('supersede_watcher()')).toBeLessThan(
+      run.indexOf('attempt=1'),
+    );
+  });
+
+  it('never arms the watcher in a replay even if the environment exports AUTO_REVIEW', () => {
+    // runScenario spreads the parent environment and the extraction window
+    // contains the arming: without the false pin, an inherited
+    // AUTO_REVIEW=true arms a watcher with no REPO for its gh poll,
+    // spinning against the instant-exit sleep stub and holding the stdout
+    // pipe open — the replay dies on runScenario's 30s bound instead of
+    // finishing. The pin must outrank extraEnv too, so inject explicitly.
+    const r = runScenario('success', { extraEnv: { AUTO_REVIEW: 'true' } });
+    expect(r.timedOut).toBe(false);
+    expect(r.line).toBe('OK outcome=success');
+  });
+
+  it('checks supersede and salvage-cede before classifying the attempt outcome', () => {
+    // A watcher kill surfaces as a non-zero qwen status; classified first it
+    // would read as fatal (job red, fallback machinery engaged) or retryable
+    // (a from-scratch re-review of a superseded head). The supersede check
+    // also runs at the TOP of the loop: a cede landing during the retry
+    // backoff (pkill matched nothing — qwen not running) must stop the next
+    // attempt before it re-reviews the dead head.
+    const check =
+      'if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then';
+    const guardedCheck =
+      'if [ "$OUTCOME" != "success" ] && [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then';
+    const call = run.indexOf('run_review_once "$attempt_timeout" "$PROMPT"');
+    const preAttempt = run.indexOf(check);
+    const supersede = run.indexOf(guardedCheck, call);
+    const cede = run.indexOf(
+      'if [ "${AUTO_REVIEW:-false}" = "true" ] && [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] && live_head_moved; then',
+    );
+    const success = run.indexOf('if [ "$OUTCOME" = "success" ]; then');
+    expect(call).toBeGreaterThan(-1);
+    expect(preAttempt).toBeGreaterThan(-1);
+    expect(preAttempt).toBeLessThan(call);
+    expect(supersede).toBeGreaterThan(call);
+    expect(cede).toBeGreaterThan(supersede);
+    expect(success).toBeGreaterThan(cede);
+  });
+
+  it('shares one cede implementation across both supersede sites', () => {
+    // The halve-budget-floor incident: two verbatim copies diverged through
+    // a one-sided edit. Pin the pair structurally — one definition, two
+    // call sites — so a one-sided signal edit cannot survive the replays.
+    expect((run.match(/cede_superseded\(\) \{/g) ?? []).length).toBe(1);
+    expect((run.match(/cede_superseded/g) ?? []).length).toBe(5);
+  });
+
+  it('decides KEEP vs CEDE with the extracted salvage_eligible', () => {
+    const fn = run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0];
+    expect(fn).toBeTruthy();
+    const eligible = (elapsed, budget, composeSeen, pct) => {
+      try {
+        execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -euo pipefail\n${fn}\nsalvage_eligible ${elapsed} ${budget} ${composeSeen} ${pct}`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // Compose done keeps past the 25% elapsed floor — a real compose is
+    // the review's final step and clears it easily...
+    expect(eligible(5400, 21600, 'true', 50)).toBe(true);
+    // ...but the artifact path is agent-derivable, so a first-minute
+    // plant must not short-circuit KEEP: below the floor the compose
+    // branch falls through to the pct test (R18-3).
+    expect(eligible(5399, 21600, 'true', 50)).toBe(false);
+    expect(eligible(60, 21600, 'true', 50)).toBe(false);
+    // The motivating incident: PR #9729's 4h06m (14760s) review on a
+    // 360-minute (21600s) budget crosses the default 50% threshold.
+    expect(eligible(14760, 21600, 'false', 50)).toBe(true);
+    // Exactly at the threshold keeps; just below cedes.
+    expect(eligible(10800, 21600, 'false', 50)).toBe(true);
+    expect(eligible(10799, 21600, 'false', 50)).toBe(false);
+    // pct=100 keeps only a run that spent its whole budget (in practice:
+    // compose-signal only); pct=0 keeps always.
+    expect(eligible(21599, 21600, 'false', 100)).toBe(false);
+    expect(eligible(1, 21600, 'false', 0)).toBe(true);
+  });
+
+  // Extract the watcher itself and drive it to its one-shot decision with
+  // stub gh/pkill/sleep — wiring the salvage_eligible result to the two
+  // signal writes the rest of the system consumes (the marker and the
+  // supersede file). String pins alone let a flipped dispatch or a
+  // wrong-head marker ship green.
+  function watcherSource() {
+    return run.match(/supersede_watcher\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  function writeSignalSource() {
+    return run.match(/write_signal\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  function runWatcher({
+    liveHead = 'head-b',
+    expectedHead = 'head-a',
+    budget = 21600,
+    runElapsed = 60,
+    attemptElapsed = runElapsed,
+    composeSeen = false,
+    composedArtifact = null,
+    docsOnly = false,
+    pct = 50,
+    swapArtifactOnRead = false,
+    swapAttemptStartOnRead = false,
+    plant = {},
+    failFirstPoll = false,
+    emptyFirstPoll = false,
+    attemptStartRaw = null,
+    removeSalvageDir = false,
+    realGhHead = null,
+    sleepFailAfter = null,
+    forgeDateOffset = null,
+    proxyPlants = {},
+    // Utilities whose pre-prepend capture this replay pins, so proxyPlants
+    // shadow bare-command resolution only (R23-1).
+    pinReal = [],
+    // Signal real processes through a real pkill to measure the CEDE kill's
+    // scope (R23-2) instead of logging its arguments to a stub.
+    realCedeKill = false,
+    // Background the watcher and reap it (TERM + wait) the moment it has
+    // written the supersede file — i.e. inside its wind-down, with a real
+    // 3s wind-down sleep — the shape every production reaper has (R30-1).
+    reapMidWindDown = false,
+  } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
+    // Stubs and logs live OUTSIDE SALVAGE_DIR: the delete variant removes it
+    // wholesale before the watcher runs.
+    const side = mkdtempSync(join(tmpdir(), 'review-watcher-side-'));
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      writeFileSync(
+        join(dir, 'attempt-start'),
+        attemptStartRaw ?? String(now - attemptElapsed),
+      );
+      if (composeSeen) {
+        writeFileSync(join(dir, 'compose-seen'), '');
+      }
+      if (composedArtifact !== null) {
+        writeFileSync(join(dir, 'composed.json'), composedArtifact);
+      }
+      // Attacker-planted FIFOs at the derivable signal names: every
+      // write-open or ungated read-open of one blocks, so a regression
+      // dies on the execFileSync timeout below instead of deciding.
+      for (const name of Object.keys(plant)) {
+        rmSync(join(dir, name), { force: true });
+        execFileSync('mkfifo', [join(dir, name)]);
+      }
+      const bin = join(side, 'bin');
+      mkdirSync(bin);
+      // Production launches the watcher AFTER configure_qwen_network
+      // prepends the agent-writable $proxy_bin to PATH, so the watcher
+      // inherits the prepend (R21-2). The replay mirrors that layout:
+      // plants here resolve ahead of the harness bin, exactly like a
+      // hijacked agent's.
+      const proxyBin = join(side, 'proxy-bin');
+      mkdirSync(proxyBin);
+      for (const [name, body] of Object.entries(proxyPlants)) {
+        const plant = join(proxyBin, name);
+        writeFileSync(plant, body);
+        chmodSync(plant, 0o755);
+      }
+      const pkillLog = join(side, 'pkills');
+      // The deletion dual of the planted-signal findings: SALVAGE_DIR is
+      // agent-derivable and can vanish mid-run; the watcher must still
+      // decide (its writes are best-effort) instead of dying on a failed
+      // mktemp under the inherited errexit.
+      if (removeSalvageDir) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      const write = (name, body) => {
+        const p = join(bin, name);
+        writeFileSync(p, body);
+        chmodSync(p, 0o755);
+      };
+      // sleepFailAfter bounds the poll loop for no-decision replays
+      // (a truthful, unmoved head never exits the loop on its own):
+      // the (N+1)th sleep fails and `while sleep ...; do` ends clean.
+      write(
+        'sleep',
+        reapMidWindDown
+          ? '#!/bin/bash\nif [ "${1:-}" = "15" ]; then exec /bin/sleep 3; fi\nexit 0\n'
+          : sleepFailAfter === null
+            ? '#!/bin/bash\nexit 0\n'
+            : [
+                '#!/bin/bash',
+                `count_file="${side}/sleep-count"`,
+                'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))',
+                'echo "$n" > "$count_file"',
+                `[ "$n" -le ${sleepFailAfter} ] || exit 1`,
+                'exit 0',
+              ].join('\n') + '\n',
+      );
+      write(
+        'gh',
+        failFirstPoll || emptyFirstPoll
+          ? [
+              '#!/bin/bash',
+              `count_file="${side}/gh-count"`,
+              'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))',
+              'echo "$n" > "$count_file"',
+              'if [ "$n" -eq 1 ]; then',
+              failFirstPoll ? '  exit 1' : '  exit 0',
+              'fi',
+              `echo "${liveHead}"`,
+            ].join('\n') + '\n'
+          : `#!/bin/bash\necho "${liveHead}"\n`,
+      );
+      // R14-1 dual: the truthful gh the decision sites must read via
+      // QWEN_CI_REAL_GH while PATH's `gh` lies — mirroring production,
+      // where QWEN_CI_REAL_GH is captured before the wrapper exists and
+      // bare `gh` resolves through the agent-writable $proxy_bin PATH
+      // prepend a hijacked agent can overwrite.
+      let realGhPath = null;
+      if (realGhHead !== null) {
+        const realBin = join(side, 'realbin');
+        mkdirSync(realBin);
+        realGhPath = join(realBin, 'gh');
+        writeFileSync(realGhPath, `#!/bin/bash\necho "${realGhHead}"\n`);
+        chmodSync(realGhPath, 0o755);
+      }
+      // R18-1 dual: a forged date planted where $proxy_bin sits in
+      // production (first in PATH) answers +%s with a future epoch; the
+      // clock sites must read the truthful capture instead.
+      let realDatePath = null;
+      if (forgeDateOffset !== null) {
+        write(
+          'date',
+          [
+            '#!/bin/bash',
+            'if [ "${1:-}" = "+%s" ]; then',
+            `  echo $(( $(/bin/date +%s) + ${forgeDateOffset} ))`,
+            '  exit 0',
+            'fi',
+            'exec /bin/date "$@"',
+          ].join('\n') + '\n',
+        );
+        const realBin = join(side, 'realbin');
+        mkdirSync(realBin, { recursive: true });
+        realDatePath = join(realBin, 'date');
+        writeFileSync(realDatePath, '#!/bin/bash\nexec /bin/date "$@"\n');
+        chmodSync(realDatePath, 0o755);
+      }
+      write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
+      // exit 1 is pgrep's "no process matched": an arm that does not
+      // measure the CEDE kill leaves the escalation with no group to
+      // signal, the no-op pkill stub's semantics. realCedeKill pins the
+      // truthful pgrep instead.
+      write('pgrep', '#!/bin/bash\nexit 1\n');
+      // The watcher's bounded reads (timeout 5 node/head ...) need a
+      // timeout(1) on every lane: macOS ships none, and a missing binary
+      // makes the latch/read condition exit 127 — the compose latch then
+      // never fires and the KEEP arms fail (R6-3). Enforce the bound: a
+      // pass-through leaves a rename-swapped FIFO wedged forever.
+      write('timeout', boundedTimeoutStub());
+      if (swapArtifactOnRead) {
+        // The R6-3 witness: the latch's [ -f ] passes the real artifact,
+        // and the node invocation swaps a FIFO in at the reopen moment —
+        // the exact check-then-open window a statically planted FIFO
+        // cannot reach. readFileSync blocks forever on it (no writer), so
+        // without the timeout bound the watcher never decides again and
+        // this harness dies on its own timeout instead.
+        write(
+          'node',
+          [
+            '#!/bin/bash',
+            'target="$3"',
+            'if [ -n "$target" ] && [ -f "$target" ]; then',
+            '  rm -f "$target"',
+            '  mkfifo "$target"',
+            'fi',
+            `exec "${process.execPath}" "$@"`,
+          ].join('\n') + '\n',
+        );
+      }
+      if (swapAttemptStartOnRead) {
+        // The R8-10 (1/3) witness: the attempt-start read meets a FIFO
+        // rename-swapped in at open time — the window [ -f ] cannot
+        // refuse. Only the timeout bound resolves the read; an unbounded
+        // open wedges the poll and the harness dies on its own timeout.
+        write('head', swapAtOpenStub());
+        write('cat', swapAtOpenStub());
+      }
+      const eligible =
+        run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+      // The kill-scope replay (R23-2) spawns two decoys whose argv carries
+      // the same REVIEW_URL: one a direct child of this shell — the shape
+      // the attempt's timeout has — and one under a different parent,
+      // standing in for a concurrent run of the same PR. The URL reaches the
+      // second through the environment, never its parent's argv, or the
+      // parent would match the sweep too and orphaning would read as
+      // survival.
+      const decoy = join(side, 'decoy');
+      const decoyBPid = join(side, 'decoy-b-pid');
+      const decoyTreePid = join(side, 'decoy-a-tree-pid');
+      const cedeKill = realCedeKill
+        ? {
+            prelude: [
+              // Job control gives each background job its own process group,
+              // which that job leads: GNU timeout's shape, and what makes the
+              // resolved direct child's pid the attempt tree's pgid. Pure
+              // bash, so the BSD/Darwin lane replays it too.
+              'set -m',
+              // Decoy A stands in for the attempt's timeout AND for the tree
+              // member the escalation exists for: it ignores TERM like a
+              // hijacked agent (`trap '' TERM`), and the child it backgrounds
+              // inherits both the ignore and its process group. A -P $$ sweep
+              // never matches that child, and SIGKILL to A is not forwarded
+              // down to it (R25-1).
+              `printf '#!/bin/bash\\ntrap "" TERM\\n( trap "" TERM; /bin/sleep 8 ) &\\necho "$!" > "\${DECOY_TREE_PID:-/dev/null}"\\n/bin/sleep 8\\n' > "${decoy}"`,
+              `chmod +x "${decoy}"`,
+              // stdout/stderr off the harness's pipes: a backgrounded decoy
+              // holding the write end would make execFileSync wait for its
+              // sleep instead of for this shell.
+              `DECOY_TREE_PID="${decoyTreePid}" "${decoy}" --prompt "$REVIEW_URL" >/dev/null 2>&1 &`,
+              'DECOY_A=$!',
+              `DECOY_B_URL="$REVIEW_URL" bash -c '"$1" --prompt "$DECOY_B_URL" & echo $! > "$2"; /bin/sleep 8' bash "${decoy}" "${decoyBPid}" >/dev/null 2>&1 &`,
+              'DECOY_B_PARENT=$!',
+              // Bounded wait on both pid files, not a fixed sleep: the
+              // epilogue reads both states, and an unloaded-host guess is a
+              // loaded-host flake.
+              `i=0; while { [ ! -s "${decoyBPid}" ] || [ ! -s "${decoyTreePid}" ]; } && [ "$i" -lt 100 ]; do /bin/sleep 0.05; i=$(( i + 1 )); done`,
+            ].join('\n'),
+            // A signalled decoy is a zombie until its parent reaps it, so
+            // ps state Z reads as dead, not alive.
+            epilogue: [
+              `DECOY_B="$(cat "${decoyBPid}" 2>/dev/null || true)"`,
+              `DECOY_T="$(cat "${decoyTreePid}" 2>/dev/null || true)"`,
+              `sa="$(ps -o state= -p "$DECOY_A" 2>/dev/null | tr -d '[:space:]' || true)"`,
+              `sb="$(ps -o state= -p "\${DECOY_B:-}" 2>/dev/null | tr -d '[:space:]' || true)"`,
+              `st="$(ps -o state= -p "\${DECOY_T:-}" 2>/dev/null | tr -d '[:space:]' || true)"`,
+              'echo "CEDEKILL own=${sa:-gone} concurrent=${sb:-gone} tree=${st:-gone}"',
+              'kill -KILL "$DECOY_A" "${DECOY_B:-}" "$DECOY_B_PARENT" "${DECOY_T:-}" 2>/dev/null || true',
+            ].join('\n'),
+          }
+        : { prelude: '', epilogue: '' };
+      const harness = [
+        'set -euo pipefail',
+        eligible,
+        writeSignalSource(),
+        watcherSource(),
+        `START_TS=${now - runElapsed}; BUDGET_SECONDS=${budget}; SALVAGE_ELAPSED_PERCENT=${pct}`,
+        `EXPECTED_HEAD_SHA=${expectedHead}; DOCS_ONLY_MEDIUM=${docsOnly ? 'true' : 'false'}`,
+        'PR_NUMBER=1; REPO=o/r; SALVAGE_POLL_SECONDS=0',
+        // Built, not spelled: this script travels in the harness bash's own
+        // argv, and a literal URL there would put the harness itself inside
+        // the sweep the kill-scope replay measures.
+        'REVIEW_URL="https://example.test/pr/${PR_NUMBER}"',
+        `SALVAGE_DIR="${dir}"; SUPERSEDE_FILE="${dir}/superseded"`,
+        `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${dir}/salvage-ok"; COMPOSED_ARTIFACT="${dir}/composed.json"`,
+        cedeKill.prelude,
+        reapMidWindDown
+          ? [
+              'supersede_watcher &',
+              'WATCHER_PID=$!',
+              // The supersede file is the first write of the cede branch,
+              // after the TERM ignore: once it exists the watcher is in its
+              // wind-down and this TERM lands mid-sleep.
+              'i=0; while [ ! -f "$SUPERSEDE_FILE" ] && [ "$i" -lt 200 ]; do /bin/sleep 0.05; i=$(( i + 1 )); done',
+              't0=$SECONDS',
+              'kill "$WATCHER_PID" 2>/dev/null || true',
+              'wait "$WATCHER_PID" 2>/dev/null || true',
+              'echo "REAP seconds=$(( SECONDS - t0 ))"',
+            ].join('\n')
+          : 'supersede_watcher',
+        cedeKill.epilogue,
+      ]
+        .filter((part) => part !== '')
+        .join('\n');
+      let stdout = '';
+      try {
+        stdout = execFileSync('bash', ['-c', harness], {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            // Every inherited QWEN_CI_REAL_* capture neutralized first:
+            // TIMEOUT/HEAD/NODE inherited from the review lane resolved
+            // the bounded reads to the real utilities and let both
+            // rename-swap wedge tests pass without a swap (R28-1).
+            ...neutralizedRealPins(),
+            // Neutralize an inherited QWEN_CI_REAL_GH (the review lane
+            // exports one): empty restores the PATH gh stub via the :-gh
+            // fallback; the R14-1 spread below still overrides when armed
+            // (R16-1).
+            QWEN_CI_REAL_GH: '',
+            // The watcher's sleep/pkill/id resolve through these pins in
+            // production, captured before the prepend; the replay pins the
+            // harness stubs and the truthful id so proxyPlants shadow
+            // bare-command resolution only (and an inherited review-lane
+            // export cannot redirect the poll at the real sleep 60).
+            QWEN_CI_REAL_SLEEP: join(bin, 'sleep'),
+            QWEN_CI_REAL_PKILL: join(bin, 'pkill'),
+            QWEN_CI_REAL_PGREP: join(bin, 'pgrep'),
+            QWEN_CI_REAL_ID: realIdPath,
+            // The R23-1 pins this arm measures: the harness stub where one
+            // exists (the bounded-read semantics must survive), else the
+            // truthful system utility production would have captured.
+            ...Object.fromEntries(
+              pinReal.map((name) => {
+                const stub = join(bin, name);
+                return [
+                  `QWEN_CI_REAL_${name.toUpperCase()}`,
+                  existsSync(stub) ? stub : realUtilityPath(name),
+                ];
+              }),
+            ),
+            PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
+            ...(realGhPath !== null ? { QWEN_CI_REAL_GH: realGhPath } : {}),
+            ...(realDatePath !== null
+              ? { QWEN_CI_REAL_DATE: realDatePath }
+              : {}),
+            ...(realCedeKill
+              ? {
+                  QWEN_CI_REAL_PKILL: realPkillPath,
+                  QWEN_CI_REAL_PGREP: realPgrepPath,
+                }
+              : {}),
+          },
+        });
+      } catch (e) {
+        // A watcher that dies before its one-shot decision (errexit on a
+        // failed poll, a wedged read) leaves absent signals — read what
+        // is there and let the assertions name the gap.
+        stdout = `${e?.stdout ?? ''}`;
+      }
+      const readOr = (name) =>
+        existsSync(join(dir, name))
+          ? readFileSync(join(dir, name), 'utf8')
+          : null;
+      const killed = /CEDEKILL own=(\S+) concurrent=(\S+) tree=(\S+)/.exec(
+        stdout,
+      );
+      const dead = (state) => state === 'gone' || state === 'Z';
+      const reap = /REAP seconds=(\d+)/.exec(stdout);
+      return {
+        reapSeconds: reap ? Number(reap[1]) : null,
+        marker: readOr('salvage-ok'),
+        movedTo: readOr('moved-to'),
+        superseded: readOr('superseded'),
+        pkilled: existsSync(pkillLog),
+        ownAttemptKilled: killed ? dead(killed[1]) : null,
+        concurrentRunAlive: killed ? !dead(killed[2]) : null,
+        attemptTreeKilled: killed ? dead(killed[3]) : null,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(side, { recursive: true, force: true });
+    }
+  }
+
+  it('wires the watcher decision to the marker and supersede file (replayed watcher)', () => {
+    // Below threshold: CEDE — the supersede file carries the LIVE head, no
+    // marker is armed, and the qwen tree is killed.
+    const cede = runWatcher({});
+    expect(cede.superseded).toBe('head-b');
+    expect(cede.marker).toBeNull();
+    expect(cede.pkilled).toBe(true);
+
+    // Past threshold: KEEP — the marker carries the REVIEWED head (the
+    // wrapper guard compares it against the expected head), not the live
+    // one; moved-to records where the PR went; nothing is killed.
+    const keep = runWatcher({ runElapsed: 12000, attemptElapsed: 12000 });
+    expect(keep.marker).toBe('head-a');
+    expect(keep.movedTo).toBe('head-b');
+    expect(keep.superseded).toBeNull();
+    expect(keep.pkilled).toBe(false);
+
+    // Compose seen past the elapsed floor: KEEP — posting is minutes out
+    // (the floor is R18-3's plant bound, not a limit on a real compose —
+    // compose is the review's final step).
+    const composed = runWatcher({ composeSeen: true, runElapsed: 6000 });
+    expect(composed.marker).toBe('head-a');
+    expect(composed.superseded).toBeNull();
+  });
+
+  it('decides on the captured date, not a forged PATH date (replayed watcher)', () => {
+    // R18-1: bare `date` at the clock sites resolves through the
+    // agent-writable $proxy_bin PATH prepend. A planted date answering +%s
+    // with a large future epoch inflates run_elapsed past the self-bound
+    // and the watcher exits silently — every supersede protection off for
+    // the rest of the run; a smaller forge inflates the attempt elapsed
+    // and arms KEEP on a seconds-old attempt. The clock must read
+    // QWEN_CI_REAL_DATE — captured before the prepend, :-date fallback
+    // for the replays — and the honest clock cedes the moved head.
+    const large = runWatcher({ forgeDateOffset: 300000 });
+    expect(large.superseded).toBe('head-b');
+    expect(large.pkilled).toBe(true);
+    expect(large.marker).toBeNull();
+    const small = runWatcher({ forgeDateOffset: 11000 });
+    expect(small.superseded).toBe('head-b');
+    expect(small.pkilled).toBe(true);
+    expect(small.marker).toBeNull();
+  });
+
+  it('cedes a moved head on a fresh retry attempt (replayed watcher)', () => {
+    // Attempt 1 burned 12000s of the 21600s budget (past 50%) and died
+    // retryable; attempt 2 is seconds old when the head moves. Run-level
+    // elapsed would KEEP — exactly the state the threshold policy says to
+    // CEDE; attempt-relative elapsed cedes.
+    const r = runWatcher({ runElapsed: 12000, attemptElapsed: 30 });
+    expect(r.superseded).toBe('head-b');
+    expect(r.marker).toBeNull();
+  });
+
+  it('never arms salvage for a docs-only run (replayed watcher)', () => {
+    // The medium relay skips any moved head and the salvage-note step
+    // excludes docs-only, so an armed KEEP could never post: cede even
+    // past the threshold.
+    const r = runWatcher({
+      runElapsed: 12000,
+      attemptElapsed: 12000,
+      docsOnly: true,
+    });
+    expect(r.superseded).toBe('head-b');
+    expect(r.marker).toBeNull();
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'never blocks a signal write or read on a planted FIFO (replayed watcher)',
+    () => {
+      // Every signal name is agent-derivable (SALVAGE_DIR derives from the
+      // exported marker path), so the reviewed agent can mkfifo one and
+      // block a direct open: write-side the CEDE/KEEP decision, read-side
+      // the attempt-start poll. Writes go aside-then-rename and every read
+      // is one timeout-bounded open, so all three plants still reach the
+      // one-shot decision inside the bounded timeout — a direct `>` or an
+      // unbounded cat hangs and this test dies on the timeout instead.
+      const cede = runWatcher({ plant: { superseded: 'fifo' } });
+      expect(cede.superseded).toBe('head-b');
+      expect(cede.pkilled).toBe(true);
+      const keep = runWatcher({
+        runElapsed: 12000,
+        attemptElapsed: 12000,
+        plant: { 'moved-to': 'fifo' },
+      });
+      expect(keep.marker).toBe('head-a');
+      expect(keep.superseded).toBeNull();
+      const fresh = runWatcher({ plant: { 'attempt-start': 'fifo' } });
+      expect(fresh.superseded).toBe('head-b');
+      // The latch write itself: a compose-seen FIFO plus a real artifact
+      // must still latch (KEEP) — the write renames over the plant.
+      const latch = runWatcher({
+        composedArtifact: '{"downgraded":false}',
+        runElapsed: 6000,
+        attemptElapsed: 6000,
+        plant: { 'compose-seen': 'fifo' },
+      });
+      expect(latch.marker).toBe('head-a');
+      expect(latch.superseded).toBeNull();
+    },
+  );
+
+  it('latches the compose signal only from a real composed artifact (replayed watcher)', () => {
+    // A genuinely composed verdict below the pct threshold but past the
+    // compose floor: KEEP — posting is minutes out, and discarding it is
+    // the #9729 shape. This is the only case exercising artifact -> latch
+    // -> KEEP end-to-end.
+    const valid = runWatcher({
+      composedArtifact: '{"downgraded":false,"downgradedFrom":null}',
+      runElapsed: 6000,
+      attemptElapsed: 6000,
+    });
+    expect(valid.marker).toBe('head-a');
+    expect(valid.superseded).toBeNull();
+    // The path is agent-derivable, so the latch must refuse forged
+    // artifacts: below the threshold the watcher still cedes.
+    for (const forged of ['', '{not json', 'null', '[1,2]']) {
+      const r = runWatcher({ composedArtifact: forged, attemptElapsed: 30 });
+      expect(r.marker, JSON.stringify(forged)).toBeNull();
+      expect(r.superseded, JSON.stringify(forged)).toBe('head-b');
+    }
+  });
+
+  it('refuses a first-minute plant of the composed artifact (replayed watcher)', () => {
+    // R18-3: the artifact path is derivable from cwd + PR number and the
+    // latch accepts any parseable JSON object — `{}` latches within one
+    // poll. The compose branch carries an elapsed floor, so the forged
+    // latch falls through to the threshold and the fresh attempt cedes
+    // the moved head instead of KEEP-ing on its first minute.
+    const r = runWatcher({ composedArtifact: '{}', attemptElapsed: 30 });
+    expect(r.marker).toBeNull();
+    expect(r.superseded).toBe('head-b');
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'refuses a statically planted FIFO composed artifact (replayed watcher)',
+    () => {
+      // A FIFO at the artifact path must not wedge the poll — [ -f ]
+      // refuses it and the watcher still cedes (bounded by the harness
+      // timeout).
+      const fifo = runWatcher({
+        composedArtifact: '{"downgraded":false}',
+        attemptElapsed: 30,
+        plant: { 'composed.json': 'fifo' },
+      });
+      expect(fifo.marker).toBeNull();
+      expect(fifo.superseded).toBe('head-b');
+    },
+  );
+
+  it('caps the compose-latch read on the agent-writable artifact (replayed watcher)', () => {
+    // R10-9/R10-1: the latch was the one salvage read with no size bound —
+    // readFileSync slurped the whole agent-writable artifact into node's
+    // heap on every poll, so a planted multi-GB file churned the shared
+    // runner for the whole run. A genuine verdict is bounded by the
+    // compose budget, far under the cap; an over-cap plant must decide
+    // inside the harness bound with the latch un-fired (removing the cap
+    // turns this red: the padded JSON parses and latches KEEP).
+    const overCap = `{"downgraded":false}${' '.repeat(3 * 1024 * 1024)}`;
+    const r = runWatcher({ composedArtifact: overCap, attemptElapsed: 30 });
+    expect(r.marker).toBeNull();
+    expect(r.superseded).toBe('head-b');
+    // A verdict UNDER the cap still latches — the cap is not a wedge.
+    const underCap = `{"downgraded":false}${' '.repeat(64 * 1024)}`;
+    const kept = runWatcher({
+      composedArtifact: underCap,
+      runElapsed: 6000,
+      attemptElapsed: 6000,
+    });
+    expect(kept.marker).toBe('head-a');
+    expect(kept.superseded).toBeNull();
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'bounds the compose-artifact reopen against a rename-swapped FIFO (replayed watcher)',
+    () => {
+      // R6-3: [ -f ] refuses a statically planted FIFO, but the artifact
+      // path is agent-derivable — one rename-swapped in during the
+      // check-then-open window blocks readFileSync forever (no writer, no
+      // timeout) and kills the supersede watcher permanently: every later
+      // head move goes unwatched. The node stub performs the swap at open
+      // time; the timeout bound keeps the poll bounded and the one-shot
+      // decision alive (removing the bound turns this test into a harness
+      // timeout). Takes the ~5s of the production bound.
+      const r = runWatcher({
+        composedArtifact: '{"downgraded":false}',
+        attemptElapsed: 30,
+        swapArtifactOnRead: true,
+      });
+      expect(r.marker).toBeNull();
+      expect(r.superseded).toBe('head-b');
+      expect(r.pkilled).toBe(true);
+    },
+  );
+
+  it.skipIf(!hasMkfifo)(
+    'bounds the attempt-start read against a rename-swapped FIFO (replayed watcher)',
+    () => {
+      // R8-10 (1/3): a FIFO rename-swapped into the attempt-start
+      // check-then-open window (no writer) wedges an unbounded cat forever
+      // and the one-shot watcher never decides — a real head move then
+      // burns the budget re-reviewing the dead head. The head stub swaps at
+      // open time; the timeout bound keeps the decision inside the harness
+      // bound (removing it turns this test into a harness timeout). Takes
+      // the ~5s of the production bound.
+      const r = runWatcher({ swapAttemptStartOnRead: true });
+      expect(r.superseded).toBe('head-b');
+      expect(r.pkilled).toBe(true);
+    },
+  );
+
+  it('still decides when SALVAGE_DIR vanished before the head move (replayed watcher)', () => {
+    // The deletion dual of the planted-FIFO hardening: SALVAGE_DIR is
+    // agent-derivable and can be rm -rf'd (or chmod'd, or ENOSPC) mid-run.
+    // Under the inherited errexit an unguarded write_signal would kill the
+    // watcher before its pkill — the attempt then reviews the dead head
+    // for the whole budget. Best-effort writes must degrade to the
+    // live-head re-check: the tree is still killed and the cede taken,
+    // even with the signals unwritable.
+    const r = runWatcher({ removeSalvageDir: true });
+    expect(r.pkilled).toBe(true);
+    expect(r.superseded).toBeNull();
+    expect(r.marker).toBeNull();
+    expect(r.movedTo).toBeNull();
+  });
+
+  it('rejects a leading-zero attempt-start instead of dying on octal arithmetic (replayed watcher)', () => {
+    // attempt-start is agent-writable; `08` passes a digits-only guard but
+    // aborts the poll's $(()) with 'value too great for base' — a silent
+    // watcher death no relaunch ever fixes. The guard must fall back to
+    // the run start and still act on the moved head.
+    const r = runWatcher({ attemptStartRaw: '08' });
+    expect(r.superseded).toBe('head-b');
+    expect(r.pkilled).toBe(true);
+    expect(r.marker).toBeNull();
+  });
+
+  it('bounds a shape-valid attempt-start plant to the run window (replayed watcher)', () => {
+    // R18-2: attempt-start is agent-writable and the shape guard rejects
+    // only empty/leading-zero/non-digit values — any past 10-digit epoch
+    // passes it and sets the eligibility clock ("1" makes elapsed ≈ now,
+    // arming KEEP on a seconds-old attempt), and a >19-digit plant wraps
+    // bash's 64-bit arithmetic (2^64+1 ≡ 1, the same flip through the
+    // wrap). Outside [START_TS, 10 digits] the value must fall back to
+    // the run start, and the watcher must still decide — a fallback, not
+    // a death, as the octal arm pins.
+    for (const plant of ['1', '18446744073709551617']) {
+      const r = runWatcher({
+        runElapsed: 60,
+        attemptElapsed: 30,
+        attemptStartRaw: plant,
+      });
+      expect(r.superseded, plant).toBe('head-b');
+      expect(r.marker, plant).toBeNull();
+    }
+    // R21-3: the guard bounded only the low side — any 10-digit FUTURE
+    // epoch passed it and set the eligibility clock, making elapsed
+    // negative and flipping KEEP to CEDE at a depth that must KEEP. The
+    // pinned-clock upper bound falls back to the run start exactly like
+    // the low side, so the truthful depth still decides KEEP.
+    const future = runWatcher({
+      attemptStartRaw: String(Math.floor(Date.now() / 1000) + 86400),
+      runElapsed: 12000,
+      attemptElapsed: 12000,
+    });
+    expect(future.marker).toBe('head-a');
+    expect(future.superseded).toBeNull();
+  });
+
+  it('keeps a late retry attempt salvage-eligible against its own budget (replayed watcher)', () => {
+    // Attempt 1 spent 12000s of the 21600s budget and died retryable;
+    // attempt 2 owns the 9600s that were left. When its head moves after
+    // 8000s — 83% of the only budget it ever had — the run must KEEP and
+    // post: the run-level denominator made the elapsed KEEP branch
+    // structurally unreachable (8000/21600 < 50%) and CEDE-killed the
+    // attempt minutes from posting.
+    const late = runWatcher({ runElapsed: 20000, attemptElapsed: 8000 });
+    expect(late.marker).toBe('head-a');
+    expect(late.movedTo).toBe('head-b');
+    expect(late.superseded).toBeNull();
+    // Control: a fresh attempt at the same run depth still cedes early.
+    const fresh = runWatcher({ runElapsed: 20000, attemptElapsed: 30 });
+    expect(fresh.marker).toBeNull();
+    expect(fresh.superseded).toBe('head-b');
+  });
+
+  it('keeps polling past failed or empty gh reads (replayed watcher)', () => {
+    // One transient gh failure among hundreds of polls is routine; under
+    // the step's errexit only `|| continue` keeps it from silently
+    // killing the watcher subshell. The failed poll must be skipped and
+    // the next one still reach the one-shot decision.
+    const failed = runWatcher({ failFirstPoll: true });
+    expect(failed.superseded).toBe('head-b');
+    expect(failed.pkilled).toBe(true);
+    expect(failed.marker).toBeNull();
+    // An empty read (exit 0, no head) must not decide either — the
+    // [ -z ] conjunct skips it like an unmoved head.
+    const empty = runWatcher({ emptyFirstPoll: true });
+    expect(empty.superseded).toBe('head-b');
+    expect(empty.pkilled).toBe(true);
+    expect(empty.marker).toBeNull();
+  });
+
+  it('ignores a planted PATH gh reporting a moved head when the real gh refutes it (replayed watcher)', () => {
+    // R14-1: bare `gh` in the poll resolves through the agent-writable
+    // $proxy_bin PATH prepend, so a hijacked agent plants a gh that
+    // reports a forged move — SUPERSEDE_FILE and the pkill land within
+    // one poll. The poll must read QWEN_CI_REAL_GH: the truthful head
+    // never trips the decision, and sleepFailAfter ends the loop after
+    // three uneventful polls.
+    const r = runWatcher({
+      liveHead: 'head-b',
+      realGhHead: 'head-a',
+      sleepFailAfter: 3,
+    });
+    expect(r.superseded).toBeNull();
+    expect(r.marker).toBeNull();
+    expect(r.movedTo).toBeNull();
+    expect(r.pkilled).toBe(false);
+  });
+
+  it('keeps the watcher deciding through proxy-bin sleep/pkill/id plants (replayed watcher)', () => {
+    // R21-2: the watcher launches AFTER configure_qwen_network prepends
+    // the agent-writable $proxy_bin to PATH and inherits the prepend —
+    // bare sleep/pkill/id resolve through it. An exit-1 planted sleep
+    // must not end the one-shot watcher before its first poll (a dead
+    // watcher drops every later head move at the attempt boundary), and
+    // a no-op pkill with a bogus-uid id must not leave the superseded
+    // tree alive — the decision and the kill must ride the captures
+    // taken before the prepend.
+    const sleepPlant = runWatcher({
+      proxyPlants: { sleep: '#!/bin/bash\nexit 1\n' },
+    });
+    expect(sleepPlant.superseded).toBe('head-b');
+    expect(sleepPlant.marker).toBeNull();
+    expect(sleepPlant.pkilled).toBe(true);
+
+    const killPlant = runWatcher({
+      proxyPlants: {
+        pkill: '#!/bin/bash\nexit 0\n',
+        id: '#!/bin/bash\necho 424242\n',
+      },
+    });
+    expect(killPlant.superseded).toBe('head-b');
+    expect(killPlant.marker).toBeNull();
+    expect(killPlant.pkilled).toBe(true);
+  });
+
+  it('keeps the watcher deciding through proxy-bin timeout/node/mktemp/mv plants (replayed watcher)', () => {
+    // R23-1: the sweep stopped six commands short. These fork from the
+    // watcher subshell, not the qwen invocation, so the invocation-scoped
+    // decoys never cover them — a plant inherits the REAL $GITHUB_OUTPUT,
+    // $GITHUB_ENV, $GITHUB_PATH and GH_TOKEN. Each arm plants one utility
+    // and pins it; reverting that pin to the bare command must turn its own
+    // arm red.
+    //
+    // A timeout plant exiting 1 un-fires the compose latch, so an already
+    // composed review is CEDE-killed minutes from posting.
+    const timeoutPlant = runWatcher({
+      composedArtifact: '{"event":"COMMENT"}',
+      runElapsed: 6000,
+      pinReal: ['timeout'],
+      proxyPlants: { timeout: '#!/bin/bash\nexit 1\n' },
+    });
+    expect(timeoutPlant.marker).toBe('head-a');
+    expect(timeoutPlant.superseded).toBeNull();
+
+    // A node plant exiting 0 latches compose-seen on a ZERO-BYTE artifact —
+    // the forgery the parseable-JSON requirement exists to refuse.
+    const nodePlant = runWatcher({
+      composedArtifact: '',
+      runElapsed: 6000,
+      pinReal: ['node'],
+      proxyPlants: { node: '#!/bin/bash\nexit 0\n' },
+    });
+    expect(nodePlant.marker).toBeNull();
+    expect(nodePlant.superseded).toBe('head-b');
+
+    // A no-op mv reports success and lands nothing, so every signal the cede
+    // consumers re-read is silently lost.
+    const mvPlant = runWatcher({
+      pinReal: ['mv'],
+      proxyPlants: { mv: '#!/bin/bash\nexit 0\n' },
+    });
+    expect(mvPlant.superseded).toBe('head-b');
+
+    // A failing mktemp aborts write_signal before it writes anything.
+    const mktempPlant = runWatcher({
+      pinReal: ['mktemp'],
+      proxyPlants: { mktemp: '#!/bin/bash\nexit 1\n' },
+    });
+    expect(mktempPlant.superseded).toBe('head-b');
+
+    // A head plant answering the attempt-start read with "now" resets the
+    // attempt clock, so a KEEP-eligible run is CEDE-killed minutes from
+    // posting.
+    const headPlant = runWatcher({
+      runElapsed: 12000,
+      attemptElapsed: 12000,
+      pinReal: ['head'],
+      proxyPlants: { head: '#!/bin/bash\n/bin/date +%s\n' },
+    });
+    expect(headPlant.marker).toBe('head-a');
+    expect(headPlant.superseded).toBeNull();
+  });
+
+  it('cleans a failed signal write through the captured rm pin (replayed watcher)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-rm-pin-'));
+    try {
+      const canary = join(dir, 'rm-ran');
+      // R23-1: write_signal's cleanup was the one rm the diff left bare —
+      // 26 lines below the comment stating the rule. A failing mv is what
+      // reaches it, and the plant forks from the watcher subshell with the
+      // real $GITHUB_* and GH_TOKEN.
+      const r = runWatcher({
+        pinReal: ['rm'],
+        proxyPlants: {
+          mv: '#!/bin/bash\nexit 1\n',
+          rm: `#!/bin/bash\necho x > "${canary}"\nexit 0\n`,
+        },
+      });
+      expect(existsSync(canary)).toBe(false);
+      expect(r.superseded).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!realPkillPath || !realPgrepPath)(
+    "cedes this run's own attempt without touching a concurrent run of the same PR (replayed watcher)",
+    () => {
+      // R23-2: the URL is not this run's identity. An explicit run gets a
+      // unique per-run concurrency group, so it reviews the SAME URL
+      // concurrently with the automatic run whose watcher cedes — and a
+      // URL-only sweep killed it too. Its attempt then dies with 143: not
+      // 124/137 and not 0, so no retry and no cede branch, and a
+      // human-requested review goes red over a push it has nothing to do
+      // with. -P scopes the sweep to this step shell's own children.
+      // R25-1: the escalation must reach the attempt TREE. GNU timeout
+      // forwards TERM down to its group but SIGKILL is never forwarded, so
+      // re-sweeping the direct children with -KILL killed only the timeout
+      // and left a TERM-resistant member alive holding the tee pipe — the
+      // step shell then blocked in run_review_once, the cede never landed,
+      // and the run went red at the job timeout. attemptTreeKilled is the
+      // falsifiable half: that member is a grandchild of the step shell, so
+      // no -P $$ sweep can reach it and only the group KILL does.
+      const r = runWatcher({ realCedeKill: true });
+      expect(r.ownAttemptKilled).toBe(true);
+      expect(r.attemptTreeKilled).toBe(true);
+      expect(r.concurrentRunAlive).toBe(true);
+      expect(r.superseded).toBe('head-b');
+    },
+  );
+
+  it.skipIf(!realPkillPath || !realPgrepPath)(
+    'finishes the group KILL when a reaper TERMs the watcher mid-wind-down (replayed watcher)',
+    () => {
+      // R30-1: every reaper — the EXIT trap on a cede or fail(), the retry
+      // branch, the post-loop reap — TERMs the one-shot watcher and waits.
+      // A TERM landing inside the 15s wind-down ended the watcher before
+      // its group KILL, the only signal the TERM-resistant tree member
+      // answers, and that member outlived the step on the shared runner
+      // holding the job's credentials. The wind-down ignores TERM now, so
+      // the reaper's wait spans it (the 3s stub sleep here) and the KILL
+      // lands before the reaper continues; the concurrent run stays
+      // untouched (R23-2). Mutation: dropping the `trap '' TERM` makes the
+      // reap return at once with the tree member alive.
+      const r = runWatcher({ realCedeKill: true, reapMidWindDown: true });
+      expect(r.superseded).toBe('head-b');
+      expect(r.reapSeconds).toBeGreaterThanOrEqual(2);
+      expect(r.ownAttemptKilled).toBe(true);
+      expect(r.attemptTreeKilled).toBe(true);
+      expect(r.concurrentRunAlive).toBe(true);
+    },
+  );
+
+  it('stops acting past the budget plus grace (replayed watcher)', () => {
+    // The self-bound is the only protection against a watcher leaked
+    // through a hard step kill acting on a LATER job of the same PR on
+    // the reused runner: past budget + 30 minutes it returns without
+    // polling the head at all.
+    const expired = runWatcher({ runElapsed: 23401, attemptElapsed: 23401 });
+    expect(expired.marker).toBeNull();
+    expect(expired.superseded).toBeNull();
+    expect(expired.pkilled).toBe(false);
+  });
+
+  it('ends a superseded attempt clean without retrying (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // The watcher cedes mid-attempt (its pkill kills the qwen tree);
+      // the attempt's post-run check sees the file and cedes clean.
+      // R7-1: the cede sites are AUTO_REVIEW-gated, so the lifecycle shape
+      // runs with the watcher armed; the explicit-run forgery dual below
+      // keeps AUTO_REVIEW=false and must fail loudly instead.
+      const r = runScenario('supersede_mid_attempt', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).toContain('ceding to the replacement run (#10110)');
+      expect(r.raw).not.toContain('FAIL ');
+      // The supersede file is agent-writable: the stub planted a newline
+      // plus a forged workflow command in it. Only the watcher's 40-hex
+      // shape may reach the interpolated message — anything else degrades
+      // to `unknown`, so no injected line starts a transcript line.
+      expect(r.raw).toContain('to unknown before the salvage threshold');
+      expect(
+        r.raw.split('\n').some((l) => l.startsWith('::error::injected')),
+      ).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails loudly when an explicit run meets a forged supersede file and a moved head (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R7-1: an explicit run (/review, review_requested, dispatch) has no
+      // watcher and no queued replacement, so SUPERSEDE_FILE can only
+      // exist by forgery — the path derives from the exported marker's
+      // dirname. The exact shape that cedes green in a lifecycle run must
+      // burn its retry and fail red here: a silent green exit would
+      // suppress the maintainer-requested review with no replacement.
+      const r = runScenario('supersede_mid_attempt', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(1);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain('Superseded early:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede an explicit run to a supersede file forged during the retry backoff (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R7-1's top-of-loop dual: the file lands in the backoff (the
+      // stubbed stand-in for a watcher cede) and the head reads moved,
+      // but an explicit run has no watcher and no queued replacement —
+      // the file can only be a forgery there, and attempt 2 must run
+      // instead of the loop exiting green on it.
+      const r = runScenario('supersede_during_backoff', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          SUPERSEDE_DURING_BACKOFF: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.raw).not.toContain('Superseded early:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes instead of retrying when salvage armed but the attempt died (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      // The stub arms the marker mid-attempt (stand-in for the watcher's
+      // KEEP write, which the replay cannot inject), the attempt still dies
+      // retryable, and the head has moved: a retry would re-review a
+      // superseded head from scratch — one attempt, clean exit.
+      // SLEEP_FAIL_AFTER=1 lets the armed watcher exactly one poll (it sees
+      // the unmoved head, stands in for a KEEP it cannot decide here) and
+      // then ends its loop; STUB_LIVE_HEAD_A1 answers that poll and the
+      // loop's later live-head re-check gets the moved head.
+      const r = runScenario('salvage_armed_then_die', {
+        armWatcher: true,
+        extraEnv: {
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count'),
+          STUB_LIVE_HEAD_A1: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+          SLEEP_FAIL_AFTER: '1',
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Salvage-armed review attempt did not complete');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries and fails an explicit run whose salvage marker coincides with a head move (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      // R6-1 defense-in-depth: an explicit run has no watcher that could
+      // legitimately arm the marker and no queued replacement to cede to,
+      // so the same shape with the marker forged must burn its retry and
+      // fail loudly instead of exiting green on the forgeable marker.
+      const r = runScenario('salvage_armed_then_die', {
+        extraEnv: {
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(1);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain(
+        'Salvage-armed review attempt did not complete',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('completes normally when salvage armed and the attempt succeeds (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      writeFileSync(salvageFile, 'head-a');
+      const r = runScenario('success', {
+        extraEnv: { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile },
+      });
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.status).toBe(0);
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes before an attempt when the watcher yielded during the backoff (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // Attempt 1 dies retryable; the stubbed backoff sleep stands in for
+      // the window where the watcher cedes against an empty process table
+      // (pkill matches nothing — qwen is not running). The top-of-loop
+      // re-check must stop attempt 2 re-reviewing the dead head.
+      // R7-1 gated the top-of-loop cede on AUTO_REVIEW. The armed watcher
+      // must stay deterministic: SLEEP_FAIL_ONLY_FIRST ends it before its
+      // first poll, the stubbed backoff remains the cede's stand-in, and
+      // the first gh call (the post-attempt re-check) answers the UNMOVED
+      // head so that check cannot preempt the top-of-loop site under test.
+      const r = runScenario('supersede_during_backoff', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          SUPERSEDE_DURING_BACKOFF: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count'),
+          STUB_LIVE_HEAD_A1: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+          SLEEP_FAIL_ONLY_FIRST: '1',
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resets the salvage state before the retry backoff, not only at the loop top (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      const obs = join(dir, 'backoff-observed');
+      // Attempt 1 reaches compose (latch + surviving artifact) and dies
+      // retryable; the head move lands in the 60s backoff. The watcher
+      // polls THROUGH the backoff, so it must meet already-reset state —
+      // the stubbed backoff observes the reset and stands in for the
+      // watcher's cede. Without the pre-backoff reset the latch/artifact
+      // survive the backoff (observed `present`) and a real watcher arms
+      // the salvage marker instead of ceding.
+      // R7-1 gating: the same deterministic AUTO_REVIEW shape as the
+      // sibling backoff replay above — the watcher's first sleep fails,
+      // the first gh call answers the unmoved head, and the top-of-loop
+      // re-check takes the cede after the backoff reset is observed.
+      const r = runScenario('compose_then_backoff_supersede', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          SUPERSEDE_DURING_BACKOFF: supersedeFile,
+          BACKOFF_OBS: obs,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count'),
+          STUB_LIVE_HEAD_A1: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+          SLEEP_FAIL_ONLY_FIRST: '1',
+        },
+      });
+      // Every observation — the backoff itself and any watcher poll past
+      // it — must meet the reset state; a surviving latch or artifact
+      // would surface `present` on one of these lines.
+      const observations = readFileSync(obs, 'utf8')
+        .split('\n')
+        .filter(Boolean);
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((l) => l === 'absent')).toBe(true);
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not record a successful attempt as superseded when the cede write raced completion (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // The watcher's one-shot CEDE writes the file and pkills; if the
+      // pkill races — or misses — qwen's natural exit-0, the attempt
+      // completes and posts. The post-attempt check carries the same
+      // OUTCOME guard as its salvage-cede sibling and must not turn the
+      // finished review into "Superseded early".
+      const r = runScenario('supersede_after_success', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
+      });
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.status).toBe(0);
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede to a forged supersede file when the live head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // Existence alone must not cede: the head never moved, so no
+      // replacement run exists — a forged cede is a silent green
+      // suppression of the whole review.
+      writeFileSync(supersedeFile, 'head-b');
+      const r = runScenario('success', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede when a planted PATH gh reports a moved head the real gh refutes (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      writeFileSync(supersedeFile, 'head-b');
+      // R14-1: bare `gh` at the cede sites resolves through the
+      // agent-writable $proxy_bin PATH prepend, so a hijacked agent
+      // plants a gh reporting a forged move and cedes the run to itself
+      // with the head never moved. The decision must read
+      // QWEN_CI_REAL_GH — the truthful stub refutes the move and the
+      // review completes. SLEEP_FAIL_AFTER=0 ends the armed watcher
+      // before its first poll so the top-of-loop site is the only
+      // decision in the replay.
+      const realBin = join(dir, 'realbin');
+      mkdirSync(realBin);
+      const realGh = join(realBin, 'gh');
+      writeFileSync(realGh, '#!/bin/bash\necho "head-a"\n');
+      chmodSync(realGh, 0o755);
+      const r = runScenario('success', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+          SLEEP_FAIL_AFTER: '0',
+          QWEN_CI_REAL_GH: realGh,
+        },
+      });
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede to a supersede file forged mid-attempt when the head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // Forged DURING the attempt (the post-attempt check site): same
+      // silence risk — the head never moved, so the review must complete.
+      const r = runScenario('supersede_forge_mid_attempt', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries and fails when the salvage marker is forged and the head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      writeFileSync(salvageFile, 'head-a');
+      const r = runScenario('transient_persist', {
+        extraEnv: {
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain(
+        'Salvage-armed review attempt did not complete',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resets the compose latch between attempts (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'latch-observed');
+      // Attempt 1 reaches compose (the stub simulates the watcher latching
+      // it) and dies retryable; attempt 2 must start without the stale
+      // latch, or it reads salvage-eligible from its first second.
+      const r = runScenario('compose_latch_reset', {
+        extraEnv: { OBS: obs },
+      });
+      expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resets the compose latch through the captured rm pin (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'latch-observed');
+      // R18-4: a hijacked agent plants a no-op rm in the agent-writable
+      // $proxy_bin prepend; attempt 1 reaches compose and dies retryable.
+      // The reset must remove the latch through QWEN_CI_REAL_RM — captured
+      // before the prepend like gh/git/date — or the bare PATH resolution
+      // no-ops it and the fresh attempt reads salvage-eligible from its
+      // first second.
+      const r = runScenario('compose_latch_reset', {
+        proxyPlants: { rm: '#!/bin/bash\nexit 0\n' },
+        extraEnv: { OBS: obs },
+      });
+      expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never touches a lane-exported salvage marker from the replay (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'latch-observed');
+      // R21-1: this workflow's own review lane exports
+      // QWEN_CI_REVIEW_SALVAGE_OK_FILE into the agent environment, and
+      // the replay spreads process.env — the retry-branch reset would
+      // rm -rf the PARENT run's live marker (an armed one-shot watcher
+      // can never re-arm, so the loss is permanent). runScenario pins
+      // the variable empty ahead of extraEnv, so the canary survives
+      // while the scenarios' own overrides still win.
+      const canary = join(dir, 'parent-salvage-ok');
+      writeFileSync(canary, 'head-a');
+      process.env.QWEN_CI_REVIEW_SALVAGE_OK_FILE = canary;
+      try {
+        const r = runScenario('compose_latch_reset', {
+          extraEnv: { OBS: obs },
+        });
+        expect(r.attempts).toBe(2);
+        expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+        expect(existsSync(canary)).toBe(true);
+      } finally {
+        delete process.env.QWEN_CI_REVIEW_SALVAGE_OK_FILE;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes a stale composed artifact in the per-attempt reset (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'artifact-observed');
+      // Attempt 1 reaches compose and dies retryable, skipping the skill's
+      // Step 9 cleanup; attempt 2 must not inherit the artifact, or the
+      // watcher re-latches compose-seen from it within one poll and the
+      // fresh attempt reads salvage-eligible from its first second.
+      const r = runScenario('compose_artifact_reset', {
+        extraEnv: { OBS: obs },
+      });
+      expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes when the head moved inside the watcher poll gap (replayed loop)', () => {
+    // The head moves and every watcher poll misses it (the extreme poll
+    // gap: the watcher never gets a poll in before the attempt dies):
+    // guard_pr_write exits 90, no signal file exists, and the attempt
+    // surfaces a fatal. In an AUTO_REVIEW run the terminal fail must
+    // re-read the live head — the queued replacement already covers it,
+    // so the run cedes clean instead of going red on a genuine supersede.
+    // SLEEP_FAIL_AFTER=0 ends the armed watcher's loop before its first
+    // poll — the replay's stand-in for the gap.
+    const moved = runScenario('hardexit', {
+      armWatcher: true,
+      extraEnv: {
+        EXPECTED_HEAD_SHA: 'head-a',
+        STUB_LIVE_HEAD: 'head-b',
+        SLEEP_FAIL_AFTER: '0',
+      },
+    });
+    expect(moved.attempts).toBe(1);
+    expect(moved.status).toBe(0);
+    expect(moved.raw).toContain('Superseded early:');
+    expect(moved.raw).not.toContain('FAIL ');
+    // R6-1: the same shape in an EXPLICIT run (no watcher, and no
+    // replacement run queued) must fail loudly, never cede — ceding there
+    // would claim a handoff to a run that does not exist and leave the
+    // review silently unposted.
+    const explicit = runScenario('hardexit', {
+      extraEnv: { EXPECTED_HEAD_SHA: 'head-a', STUB_LIVE_HEAD: 'head-b' },
+    });
+    expect(explicit.attempts).toBe(1);
+    expect(explicit.status).toBe(1);
+    expect(explicit.raw).toContain('FAIL ');
+    expect(explicit.raw).not.toContain('Superseded early:');
+    // Control: an unmoved head keeps the red failure — the cede exists
+    // for the superseded run, not as a universal failure escape.
+    const unmoved = runScenario('hardexit', {
+      extraEnv: { EXPECTED_HEAD_SHA: 'head-a', STUB_LIVE_HEAD: 'head-a' },
+    });
+    expect(unmoved.status).toBe(1);
+    expect(unmoved.raw).toContain('FAIL ');
+    expect(unmoved.raw).not.toContain('Superseded early:');
+  });
+
+  it('cedes a killed attempt whose superseding push reverted before the re-check (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // The watcher ceded mid-attempt (file written, tree killed — the
+      // attempt surfaces the kill as a fatal), then the push was
+      // force-reverted before the post-attempt live-head re-check: the
+      // re-check sees the restored head, but the timeline still carries
+      // the FULL move-then-revert pair landing during this run — the
+      // unforgeable witness that the run really was superseded. Timeline
+      // lines are `beforeCommit afterCommit createdAt`, ascending.
+      // SLEEP_FAIL_AFTER=0 keeps the armed watcher from polling (the loop
+      // owns every gh call in the replay); AUTO_REVIEW is on because a
+      // watcher kill is an AUTO_REVIEW story and the revert cede is gated
+      // on it.
+      writeFileSync(supersedeFile, 'head-b');
+      const base = {
+        SUPERSEDE_FILE: supersedeFile,
+        EXPECTED_HEAD_SHA: 'head-a',
+        STUB_LIVE_HEAD: 'head-a',
+        REPO: 'o/r',
+        SLEEP_FAIL_AFTER: '0',
+      };
+      const now = new Date().toISOString();
+      const pair = `head-a head-x ${now}\nhead-x head-a ${now}`;
+      const ceded = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: { ...base, STUB_TIMELINE: pair },
+      });
+      expect(ceded.attempts).toBe(1);
+      expect(ceded.status).toBe(0);
+      expect(ceded.raw).toContain('Superseded early:');
+      expect(ceded.raw).not.toContain('FAIL ');
+      // A silent timeline (the verification unavailable) keeps the red
+      // failure — the cede needs the unforgeable witness.
+      const silent = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: base,
+      });
+      expect(silent.status).toBe(1);
+      expect(silent.raw).toContain('FAIL ');
+      expect(silent.raw).not.toContain('Superseded early:');
+      // A LONE back-push to the expected head proves nothing — it matches
+      // the triggering push of a reopened/ready_for_review run, whose
+      // event window reaches before the run started; only the departure
+      // followed by the return is the move's signature.
+      const loneBack = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: { ...base, STUB_TIMELINE: `head-x head-a ${now}` },
+      });
+      expect(loneBack.status).toBe(1);
+      expect(loneBack.raw).toContain('FAIL ');
+      expect(loneBack.raw).not.toContain('Superseded early:');
+      // A pair that landed BEFORE the run started proves nothing about a
+      // move during it either (the old 300s window admitted it).
+      const preRun = new Date(Date.now() - 200_000).toISOString();
+      const preRunPair = `head-a head-x ${preRun}\nhead-x head-a ${preRun}`;
+      const early = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: { ...base, STUB_TIMELINE: preRunPair },
+      });
+      expect(early.status).toBe(1);
+      expect(early.raw).toContain('FAIL ');
+      expect(early.raw).not.toContain('Superseded early:');
+      // A stale pair (2020) fails the window the same way.
+      const stale = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE:
+            'head-a head-x 2020-01-01T00:00:00Z\nhead-x head-a 2020-01-01T00:00:01Z',
+        },
+      });
+      expect(stale.status).toBe(1);
+      expect(stale.raw).toContain('FAIL ');
+      // And a pair between two OTHER heads is not the move's signature.
+      const other = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: { ...base, STUB_TIMELINE: `deadbeef cafebabe ${now}` },
+      });
+      expect(other.status).toBe(1);
+      expect(other.raw).toContain('FAIL ');
+      // The pair's timestamp conversion must not evaluate through a
+      // PATH-resolved binary either: a `date` planted in the agent-writable
+      // $proxy_bin prepend answering -d with a future epoch lifts this
+      // pre-run pair into the window and cedes green on a head that never
+      // moved. QWEN_CI_REAL_DATE restores the truthful read (R16-3).
+      const forgedDate = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        proxyPlants: { date: forgedDateShim() },
+        extraEnv: { ...base, STUB_TIMELINE: preRunPair },
+      });
+      expect(forgedDate.attempts).toBe(1);
+      expect(forgedDate.status).toBe(1);
+      expect(forgedDate.raw).toContain('FAIL ');
+      expect(forgedDate.raw).not.toContain('Superseded early:');
+      // R22-1: the witness is unforgeable only against an actor that is not
+      // this step's OWN credential. The reviewed agent inherits
+      // GH_TOKEN=CI_BOT_PAT, and neither the git wrapper (proxy env + exec)
+      // nor guard_api_write (four comment/review endpoints) blocks a
+      // repos/*/git/refs/* write — so an injected agent force-pushes the
+      // head EXPECTED→X→EXPECTED itself and authors the very pair above.
+      // Accepting it cedes green with nothing posted, and the push queues
+      // the successor run that repeats it against the same content.
+      const botPair = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: pair,
+          STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
+        },
+      });
+      expect(botPair.attempts).toBe(1);
+      expect(botPair.status).toBe(1);
+      expect(botPair.raw).toContain('FAIL ');
+      expect(botPair.raw).not.toContain('Superseded early:');
+      // The identity read is what separates the two authors, so an
+      // unavailable identity must not fall through to accepting every
+      // actor-bearing event: an unattributable witness keeps the red
+      // failure the cede's contract prefers.
+      const noIdentity = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: pair,
+          STUB_BOT_LOGIN_STATUS: '1',
+        },
+      });
+      expect(noIdentity.attempts).toBe(1);
+      expect(noIdentity.status).toBe(1);
+      expect(noIdentity.raw).toContain('FAIL ');
+      expect(noIdentity.raw).not.toContain('Superseded early:');
+      // A null actor (the schema allows one) is unattributable the same way:
+      // the selection's `// ""` fallback must not read as "someone else".
+      const noActor = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: { ...base, STUB_TIMELINE: pair, STUB_TIMELINE_ACTOR: '' },
+      });
+      expect(noActor.attempts).toBe(1);
+      expect(noActor.status).toBe(1);
+      expect(noActor.raw).toContain('FAIL ');
+      expect(noActor.raw).not.toContain('Superseded early:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede a reverted supersede to a forged timeline served by a planted gh (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      writeFileSync(supersedeFile, 'head-b');
+      // R14-1: the timeline witness is only unforgeable while the read
+      // bypasses the agent-writable $proxy_bin PATH prepend — a planted
+      // gh answers the graphql query with the full move-then-revert pair
+      // while the real timeline is silent. The read must go through
+      // QWEN_CI_REAL_GH: the empty real timeline refuses the cede and
+      // the killed attempt keeps its red failure.
+      const realBin = join(dir, 'realbin');
+      mkdirSync(realBin);
+      const realGh = join(realBin, 'gh');
+      writeFileSync(
+        realGh,
+        [
+          '#!/bin/bash',
+          'if [ "${1:-}" = "api" ]; then',
+          '  exit 0',
+          'fi',
+          'echo "head-a"',
+        ].join('\n') + '\n',
+      );
+      chmodSync(realGh, 0o755);
+      const now = new Date().toISOString();
+      const r = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+          REPO: 'o/r',
+          SLEEP_FAIL_AFTER: '0',
+          STUB_TIMELINE: `head-a head-x ${now}\nhead-x head-a ${now}`,
+          QWEN_CI_REAL_GH: realGh,
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(1);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain('Superseded early:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes a killed attempt whose superseding departure was a normal push (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R4-1: a normal fast-forward departure emits no force-push event,
+      // so the timeline carries ONLY the corrective back-push — the lone
+      // back-push the timeline witness rightly rejects (the loneBack arm
+      // above pins that refusal for a watcher-less run). Here the watcher
+      // saw the move itself: its kill record, written into the unexported
+      // minted dir, is the primary witness, and the killed attempt cedes
+      // clean instead of going red on a genuine supersede. The corrective
+      // back-push lands AFTER the run started — the kill-record branch
+      // requires it past one poll interval (a lone back-push at or before
+      // run start is the triggering push's shape, and no watcher poll
+      // could have recorded the kill that early) — so the event postdates
+      // START_TS + SALVAGE_POLL_SECONDS with margin for the harness setup
+      // between now and the loop start.
+      const now = new Date(Date.now() + 75000).toISOString();
+      const r = runScenario('cede_revert_ff_kill', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count'),
+          STUB_LIVE_HEAD_A1: 'head-b',
+          STUB_LIVE_HEAD: 'head-a',
+          REPO: 'o/r',
+          STUB_TIMELINE: `head-x head-a ${now}`,
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a forged kill record when the head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R4-1: SUPERSEDE_KILL_DIR is never exported, but it is minted with
+      // mktemp -d under the enumerable RUNNER_TEMP with a fixed prefix —
+      // non-export stops DERIVATION, not DISCOVERY by the same-uid agent.
+      // The stub qwen plays the injected agent: it lists RUNNER_TEMP,
+      // plants the kill record, plants SUPERSEDE_FILE, and dies
+      // non-retryably (a fatal skips the retry reset that clears plants).
+      // With the live head UNMOVED and the timeline silent the run must
+      // fail red — accepted alone, the planted record used to cede
+      // green: no review posted, no failure fallback, no replacement run.
+      // RUNNER_TEMP is this test's private dir so the glob finds exactly
+      // this run's minted kill dir.
+      const base = {
+        SUPERSEDE_FILE: supersedeFile,
+        EXPECTED_HEAD_SHA: 'head-a',
+        STUB_LIVE_HEAD: 'head-a',
+        REPO: 'o/r',
+        SLEEP_FAIL_AFTER: '0',
+        RUNNER_TEMP: dir,
+      };
+      const r = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: base,
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(1);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain('Superseded early:');
+      // A timeline event between two OTHER heads is not corroboration:
+      // the back-push must land ON the expected head, so a record planted
+      // beside an unrelated force-push still fails red.
+      const unrelated = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `deadbeef cafebabe ${new Date().toISOString()}`,
+        },
+      });
+      expect(unrelated.attempts).toBe(1);
+      expect(unrelated.status).toBe(1);
+      expect(unrelated.raw).toContain('FAIL ');
+      expect(unrelated.raw).not.toContain('Superseded early:');
+      // The run's OWN triggering force-push has the corroboration's exact
+      // shape — a back-push onto the expected head — and with the old skew
+      // tolerance any such event inside [START_TS - 15, ...) corroborated a
+      // planted record whenever dispatch was fast or the runner clock
+      // lagged GitHub: silent suppression with the head never moved. The
+      // kill-record branch must require the event at or after run start —
+      // 5s before it sits inside the old window, so this arm shipped green
+      // pre-fix. The triggering push predates START_TS by the full
+      // dispatch-plus-setup latency; a genuine mid-run revert postdates it.
+      const triggering = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() - 5000).toISOString()}`,
+        },
+      });
+      expect(triggering.attempts).toBe(1);
+      expect(triggering.status).toBe(1);
+      expect(triggering.raw).toContain('FAIL ');
+      expect(triggering.raw).not.toContain('Superseded early:');
+      // The conversion must not evaluate through a PATH-resolved binary: a
+      // `date` planted in the agent-writable $proxy_bin prepend answering
+      // -d with a future epoch lifts this triggering-shape event — 5s
+      // BEFORE run start — past the bound and corroborates the planted
+      // record with the head never moved. QWEN_CI_REAL_DATE, captured
+      // before the prepend, restores the truthful read (R16-3).
+      const forgedDate = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        proxyPlants: { date: forgedDateShim() },
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() - 5000).toISOString()}`,
+        },
+      });
+      expect(forgedDate.attempts).toBe(1);
+      expect(forgedDate.status).toBe(1);
+      expect(forgedDate.raw).toContain('FAIL ');
+      expect(forgedDate.raw).not.toContain('Superseded early:');
+      // The margin dual: a back-push landing INSIDE the first poll interval
+      // postdates START_TS yet predates the earliest poll that could have
+      // recorded the kill, so it cannot corroborate it — the honest-date
+      // shape the conversion pin alone cannot refuse.
+      const insideMargin = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 30000).toISOString()}`,
+        },
+      });
+      expect(insideMargin.attempts).toBe(1);
+      expect(insideMargin.status).toBe(1);
+      expect(insideMargin.raw).toContain('FAIL ');
+      expect(insideMargin.raw).not.toContain('Superseded early:');
+      // R22-1's kill-record arm: the corroboration has to be a back-push by
+      // SOMEONE ELSE. The agent that planted the record can author the
+      // back-push too with the inherited CI_BOT_PAT, and past the poll
+      // margin it is otherwise indistinguishable from the genuine shape the
+      // normal-push cede replay pins.
+      const botBackPush = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 75000).toISOString()}`,
+          STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
+        },
+      });
+      expect(botBackPush.attempts).toBe(1);
+      expect(botBackPush.status).toBe(1);
+      expect(botBackPush.raw).toContain('FAIL ');
+      expect(botBackPush.raw).not.toContain('Superseded early:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('relaunches a spent watcher and clears stale signals for a retry (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      const B40 = 'b'.repeat(40);
+      // Attempt 1: the armed watcher sees a below-threshold head move
+      // (first gh call) recording the SHORT head, writes the supersede
+      // file and kills — but the head REVERTS before the re-check, so
+      // the run retries instead of ceding. The retry must clear attempt
+      // 1's file and relaunch the spent one-shot watcher: a head move
+      // early in attempt 2 (gh serves the full live head from attempt 2
+      // on) then lands a fresh CEDE within one poll. The two recorded
+      // shapes make the difference observable — a surviving stale file
+      // (no clear) or a missing relaunch degrades the cede's head to
+      // `unknown` instead of the watcher's 40-hex recording.
+      const r = runScenario('retry_watcher_relaunch', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count'),
+          STUB_LIVE_HEAD_A1: 'head-b',
+          STUB_LIVE_HEAD: 'head-a',
+          STUB_LIVE_HEAD_A2: B40,
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).toContain(`to ${B40} before the salvage threshold`);
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears the previous attempt's supersede signal before a retry (replayed loop)", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      const obs = join(dir, 'signal-observed');
+      // A cede whose head reverted leaves the previous attempt's file
+      // behind; the re-check sees the restored head and retries, so
+      // attempt 2 must meet cleared state (the relaunch witness above
+      // covers the watcher half; this pins the rm).
+      writeFileSync(supersedeFile, 'head-b');
+      const r = runScenario('retry_clears_stale_signals', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          OBS: obs,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.line).toBe('OK outcome=success');
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('survives agent-planted directories at the salvage signal paths on a retry (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // The reviewed agent derives every signal path from its exported
+      // environment and mkdir's them during attempt 1: a bare `rm -f` on a
+      // directory exits 1 even with -f, and under the step's restored
+      // errexit the reset would abort red instead of retrying. rm -rf must
+      // absorb the plant and attempt 2 must run.
+      const r = runScenario('retry_planted_dirs', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes a moved head when attempt-start was planted as a directory (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R19-1: attempt-start was the only salvage path no reset removed —
+      // a DIRECTORY planted there survives every reset, because the
+      // rewrite's mv -f renames the fresh temp INTO the directory (exit 0,
+      // silent). The watcher's read then falls back to START_TS on every
+      // poll: attempt 1 burned past the salvage threshold (the date stub
+      // advances the truthful clock with the attempt counter) and the head
+      // moves early in attempt 2, so run-level elapsed arms KEEP on the
+      // seconds-old attempt instead of the mandated CEDE. The reset must
+      // remove the plant before rewriting.
+      const r = runScenario('retry_planted_attempt_start', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          // Production exports the marker path (SALVAGE_DIR derives from
+          // it); the watcher's KEEP arming writes it, and the salvage-cede
+          // check below the supersede check reads it.
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: join(dir, 'salvage-ok'),
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+          STUB_LIVE_HEAD_A2: 'head-b',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).not.toContain(
+        'Salvage-armed review attempt did not complete',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('survives a deleted SALVAGE_DIR across the retry reset (replayed loop)', () => {
+    // The deletion dual: the agent removes SALVAGE_DIR outright during
+    // attempt 1. The reset's attempt-start rewrite must be best-effort —
+    // an unguarded write_signal fails its mktemp and aborts the retry
+    // under errexit; the watcher's START_TS fallback covers the lost file.
+    const r = runScenario('retry_deleted_salvage_dir', {
+      extraEnv: { EXPECTED_HEAD_SHA: 'head-a', STUB_LIVE_HEAD: 'head-a' },
+    });
+    expect(r.attempts).toBe(2);
+    expect(r.status).toBe(0);
+    expect(r.line).toBe('OK outcome=success');
+    expect(r.raw).not.toContain('FAIL ');
+  });
+
+  it('pins the compose-artifact path to the CLI that writes it', () => {
+    // The watcher's strongest KEEP signal is the composed-verdict artifact;
+    // its name comes from composedNameFor in the review CLI. If either side
+    // renames, this cross-pin fails instead of the signal silently dying
+    // (the elapsed threshold would still salvage, but later than intended).
+    expect(run).toContain(
+      'COMPOSED_ARTIFACT="${GITHUB_WORKSPACE}/.qwen/tmp/qwen-review-pr-${PR_NUMBER}-composed.json"',
+    );
+    const cli = readFileSync('packages/cli/src/commands/review/run.ts', 'utf8');
+    expect(cli).toContain('`qwen-review-pr-${cls.number}-composed.json`');
+  });
+
+  it('captures every pinned utility before the agent-writable prepend', () => {
+    // R18-4, R21-2 and R23-1 each pinned the commands that round's finding
+    // named, so the sweep kept stopping short. The property is one line: a
+    // capture taken after the prepend resolves through the prepend it exists
+    // to escape, and a capture the block drops silently re-opens the
+    // bare-command path that every consumer's :- fallback then takes. The
+    // replayed arms pin the harness env themselves, so they witness the
+    // consumption sites and can see neither gap.
+    const prepend = run.indexOf('export PATH="$proxy_bin:$PATH"');
+    expect(prepend).toBeGreaterThan(-1);
+    for (const name of [
+      'GH',
+      'GIT',
+      'DATE',
+      'RM',
+      'TEE',
+      'SLEEP',
+      'PKILL',
+      'PGREP',
+      'ID',
+      'TIMEOUT',
+      'HEAD',
+      'NODE',
+      'MKTEMP',
+      'MV',
+    ]) {
+      const at = run.indexOf(`export QWEN_CI_REAL_${name}=`);
+      expect(at, `QWEN_CI_REAL_${name}`).toBeGreaterThan(-1);
+      expect(at, `QWEN_CI_REAL_${name}`).toBeLessThan(prepend);
+    }
+  });
+
+  it('bounds and scopes the watcher kill', () => {
+    // -U scopes to the runner user and -P to this step shell's own children
+    // (R23-2: a URL-only sweep also killed a concurrent explicit run of the
+    // same PR); the trailing ($|[^0-9]) keeps PR 123 from matching PR
+    // 1234's URL; TERM first, KILL after a grace period. Both resolve
+    // through the pre-prepend captures (R21-2); the replayed proxy-bin
+    // plant arms witness the pins.
+    expect(run).toContain(
+      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -TERM -f "${REVIEW_URL}($|[^0-9])"',
+    );
+    // R25-1: the escalation signals the process GROUP led by the direct
+    // child it resolves, because SIGKILL is not forwarded down the tree the
+    // way TERM is — the -P $$ -KILL sweep this replaced killed the timeout
+    // wrapper alone and left a TERM-resistant member holding the tee pipe.
+    expect(run).toContain(
+      '"${QWEN_CI_REAL_PGREP:-pgrep}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -f "${REVIEW_URL}($|[^0-9])"',
+    );
+    expect(run).toContain('kill -KILL -- "-${attempt_pgid}"');
+    expect(run).not.toContain('-P "$$" -KILL');
+    // Self-bounded past the budget, and reaped on every exit path — a
+    // watcher outliving the step on a reused self-hosted runner could kill
+    // a later job's review of the same PR.
+    expect(run).toContain('BUDGET_SECONDS + 1800');
+    expect(run).toContain(
+      '[ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }',
+    );
+    // R30-1: the CEDE wind-down ignores TERM so a reaper's kill+wait spans
+    // it and the group KILL lands; the polling phase before the decision
+    // stays killable (the ignore sits inside the cede branch, after the
+    // KEEP return and before the first signal write).
+    const watcher = watcherSource();
+    const ignoreAt = watcher.indexOf("trap '' TERM");
+    expect(ignoreAt).toBeGreaterThan(-1);
+    expect(ignoreAt).toBeGreaterThan(
+      watcher.indexOf('salvage_eligible "$elapsed"'),
+    );
+    expect(ignoreAt).toBeLessThan(
+      watcher.indexOf('write_signal "$SUPERSEDE_FILE"'),
+    );
+  });
+
+  it('reaps an already-exited watcher without failing the clean cede', () => {
+    // Salvage arming exits the watcher on the spot; the cede path's
+    // deliberate `exit 0` then runs the trap AFTER bash reaped the
+    // subshell. The kill must not turn that clean exit into exit 1 under
+    // the step's errexit, nor skip the SALVAGE_DIR cleanup.
+    const trapLine = run.split('\n').find((l) => l.startsWith("trap '"));
+    expect(trapLine).toContain("' EXIT");
+    const runTrap = (plant) => {
+      const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+      try {
+        const harness = [
+          'set -euo pipefail',
+          `LOG_PATH="${join(dir, 'log')}"`,
+          // R10-2: every cleanup path is agent-derivable — the poisoned
+          // arm plants LOG_PATH as a directory holding a mode-000 child,
+          // which makes rm -rf exit 1 (EACCES) and under errexit aborts
+          // the rest of the trap; the sibling cleanups must still run.
+          plant === 'dir'
+            ? 'mkdir -p "$LOG_PATH"'
+            : plant === 'poisoned'
+              ? 'mkdir -p "$LOG_PATH/locked"; touch "$LOG_PATH/locked/inner"; chmod 000 "$LOG_PATH/locked"'
+              : ': > "$LOG_PATH"',
+          `PROXY_BIN="${join(dir, 'proxy')}"; mkdir -p "$PROXY_BIN"`,
+          `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"`,
+          `SUPERSEDE_KILL_DIR="${join(dir, 'killdir')}"; mkdir -p "$SUPERSEDE_KILL_DIR"`,
+          '( : ) &',
+          'WATCHER_PID=$!',
+          'wait "$WATCHER_PID"',
+          trapLine,
+          'exit 0',
+        ].join('\n');
+        const r = spawnSync('bash', ['-c', harness], { encoding: 'utf8' });
+        expect(r.status).toBe(0);
+        expect(existsSync(join(dir, 'salvage'))).toBe(false);
+        expect(existsSync(join(dir, 'proxy'))).toBe(false);
+        expect(existsSync(join(dir, 'killdir'))).toBe(false);
+      } finally {
+        try {
+          chmodSync(join(dir, 'log', 'locked'), 0o755);
+        } catch {
+          // Not planted in the file/dir arms.
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    runTrap('file');
+    // LOG_PATH is agent-derivable (RUNNER_TEMP + PR number): a planted
+    // DIRECTORY there must not abort the trap's first clause and leak the
+    // watcher reap / SALVAGE_DIR cleanup (rm -f exits 1 on a directory).
+    runTrap('dir');
+    // R10-2: the same plant hardened against removal — a child chmod 000
+    // makes rm -rf fail EACCES (-f does not suppress that on existing
+    // operands). Without the || true guards the failing clause aborts the
+    // trap and silently skips the PROXY_BIN/SALVAGE_DIR/SUPERSEDE_KILL_DIR
+    // cleanups this PR added, leaking every later run's temp dirs into the
+    // persistent self-hosted runner.
+    runTrap('poisoned');
+  });
+
+  it('wires the salvage outputs into the historical-head note step', () => {
+    expect(run).toContain('echo "salvaged=true"');
+    expect(run).toContain('salvage_moved_to=');
+    const note = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report salvaged historical-head review',
+    );
+    expect(note).toBeTruthy();
+    expect(note.env.MOVED_TO).toBe(
+      '${{ steps.review.outputs.salvage_moved_to }}',
+    );
+    expect(note.if).toContain("steps.review.outputs.salvaged == 'true'");
+    expect(note.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    // Docs-only medium never posts, so a "posted against" note would be
+    // false there.
+    expect(note.if).toContain(
+      "steps.review.outputs.docs_only_medium != 'true'",
+    );
+    expect(note.run).toContain('<!-- qwen-review-salvaged');
+    // R32-2: the note claims the historical anchor only after reading back
+    // the posted review's commit_id — a restart that completed at the NEW
+    // head must not be announced as a post against the old one.
+    const readBack = note.run.indexOf('.commit_id');
+    const gate = note.run.indexOf('"$posted_sha" != "$EXPECTED_HEAD_SHA"');
+    const post = note.run.indexOf('gh pr comment');
+    expect(readBack).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(readBack);
+    expect(post).toBeGreaterThan(gate);
+  });
+
+  it('posts the historical-head note only when the review landed on the reviewed head (replayed note step)', () => {
+    const note = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report salvaged historical-head review',
+    );
+    const replay = (postedShas) => {
+      const dir = mkdtempSync(join(tmpdir(), 'review-note-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const ghLog = join(dir, 'gh.log');
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$*" >> "${ghLog}"`,
+            'case "$*" in',
+            '  "api user --jq .login") echo bot ;;',
+            // The --jq projection is gh-side; the stub answers with the
+            // projected commit_id lines, chronological like the API.
+            '  *"/pulls/1/reviews"*) printf "%s\\n" "$POSTED_SHAS" ;;',
+            '  "pr comment"*) exit 0 ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ].join('\n') + '\n',
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const r = spawnSync('bash', ['-c', note.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GITHUB_REPOSITORY: 'o/r',
+            PR_NUMBER: '1',
+            EXPECTED_HEAD_SHA: 'head-a',
+            MOVED_TO: 'head-b',
+            RUN_URL: 'https://example.test/run',
+            POSTED_SHAS: postedShas.join('\n'),
+          },
+        });
+        return {
+          status: r.status,
+          stdout: r.stdout,
+          posted: readFileSync(ghLog, 'utf8').includes('pr comment'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // The latest bot review is anchored at the reviewed head: note posted.
+    const landed = replay(['head-old', 'head-a']);
+    expect(landed.status).toBe(0);
+    expect(landed.posted).toBe(true);
+    // The latest bot review sits on the NEW head (a restart completed
+    // there): no historical-head claim, a warning, still exit 0.
+    const restarted = replay(['head-a', 'head-b']);
+    expect(restarted.status).toBe(0);
+    expect(restarted.posted).toBe(false);
+    expect(restarted.stdout).toContain('::warning::salvage note skipped');
+  });
+
+  it('exports the salvage-post contract to the agent only where the watcher arms (shape)', () => {
+    // R32-2: the skill's anchorsAtRisk=true rule restarts unless the
+    // environment carries the CI salvage contract; the export sits inside
+    // the AUTO_REVIEW-gated arming block, so an explicit run (no watcher,
+    // any marker forged) never carries it. Cross-pinned with
+    // packages/core/src/skills/bundled/review/SKILL.test.ts, which pins the
+    // rule's exception by the same name.
+    const armAt = run.indexOf('if [ "${AUTO_REVIEW:-false}" = "true" ]; then');
+    const exportAt = run.indexOf('export QWEN_REVIEW_SALVAGE_POST=1');
+    const launchAt = run.indexOf('supersede_watcher &');
+    expect(armAt).toBeGreaterThan(-1);
+    expect(exportAt).toBeGreaterThan(armAt);
+    expect(launchAt).toBeGreaterThan(exportAt);
+    // Exactly one export site (the guard's comment names the variable too).
+    expect(run.split('export QWEN_REVIEW_SALVAGE_POST').length).toBe(2);
+  });
+
+  // The marker -> outputs block sits OUTSIDE the retry-loop extraction
+  // window (the window ends at the loop's column-0 `done`), so pin it by
+  // executing it — a flipped marker condition or an unvalidated moved-to
+  // ships green under shape checks alone.
+  function salvageOutputsSource() {
+    const start = run.indexOf(
+      'if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then',
+    );
+    const end = run.indexOf('\nfi', start) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function liveHeadMovedSource() {
+    return run.match(/live_head_moved\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  function readHeadSignalSource() {
+    return run.match(/read_head_signal\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  function cedeSupersededSource() {
+    return run.match(/cede_superseded\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  // Drive the cede's SUPERSEDE_FILE read (read_head_signal) directly: the
+  // swap-at-open / huge-plant witnesses need the read site itself, not the
+  // retry loop around it.
+  function runCedeRead({ swapOnRead = false, huge = false } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-cede-read-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      if (huge) {
+        // yes(1), not /dev/zero | tr: same ~1.5GB non-hex plant, generated
+        // at GB/s on GNU and BSD alike instead of ~65s per plant.
+        spawnSync('sh', [
+          '-c',
+          `yes "${'a'.repeat(4096)}" | head -c 1500000000 > "${supersedeFile}"`,
+        ]);
+      } else {
+        writeFileSync(supersedeFile, 'b'.repeat(40));
+      }
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const timeoutPath = join(bin, 'timeout');
+      writeFileSync(timeoutPath, boundedTimeoutStub());
+      chmodSync(timeoutPath, 0o755);
+      if (swapOnRead) {
+        for (const name of ['head', 'cat']) {
+          const stubPath = join(bin, name);
+          writeFileSync(stubPath, swapAtOpenStub());
+          chmodSync(stubPath, 0o755);
+        }
+      }
+      const summary = join(dir, 'gss');
+      const harness = [
+        'set -euo pipefail',
+        readHeadSignalSource(),
+        cedeSupersededSource(),
+        'PR_NUMBER=1; EXPECTED_HEAD_SHA=head-a',
+        `SUPERSEDE_FILE="${supersedeFile}"`,
+        `GITHUB_STEP_SUMMARY="${summary}"; : > "$GITHUB_STEP_SUMMARY"`,
+        'cede_superseded',
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', harness], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          // Inherited captures would route the bounded read past the
+          // bin stubs (R28-1).
+          ...neutralizedRealPins(),
+          PATH: `${bin}:${process.env.PATH}`,
+        },
+      });
+      expect(r.status).toBe(0);
+      return readFileSync(summary, 'utf8');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  function runSalvageOutputs({
+    autoReview = true,
+    marker = 'head-a',
+    movedTo = null,
+    liveHead = 'head-b',
+    movedToFifo = false,
+    movedToSwapOnRead = false,
+    movedToHuge = false,
+  } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-out-'));
+    try {
+      const salvage = join(dir, 'salvage');
+      mkdirSync(salvage);
+      if (marker !== null) writeFileSync(join(salvage, 'salvage-ok'), marker);
+      if (movedToHuge) {
+        // ~1.5GB of non-hex chars: an unbounded cat slurps it past the
+        // harness bound; head -c 64 reads 64 bytes and closes. Generated
+        // by yes(1) — GB/s on GNU and BSD alike, where the /dev/zero | tr
+        // pipeline measured ~65s per plant on a macOS host.
+        spawnSync('sh', [
+          '-c',
+          `yes "${'a'.repeat(4096)}" | head -c 1500000000 > "${join(salvage, 'moved-to')}"`,
+        ]);
+      } else if (movedToFifo) {
+        execFileSync('mkfifo', [join(salvage, 'moved-to')]);
+      } else if (movedTo !== null) {
+        writeFileSync(join(salvage, 'moved-to'), movedTo);
+      }
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const ghPath = join(bin, 'gh');
+      writeFileSync(ghPath, `#!/bin/bash\necho "${liveHead}"\n`);
+      chmodSync(ghPath, 0o755);
+      const timeoutPath = join(bin, 'timeout');
+      writeFileSync(timeoutPath, boundedTimeoutStub());
+      chmodSync(timeoutPath, 0o755);
+      if (movedToSwapOnRead) {
+        for (const name of ['head', 'cat']) {
+          const stubPath = join(bin, name);
+          writeFileSync(stubPath, swapAtOpenStub());
+          chmodSync(stubPath, 0o755);
+        }
+      }
+      const gho = join(dir, 'gho');
+      const harness = [
+        'set -euo pipefail',
+        liveHeadMovedSource(),
+        readHeadSignalSource(),
+        'PR_NUMBER=1; REPO=o/r; EXPECTED_HEAD_SHA=head-a',
+        `SALVAGE_DIR="${salvage}"`,
+        `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${salvage}/salvage-ok"`,
+        `GITHUB_OUTPUT="${gho}"; : > "$GITHUB_OUTPUT"`,
+        salvageOutputsSource(),
+      ].join('\n');
+      execFileSync('bash', ['-c', harness], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          // Every inherited QWEN_CI_REAL_* capture neutralized (R28-1); the
+          // replayed live_head_moved gate must decide through the PATH gh
+          // stub (R16-1), and the swap witnesses through the bin
+          // timeout/head stubs.
+          ...neutralizedRealPins(),
+          QWEN_CI_REAL_GH: '',
+          // The block is AUTO_REVIEW-gated like every cede consumer: an
+          // explicit run never arms the marker, so a marker there is a
+          // forgery and must not turn into a historical-head note.
+          AUTO_REVIEW: autoReview ? 'true' : 'false',
+          PATH: `${bin}:${process.env.PATH}`,
+        },
+      });
+      return readFileSync(gho, 'utf8').split('\n').filter(Boolean);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('writes the salvage outputs only for an armed marker and a real move (replayed block)', () => {
+    const sha = 'b'.repeat(40);
+    expect(runSalvageOutputs({ movedTo: sha })).toEqual([
+      'salvaged=true',
+      `salvage_moved_to=${sha}`,
+    ]);
+    // No marker: an ordinary run emits neither output (a flipped condition
+    // would post the historical-head note on every run).
+    expect(runSalvageOutputs({ marker: null })).toEqual([]);
+    // Explicit runs (/review, review_requested, dispatch) arm no watcher,
+    // so an armed marker plus a moved head there can only be a forgery:
+    // the gate matches the five cede sites (R6-1/R7-1) and no
+    // historical-head note posts from an explicit run.
+    expect(runSalvageOutputs({ autoReview: false })).toEqual([]);
+    // Marker armed but the watcher died before recording a destination.
+    expect(runSalvageOutputs({})).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+    // Forged marker, head NEVER moved: the outputs block follows the cede
+    // sites' live-head re-check — no outputs, and the historical-head
+    // note never posts on an unmoved PR. A failed gh read at decision
+    // time (empty output) falls the same way.
+    expect(runSalvageOutputs({ liveHead: 'head-a' })).toEqual([]);
+    expect(runSalvageOutputs({ liveHead: '' })).toEqual([]);
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'never hangs the finished step on a planted moved-to FIFO (replayed block)',
+    () => {
+      // A FIFO planted at moved-to must not hang the finished step; the
+      // bounded read degrades it to unknown inside the timeout bound.
+      expect(runSalvageOutputs({ movedToFifo: true })).toEqual([
+        'salvaged=true',
+        'salvage_moved_to=unknown',
+      ]);
+    },
+  );
+
+  it('degrades a forged moved-to instead of injecting outputs (replayed block)', () => {
+    // moved-to is agent-writable; embedded newlines would land as forged
+    // name=value lines in $GITHUB_OUTPUT and flip gates like
+    // docs_only_medium. Only the watcher's 40-hex shape passes.
+    const forged = `${'a'.repeat(40)}\ndocs_only_medium=true\ncompletion_line=forged`;
+    expect(runSalvageOutputs({ movedTo: forged })).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+    expect(runSalvageOutputs({ movedTo: 'a'.repeat(41) })).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'bounds the moved-to read against a rename-swapped FIFO (replayed block)',
+    () => {
+      // R8-10 (3/3): read_head_signal is one timeout-bounded, size-capped
+      // open. A FIFO rename-swapped in at open time must degrade to
+      // `unknown` inside the bound instead of hanging the finished step.
+      expect(
+        runSalvageOutputs({
+          movedTo: 'b'.repeat(40),
+          movedToSwapOnRead: true,
+        }),
+      ).toEqual(['salvaged=true', 'salvage_moved_to=unknown']);
+    },
+  );
+
+  it('bounds the moved-to read against a huge plant (replayed block)', () => {
+    // A huge regular plant must not be slurped into the command
+    // substitution (unbounded, the ~1.5GB plant out-runs the harness
+    // bound).
+    expect(runSalvageOutputs({ movedToHuge: true })).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'bounds the superseded read against a rename-swapped FIFO (replayed cede)',
+    () => {
+      // R8-10 (3/3): cede_superseded reads SUPERSEDE_FILE through
+      // read_head_signal; a FIFO swapped in at open time must cede with
+      // `unknown` inside the bound (an unbounded open wedges the exit and
+      // this test dies on the harness timeout).
+      expect(runCedeRead({ swapOnRead: true })).toContain('to unknown before');
+    },
+  );
+
+  it('bounds the superseded read against a huge plant (replayed cede)', () => {
+    // The control cedes with the recorded head; a huge plant must not be
+    // slurped into the command substitution.
+    expect(runCedeRead()).toContain(`to ${'b'.repeat(40)} before`);
+    expect(runCedeRead({ huge: true })).toContain('to unknown before');
+  });
+
+  it('reads the salvage threshold from the repo variable with a 50 default', () => {
+    const env = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).env;
+    expect(env.SALVAGE_ELAPSED_PERCENT_VAR).toBe(
+      '${{ vars.QWEN_REVIEW_SALVAGE_ELAPSED_PERCENT }}',
+    );
+    expect(run).toContain('SALVAGE_ELAPSED_PERCENT=50');
+  });
+
+  it('sanitizes the salvage percent to a clamped decimal (replayed parse)', () => {
+    // The parse sits OUTSIDE the retry-loop extraction window, so pin its
+    // behavior by executing it: the digit guard, the 100 clamp, and the
+    // decimal coercion a leading-zero value needs before $(( )) reads it.
+    const start = run.indexOf(
+      'SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT_VAR:-}"',
+    );
+    const clamp = run.indexOf(
+      'if [ "$SALVAGE_ELAPSED_PERCENT" -gt 100 ]',
+      start,
+    );
+    const end = run.indexOf('\nfi', clamp) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(clamp).toBeGreaterThan(start);
+    expect(end).toBeGreaterThan(clamp);
+    const block = run.slice(start, end);
+    const parsePct = (value) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$SALVAGE_ELAPSED_PERCENT"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, SALVAGE_ELAPSED_PERCENT_VAR: value },
+        },
+      );
+    expect(parsePct('30')).toBe('30');
+    expect(parsePct('')).toBe('50');
+    expect(parsePct('abc')).toBe('50');
+    expect(parsePct('150')).toBe('100');
+    expect(parsePct('08')).toBe('8');
+    expect(parsePct('050')).toBe('50');
+    expect(parsePct('0050')).toBe('50');
+    expect(parsePct('000')).toBe('0');
+    expect(parsePct('1000')).toBe('100');
+    // Bash wraps >= 2^63 silently: 2^63 read as a huge negative and 2^64
+    // as exactly 0 — both made a one-second-old attempt KEEP, i.e. never
+    // cede. The digit-count bound runs BEFORE the arithmetic.
+    expect(parsePct('9223372036854775808')).toBe('100');
+    expect(parsePct('18446744073709551616')).toBe('100');
+  });
+
+  it('skips a queued run whose event head went stale before review-pr spends setup', () => {
+    // With cancel-in-progress scoped to `closed`, a synchronize run can wait
+    // PENDING behind an in-flight review and outlive its own head; the delay
+    // job's re-check is the cheap exit before review-pr's runner setup.
+    const delay = doc.jobs['delay-automatic-review'].steps.find(
+      (s) => s.id === 'pr_state',
+    );
+    expect(delay.env.EVENT_HEAD_SHA).toBe(
+      '${{ github.event.pull_request.head.sha }}',
+    );
+    expect(delay.run).toContain('while this run queued');
+    expect(delay.run).toContain('should_review=false');
+    // The comparison direction is load-bearing — a one-keystroke
+    // `!=` → `=` flip makes every run whose head did NOT move skip
+    // itself, silently ending all delayed automatic reviews — so pin
+    // the condition verbatim, not just its echo strings.
+    expect(delay.run).toContain(
+      'if [ -n "$EVENT_HEAD_SHA" ] && [ -n "$current_head" ] && [ "$current_head" != "$EVENT_HEAD_SHA" ]; then',
+    );
+  });
+
+  // The replay stub still serves the reviews/runs lookups the PRE-removal
+  // step used to make (running the served --jq programs through real jq),
+  // so the attack shape below runs the old dedup path on the pre-round
+  // workflow and fails there; hosts without jq skip honestly (the suite's
+  // hasJq convention).
+  const delayStepHasJq = (() => {
+    try {
+      execFileSync('jq', ['--version'], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!delayStepHasJq)(
+    'reviews a delayed run even when the live head carries a posted bot review (dedup removed, R13-1)',
+    () => {
+      // The head-level dedup skipped a delayed run when the live head
+      // carried a bot-review ledger anchor corroborated by a successful
+      // run of this workflow. The reviewed agent authors every input that
+      // lookup had — the marker sha and commit_id are caller-supplied on
+      // POST reviews, and cede/skip/docs-only runs make "a successful run"
+      // true without any posting — so a forged anchor plus one
+      // posting-less green run skipped the head's review permanently. The
+      // lookup's own arithmetic ranked a missed dedup (one duplicate
+      // review) as cheap and a false skip (one lost review) as dear, so
+      // the dedup is gone instead of growing another guard.
+      const delay = doc.jobs['delay-automatic-review'].steps.find(
+        (s) => s.id === 'pr_state',
+      );
+      // The step no longer queries reviews or runs — the only lookup left
+      // is the state/draft/head re-check — and the corroboration's
+      // actions:read permission left with it.
+      expect(delay.run).not.toContain('pulls/${PR_NUMBER}/reviews');
+      expect(delay.run).not.toContain('actions/runs');
+      expect(delay.run).not.toContain('qwen-review-ledger');
+      expect(
+        doc.jobs['delay-automatic-review'].permissions.actions,
+      ).toBeUndefined();
+      const H = 'a'.repeat(40);
+      const OTHER = 'b'.repeat(40);
+      const ledgerFor = (sha) =>
+        `findings posted <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R1-1","sev":"C"}],"sha":"${sha}"} -->`;
+      const runDelayStep = ({
+        currentHead = H,
+        eventHead = H,
+        reviews = [],
+        apiStatus = 0,
+        prState = 'OPEN',
+        runPaths = [],
+        runsStatus = 0,
+      }) => {
+        const dir = mkdtempSync(join(tmpdir(), 'review-delay-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin);
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/bin/bash',
+              'if [ "${1:-}" = "pr" ]; then',
+              `  printf '%s\\tfalse\\t%s\\n' "$STUB_PR_STATE" "$STUB_CURRENT_HEAD"`,
+              '  exit 0',
+              'fi',
+              'if [ "${1:-}" = "api" ]; then',
+              '  shift',
+              '  endpoint="$1"',
+              '  filter=""',
+              '  while [ $# -gt 0 ]; do',
+              '    case "$1" in',
+              '      --jq) filter="$2"; shift 2 ;;',
+              '      --paginate) shift ;;',
+              '      --*) echo "unknown flag: $1" >&2; exit 1 ;;',
+              '      *) shift ;;',
+              '    esac',
+              '  done',
+              '  case "$endpoint" in',
+              '    *actions/runs*)',
+              '      if [ "${STUB_RUNS_STATUS:-0}" != "0" ]; then',
+              '        echo "gh api failed" >&2',
+              '        exit "$STUB_RUNS_STATUS"',
+              '      fi',
+              `      printf '%s' "$STUB_RUNS" | jq -r "$filter"`,
+              '      exit 0',
+              '      ;;',
+              '    *)',
+              `      printf '%s' "$STUB_REVIEWS" | jq -r "$filter"`,
+              '      exit "$STUB_API_STATUS"',
+              '      ;;',
+              '  esac',
+              'fi',
+              'exit 1',
+            ].join('\n') + '\n',
+          );
+          chmodSync(join(bin, 'gh'), 0o755);
+          const out = join(dir, 'gho');
+          const summary = join(dir, 'gss');
+          writeFileSync(out, '');
+          writeFileSync(summary, '');
+          execFileSync('bash', ['-c', delay.run], {
+            encoding: 'utf8',
+            timeout: 30_000,
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_REPOSITORY: 'o/r',
+              PR_NUMBER: '7',
+              EVENT_HEAD_SHA: eventHead,
+              GITHUB_OUTPUT: out,
+              GITHUB_STEP_SUMMARY: summary,
+              STUB_PR_STATE: prState,
+              STUB_CURRENT_HEAD: currentHead,
+              STUB_REVIEWS: JSON.stringify(reviews),
+              STUB_API_STATUS: String(apiStatus),
+              STUB_RUNS: JSON.stringify({
+                workflow_runs: runPaths.map((path) => ({ path })),
+              }),
+              STUB_RUNS_STATUS: String(runsStatus),
+            },
+          });
+          return {
+            outputs: readFileSync(out, 'utf8'),
+            summary: readFileSync(summary, 'utf8'),
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+      // The attack shape: an anchored bot review (marker sha == commit_id
+      // == live head) corroborated by a green run of this workflow — the
+      // exact shape a ceded, delay-skipped, or docs-only run records
+      // without any posting. The pre-removal step skipped here
+      // (should_review=false) — the permanent suppression R13-1 proved;
+      // the head is reviewed instead, at the cost of one possible
+      // duplicate review.
+      const attackShape = runDelayStep({
+        reviews: [
+          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
+        ],
+        runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
+      });
+      expect(attackShape.outputs).toContain('should_review=true');
+      expect(attackShape.summary).not.toContain('already carries');
+      // Controls: the state guards keep their shape.
+      expect(
+        runDelayStep({ currentHead: OTHER, eventHead: H }).outputs,
+      ).toContain('should_review=false');
+      expect(runDelayStep({ prState: 'MERGED' }).outputs).toContain(
+        'should_review=false',
+      );
+    },
+  );
 });

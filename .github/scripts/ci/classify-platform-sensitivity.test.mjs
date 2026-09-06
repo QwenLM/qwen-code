@@ -111,11 +111,19 @@ test('platform-coupled subsystems match on segments, not substrings', () => {
 
   // The substring trap: these contain "shell", "pty", "os" or "platform"
   // inside a longer word and must NOT drag both lanes in.
+  //
+  // `Shellfish.tsx` is the one that pins the segment boundary itself: the
+  // keyword is the HEAD of the stem, not buried mid-word, so a rule that
+  // accepts a keyword prefix followed by anything would classify every
+  // `Shell*.tsx` component as sensitive and summon both expensive lanes on
+  // each change. The case above covers the sibling trap — `web-shell` as a
+  // compound — which a different loosening breaks.
   for (const file of [
     'packages/core/src/utils/cryptic.ts',
     'packages/cli/src/ui/emptyState.ts',
     'packages/core/src/telemetry/uploader.ts',
     'packages/cli/src/services/plateauDetector.ts',
+    'packages/web-shell/client/components/Shellfish.tsx',
   ]) {
     assert.equal(classifyChangedFiles([file]), PLATFORM_INSENSITIVE, file);
   }
