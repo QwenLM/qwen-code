@@ -16281,6 +16281,14 @@ describe('runQwenServe startup observability', () => {
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
       isChannelLive: vi.fn().mockReturnValue(true),
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+      reloadWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
+      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
     } as unknown as HttpAcpBridge;
   }
 
@@ -16521,6 +16529,36 @@ describe('runQwenServe startup observability', () => {
       } else {
         process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
       }
+    }
+  });
+
+  it('loads persisted MCP configuration after ACP preheat succeeds', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-config-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() =>
+        expect(bridge.reloadWorkspaceMcp).toHaveBeenCalledOnce(),
+      );
+    } finally {
+      await handle.close();
     }
   });
 

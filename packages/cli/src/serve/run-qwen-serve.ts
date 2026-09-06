@@ -8928,7 +8928,22 @@ async function runQwenServeImpl(
         clearRuntimeStartupTimer();
         markRuntimeReady();
       };
-      const startBridgePreheat = (bridge: AcpSessionBridge): void => {
+      const schedulePersistedMcpConfigurationAfterPreheat = (
+        app: Application,
+      ): void => {
+        const registry = app.locals?.['workspaceRegistry'] as
+          | WorkspaceRegistry
+          | undefined;
+        const primary = registry?.primary;
+        if (!primary?.trusted) return;
+        getWorkspaceRuntimeCoordinatorIfSupported?.(
+          primary,
+        )?.reconcileMcpConfiguration();
+      };
+      const startBridgePreheat = (
+        bridge: AcpSessionBridge,
+        app: Application,
+      ): void => {
         startup.preheat.status = 'running';
         const preheatStartedAt = performance.now();
         bridge
@@ -8938,6 +8953,7 @@ async function runQwenServeImpl(
             startup.preheat.durationMs = Math.round(
               performance.now() - preheatStartedAt,
             );
+            schedulePersistedMcpConfigurationAfterPreheat(app);
           })
           .catch((err) => {
             const message = err instanceof Error ? err.message : String(err);
@@ -8973,7 +8989,7 @@ async function runQwenServeImpl(
               return;
             }
             if (shouldPreheat && runtime.bridge) {
-              startBridgePreheat(runtime.bridge);
+              startBridgePreheat(runtime.bridge, runtime.app);
             }
             await completeRuntimeStartup(runtime.app);
           })
@@ -9510,7 +9526,7 @@ async function runQwenServeImpl(
       if (preparedRuntimeApp && bridgeRef && deps.bridge) {
         attachLiveDiscoveryControl(preparedRuntimeApp);
         if (shouldPreheat) {
-          startBridgePreheat(bridgeRef);
+          startBridgePreheat(bridgeRef, preparedRuntimeApp);
         }
         if (opts.channelSelection && !runtimeStartupSettled) {
           armRuntimeStartupTimer();
