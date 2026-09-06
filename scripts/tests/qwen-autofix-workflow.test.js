@@ -38,7 +38,10 @@ const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // than a code line) read it here.
 const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
-const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const releaseStepScript = readFileSync(
+  '.github/scripts/run-release-step.sh',
+  'utf8',
+);
 const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
@@ -9966,14 +9969,14 @@ exit 1
   });
 
   it('keeps release-failure autofix issues approved for scheduled fallback', () => {
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       'Safe to auto-apply approval: release-failure issue content is',
     );
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
     );
-    expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(releaseStepScript).toContain(
       'gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}"',
     );
   });

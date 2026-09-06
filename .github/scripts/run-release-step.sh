@@ -329,6 +329,8 @@ BODY
           echo "::warning::Reused ${issue_url} looks maintainer-owned (assignee / linked PR / need-information / need-retesting); skipping autofix dispatch."
           exit 0
         fi
+        # Safe to auto-apply approval: release-failure issue content is
+        # fully CI-generated, not user-controlled issue text.
         gh issue edit "${issue_number}" --repo "${GH_REPO}" \
           --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
           || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL}/${AUTOFIX_APPROVED_LABEL} on issue #${issue_number}."
@@ -336,6 +338,8 @@ BODY
     fi
 
     if [[ -z "${existing_issue}" ]]; then
+      # Safe to auto-apply approval: release-failure issue content is
+      # fully CI-generated, not user-controlled issue text.
       issue_url="$(gh issue create --repo "${GH_REPO}" \
         --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
         --body-file "${body_file}" \
