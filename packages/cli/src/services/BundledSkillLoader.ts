@@ -98,6 +98,17 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
+          // Re-check enabledness here, not just in the load-time filter above:
+          // `skills.disabled` can change after the command registry was built,
+          // and a stale command must not install a disabled skill's side
+          // effects. `SkillCommandLoader` refuses the same way.
+          if (this.config && !this.config.isSkillEnabled(skill)) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: `Skill "${skill.name}" is disabled.`,
+            };
+          }
           // Apply the skill's declared side effects — allowedTools and
           // frontmatter hooks — before its body is submitted, matching the
           // Skill tool's model-invocation path (#11067).
