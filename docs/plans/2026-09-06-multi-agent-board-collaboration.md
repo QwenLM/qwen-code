@@ -865,6 +865,18 @@ remain genuinely open:
     reply aimed at `@bob` must not silently clear an unrelated question raised
     by Alice. Decide whether acknowledgement follows mentioned targets, the
     assignee, or an explicit blocker id.
+12. **Runtime as a first-class concept (v2 binding).** V1 binds an agent to a
+    local background agent (`MeshAgent.backgroundAgentId`) in a hidden host
+    session. Multica binds a task to a *runtime* that claims it
+    (`taskWakeupLoop`, runtime ids), which is what makes remote, cloud, and
+    non-Qwen agents possible — the gap §7 calls the one hard one. Decide now,
+    because it shapes step 3 and step 4: if v2 wants runtimes, the v1 schema
+    should carry a binding field that is not local-specific (a `runtimeId`
+    beside, not instead of, `backgroundAgentId`), and the launcher must be an
+    interface `launch(agent) → typed result` whose first implementation is the
+    local background agent. If v2 does not, say so and let the schema stay
+    local. Related prior work: #9402's `--as` actor model, #10078's session
+    boundary, #10247 §5's supervisor.
 
 ## 10. Out of scope
 
