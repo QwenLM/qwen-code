@@ -21386,7 +21386,7 @@ exit 0
     // stays two lines" — is what keeps the read sites' sed -n '1p'/'2p' from
     // rendering a model fragment as the CLI version. TWO fixtures, because
     // one cannot pin both halves: a newline discriminates the flattening
-    // only INSIDE the cap (past it, slice(0, 200) of the unflattened value
+    // only INSIDE the cap (past it, slice(0, 100) of the unflattened value
     // equals the flattened-and-capped one), and the cap discriminates only
     // when the value EXCEEDS it.
     const runInit = (dir, init) => {
@@ -21399,8 +21399,8 @@ exit 0
       expect(runAddressReview(dir, stub).status).toBe(0);
       return readFileSync(join(dir, 'agent-model'), 'utf8');
     };
-    // Flattening: both newlines sit inside their caps (model index 10 < 200,
-    // version index 6 < 80). Dropping either .split('\n')[0] writes a
+    // Flattening: both newlines sit inside their caps (model index 10 < 100,
+    // version index 6 < 40). Dropping either .split('\n')[0] writes a
     // THREE-line sentinel and goes red.
     withRunnerDir((dir) => {
       expect(
@@ -21418,8 +21418,62 @@ exit 0
           model: `${'x'.repeat(250)}\nsecond-line`,
           version: 'v'.repeat(100),
         }),
-      ).toBe(`${'x'.repeat(200)}\n${'v'.repeat(80)}\n`);
+      ).toBe(`${'x'.repeat(100)}\n${'v'.repeat(40)}\n`);
     });
+  });
+
+  it('keeps the writer caps equal to the reader caps so nothing publishes silently truncated', () => {
+    // A writer cap ABOVE the reader's published bound writes a legitimate
+    // value in full only to have the read site clip it — allowlist-clean
+    // output, exit 0, and a public attribution comment that looks accurate
+    // while naming a truncated model (measured in this PR's sandboxed
+    // verification: a 154-char model published as 100). Equal caps make
+    // written == published; the head -c windows must then still cover the
+    // largest file the writer can emit, or the version read loses line 2 to
+    // the byte window before sed ever sees it.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const writerModelCap = Number(
+      runner.match(
+        /initModel = event\.model\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const writerVersionCap = Number(
+      runner.match(
+        /event\.qwen_code_version\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const readerModelCap = Number(
+      pushAndReportScript.match(
+        /AGENT_MODEL="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    const readerVersionCap = Number(
+      pushAndReportScript.match(
+        /AGENT_CLI_VERSION="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    for (const cap of [
+      writerModelCap,
+      writerVersionCap,
+      readerModelCap,
+      readerVersionCap,
+    ]) {
+      // A regex that stopped matching yields NaN; fail on that explicitly
+      // rather than comparing NaN to NaN.
+      expect(Number.isInteger(cap)).toBe(true);
+    }
+    expect(writerModelCap).toBe(readerModelCap);
+    expect(writerVersionCap).toBe(readerVersionCap);
+    const maxSentinelBytes = writerModelCap + writerVersionCap + 2;
+    const windows = [
+      ...pushAndReportScript.matchAll(
+        /head -c (\d+) "\$\{WORKDIR\}\/agent-model"/g,
+      ),
+    ].map((m) => Number(m[1]));
+    expect(windows).toHaveLength(2);
+    for (const window of windows) {
+      expect(window).toBeGreaterThanOrEqual(maxSentinelBytes);
+    }
   });
 
   it('records the model even when the run dies before a verdict', () => {

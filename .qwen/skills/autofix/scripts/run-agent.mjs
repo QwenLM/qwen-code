@@ -268,17 +268,21 @@ function runQwen(options, prompt) {
         lastOutputAt = Date.now();
         if (event?.type === 'result') terminalResult = event;
         // First init event wins; newlines are flattened so the sentinel file
-        // stays two lines (the read sites allowlist further).
+        // stays two lines (the read sites allowlist further). The caps EQUAL
+        // the read sites' published bounds (cut -c1-100 / -c1-40), so a
+        // legitimate value is never written long and silently truncated on
+        // its way into the footer — a contract test pins the two pairs
+        // together.
         if (
           !initModel &&
           event?.type === 'system' &&
           event?.subtype === 'init' &&
           typeof event.model === 'string'
         ) {
-          initModel = event.model.split('\n')[0].slice(0, 200);
+          initModel = event.model.split('\n')[0].slice(0, 100);
           initVersion =
             typeof event.qwen_code_version === 'string'
-              ? event.qwen_code_version.split('\n')[0].slice(0, 80)
+              ? event.qwen_code_version.split('\n')[0].slice(0, 40)
               : '';
         }
         if (event?.type !== 'stream_event') {
