@@ -7,6 +7,7 @@
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   recordDaemonBridgeError,
   recordDaemonError,
   SessionIdCaseConflictError,
@@ -30,6 +31,7 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
@@ -431,6 +433,14 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof InvalidSessionTranscriptTurnAnchorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_turn_anchor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
   if (err instanceof SessionTranscriptSnapshotUnavailableError) {
     res.status(409).json({
       error: err.message,
@@ -514,6 +524,13 @@ export function sendBridgeError(
       code: 'workspace_init_race',
       target: err.target,
       kind: err.kind,
+    });
+    return;
+  }
+  if (err instanceof McpAuthenticationInProgressError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'mcp_authentication_in_progress',
     });
     return;
   }
@@ -963,6 +980,13 @@ export function sendBridgeError(
         res.status(400).json({
           error: errorMessage(err),
           code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'invalid_turn_anchor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_turn_anchor',
         });
         return;
       }

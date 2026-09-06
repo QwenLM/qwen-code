@@ -280,6 +280,27 @@ describe('delivery status frames', () => {
     expect(describeDeliveryStatus('misaddressed')).not.toContain('declined');
   });
 
+  it('separates a refusal from a decision', () => {
+    // The sender's model acts on these differently: 'denied' is a person
+    // saying no and may be worth raising with them, 'refused' means the
+    // session takes no peer messages and re-sending is pointless.
+    const refused = describeDeliveryStatus('refused');
+    expect(refused).toContain('does not accept messages');
+    expect(refused).not.toContain('declined');
+    expect(describeDeliveryStatus('denied')).not.toContain(
+      'does not accept messages',
+    );
+  });
+
+  it('accepts a refused receipt off the wire', () => {
+    const frame = buildDeliveryStatusFrame({
+      status: 'refused',
+      origMsgId: 'abc',
+    });
+    const parsed = parsePeerFrame(encodePeerFrame(frame));
+    expect(parsed).toMatchObject({ type: 'control', status: 'refused' });
+  });
+
   it('carries the reason on the frame so the sender need not map it', () => {
     const frame = buildDeliveryStatusFrame({
       status: 'held',

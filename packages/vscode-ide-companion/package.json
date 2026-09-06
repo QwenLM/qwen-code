@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.22.3",
+  "version": "0.23.0",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -264,7 +264,7 @@
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "vsce package --no-dependencies",
     "test": "vitest run",
-    "test:ci": "vitest run --coverage"
+    "test:ci": "vitest run"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

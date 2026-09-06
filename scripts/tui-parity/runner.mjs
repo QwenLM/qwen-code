@@ -226,7 +226,13 @@ export function buildComparison(
     fixedVerdict: fixed.eval.verdict,
     deltas,
     outcome,
-    harnessPass: PASSING_OUTCOMES.has(outcome),
+    expectBaseFailure: scenario.expectBaseFailure === true,
+    // A scenario whose base side is a defect fixture proves nothing when the
+    // base passes: both-pass there means the fixture lost its defect, not that
+    // the fixed side matched a clean reference.
+    harnessPass:
+      PASSING_OUTCOMES.has(outcome) &&
+      !(scenario.expectBaseFailure === true && outcome === 'both-pass'),
     proves: scenario.proves,
     doesNotProve: scenario.doesNotProve,
   };
@@ -280,6 +286,16 @@ export function renderReport(comparison) {
   lines.push(
     `- Outcome: **${c.outcome}** (base=${c.baseVerdict}, fixed=${c.fixedVerdict})`,
   );
+  if (c.expectBaseFailure) {
+    lines.push(
+      c.outcome === 'both-pass'
+        ? '- Gate: **failed** — this scenario requires the base side to fail, so ' +
+            'a both-pass means the base fixture emitted no defect and the ' +
+            'comparison proves nothing.'
+        : '- Gate: this scenario requires the base side to fail (its base is a ' +
+            'defect fixture, so a clean base proves nothing).',
+    );
+  }
   lines.push('');
   lines.push('## Commands');
   lines.push('');
@@ -562,8 +578,12 @@ async function main() {
   });
   for (const error of result.errors) console.error(`error: ${error}`);
   for (const c of result.scenarios) {
+    const gate =
+      c.expectBaseFailure && c.outcome === 'both-pass'
+        ? ' (requires a failing base: the base fixture emitted no defect)'
+        : '';
     console.log(
-      `${c.scenarioId}: outcome=${c.outcome} base=${c.baseVerdict} fixed=${c.fixedVerdict}`,
+      `${c.scenarioId}: outcome=${c.outcome} base=${c.baseVerdict} fixed=${c.fixedVerdict}${gate}`,
     );
   }
   console.log(`overall: ${result.overall}`);

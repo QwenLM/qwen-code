@@ -66,6 +66,7 @@ import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import type { Suggestion } from '../utils/suggestions.js';
 import { cpLen, toCodePoints } from '../utils/textUtils.js';
+import { t } from '../../i18n/index.js';
 import { C } from './theme.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
@@ -87,7 +88,7 @@ import {
   historyDownDecision,
   historyUpDecision,
   isLargePaste,
-  isPerfectSlashMatch,
+  isPerfectMatchForTarget,
   nextLargePastePlaceholder,
   normalizePastedText,
   parsePastePlaceholder,
@@ -157,11 +158,15 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
 } {
   switch (approvalMode) {
     case ApprovalMode.AUTO_EDIT:
-      return { prefix: '>', color: C.yellow, statusText: 'Accepting edits' };
+      return {
+        prefix: '>',
+        color: C.yellow,
+        statusText: t('Accepting edits'),
+      };
     case ApprovalMode.AUTO:
-      return { prefix: '>', color: C.accent, statusText: 'Auto mode' };
+      return { prefix: '>', color: C.accent, statusText: t('Auto mode') };
     case ApprovalMode.YOLO:
-      return { prefix: '*', color: C.red, statusText: 'YOLO mode' };
+      return { prefix: '*', color: C.red, statusText: t('YOLO mode') };
     case ApprovalMode.PLAN:
     case ApprovalMode.DEFAULT:
       return { prefix: '>' };
@@ -260,13 +265,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const fileSearchReadyRef = useRef<Promise<void> | null>(null);
   const atSearchSeqRef = useRef(0);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
-  // SLASH-completion state for the current buffer: the query-relative
-  // replacement range and whether the input already names a runnable command
-  // exactly (Enter then submits instead of accepting a suggestion).
-  const slashStateRef = useRef<{
-    range: { start: number; end: number };
-    perfect: boolean;
-  } | null>(null);
+  // Query-relative replacement range for the current buffer's SLASH target.
+  // The perfect-match verdict is deliberately not cached alongside it: Enter
+  // recomputes that one from the buffer (see the Enter branch below).
+  const slashRangeRef = useRef<{ start: number; end: number } | null>(null);
   // Sequence guard for async argument completion (drops stale results).
   const slashSearchSeqRef = useRef(0);
   // The user navigated the dropdown with ↑/↓ (reset on recompute/accept):
@@ -330,14 +332,16 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     [],
   );
 
-  // ── completion recomputation on every buffer/cursor change ──────────────
-  const refreshCompletion = useCallback(() => {
+  // The completion target for the buffer as it stands right now. Read from the
+  // editor, never from published state, so a key that lands before the
+  // completion effect flushes still sees the text the user typed.
+  const currentCompletionTarget = useCallback(() => {
     const el = editorRef.current;
-    if (!el) return;
+    if (!el) return null;
     const text = el.plainText;
     const cursor = el.logicalCursor;
     const lines = text.split('\n');
-    const target = detectCompletionTarget(
+    return detectCompletionTarget(
       lines,
       cursor.row,
       displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
@@ -345,6 +349,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       displayOffsetToCodePointIndex(text, cursor.offset),
       commandsRef.current,
     );
+  }, []);
+
+  // ── completion recomputation on every buffer/cursor change ──────────────
+  const refreshCompletion = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const text = el.plainText;
+    const target = currentCompletionTarget();
 
     const restored = historyRestoredTextRef.current;
     const suppressedByHistory = restored !== null && text === restored;
@@ -354,7 +366,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (!target || suppressedByHistory || dismissed) {
       completionModeRef.current = CompletionMode.IDLE;
-      slashStateRef.current = null;
+      slashRangeRef.current = null;
       suggestionNavigatedRef.current = false;
       setSuggestions([]);
       setActiveIndex(0);
@@ -373,10 +385,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // full registry.
       const pool = slashCommandPool(target, commandsRef.current);
       const parsed = parseSlashCommandQuery(target.query, pool);
-      slashStateRef.current = {
-        range: slashCompletionPositions(target.query, parsed),
-        perfect: isPerfectSlashMatch(parsed),
-      };
+      slashRangeRef.current = slashCompletionPositions(target.query, parsed);
 
       // Argument completion: the leaf command's async completion() supplies
       // the candidates (ink useCommandSuggestions), e.g. `/cd <path>`,
@@ -440,7 +449,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         if (atSearchSeqRef.current === seq) setLoadingSuggestions(false);
       }
     });
-  }, [ensureFileSearch, config]);
+  }, [ensureFileSearch, config, currentCompletionTarget]);
 
   useEffect(() => {
     const el = editorRef.current;
@@ -482,18 +491,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const el = editorRef.current;
       const suggestion = suggestions[index];
       if (!el || !suggestion) return;
-      const text = el.plainText;
-      const cursor = el.logicalCursor;
-      const lines = text.split('\n');
-      const target = detectCompletionTarget(
-        lines,
-        cursor.row,
-        displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
-        text,
-        displayOffsetToCodePointIndex(text, cursor.offset),
-        commandsRef.current,
-      );
+      const target = currentCompletionTarget();
       if (!target) return;
+      const cursor = el.logicalCursor;
+      const lines = el.plainText.split('\n');
       suggestionNavigatedRef.current = false;
       const applied = applyCompletion(
         lines[cursor.row] ?? '',
@@ -501,7 +502,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         suggestion,
         viaEnter,
         target.mode === CompletionMode.SLASH
-          ? (slashStateRef.current?.range ?? undefined)
+          ? (slashRangeRef.current ?? undefined)
           : undefined,
       );
       if (applied.submitNow) {
@@ -538,7 +539,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       };
       apply();
     },
-    [suggestions, applyTextToEditor, onSubmit, attachments],
+    [
+      suggestions,
+      applyTextToEditor,
+      onSubmit,
+      attachments,
+      currentCompletionTarget,
+    ],
   );
 
   // ── Ctrl+V / Cmd+V: clipboard image → temp file → attachment chip ──────
@@ -691,10 +698,19 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // prevents submitting half-typed commands like `/he`). Only a perfect
       // command match submits directly; if the user navigated away from the
       // highlighted default, Enter fills the navigated suggestion instead.
+      //
+      // The verdict is read from the buffer, never from the published
+      // completion state: that state arrives from an effect one render behind
+      // the keystrokes, and a streaming turn keeps the render loop busy enough
+      // for Enter to land in the gap. Read stale, the accept path splices the
+      // earlier prefix's highlighted row into the live buffer — `/quit` typed
+      // mid-turn came out as `/model quit` and never quit. ink resolves the
+      // same race in its InputPrompt; this is the OpenTUI half.
       const showing = suggestions.length > 0;
+      const liveTarget = currentCompletionTarget();
       const isPerfectMatch =
-        completionModeRef.current === CompletionMode.SLASH &&
-        (slashStateRef.current?.perfect ?? false);
+        liveTarget !== null &&
+        isPerfectMatchForTarget(liveTarget, commandsRef.current);
       if (showing && (!isPerfectMatch || suggestionNavigatedRef.current)) {
         key.preventDefault();
         acceptSuggestion(activeIndex, true);
@@ -1087,6 +1103,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             </text>
           )}
         </box>
+      )}
+      {/* No "(shift + tab to cycle)" suffix like ink's AutoAcceptIndicator:
+          nextApprovalMode is not bound to any key in this renderer yet. */}
+      {chrome.statusText && (
+        <text fg={chrome.color ?? C.dim}>{chrome.statusText}</text>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
     </box>

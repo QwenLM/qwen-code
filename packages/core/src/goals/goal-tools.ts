@@ -45,6 +45,7 @@ import {
   type GoalSnapshotV2,
   type GoalTerminalProposal,
   type GoalTurnPermit,
+  isRepeatedBlockerProposal,
   validateGoalProposalReason,
 } from './goal-protocol.js';
 
@@ -332,6 +333,24 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         : {}),
     };
     signal.throwIfAborted();
+    if (
+      view.evidenceCatalog?.truncated &&
+      !isRepeatedBlockerProposal(proposal)
+    ) {
+      return {
+        llmContent: JSON.stringify({
+          proposalRecorded: false,
+          readyForVerification: false,
+          goalLifecycleChanged: false,
+          checkpointRequired: true,
+          nextAction:
+            'End this turn without user-facing text so the runtime can checkpoint the evidence catalog. In the next Goal turn, call get_goal and retry the terminal proposal with the new evidence UUIDs.',
+        }),
+        returnDisplay:
+          'Goal evidence reached its bounded catalog; ending the turn to checkpoint before terminal verification.',
+        terminateTurn: true,
+      };
+    }
     const receipt = recordTerminalProposalForPermit(
       this.runtime,
       this.permit,
@@ -387,7 +406,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a cited external_fact (a tool result, not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
+      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a cited external_fact (a tool result, not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification or checkpointRequired, end the turn without additional user-facing text; after checkpointRequired, call get_goal and retry in the next Goal turn. Otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
       Kind.Think,
       {
         type: 'object',
@@ -703,7 +722,19 @@ export const PROPOSE_GOAL_UNTRUSTED_MESSAGE =
   'Goals can only be set in trusted workspaces. Tell the user to trust the folder with /trust and then run /goal set themselves.';
 export const PROPOSE_GOAL_UNAVAILABLE_MESSAGE =
   'This session cannot persist Goals, so no Goal can be set.';
-export const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
+/**
+ * Defensive only: the model never reads this.
+ *
+ * A declined dialog resolves as `ToolConfirmationOutcome.Cancel`, and the
+ * scheduler settles the call as `cancelled` without ever entering
+ * `execute()` -- the model is handed the scheduler's own cancellation
+ * notice instead. The guard below stays for a host that one day runs
+ * `execute()` after a cancelled confirmation, so a decline can never fall
+ * through to parking an approval. It is deliberately not exported: nothing
+ * outside this module should assert on a string the model cannot receive.
+ * What actually keeps the model from re-proposing is the tool description.
+ */
+const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
   'The Goal was not set: the user did not approve it. Do not ask why and do not propose the same or a reworded objective again.';
 export const PROPOSE_GOAL_NO_TURN_MESSAGE =
   'The Goal was not set: this call is not attributable to a turn, so its approval could not be bound to one. Hand the user a `/goal set <objective>` line instead.';
