@@ -47,6 +47,11 @@ const daemonProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 
+// The local-files bridge upgrades here for secondary-workspace sessions;
+// without a ws-enabled entry the upgrade is never forwarded in dev and the
+// bridge hangs in `connecting`.
+export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
@@ -55,6 +60,10 @@ export default defineConfig(({ command }) => ({
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
         __dirname,
         './client/daemon-react-sdk.ts',
+      ),
+      '@qwen-code/web-shell/transcript': resolve(
+        __dirname,
+        './client/transcript.ts',
       ),
       '@': resolve(__dirname, './client'),
       ...(command === 'serve'
@@ -95,6 +104,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
+      [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
@@ -131,6 +141,13 @@ export default defineConfig(({ command }) => ({
       // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
       // HTTP upgrade to the daemon, same as `/voice/stream`.
       '/terminal': { ...daemonProxy, ws: true },
+      // ACP WebSocket (`/acp`): the local-files bridge upgrades here to host
+      // its client-side MCP server. Exact-path regex, so the prefix cannot
+      // shadow a client source module (same reasoning as `/voice/stream`).
+      // Without it the dev server answers the upgrade itself and the bridge
+      // hangs in `connecting`; production needs no proxy because the daemon
+      // serves the page and `/acp` is then same-origin.
+      '^/acp/?$': { ...daemonProxy, ws: true },
     },
   },
 }));

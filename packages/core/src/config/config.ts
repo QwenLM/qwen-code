@@ -1108,6 +1108,8 @@ export interface ConfigParameters {
    * listing the tool in the `coreTools` allowlist also re-enables it.
    */
   lsToolEnabled?: boolean;
+  /** Opt-in flag for the built-in `todo_write` tool. */
+  todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
@@ -2385,6 +2387,7 @@ export class Config {
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
   private readonly lsToolEnabled: boolean = false;
+  private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
@@ -2704,6 +2707,7 @@ export class Config {
       params.cronRecurringMaxAgeDays,
     );
     this.lsToolEnabled = params.lsToolEnabled ?? false;
+    this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -3016,7 +3020,8 @@ export class Config {
   /**
    * Must only be called once, throws if called again after the first call
    * settled. Callers arriving while the first call is still in flight join
-   * that flight instead of throwing.
+   * that flight instead of throwing; a joining caller's options are ignored
+   * — the first caller's options win.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -3029,6 +3034,12 @@ export class Config {
       // a config whose chat had not started yet, and the first prompt died
       // with "Chat not initialized" (#11002).
       if (!this.initializationSettled) {
+        // A joining caller's options cannot be honored, so an already-aborted
+        // signal must fail fast instead of blocking on the foreign flight.
+        options?.signal?.throwIfAborted();
+        this.debugLogger.debug(
+          'Config.initialize() called while initialization is in flight; joining the existing run',
+        );
         await this.initializationPromise;
         return;
       }
@@ -7875,6 +7886,10 @@ export class Config {
     );
   }
 
+  isTodoWriteEnabled(): boolean {
+    return this.todoWriteEnabled;
+  }
+
   isAgentTeamEnabled(): boolean {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
@@ -8836,15 +8851,15 @@ export class Config {
     return this.goalRuntime;
   }
 
-  getGoalRuntimeReady(): Promise<GoalRuntime> {
+  async getGoalRuntimeReady(): Promise<GoalRuntime> {
     const runtime = this.getGoalRuntime();
     if (!Object.hasOwn(this, 'goalRuntimeReady') || !this.goalRuntimeReady) {
-      return Promise.reject(new GoalPersistenceUnavailableError());
+      throw new GoalPersistenceUnavailableError();
     }
     return this.goalRuntimeReady.then(() => runtime);
   }
 
-  getGoalRuntimePrepared(): Promise<GoalRuntime> {
+  async getGoalRuntimePrepared(): Promise<GoalRuntime> {
     const runtime = this.getGoalRuntime();
     if (!this.sessionRestoreRuntime) return this.getGoalRuntimeReady();
     return runtime.getPreparedRestore().then(() => runtime);
@@ -9748,10 +9763,12 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    await registerLazy(ToolNames.TODO_WRITE, async () => {
-      const { TodoWriteTool } = await import('../tools/todoWrite.js');
-      return new TodoWriteTool(this);
-    });
+    if (this.isTodoWriteEnabled()) {
+      await registerLazy(ToolNames.TODO_WRITE, async () => {
+        const { TodoWriteTool } = await import('../tools/todoWrite.js');
+        return new TodoWriteTool(this);
+      });
+    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
