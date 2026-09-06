@@ -5654,15 +5654,21 @@ export class LlmChat {
                 protocolTextWasSuppressed ||= part.text.length > 0;
                 continue;
               }
-              if (
-                protocolTagDetector.blockingOutput ||
-                !systemReminderEchoFilter.pending
-              ) {
+              if (protocolTagDetector.blockingOutput) {
+                // Withdrawal is only correct while the leading detector
+                // blocks: it has not released anything yet, so
+                // `textReleasedThroughDetectors` stays false, the flush
+                // replays these parts verbatim, and whole-chunk atomicity
+                // survives a potential leak-retry.
                 pendingProtocolParts.push(...outputParts.splice(0), part);
               } else {
-                // Empty text while only the echo filter withholds bytes: a
-                // withdrawal would park already-released parts whose bytes
-                // are no longer in any buffer, so park just this part.
+                // Empty text with the detector clean and terminal (no retry
+                // can follow, so chunk atomicity is moot): a withdrawal would
+                // park parts whose bytes were already released past every
+                // buffer, and the stripped flush would drop their text with
+                // nothing re-entering through a later filter release. Park
+                // just this part instead — whether or not the echo filter is
+                // still holding earlier bytes.
                 pendingProtocolParts.push(part);
               }
               protocolTextWasSuppressed ||= part.text.length > 0;

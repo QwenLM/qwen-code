@@ -13474,6 +13474,74 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe('All done.');
   });
 
+  it('keeps sibling text when an empty part follows released text in one chunk (#10797)', async () => {
+    // Regression: the empty-text guard used to withdraw earlier parts of the
+    // same chunk whenever the echo filter was idle, parking text that had
+    // already been released past every buffer; the stripped flush then
+    // dropped it ('Hello ' vanished and only 'world' reached the user).
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      streamResponse(
+        stopResponse([{ text: 'Hello ' }, { text: '' }, { text: 'world' }]),
+      ),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-empty-part-between-text',
+    );
+    const events: StreamEvent[] = [];
+    let emittedText = '';
+    for await (const event of stream) {
+      events.push(event);
+      if (event.type === StreamEventType.CHUNK) {
+        // Snapshot the text as each chunk arrives: history consolidation
+        // later merges text parts by mutating the yielded part objects, so
+        // aggregating after the loop would double-count merged text.
+        emittedText += (event.value.candidates?.[0]?.content?.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join('');
+      }
+    }
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(emittedText).toBe('Hello world');
+    expect(chat.getLastModelMessageText()).toBe('Hello world');
+  });
+
+  it('keeps the whole reply when a trailing empty part ends the chunk (#10797)', async () => {
+    // Regression: with the echo filter idle, a trailing empty part withdrew
+    // the already-released 'Hello world' into the pending buffer and the
+    // stripped finish dropped it — the entire reply went missing and the
+    // turn burned an avoidable NO_RESPONSE_TEXT retry.
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'Hello world' }, { text: '' }])),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'RETRY REPLY' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-trailing-empty-part',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe('Hello world');
+  });
+
   it('retries leaked JSON before a structured tool call', async () => {
     vi.useFakeTimers();
     try {
