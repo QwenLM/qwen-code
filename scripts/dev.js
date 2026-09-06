@@ -65,21 +65,62 @@ const cliEntry = join(cliPackageDir, 'index.ts');
 const tmpDir = mkdtempSync(join(tmpdir(), 'qwen-dev-'));
 const loaderPath = join(tmpDir, 'loader.mjs');
 
-const coreSourcePath = join(root, 'packages', 'core', 'index.ts');
-const coreSourceUrl = pathToFileURL(coreSourcePath).href;
+const coreDir = join(root, 'packages', 'core');
+const coreSpecifier = '@qwen-code/qwen-code-core';
+const coreSourceUrl = pathToFileURL(join(coreDir, 'index.ts')).href;
+const coreSrcUrl = pathToFileURL(join(coreDir, 'src') + '/').href;
+
+const coreExports = JSON.parse(
+  readFileSync(join(coreDir, 'package.json'), 'utf-8'),
+).exports;
+
+const coreSubpathSourceUrls = {};
+for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
+  const distEntry = conditions?.import;
+  // Skips the root (handled below) and the string-valued entries — `./dist/*`,
+  // `./src/*`, `./package.json` — whose target is not one fixed source file.
+  if (subpath === '.' || typeof distEntry !== 'string') continue;
+  if (!distEntry.startsWith('./dist/')) continue;
+  const sourcePath = join(
+    coreDir,
+    distEntry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+  );
+  if (existsSync(sourcePath)) {
+    coreSubpathSourceUrls[`${coreSpecifier}/${subpath.slice(2)}`] =
+      pathToFileURL(sourcePath).href;
+  }
+}
 
 const loaderCode = `
-import { pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const coreSourceUrl = '${coreSourceUrl}';
+const coreSubpathSourceUrls = ${JSON.stringify(coreSubpathSourceUrls, null, 2)};
+const coreSrcUrl = '${coreSrcUrl}';
+const corePrefix = '${coreSpecifier}/';
 
 export function resolve(specifier, context, nextResolve) {
-  if (specifier === '@qwen-code/qwen-code-core') {
+  const url =
+    specifier === '${coreSpecifier}'
+      ? coreSourceUrl
+      : coreSubpathSourceUrls[specifier];
+  if (url) {
     return {
       shortCircuit: true,
-      url: coreSourceUrl,
+      url,
       format: 'module',
     };
+  }
+  if (specifier.startsWith(corePrefix)) {
+    // Deep paths mirror packages/core/src; leave missing files to Node.
+    const sub = specifier.slice(corePrefix.length).replace(/\\.js$/, '');
+    for (const ext of ['.ts', '.tsx']) {
+      const candidate = new URL(sub + ext, coreSrcUrl);
+      if (existsSync(fileURLToPath(candidate))) {
+        return { shortCircuit: true, url: candidate.href, format: 'module' };
+      }
+    }
   }
   return nextResolve(specifier, context);
 }

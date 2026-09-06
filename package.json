@@ -96,6 +96,7 @@
     "check:lockfile": "node scripts/check-lockfile.js",
     "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
     "check:tui-dep-direction": "node scripts/check-tui-dep-direction.mjs",
+    "check:core-subpath-exports": "node scripts/check-core-subpath-exports.mjs",
     "check:serve-fast-path-bundle": "node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle && node scripts/check-serve-fast-path-bundle.js",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
@@ -111,7 +112,8 @@
     "react-dom": "^19.2.4",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "axios": "^1.19.0"
+    "axios": "^1.19.0",
+    "react-markdown": "^9.0.0"
   },
   "bin": {
     "qwen": "scripts/cli-entry.js"
