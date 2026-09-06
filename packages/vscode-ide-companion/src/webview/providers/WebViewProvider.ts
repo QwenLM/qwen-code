@@ -6,7 +6,7 @@
 
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
@@ -1987,12 +1987,15 @@ export class WebViewProvider {
         handle.dispose();
       }
       try {
+        const canonicalWorkspaceCwd = existsSync(workspaceCwd)
+          ? realpathSync.native(workspaceCwd)
+          : workspaceCwd;
         const runtime = await this.daemonProcess.start(
           resolveQwenCliEntryPath(
             this.extensionUri,
             this.context.extensionMode,
           ),
-          workspaceCwd,
+          canonicalWorkspaceCwd,
         );
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
@@ -2000,7 +2003,7 @@ export class WebViewProvider {
         const viewSessionId = this.isViewHost
           ? getRestorableDaemonSessionId(
               this.context.workspaceState.get<string>(
-                webShellSessionStateKey(workspaceCwd),
+                webShellSessionStateKey(canonicalWorkspaceCwd),
               ),
             )
           : undefined;
@@ -2012,7 +2015,7 @@ export class WebViewProvider {
           data: {
             ...runtime,
             clientId: this.daemonClientId,
-            workspaceCwd,
+            workspaceCwd: canonicalWorkspaceCwd,
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
           },

@@ -12,12 +12,14 @@ const {
   mockShowErrorMessage,
   mockExportSessionToFile,
   mockReadFile,
+  mockRealpath,
   mockStat,
 } = vi.hoisted(() => ({
   mockProcessImageAttachments: vi.fn(),
   mockShowErrorMessage: vi.fn(),
   mockExportSessionToFile: vi.fn(),
   mockReadFile: vi.fn(),
+  mockRealpath: vi.fn(),
   mockStat: vi.fn(),
 }));
 const { mockExecuteCommand } = vi.hoisted(() => ({
@@ -26,8 +28,13 @@ const { mockExecuteCommand } = vi.hoisted(() => ({
 
 vi.mock('fs/promises', () => ({
   readFile: mockReadFile,
+  realpath: mockRealpath,
   stat: mockStat,
-  default: { readFile: mockReadFile, stat: mockStat },
+  default: {
+    readFile: mockReadFile,
+    realpath: mockRealpath,
+    stat: mockStat,
+  },
 }));
 
 vi.mock('vscode', () => ({
@@ -114,6 +121,7 @@ describe('SessionMessageHandler', () => {
       uri: { fsPath: '/workspace/export.html' },
     });
     mockStat.mockResolvedValue({ size: 3 });
+    mockRealpath.mockImplementation(async (value: string) => value);
   });
 
   it('forwards the active model when opening a new chat tab', async () => {
@@ -1104,6 +1112,33 @@ describe('SessionMessageHandler', () => {
       format: 'html',
     });
     expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('canonicalizes the workspace fallback before exporting', async () => {
+    mockRealpath.mockResolvedValue('/private/workspace');
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi.fn().mockResolvedValue([]),
+      sendMessage: vi.fn(),
+    };
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      {} as never,
+      'session-1',
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: '/export html' },
+    });
+
+    expect(mockExportSessionToFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      cwd: '/private/workspace',
+      format: 'html',
+    });
   });
 
   it('reports bare /export as a missing subcommand instead of exporting', async () => {

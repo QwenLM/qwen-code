@@ -468,7 +468,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    return workspaceFolder?.uri.fsPath || process.cwd();
+    return workspaceFolder
+      ? await fsp.realpath(workspaceFolder.uri.fsPath)
+      : process.cwd();
   }
 
   private async handleExportCommand(

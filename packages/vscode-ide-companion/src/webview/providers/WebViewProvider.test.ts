@@ -437,7 +437,14 @@ import {
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
 import { logger } from '../../utils/logger.js';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -2300,6 +2307,38 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       },
       'initializeAgentConnection',
     ).mockResolvedValue(undefined);
+  });
+
+  it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const target = path.join(root, 'workspace');
+    const alias = path.join(root, 'workspace-link');
+    mkdirSync(target);
+    symlinkSync(
+      target,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    try {
+      setWorkspaceFolders([alias]);
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context: createSharedContext(),
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const canonical = realpathSync.native(target);
+      expect(daemonMocks.instances[0].boundCwd).toBe(canonical);
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({ workspaceCwd: canonical }),
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
