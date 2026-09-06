@@ -69,9 +69,10 @@ export function ContextUsagePanel({
         );
       } catch (err) {
         if (!active) return;
-        // A failed refresh keeps the last good reading; transient failures
-        // (disconnect, transport close, network blip) stay silent here
-        // because the action's notice channel already reports them.
+        // A failed refresh keeps the last good reading. Transient failures
+        // (disconnect, transport close, network blip) stay silent in both
+        // layers — the action rethrows them without a notice — leaving the
+        // unavailable copy plus the enabled Refresh as the retry affordance.
         setError(!isTransientSessionReadError(err));
       } finally {
         pending = false;

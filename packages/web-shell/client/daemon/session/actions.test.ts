@@ -531,6 +531,44 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('does not report a context usage error while the session is disconnected', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getContextUsage({ detail: true })).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('does not report a context usage error when the session disconnects in flight', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.contextUsage.mockRejectedValueOnce(
+      new DaemonTransportClosedError(),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getContextUsage({ detail: true })).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports non-transient context usage errors', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.contextUsage.mockRejectedValueOnce(new Error('bad response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getContextUsage({ detail: true })).rejects.toThrow(
+      'bad response',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context_usage' }),
+    );
+  });
+
   it('clears the previous Goal before starting a fresh session', async () => {
     const { actions, getConnection } = createActionsHarness({
       connection: {
@@ -4442,6 +4480,7 @@ function createMockSession(
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
+    contextUsage: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
     workflowTasks: vi.fn(async () => ({
       v: 1 as const,

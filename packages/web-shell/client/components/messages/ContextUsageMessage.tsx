@@ -82,16 +82,16 @@ function ProgressBar({
         <span style={{ width: `${usedCount}%`, background: usedColor }} />
         <span
           style={{
-            width: `${bufferCount}%`,
-            background: 'var(--warning-color)',
-            opacity: 0.45,
+            width: `${freeCount}%`,
+            background: 'var(--muted-foreground)',
+            opacity: 0.25,
           }}
         />
         <span
           style={{
-            width: `${freeCount}%`,
-            background: 'var(--muted-foreground)',
-            opacity: 0.25,
+            width: `${bufferCount}%`,
+            background: 'var(--warning-color)',
+            opacity: 0.45,
           }}
         />
       </div>

@@ -247,6 +247,22 @@ describe('ContextUsagePanel', () => {
     expect(container.textContent).not.toContain('…');
   });
 
+  it('replaces the retained reading with the alert when a refresh really fails', async () => {
+    const initial = deferred();
+    const second = deferred();
+    const get = vi
+      .fn()
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(second.promise);
+    const { container } = renderPanel(get);
+    await act(async () => initial.resolve(fixture()));
+    expect(container.textContent).toContain('context-model');
+    act(() => refresh(container).click());
+    await act(async () => second.reject(new Error('boom')));
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('context-model');
+  });
+
   it('does not load without actions', () => {
     const { container } = renderPanel();
     expect(refresh(container).disabled).toBe(true);

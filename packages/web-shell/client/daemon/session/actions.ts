@@ -61,6 +61,7 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
+import { isTransientSessionReadError } from '../../utils/sessionErrors.js';
 import {
   getPersistedClientId,
   persistStableClientId,
@@ -2074,18 +2075,23 @@ export function createDaemonSessionActions({
     },
 
     async getContextUsage(opts) {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Load context usage failed',
-        'load_context_usage',
-      );
+      // Mirrors getStats: a missing or transiently lost session rethrows raw
+      // without a notice — the context panel re-collects on every activation,
+      // so notifying here would stack identical notices while down.
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(
           session.contextUsage(opts),
           'Load context usage timed out',
         );
       } catch (error) {
+        // Transient read failures rethrow raw, like getStats: the context
+        // panel re-collects on every activation, so notifying here would
+        // stack identical notices for as long as the session is down.
+        if (isTransientSessionReadError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load context usage failed',

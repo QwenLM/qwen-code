@@ -6017,18 +6017,7 @@ export function App({
       const mergedTabs = [
         ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
         ...tabsOpenedDuringRestore,
-      ].filter(
-        (tab) =>
-          // Pane-bound usage tabs die with their pane; the mount-time pane
-          // cleanup ran before restoration landed, so reclaim them here.
-          !(
-            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
-            tab.closeWithPane &&
-            (mainViewRef.current !== 'split' ||
-              tab.sessionId === undefined ||
-              !splitSessionIdsRef.current.includes(tab.sessionId))
-          ),
-      );
+      ];
       const activeTabId = mergedTabs.some(
         (tab) => tab.id === activeArtifactPanelTabIdRef.current,
       )
@@ -7999,6 +7988,11 @@ export function App({
   }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  // False until the split bootstrap has decided whether a split view is
+  // coming (URL deep link, per-tab sessionStorage, or controlled prop). The
+  // pane-tab reclaim below must wait for it: at restore-commit time
+  // mainView/splitSessionIds are still their useState initials.
+  const [splitViewSettled, setSplitViewSettled] = useState(false);
   // Latest pane list, readable from the shrink-close effect without making it a
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
@@ -8016,6 +8010,37 @@ export function App({
   useEffect(() => {
     if (mainView !== 'split') closeUsageTabs(undefined, true);
   }, [closeUsageTabs, mainView]);
+  // Pane-bound usage tabs restored from storage are reclaimed only once the
+  // split bootstrap has settled: deciding at restore-commit time reads
+  // mainView/splitSessionIds before the split lands, dropping tabs whose
+  // panes arrive a moment later — and the drop is written back to storage.
+  useEffect(() => {
+    if (!splitViewSettled || artifactPanelRestoring) return;
+    if (mainView === 'split') {
+      const live = new Set(splitSessionIds);
+      const orphans = Array.from(
+        new Set(
+          artifactPanelTabsRef.current.flatMap((tab) =>
+            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
+            tab.closeWithPane &&
+            tab.sessionId !== undefined &&
+            !live.has(tab.sessionId)
+              ? [tab.sessionId]
+              : [],
+          ),
+        ),
+      );
+      if (orphans.length > 0) closeUsageTabs(orphans, true);
+    } else {
+      closeUsageTabs(undefined, true);
+    }
+  }, [
+    artifactPanelRestoring,
+    closeUsageTabs,
+    mainView,
+    splitSessionIds,
+    splitViewSettled,
+  ]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
@@ -8207,13 +8232,15 @@ export function App({
               : [],
         );
         setMainView('split');
+        setSplitViewSettled(true);
         return;
       }
       void sanitizeSplitSessionIds(requested).then((sanitized) => {
-        if (
-          splitClassificationGenerationRef.current !== generation ||
-          sanitized.length === 0
-        ) {
+        if (splitClassificationGenerationRef.current !== generation) {
+          return;
+        }
+        setSplitViewSettled(true);
+        if (sanitized.length === 0) {
           return;
         }
         setSplitSessionIds(sanitized);
@@ -8271,6 +8298,7 @@ export function App({
     if (requested.length === 0) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
+      setSplitViewSettled(true);
       return;
     }
     if (!workspaceContextActive) {
@@ -8284,11 +8312,13 @@ export function App({
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
       onSplitSessionIdsChangeRef.current?.([]);
+      setSplitViewSettled(true);
       return;
     }
     if (!workspaceCapabilitiesReady) return;
     void sanitizeSplitSessionIds(requested).then((sanitized) => {
       if (splitClassificationGenerationRef.current !== generation) return;
+      setSplitViewSettled(true);
       setSplitSessionIds((previous) =>
         areSessionIdsEqual(previous, sanitized) ? previous : sanitized,
       );
@@ -8420,7 +8450,11 @@ export function App({
     // restores nothing.
     if (externalSplitControlled) return;
     const saved = loadSplitSessions();
-    if (saved.length > 0) openSplitView(saved);
+    if (saved.length > 0) {
+      openSplitView(saved);
+      return;
+    }
+    setSplitViewSettled(true);
   }, [externalSplitControlled, openSplitView, workspace.capabilities]);
   // Mirror the live split session set to per-tab storage while the split is the
   // active view, so a refresh restores exactly these panes. Not written when the

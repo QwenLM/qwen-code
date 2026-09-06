@@ -220,7 +220,6 @@ const {
   mockPaneSessionActions,
   mockSessionActions,
   paneContextFixture,
-  paneStatsFixture,
   mockWorkspace,
   mockWorkspaceActions,
   mockMcp,
@@ -355,25 +354,7 @@ const {
   };
   const settingsSetValue = vi.fn().mockResolvedValue(undefined);
   const mockCollectSystemInfo = vi.fn();
-  const paneStatsFixture = {
-    v: 1,
-    sessionId: 's1',
-    workspaceCwd: '/tmp/project',
-    sessionStartTimeMs: 1,
-    durationMs: 1,
-    promptCount: 0,
-    models: {},
-    tools: {
-      totalCalls: 0,
-      totalSuccess: 0,
-      totalFail: 0,
-      totalDurationMs: 0,
-      byName: {},
-    },
-    files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
-    sources: [],
-  };
-  const paneContextFixture = {
+  const paneContextFixture: DaemonSessionContextUsageStatus = {
     v: 1,
     sessionId: 's1',
     workspaceCwd: '/tmp/project',
@@ -399,80 +380,81 @@ const {
       isEstimated: false,
     },
   };
+  const mockSessionActions = {
+    setDaemonActivePrompt: vi.fn(),
+    sendPrompt: vi.fn().mockResolvedValue(undefined),
+    btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
+    generateSessionContent: vi.fn(async function* () {}),
+    createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+    attachSession: vi.fn().mockResolvedValue(undefined),
+    clearSession: vi.fn().mockResolvedValue(undefined),
+    releaseSession: vi.fn().mockResolvedValue(undefined),
+    renameSession: vi.fn().mockResolvedValue(undefined),
+    recapSession: vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      recap: null,
+    }),
+    refreshCommands: vi.fn().mockResolvedValue(undefined),
+    setModel: vi.fn().mockResolvedValue(undefined),
+    setReasoningEffort: vi.fn().mockResolvedValue(undefined),
+    setApprovalMode: vi.fn().mockResolvedValue(undefined),
+    getRewindSnapshots: vi.fn().mockResolvedValue([]),
+    rewindSession: vi.fn().mockResolvedValue(undefined),
+    branchSession: vi.fn().mockResolvedValue({
+      sessionId: 'branch-1',
+      displayName: 'Historical branch',
+      switchStarted: true,
+    }),
+    submitPermission: vi.fn().mockResolvedValue(true),
+    clearGoal: vi.fn().mockResolvedValue(undefined),
+    getGoal: vi.fn().mockResolvedValue({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    }),
+    controlGoal: vi.fn().mockResolvedValue({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    }),
+    applyGoalSnapshot: vi.fn((sessionId: string, snapshot: unknown) => {
+      if (mockConnection.sessionId === sessionId) {
+        mockConnection.goalState = snapshot as never;
+      }
+    }),
+    forkSession: vi.fn().mockResolvedValue({ launched: false }),
+    sendShellCommand: vi.fn().mockResolvedValue(undefined),
+    cancel: vi.fn().mockResolvedValue(undefined),
+    getStats: vi.fn().mockResolvedValue({}),
+    getContextUsage: vi.fn().mockResolvedValue({}),
+    readAttachment: vi.fn().mockResolvedValue({
+      data: 'aGVsbG8=',
+      mimeType: 'text/plain',
+    }),
+    listAttachments: vi.fn().mockResolvedValue([]),
+    getTasks: vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 1,
+      tasks: [],
+    }),
+    getWorkflowTasks: vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 1,
+      tasks: [],
+    }),
+    loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
+    loadSession: vi.fn().mockResolvedValue(undefined),
+    reloadSession: vi.fn().mockResolvedValue(undefined),
+  };
   const mockPaneSessionActions = {
-    getStats: vi.fn().mockResolvedValue(paneStatsFixture),
+    ...mockSessionActions,
+    getStats: vi.fn().mockResolvedValue({}),
     getContextUsage: vi.fn().mockResolvedValue(paneContextFixture),
   };
   return {
     mockCollectSystemInfo,
     mockConnection: connection,
     mockPaneSessionActions,
+    mockSessionActions,
     paneContextFixture,
-    paneStatsFixture,
-    mockSessionActions: {
-      setDaemonActivePrompt: vi.fn(),
-      sendPrompt: vi.fn().mockResolvedValue(undefined),
-      btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
-      generateSessionContent: vi.fn(async function* () {}),
-      createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
-      attachSession: vi.fn().mockResolvedValue(undefined),
-      clearSession: vi.fn().mockResolvedValue(undefined),
-      releaseSession: vi.fn().mockResolvedValue(undefined),
-      renameSession: vi.fn().mockResolvedValue(undefined),
-      recapSession: vi.fn().mockResolvedValue({
-        sessionId: 'session-1',
-        recap: null,
-      }),
-      refreshCommands: vi.fn().mockResolvedValue(undefined),
-      setModel: vi.fn().mockResolvedValue(undefined),
-      setReasoningEffort: vi.fn().mockResolvedValue(undefined),
-      setApprovalMode: vi.fn().mockResolvedValue(undefined),
-      getRewindSnapshots: vi.fn().mockResolvedValue([]),
-      rewindSession: vi.fn().mockResolvedValue(undefined),
-      branchSession: vi.fn().mockResolvedValue({
-        sessionId: 'branch-1',
-        displayName: 'Historical branch',
-        switchStarted: true,
-      }),
-      submitPermission: vi.fn().mockResolvedValue(true),
-      clearGoal: vi.fn().mockResolvedValue(undefined),
-      getGoal: vi.fn().mockResolvedValue({
-        snapshot: { v: 2, activity: 'idle', goal: null },
-      }),
-      controlGoal: vi.fn().mockResolvedValue({
-        snapshot: { v: 2, activity: 'idle', goal: null },
-      }),
-      applyGoalSnapshot: vi.fn((sessionId: string, snapshot: unknown) => {
-        if (mockConnection.sessionId === sessionId) {
-          mockConnection.goalState = snapshot as never;
-        }
-      }),
-      forkSession: vi.fn().mockResolvedValue({ launched: false }),
-      sendShellCommand: vi.fn().mockResolvedValue(undefined),
-      cancel: vi.fn().mockResolvedValue(undefined),
-      getStats: vi.fn().mockResolvedValue({}),
-      getContextUsage: vi.fn().mockResolvedValue({}),
-      readAttachment: vi.fn().mockResolvedValue({
-        data: 'aGVsbG8=',
-        mimeType: 'text/plain',
-      }),
-      listAttachments: vi.fn().mockResolvedValue([]),
-      getTasks: vi.fn().mockResolvedValue({
-        v: 1,
-        sessionId: 'session-1',
-        now: 1,
-        tasks: [],
-      }),
-      getWorkflowTasks: vi.fn().mockResolvedValue({
-        v: 1,
-        sessionId: 'session-1',
-        now: 1,
-        tasks: [],
-      }),
-      loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
-      loadSession: vi.fn().mockResolvedValue(undefined),
-      reloadSession: vi.fn().mockResolvedValue(undefined),
-    },
     mockWorkspace: {
       capabilities: {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
@@ -4054,17 +4036,19 @@ describe('task activity key', () => {
               kind: 'context_usage',
               title: 'Pane context usage',
               sessionId: 'pane-session',
+              closeWithPane: true,
             },
           ],
         },
       }),
     );
-    const { container } = renderApp();
+    // The pane-bound shape only survives restoration while its pane is live.
+    renderApp({ splitSessionIds: ['pane-session'] });
     await flush();
     expect(mockWorkspace.client.sessionContextUsage).not.toHaveBeenCalled();
     expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
     await act(async () => {
-      container
+      document.body
         .querySelector<HTMLButtonElement>('button[title="Pane context usage"]')!
         .click();
     });
@@ -4150,6 +4134,160 @@ describe('task activity key', () => {
         .click();
     });
     expect(mockWorkspace.client.sessionContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('reclaims pane-bound token usage tabs restored outside a split view', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'file:README.md',
+          tabs: [
+            {
+              id: 'file:README.md',
+              kind: 'file',
+              title: 'README.md',
+              workspacePath: 'README.md',
+            },
+            {
+              id: 'token-usage:pane-session',
+              kind: 'token_usage',
+              title: 'Pane token usage',
+              sessionId: 'pane-session',
+              closeWithPane: true,
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('button[title="Pane token usage"]'),
+    ).toBeNull();
+    expect(mockWorkspace.client.sessionStats).not.toHaveBeenCalled();
+  });
+
+  it('keeps pane-bound usage tabs whose pane is live after restoration', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'file:README.md',
+          tabs: [
+            {
+              id: 'file:README.md',
+              kind: 'file',
+              title: 'README.md',
+              workspacePath: 'README.md',
+            },
+            {
+              id: 'context-usage:pane-session',
+              kind: 'context_usage',
+              title: 'Pane context usage',
+              sessionId: 'pane-session',
+              closeWithPane: true,
+            },
+          ],
+        },
+      }),
+    );
+    renderApp({ splitSessionIds: ['pane-session'] });
+    await flush();
+    expect(
+      document.body.querySelector('button[title="Pane context usage"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps pane-bound usage tabs when the split lands after restoration', async () => {
+    // Delay the split classification so the artifact restore commits first:
+    // the reclaim must wait for the split decision instead of reading the
+    // still-initial view state at commit time.
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let classify!: (value: unknown) => void;
+    mockWorkspace.client.getStandaloneSession.mockReturnValue(
+      new Promise((resolve) => {
+        classify = resolve;
+      }),
+    );
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'file:README.md',
+          tabs: [
+            {
+              id: 'file:README.md',
+              kind: 'file',
+              title: 'README.md',
+              workspacePath: 'README.md',
+            },
+            {
+              id: 'context-usage:pane-session',
+              kind: 'context_usage',
+              title: 'Pane context usage',
+              sessionId: 'pane-session',
+              closeWithPane: true,
+            },
+          ],
+        },
+      }),
+    );
+    renderApp({ splitSessionIds: ['pane-session'] });
+    await flush();
+    // Restore committed while the split decision was still in flight.
+    expect(
+      document.body.querySelector('button[title="Pane context usage"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      classify(
+        new DaemonHttpError(
+          404,
+          { code: 'standalone_session_not_found' },
+          'Not found',
+        ),
+      );
+    });
+    await flush();
+    expect(
+      document.body.querySelector('button[title="Pane context usage"]'),
+    ).not.toBeNull();
+  });
+
+  it('reclaims pane-bound usage tabs whose session is not a live pane', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'file:README.md',
+          tabs: [
+            {
+              id: 'file:README.md',
+              kind: 'file',
+              title: 'README.md',
+              workspacePath: 'README.md',
+            },
+            {
+              id: 'token-usage:other-session',
+              kind: 'token_usage',
+              title: 'Orphan token usage',
+              sessionId: 'other-session',
+              closeWithPane: true,
+            },
+          ],
+        },
+      }),
+    );
+    renderApp({ splitSessionIds: ['pane-session'] });
+    await flush();
+    expect(
+      document.body.querySelector('button[title="Orphan token usage"]'),
+    ).toBeNull();
   });
 
   it('drops malformed persisted tabs without leaving the skeleton visible', async () => {
@@ -8677,7 +8815,7 @@ beforeEach(() => {
   mockWorkspace.client.sessionContextUsage.mockReset();
   mockWorkspace.client.sessionContextUsage.mockResolvedValue({});
   mockPaneSessionActions.getStats.mockReset();
-  mockPaneSessionActions.getStats.mockResolvedValue(paneStatsFixture);
+  mockPaneSessionActions.getStats.mockResolvedValue({});
   mockPaneSessionActions.getContextUsage.mockReset();
   mockPaneSessionActions.getContextUsage.mockResolvedValue(paneContextFixture);
   mockWorkspace.client.sessionTaskCancel.mockReset();

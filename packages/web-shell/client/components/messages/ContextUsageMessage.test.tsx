@@ -101,6 +101,25 @@ describe('ContextUsageMessage', () => {
     expect(filledClass(render(makeStatus(81, false)))).toContain('error');
   });
 
+  it('renders the compact meter in legend order with threshold colors', () => {
+    const spans = (totalTokens: number) =>
+      Array.from(
+        render(makeStatus(totalTokens, false), true).querySelectorAll(
+          '[aria-hidden="true"] > span',
+        ),
+      ) as HTMLSpanElement[];
+
+    const [used, free, buffer] = spans(60);
+    expect(used.style.width).toBe('60%');
+    expect(used.style.background).toBe('var(--agent-blue-500)');
+    expect(free.style.width).toBe('30%');
+    expect(buffer.style.width).toBe('10%');
+    expect(buffer.style.background).toBe('var(--warning-color)');
+
+    expect(spans(61)[0].style.background).toBe('var(--warning-color)');
+    expect(spans(81)[0].style.background).toBe('var(--error-color)');
+  });
+
   it('suppresses its own title in compact mode so the panel toolbar is the only heading', () => {
     const compactContainer = render(makeStatus(60, false), true);
     expect(compactContainer.querySelector('[class*="title"]')).toBeNull();
