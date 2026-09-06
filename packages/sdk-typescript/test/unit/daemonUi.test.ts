@@ -3459,6 +3459,18 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(events).toEqual([]);
   });
 
+  it('does not surface session_info_update as a debug transcript event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'session_info_update',
+          title: 'Durable title',
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
   it('stamps debugReason on unrecognized daemon events', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('some_future_event', { sessionId: 's1' }),
