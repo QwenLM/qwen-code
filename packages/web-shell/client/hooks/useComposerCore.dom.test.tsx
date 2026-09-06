@@ -2221,17 +2221,35 @@ describe('useComposerCore tags', () => {
 });
 
 describe('useComposerCore attachment chip deletion keys', () => {
+  // Deterministic ingestion wait: `waitForImageIngestion` drains the batch
+  // lane, but the committed attachment state can lag the batch count by one
+  // render, so assert the expected state itself before touching the keymap.
+  async function ingestAttachmentsAndWait(
+    files: readonly File[],
+    expected: { images: number; files: number },
+  ) {
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await waitForImageIngestion();
+    });
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(latest!.pastedImages).toHaveLength(expected.images);
+      expect(latest!.pastedFiles).toHaveLength(expected.files);
+    });
+  }
   it('removes the last pasted image with Backspace when the composer has no text or tags', async () => {
     // Regression for issue #10794: Backspace used to return false when no
     // removable @-tag existed, so image-only composers ignored the key.
     await mount();
-    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['png2'], 'photo2.png', { type: 'image/png' }),
+    ];
 
-    await act(async () => {
-      expect(latest!.ingestFiles([file])).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
-    expect(latest!.pastedImages).toHaveLength(1);
+    await ingestAttachmentsAndWait(files, { images: 2, files: 0 });
 
     const view = latest!.viewRef.current!;
     act(() => {
@@ -2240,7 +2258,10 @@ describe('useComposerCore attachment chip deletion keys', () => {
       );
     });
 
-    expect(latest!.pastedImages).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+    // data is stored base64-encoded: 'png' identifies the *first* image,
+    // proving Backspace removed the last one.
+    expect(atob(latest!.pastedImages[0].data as string)).toBe('png');
   });
 
   it('removes the first pasted image with Delete when the composer has no text or tags', async () => {
@@ -2250,11 +2271,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
       new File(['png2'], 'photo2.png', { type: 'image/png' }),
     ];
 
-    await act(async () => {
-      expect(latest!.ingestFiles(files)).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
-    expect(latest!.pastedImages).toHaveLength(2);
+    await ingestAttachmentsAndWait(files, { images: 2, files: 0 });
 
     const view = latest!.viewRef.current!;
     act(() => {
@@ -2276,10 +2293,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
     await mount();
     const file = new File(['png'], 'photo.png', { type: 'image/png' });
 
-    await act(async () => {
-      expect(latest!.ingestFiles([file])).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
     const view = latest!.viewRef.current!;
     act(() => {
       latest!.setText('abc');
@@ -2297,10 +2311,7 @@ describe('useComposerCore attachment chip deletion keys', () => {
     await mount();
     const file = new File(['png'], 'photo.png', { type: 'image/png' });
 
-    await act(async () => {
-      expect(latest!.ingestFiles([file])).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
     const view = latest!.viewRef.current!;
     act(() => {
       latest!.setText('abc');
@@ -2312,5 +2323,140 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     expect(view.state.doc.toString()).toBe('abc');
     expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('ignores auto-repeat Backspace so a held key cannot destroy attachment chips', async () => {
+    // A held Backspace clears the text and would then remove one chip per
+    // repeat event (~30/s) with no way back; repeats must never fire the
+    // fallback.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Backspace',
+          bubbles: true,
+          repeat: true,
+        }),
+      );
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Backspace',
+          bubbles: true,
+          repeat: true,
+        }),
+      );
+    });
+
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('removes a pasted file with Backspace when the composer has no text or tags', async () => {
+    await mount();
+    const file = new File(['log'], 'a.log', { type: 'text/plain' });
+
+    await ingestAttachmentsAndWait([file], { images: 0, files: 1 });
+    expect(latest!.pastedFiles).toHaveLength(1);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedFiles).toHaveLength(0);
+  });
+
+  it('removes the pasted file before the image with Backspace for mixed attachments', async () => {
+    // Files render after images, so the visually last chip is the file.
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['log'], 'notes.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 1, files: 1 });
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedFiles).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('removes the pasted image before the file with Delete for mixed attachments', async () => {
+    // Images render before files, so the visually first chip is the image.
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['log'], 'notes.log', { type: 'text/plain' }),
+    ];
+
+    await ingestAttachmentsAndWait(files, { images: 1, files: 1 });
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
+      );
+    });
+
+    expect(latest!.pastedImages).toHaveLength(0);
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'notes.log' }]);
+  });
+
+  it('removes a removable composer tag before pasted attachments with Backspace', async () => {
+    // The tag scan exists to give tags precedence over the attachment
+    // fallback; a later reorder that lets the fallback win must turn red.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'orders', value: 'orders' }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(latest!.composerTags).toHaveLength(0);
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('keeps a non-removable composer tag and falls through to the pasted attachment with Backspace', async () => {
+    // A pinned (removable: false) tag cannot be removed by the key scan, so
+    // the attachment fallback still fires on an empty composer. This pins the
+    // intended reading: only *removable* tags block the fallback.
+    await mount();
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+
+    await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
+    act(() => {
+      latest!.addTags([{ id: 'pinned', value: 'pinned', removable: false }]);
+    });
+    expect(latest!.composerTags).toHaveLength(1);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }),
+      );
+    });
+
+    expect(latest!.composerTags).toHaveLength(1);
+    expect(latest!.pastedImages).toHaveLength(0);
   });
 });

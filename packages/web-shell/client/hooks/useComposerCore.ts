@@ -2888,6 +2888,33 @@ export function useComposerCore(
       return true;
     };
 
+    // Attachment fallback for the Backspace/Delete handlers below (issue
+    // #10794). Files render after images in the composer, so the visually
+    // last chip is a file when one exists and the visually first chip is an
+    // image — matching how the same keys already treat composer tags.
+    const removeLastAttachment = (): boolean => {
+      if (pastedFilesRef.current.length > 0) {
+        removeFile(pastedFilesRef.current.length - 1);
+        return true;
+      }
+      if (pastedImagesRef.current.length > 0) {
+        removeImage(pastedImagesRef.current.length - 1);
+        return true;
+      }
+      return false;
+    };
+    const removeFirstAttachment = (): boolean => {
+      if (pastedImagesRef.current.length > 0) {
+        removeImage(0);
+        return true;
+      }
+      if (pastedFilesRef.current.length > 0) {
+        removeFile(0);
+        return true;
+      }
+      return false;
+    };
+
     const submitKeymap = keymap.of([
       {
         key: 'Backspace',
@@ -2906,22 +2933,7 @@ export function useComposerCore(
               break;
             }
           }
-          if (removableIndex < 0) {
-            // No @-tags to remove: fall back to the last pasted attachment
-            // (files render after images) so Backspace still deletes a chip.
-            // Only on an otherwise-empty composer: with text present, Backspace
-            // at position 0 is a no-op and must stay one.
-            if (view.state.doc.length !== 0) return false;
-            if (pastedFilesRef.current.length > 0) {
-              removeFile(pastedFilesRef.current.length - 1);
-              return true;
-            }
-            if (pastedImagesRef.current.length > 0) {
-              removeImage(pastedImagesRef.current.length - 1);
-              return true;
-            }
-            return false;
-          }
+          if (removableIndex < 0) return false;
           setComposerTags((current) =>
             current.filter((_, index) => index !== removableIndex),
           );
@@ -2941,26 +2953,39 @@ export function useComposerCore(
           const removableIndex = composerTagsRef.current.findIndex(
             (tag) => tag.removable !== false,
           );
-          if (removableIndex < 0) {
-            // No @-tags to remove: fall back to the first pasted attachment
-            // (images render before files) so Delete still deletes a chip.
-            // Only on an otherwise-empty composer: with text present, Delete at
-            // position 0 must keep deleting the character after the caret.
-            if (view.state.doc.length !== 0) return false;
-            if (pastedImagesRef.current.length > 0) {
-              removeImage(0);
-              return true;
-            }
-            if (pastedFilesRef.current.length > 0) {
-              removeFile(0);
-              return true;
-            }
-            return false;
-          }
+          if (removableIndex < 0) return false;
           setComposerTags((current) =>
             current.filter((_, index) => index !== removableIndex),
           );
           return true;
+        },
+      },
+      {
+        // Attachment-chip fallback for the two keys above. Lives in the `any`
+        // slot — the only keymap slot that receives the KeyboardEvent — so it
+        // can skip OS auto-repeat (a held key must not destroy every chip,
+        // one per event, with no way back) and match only the bare,
+        // unmodified keys, exactly like the named bindings above. It runs
+        // after those named bindings returned false (no removable tag), and
+        // only on an otherwise-empty composer: with text present, Backspace
+        // at position 0 stays a no-op and Delete keeps deleting characters.
+        any: (view, event) => {
+          if (!event || (event.key !== 'Backspace' && event.key !== 'Delete')) {
+            return false;
+          }
+          if (
+            event.repeat ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.shiftKey
+          ) {
+            return false;
+          }
+          if (view.state.doc.length !== 0) return false;
+          return event.key === 'Backspace'
+            ? removeLastAttachment()
+            : removeFirstAttachment();
         },
       },
       {
