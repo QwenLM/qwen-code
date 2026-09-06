@@ -13,6 +13,10 @@ import {
   type ServeWorkspaceRuntimeStatus,
   type ServeWorkspaceSkillsRefreshResult,
 } from '@qwen-code/acp-bridge/status';
+import {
+  redactUrlCredentials,
+  stripAnsiAndControl,
+} from '@qwen-code/qwen-code-core';
 import type {
   AcpSessionBridge,
   BridgeWorkspaceRuntimeLifecycleSnapshot,
@@ -35,6 +39,13 @@ export interface WorkspaceExtensionReconciliationResult {
   failed: number;
   error?: string;
 }
+
+// Extension refresh failures surface in two places — the persisted
+// capabilities status and the `extensions_changed` broadcast — and the raw
+// error can carry git credentials, ANSI/control sequences, or unbounded
+// output. Sanitize once at the producer so both sinks stay safe.
+const sanitizeExtensionsErrorMessage = (message: string): string =>
+  redactUrlCredentials(stripAnsiAndControl(message)).slice(0, 500);
 
 class ExtensionRuntimeRefreshError extends Error {
   constructor(
@@ -125,6 +136,8 @@ export class WorkspaceRuntimeCoordinator {
   private extensionsTail: Promise<void> = Promise.resolve();
 
   private extensionsQueuedWork = 0;
+
+  private extensionsRefreshFailedRevision: number | undefined;
 
   private skillsRefreshRetryRevision: number | undefined;
 
@@ -345,7 +358,7 @@ export class WorkspaceRuntimeCoordinator {
     if (generation === this.desiredExtensionGeneration) return;
     this.desiredExtensionGeneration = generation;
     this.extensionsRevision += 1;
-    this.invalidateDerivedCapabilities();
+    this.extensionsRefreshFailedRevision = undefined;
     this.extensionsStatus = {
       state:
         this.extensionsStatus.runtimeEpoch === undefined
@@ -370,6 +383,11 @@ export class WorkspaceRuntimeCoordinator {
         snapshot.runtimeLive && this.draining;
       return { state: 'deferred', refreshed: 0, failed: 0 };
     }
+    // Only the mutation path invalidates derived Skills/MCP capabilities: it
+    // owns rescheduling them on the success gate below. A read-side
+    // invalidation (observeExtensionGeneration) would abort their queued
+    // closures with nothing queueing a replacement.
+    this.invalidateDerivedCapabilities();
     const revision = this.extensionsRevision;
     let result: ServeWorkspaceExtensionsRefreshResult | undefined;
     try {
@@ -391,7 +409,9 @@ export class WorkspaceRuntimeCoordinator {
         failed:
           (refresh?.sessionsFailed ?? 0) +
           (refresh?.sessionsSkipped ?? (refresh ? 0 : 1)),
-        error: error instanceof Error ? error.message : String(error),
+        error: sanitizeExtensionsErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       };
     }
     if (
@@ -538,9 +558,30 @@ export class WorkspaceRuntimeCoordinator {
   > {
     const revision = this.extensionsRevision;
     const generation = this.desiredExtensionGeneration;
-    return this.queueExtensionsWork(() =>
-      this.prepareExtensionsRevision(revision, generation),
-    );
+    return this.queueExtensionsWork(async () => {
+      const status = this.status();
+      const extensions = status.capabilities?.extensions;
+      if (
+        extensions?.state === 'ready' &&
+        extensions.runtimeEpoch === status.runtimeEpoch &&
+        extensions.desiredGeneration === generation &&
+        extensions.appliedGeneration === generation
+      ) {
+        return undefined;
+      }
+      // A revision that already failed is not retried from the ensure path;
+      // only an explicit reconcile (or an observed generation move, both of
+      // which clear the marker) may rerun it. Mirror of the Skills guard.
+      if (
+        extensions?.state === 'error' &&
+        extensions.revision === revision &&
+        extensions.runtimeEpoch === status.runtimeEpoch &&
+        this.extensionsRefreshFailedRevision === revision
+      ) {
+        return undefined;
+      }
+      return this.prepareExtensionsRevision(revision, generation);
+    });
   }
 
   private async prepareExtensionsRevision(
@@ -1004,9 +1045,12 @@ export class WorkspaceRuntimeCoordinator {
       appliedGeneration: this.appliedExtensionGeneration,
       error: {
         code: 'extensions_prepare_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: sanitizeExtensionsErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       },
     };
+    this.extensionsRefreshFailedRevision = revision;
   }
 
   private recordMcpError(

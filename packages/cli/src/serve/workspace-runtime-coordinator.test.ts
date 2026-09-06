@@ -267,6 +267,35 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
   });
 
+  it('sanitizes Extension reconcile failures before broadcasting and persisting them', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: [
+        `fatal: unable to access 'https://user:tok3n@github.com/org/ext.git/'${'x'.repeat(600)}\x1b[31m`,
+      ],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    const reconciliation = await coordinator.reconcileExtensionGeneration(7);
+
+    expect(reconciliation.state).toBe('failed');
+    // The extensions_changed broadcast reads reconciliation.error verbatim.
+    expect(reconciliation.error).not.toContain('tok3n');
+    expect(reconciliation.error).not.toContain('\x1b');
+    expect(reconciliation.error!.length).toBeLessThanOrEqual(500);
+    // The persisted capabilities status is the second sink.
+    const extensions = coordinator.status().capabilities?.extensions;
+    expect(extensions?.state).toBe('error');
+    expect(extensions?.error?.message).not.toContain('tok3n');
+    expect(extensions?.error?.message).not.toContain('\x1b');
+    expect(extensions?.error?.message!.length).toBeLessThanOrEqual(500);
+  });
+
   it('replays Extension reconciliation interrupted by draining', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
@@ -329,6 +358,71 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
     expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalled();
     expect(harness.getWorkspaceMcpStatus).toHaveBeenCalled();
+  });
+
+  it('does not re-run a failed Extension revision from the ensure path', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockResolvedValue({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    coordinator.observeExtensionGeneration(2);
+    const reconcileCalls = () =>
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+    });
+    expect(reconcileCalls()).toBe(1);
+
+    // A failed revision is terminal for the ensure path: re-ensuring (the
+    // Extensions page retries every 2s) must not hammer the runtime.
+    await coordinator.ensure();
+    expect(reconcileCalls()).toBe(1);
+
+    // A newly observed generation (or an explicit reconcile) retries.
+    coordinator.observeExtensionGeneration(3);
+    await coordinator.ensure();
+    expect(reconcileCalls()).toBe(2);
+  });
+
+  it('keeps a queued MCP reload alive across a read-side Extension observation', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    // Hold the MCP queue so the configuration reconcile stays queued behind
+    // an in-flight mutation, the same way a committed config change waits.
+    let releaseMutation!: () => void;
+    const mutation = coordinator.runMcpRuntimeMutation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseMutation = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releaseMutation).toBeTypeOf('function'));
+    expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
+
+    // A read-only observation (GET routes, poller pre-pass) must not discard
+    // the queued reload: observation is not mutation.
+    coordinator.observeExtensionGeneration(5);
+    releaseMutation();
+    await mutation;
+
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.mcp).toMatchObject({
+        state: 'ready',
+        runtimeEpoch: 3,
+      }),
+    );
+    expect(harness.reloadWorkspaceMcp).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles a live Skills runtime in revision order', async () => {

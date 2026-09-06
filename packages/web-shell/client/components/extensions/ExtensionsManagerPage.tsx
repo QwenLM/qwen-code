@@ -41,6 +41,7 @@ import styles from './ExtensionsManagerPage.module.css';
 import {
   extensionSnapshotsCurrent,
   filterExtensions,
+  isUninstallNoOpResult,
   mergeExtensionCatalog,
   preserveSelectedExtensionName,
   type ManagedExtensionEntry,
@@ -1165,6 +1166,13 @@ export function ExtensionsManagerPage({
               name,
               operation: options.operation,
             });
+            return;
+          }
+          if (isUninstallNoOpResult(result, options.operation)) {
+            setMessageTone('success');
+            setMessage(
+              t('extensions.manage.uninstallNothingToRemove', { name }),
+            );
             return;
           }
           setMessage(t('extensions.manage.queued', { name }));

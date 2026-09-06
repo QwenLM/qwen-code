@@ -6,6 +6,7 @@ import type {
 import {
   filterExtensions,
   extensionSnapshotsCurrent,
+  isUninstallNoOpResult,
   mergeExtensionCatalog,
   preserveSelectedExtensionName,
 } from './extensions-manager-logic';
@@ -51,6 +52,22 @@ describe('extensions manager logic', () => {
 
   it('returns all extensions for an empty query', () => {
     expect(filterExtensions(extensions, '')).toEqual(extensions);
+  });
+
+  it('treats only an undefined uninstall result as a completed no-op', () => {
+    // DELETE /extensions/:extensionId answers 204 (undefined) when the listed
+    // extension has no removable user-store policy — the page must report a
+    // finished no-op, never a queued operation that will never be polled.
+    expect(isUninstallNoOpResult(undefined, 'uninstall')).toBe(true);
+    expect(isUninstallNoOpResult(undefined, 'update')).toBe(false);
+    expect(isUninstallNoOpResult(undefined, undefined)).toBe(false);
+    expect(isUninstallNoOpResult(null, 'uninstall')).toBe(false);
+    expect(
+      isUninstallNoOpResult(
+        { accepted: true, operationId: 'op-1' },
+        'uninstall',
+      ),
+    ).toBe(false);
   });
 
   it('keeps a selected extension only while it remains installed', () => {

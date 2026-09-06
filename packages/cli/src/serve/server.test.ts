@@ -3641,9 +3641,7 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime' ||
-          feature === 'workspace_extensions_config_runtime' ||
-          feature === 'workspace_extension_mentions'
+          feature === 'workspace_skills_config_runtime'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
@@ -3656,6 +3654,40 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (
+          feature === 'workspace_extensions_config_runtime' ||
+          feature === 'workspace_extension_mentions'
+        ) {
+          // The split Extension runtime routes are trust-gated per target:
+          // a daemon whose primary is untrusted must not advertise clients
+          // onto them (they keep the legacy trust-free loader instead).
+          expect(
+            predicate({
+              workspaceRuntimeAvailable: true,
+              primaryWorkspaceTrusted: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              workspaceRuntimeAvailable: true,
+              primaryWorkspaceTrusted: false,
+            }),
+          ).toBe(false);
+          expect(predicate({ workspaceRuntimeAvailable: true })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeAvailable: true,
+              primaryWorkspaceTrusted: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeAvailable: true,
+            }),
+          ).not.toContain(feature);
           continue;
         }
         if (feature === 'workspace_local_open') {
@@ -4679,6 +4711,35 @@ describe('createServeApp', () => {
       expect(unsupported.body.features).not.toContain('workspace_generation');
     });
 
+    it('advertises the Extension runtime tags only when the primary workspace is trusted', async () => {
+      const untrusted = await request(
+        createServeApp(baseOpts, undefined, { primaryWorkspaceTrusted: false }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(untrusted.status).toBe(200);
+      expect(untrusted.body.features).not.toContain(
+        'workspace_extensions_config_runtime',
+      );
+      expect(untrusted.body.features).not.toContain(
+        'workspace_extension_mentions',
+      );
+      // The sibling runtime tags are trust-free and stay advertised.
+      expect(untrusted.body.features).toContain(
+        'workspace_skills_config_runtime',
+      );
+
+      const trusted = await request(
+        createServeApp(baseOpts, undefined, { primaryWorkspaceTrusted: true }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(trusted.body.features).toContain(
+        'workspace_extensions_config_runtime',
+      );
+      expect(trusted.body.features).toContain('workspace_extension_mentions');
+    });
+
     it('returns the v1 envelope', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(
@@ -4709,6 +4770,8 @@ describe('createServeApp', () => {
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
             workspaceRuntimeAvailable: true,
+            // The test daemon treats its single workspace as trusted.
+            primaryWorkspaceTrusted: true,
             acpHttpEnabled: true,
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.

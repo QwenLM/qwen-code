@@ -552,6 +552,12 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  /**
+   * Whether the primary workspace is trusted. The split Extension runtime
+   * routes are trust-gated per target, so an untrusted primary must not be
+   * advertised to clients that would switch it onto those routes.
+   */
+  primaryWorkspaceTrusted?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -711,11 +717,15 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_extensions_config_runtime',
-    (toggles) => toggles.workspaceRuntimeAvailable === true,
+    (toggles) =>
+      toggles.workspaceRuntimeAvailable === true &&
+      toggles.primaryWorkspaceTrusted === true,
   ],
   [
     'workspace_extension_mentions',
-    (toggles) => toggles.workspaceRuntimeAvailable === true,
+    (toggles) =>
+      toggles.workspaceRuntimeAvailable === true &&
+      toggles.primaryWorkspaceTrusted === true,
   ],
   [
     'workspace_local_open',

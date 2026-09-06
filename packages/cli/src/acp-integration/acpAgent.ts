@@ -13561,7 +13561,7 @@ class QwenAgent implements Agent {
         );
         const sessionResults = await Promise.allSettled(
           attemptedSessions.map((session) =>
-            session.sendAvailableCommandsUpdate(),
+            session.sendAvailableCommandsUpdateOrThrow(),
           ),
         );
         const sessionErrors: Array<{ sessionId: string; error: string }> = [];

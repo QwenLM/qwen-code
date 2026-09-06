@@ -2084,6 +2084,8 @@ const EN: Messages = {
   'extensions.manage.uninstallAction': 'Uninstall Extension',
   'extensions.manage.uninstallConfirm': (v) =>
     `Uninstall extension "${v?.name ?? 'extension'}"?`,
+  'extensions.manage.uninstallNothingToRemove': (v) =>
+    `Extension "${v?.name ?? 'extension'}" has no user installation to remove.`,
   'extensions.manage.upToDate': 'up to date',
   'extensions.manage.update': 'Update Extension',
   'extensions.manage.updateAvailable': 'update available',
@@ -5492,6 +5494,8 @@ const ZH: Messages = {
   'extensions.manage.uninstallAction': '卸载扩展',
   'extensions.manage.uninstallConfirm': (v) =>
     `确定卸载扩展 "${v?.name ?? '扩展'}"？`,
+  'extensions.manage.uninstallNothingToRemove': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 没有可移除的用户安装。`,
   'extensions.manage.upToDate': '已是最新',
   'extensions.manage.update': '更新扩展',
   'extensions.manage.updateAvailable': '有可用更新',

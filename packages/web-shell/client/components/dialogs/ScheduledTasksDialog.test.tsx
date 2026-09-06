@@ -1446,6 +1446,41 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.loadExtensionsStatus).not.toHaveBeenCalled();
   });
 
+  it('closes the extension reference picker when the target workspace changes', async () => {
+    const workspaceRuntimeExtensions = vi.fn(async () => ({
+      extensions: [
+        { id: 'ext-primary-only', name: 'primary-only-ext', isActive: true },
+      ],
+    }));
+    optionalWorkspaceState.current = {
+      capabilities: { features: ['workspace_extension_mentions'] },
+      client: {
+        ensureWorkspaceRuntime: vi.fn(async () => ({})),
+        workspaceRuntimeExtensions,
+        workspaceByCwd: vi.fn(),
+      },
+    };
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Extensions'));
+    await flush();
+
+    // The primary runtime's Extension renders in the open picker.
+    expect(findButtonContaining('primary-only-ext')).toBeDefined();
+    expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
+
+    // Move the form to the secondary workspace without a pointerdown (e.g.
+    // keyboard selection): the stale primary candidate list must close.
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('primary-only-ext');
+  });
+
   it('lists and creates tasks in a locked secondary workspace', async () => {
     const secondary = WORKSPACES[1]!;
     await mountMulti(

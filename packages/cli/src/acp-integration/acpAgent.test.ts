@@ -29604,6 +29604,9 @@ describe('sessionLanguage multi-session propagation', () => {
       cfg.getLlmClient().refreshSystemInstruction,
     );
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+    const sendAvailableCommandsUpdateOrThrow = vi
+      .fn()
+      .mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
@@ -29618,6 +29621,7 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
+          sendAvailableCommandsUpdateOrThrow,
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
@@ -29691,6 +29695,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     skillManager.refreshCache.mockResolvedValue(undefined);
     sendAvailableCommandsUpdate.mockClear();
+    sendAvailableCommandsUpdateOrThrow.mockClear();
     await expect(
       agent.extMethod(
         SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
@@ -29703,12 +29708,13 @@ describe('sessionLanguage multi-session propagation', () => {
       sessionsFailed: 0,
       sessionsSkipped: 0,
     });
-    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdateOrThrow).toHaveBeenCalledOnce();
+    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
 
     extensionManager.refreshCache.mockRejectedValueOnce(
       new Error('broken session config'),
     );
-    sendAvailableCommandsUpdate.mockClear();
+    sendAvailableCommandsUpdateOrThrow.mockClear();
     await expect(
       agent.extMethod(
         SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
@@ -29722,7 +29728,27 @@ describe('sessionLanguage multi-session propagation', () => {
       sessionsFailed: 0,
       sessionsSkipped: 1,
     });
-    expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+    expect(sendAvailableCommandsUpdateOrThrow).not.toHaveBeenCalled();
+
+    // A session whose command update rejects must be surfaced, not swallowed:
+    // the daemon promotes sessionsFailed > 0 into a reconcile failure instead
+    // of certifying the generation against a stale command set.
+    sendAvailableCommandsUpdateOrThrow.mockRejectedValueOnce(
+      new Error('commands update broke'),
+    );
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toEqual({
+      configsRefreshed: 2,
+      configsFailed: 0,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+      sessionsSkipped: 0,
+      sessionErrors: [{ sessionId: 's-ext', error: 'commands update broke' }],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

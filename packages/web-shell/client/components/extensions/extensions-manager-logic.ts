@@ -89,6 +89,19 @@ export function mergeExtensionCatalog(
   });
 }
 
+/**
+ * The split-mode `DELETE /extensions/:extensionId` answers 204 (surfaced by
+ * the SDK as `undefined`) when the listed extension has no removable
+ * user-store policy. That is a completed no-op, not a queued mutation, and
+ * must not be announced as one — no operation will ever be polled.
+ */
+export function isUninstallNoOpResult(
+  result: unknown,
+  operation: string | undefined,
+): boolean {
+  return result === undefined && operation === 'uninstall';
+}
+
 export function preserveSelectedExtensionName(
   name: string | null,
   extensions: readonly ManagedExtensionEntry[],

@@ -1342,9 +1342,12 @@ export function ScheduledTasksDialog({
                   // so the picker is fixed while editing and when only one
                   // workspace is operable (nothing to choose).
                   disabled={!!editingId || operableWorkspaces.length <= 1}
-                  onChange={(e) =>
-                    setFormWorkspaceId(e.target.value || undefined)
-                  }
+                  onChange={(e) => {
+                    setFormWorkspaceId(e.target.value || undefined);
+                    // Reference candidates are scoped to the form's workspace;
+                    // an open picker still shows the previous workspace's list.
+                    resetReferenceState();
+                  }}
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
