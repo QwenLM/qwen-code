@@ -64,20 +64,46 @@ describe('SystemMessage — prompt_cancelled marker', () => {
 
 describe('SystemMessage — goal status', () => {
   it.each([
-    ['en', 'Goal usage limited', 'Last check: token budget reached'],
-    ['zh-CN', '目标用量受限', '上次检查: token budget reached'],
+    [
+      'usage_limited',
+      'en',
+      'Goal usage limited',
+      'token budget reached',
+      'Last check: token budget reached',
+    ],
+    [
+      'usage_limited',
+      'zh-CN',
+      '目标用量受限',
+      'token budget reached',
+      '上次检查: token budget reached',
+    ],
+    [
+      'blocked',
+      'en',
+      'Goal blocked',
+      'approval required',
+      'Last check: approval required',
+    ],
+    [
+      'blocked',
+      'zh-CN',
+      '目标已阻塞',
+      'approval required',
+      '上次检查: approval required',
+    ],
   ] as const)(
-    'renders a usage-limited goal distinctly in %s',
-    (language, title, reason) => {
+    'renders a %s goal distinctly in %s',
+    (kind, language, title, lastReason, reason) => {
       const container = render(
         <SystemMessage
           content=""
           variant="info"
           source="goal"
           data={{
-            kind: 'usage_limited',
+            kind,
             condition: 'finish the evaluation',
-            lastReason: 'token budget reached',
+            lastReason,
           }}
         />,
         language,

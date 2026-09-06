@@ -4937,8 +4937,12 @@ function restoreCanonicalGoalStatusKind(
   // value stable for older clients while restoring its precise Web Shell label.
   if (status['kind'] !== 'aborted' || !isRecord(goalState)) return status;
   const goal = goalState['goal'];
-  if (!isRecord(goal) || goal['status'] !== 'usage_limited') return status;
-  return { ...status, kind: 'usage_limited' };
+  if (!isRecord(goal)) return status;
+  const canonicalStatus = goal['status'];
+  if (canonicalStatus !== 'blocked' && canonicalStatus !== 'usage_limited') {
+    return status;
+  }
+  return { ...status, kind: canonicalStatus };
 }
 
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {

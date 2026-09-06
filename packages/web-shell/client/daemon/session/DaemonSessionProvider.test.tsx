@@ -3808,7 +3808,7 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it('keeps legacy aborted semantics without a usage-limited canonical state', async () => {
+  it('restores blocked semantics without rewriting other legacy kinds', async () => {
     const session = createMockSession({
       events: async function* goalStatusEvents() {
         yield {
@@ -3862,6 +3862,40 @@ describe('DaemonSessionProvider', () => {
             },
           },
         };
+        yield {
+          id: 16,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-limited-edit',
+                    revision: 3,
+                    objective: 'revise the evaluation',
+                    status: 'usage_limited',
+                    limitKind: 'token_budget',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 4,
+                    activeTimeMs: 5000,
+                    tokensUsed: 1000,
+                    createdAt: 1234,
+                    updatedAt: 3456,
+                  },
+                },
+                goalStatus: {
+                  kind: 'set',
+                  condition: 'revise the evaluation',
+                },
+              },
+            },
+          },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -3885,7 +3919,7 @@ describe('DaemonSessionProvider', () => {
         kind: 'status',
         source: 'goal',
         data: {
-          kind: 'aborted',
+          kind: 'blocked',
           condition: 'wait for approval',
           lastReason: 'approval required',
         },
@@ -3896,6 +3930,14 @@ describe('DaemonSessionProvider', () => {
         data: {
           kind: 'aborted',
           condition: 'stop the legacy run',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'set',
+          condition: 'revise the evaluation',
         },
       }),
     ]);
