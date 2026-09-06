@@ -968,14 +968,23 @@ export function splitCompoundCommand(command: string): string[] {
  *    `Bash(git commit)` matches `git commit -m "test"`.
  *
  * 5. `Bash(*)` is equivalent to `Bash` and matches any command.
+ *
+ * @param envPrefixMode - How leading `NAME=value` assignments are stripped
+ *   before matching. `'safe-only'` (default) keeps hostile prefixes intact;
+ *   `'always'` strips them unconditionally so restrictive (deny/ask) rules
+ *   still match the underlying command.
  */
 export function matchesCommandPattern(
   pattern: string,
   command: string,
+  envPrefixMode: EnvPrefixStripMode = 'safe-only',
 ): boolean {
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
-  const normalizedCommand = stripLeadingVariableAssignments(command);
+  const normalizedCommand = stripLeadingVariableAssignments(
+    command,
+    envPrefixMode,
+  );
 
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
@@ -1163,23 +1172,37 @@ const ENV_ASSIGNMENT_PARTS_REGEX = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/;
  * variables keep the #2846 behavior (static assignments are still stripped).
  */
 const UNSTRIPPABLE_ENV_VARS = new Set([
+  // Binary lookup: `PATH=…` executes an attacker-chosen binary even for a
+  // fully literal value.
+  'PATH',
   // Node: code and module injection
   'NODE_OPTIONS',
   'NODE_PATH',
-  // Dynamic linkers / loaders
+  // Dynamic linkers / loaders (incl. CVE-2023-4911 GLIBC_TUNABLES)
   'LD_PRELOAD',
   'LD_LIBRARY_PATH',
+  'LD_AUDIT',
+  'GLIBC_TUNABLES',
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
   'DYLD_FRAMEWORK_PATH',
+  // JVM: option injection honored by every java launcher
+  'JAVA_TOOL_OPTIONS',
+  'JDK_JAVA_OPTIONS',
+  '_JAVA_OPTIONS',
   // Interpreter startup files / option injection
   'PYTHONSTARTUP',
   'PYTHONHOME',
   'BASH_ENV',
   'ENV',
   'KSH_ENV',
+  // zsh reads its startup files from ZDOTDIR
+  'ZDOTDIR',
   'RUBYOPT',
+  'RUBYLIB',
   'PERL5OPT',
+  'PERL5LIB',
+  'PERLLIB',
 ]);
 
 /**
@@ -1196,8 +1219,11 @@ const UNSTRIPPABLE_ENV_VAR_PREFIXES = ['GIT_CONFIG', 'NPM_CONFIG'];
  * means the value carries shell expansion or execution semantics, so the
  * assignment must stay in place and keep the invocation from matching a
  * saved allow rule (#10192).
+ *
+ * `~` is included: tilde expansion in an assignment value can only produce a
+ * path, never command or expansion syntax (`PYTHONPATH=~/lib …`).
  */
-const STATIC_ENV_VALUE_REGEX = /^[A-Za-z0-9_@%+=:,./ -]*$/;
+const STATIC_ENV_VALUE_REGEX = /^[A-Za-z0-9_@%+=:,./~ -]*$/;
 
 /**
  * Materialize `$VAR` / `${VAR}` references with characters that can never
@@ -1239,6 +1265,80 @@ function isStrippableStaticAssignment(token: string): boolean {
 /** Outcome of inspecting a command's leading assignment prefix. */
 type LeadingAssignmentCheck = 'none' | 'static' | 'unsafe';
 
+/** A shell NAME with no quoting/expansion: matches bash's assignment words. */
+const RAW_ENV_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Scan a string for an unterminated quote, starting from `open` (or none).
+ * `\` escapes the next character inside double quotes only, mirroring bash.
+ */
+function scanOpenQuote(s: string, open: '"' | "'" | null): '"' | "'" | null {
+  let state = open;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (state === null) {
+      if (ch === '"' || ch === "'") {
+        state = ch;
+      }
+    } else if (ch === '\\' && state === '"') {
+      i++; // skip the escaped character
+    } else if (ch === state) {
+      state = null;
+    }
+  }
+  return state;
+}
+
+/**
+ * Raw-vs-parsed divergence guard (#10192 review): bash classifies a word as
+ * a `NAME=value` assignment by its *literal* form — any quoting, escaping, or
+ * variable reference before the `=` disqualifies it, and bash then executes
+ * the (expanded) word as the command. shell-quote resolves those characters
+ * away, so the parsed view can see an assignment where bash sees a command:
+ *
+ * - `FOO\=bar npm …` parses as `FOO=bar` but bash runs a command named
+ *   `FOO=bar`
+ * - `A$PWD=c npm …` parses as `A=c` (unknown refs are dropped) but bash
+ *   expands the word before running it
+ * - `A"x"=c npm …` parses as `Ax=c` but the quoted name disqualifies the
+ *   assignment
+ *
+ * Walks the raw whitespace-separated words up to the first word without `=`
+ * (the raw command word) and flags every divergence from the
+ * `parsedAssignmentCount` assignments the parser found in the same prefix.
+ */
+function hasRawParsedAssignmentDivergence(
+  command: string,
+  parsedAssignmentCount: number,
+): boolean {
+  let rawShapedAssignments = 0;
+  let openQuote: '"' | "'" | null = null;
+  for (const word of command.split(/\s+/)) {
+    if (!word) {
+      continue;
+    }
+    if (openQuote !== null) {
+      // Continuation of a quoted value (`FOO="bar baz" …`) — not a new word
+      // for bash until the quote closes.
+      openQuote = scanOpenQuote(word, openQuote);
+      continue;
+    }
+    const eq = word.indexOf('=');
+    if (eq === -1) {
+      // First word without `=` is the raw command word: prefix ended.
+      break;
+    }
+    if (!RAW_ENV_NAME_REGEX.test(word.slice(0, eq))) {
+      // An `=`-bearing word whose NAME is not a plain literal — bash would
+      // execute this word as a command while the parsed view strips it.
+      return true;
+    }
+    rawShapedAssignments++;
+    openQuote = scanOpenQuote(word.substring(eq + 1), null);
+  }
+  return rawShapedAssignments < parsedAssignmentCount;
+}
+
 /**
  * Inspect the leading `NAME=value …` prefix with variable references
  * materialized (see {@link materializeEnvReference}), so expansion hidden in
@@ -1246,9 +1346,11 @@ type LeadingAssignmentCheck = 'none' | 'static' | 'unsafe';
  *
  * `unsafe` covers every form that must keep the command from matching a
  * concrete allow rule: values with substitution/expansion characters
- * (`` X=`touch /tmp/poc` ``, `X=$(…)`, `X=${IFS}…`), runtime-loader
- * variables (`NODE_OPTIONS=… npm --version`), glob tokens, and operators
- * mixed into the prefix (`X=a;cmd`). See #10192 / #10197.
+ * (`` X=`touch /tmp/poc` ``, `X=$(…)`, `X=${IFS}…`), a variable reference in
+ * the NAME part (`A$PWD=c` — the two parses disagree about whether the word
+ * is an assignment at all), runtime-loader variables (`NODE_OPTIONS=…
+ * npm --version`), glob tokens, and operators mixed into the prefix
+ * (`X=a;cmd`). See #10192 / #10197.
  */
 function checkLeadingAssignments(command: string): LeadingAssignmentCheck {
   let tokens;
@@ -1259,12 +1361,20 @@ function checkLeadingAssignments(command: string): LeadingAssignmentCheck {
   }
 
   let sawAssignment = false;
+  let assignmentCount = 0;
   for (const token of tokens) {
     if (typeof token !== 'string') {
+      if ('op' in token && token.op === 'glob') {
+        // shell-quote emits globs as `{op:'glob', pattern}` — including a
+        // whole assignment-looking word such as `X=*`. The normalization
+        // pass in stripLeadingVariableAssignments splices such tokens in as
+        // the literal word `glob`, so a prefix containing one can never be
+        // verified as static.
+        return 'unsafe';
+      }
       if (!('op' in token) || typeof token.op !== 'string') {
-        // Glob/comment-like tokens are dropped by the normalization pass in
-        // stripLeadingVariableAssignments, so a prefix containing one can
-        // never be verified.
+        // Comment-like tokens are dropped by the normalization pass, so a
+        // prefix containing one can never be verified.
         return 'unsafe';
       }
       // Operators are preserved verbatim by the normalization pass; before
@@ -1272,29 +1382,75 @@ function checkLeadingAssignments(command: string): LeadingAssignmentCheck {
       return sawAssignment ? 'unsafe' : 'none';
     }
     if (!ENV_ASSIGNMENT_REGEX.test(token)) {
+      if (token.includes('\0')) {
+        // A materialized variable reference kept this word from even looking
+        // like an assignment (`A$PWD=c`) — but the plain parse may resolve
+        // the reference into something assignment-shaped and strip it, so
+        // bash could execute a planted command. Never verifiable as static.
+        return 'unsafe';
+      }
       // First plain command word — the prefix ended cleanly.
-      return sawAssignment ? 'static' : 'none';
+      return sawAssignment
+        ? staticOrDivergent(command, assignmentCount)
+        : 'none';
     }
     sawAssignment = true;
+    assignmentCount++;
     if (!isStrippableStaticAssignment(token)) {
       return 'unsafe';
     }
   }
-  return sawAssignment ? 'static' : 'none';
+  return sawAssignment ? staticOrDivergent(command, assignmentCount) : 'none';
 }
 
-function stripLeadingVariableAssignments(command: string): string {
+/**
+ * Final gate for an otherwise-static prefix: the raw text must agree with
+ * the parser about which leading words are assignments (see
+ * {@link hasRawParsedAssignmentDivergence}).
+ */
+function staticOrDivergent(
+  command: string,
+  assignmentCount: number,
+): LeadingAssignmentCheck {
+  return hasRawParsedAssignmentDivergence(command, assignmentCount)
+    ? 'unsafe'
+    : 'static';
+}
+
+/**
+ * How leading `NAME=value` assignments are treated when normalizing a
+ * command for rule matching.
+ *
+ * - `'safe-only'` (default, allow rules): strip only prefixes where every
+ *   assignment is provably static and free of runtime/loader semantics.
+ *   Anything else keeps the command intact so it cannot hit a concrete
+ *   allow rule (#10192 / #10197).
+ * - `'always'` (deny/ask rules): strip every leading assignment
+ *   unconditionally, as before this hardening. Restrictive rules must keep
+ *   matching the command *underneath* a hostile prefix — `LD_PRELOAD=…
+ *   rm -rf x` must still trip `Bash(rm *)` — and widening a deny/ask match
+ *   is always the safe direction.
+ */
+export type EnvPrefixStripMode = 'safe-only' | 'always';
+
+function stripLeadingVariableAssignments(
+  command: string,
+  mode: EnvPrefixStripMode = 'safe-only',
+): string {
   const trimmed = command.trim();
   if (!trimmed) {
     return trimmed;
   }
 
   try {
-    if (checkLeadingAssignments(trimmed) === 'unsafe') {
+    if (mode === 'safe-only' && checkLeadingAssignments(trimmed) === 'unsafe') {
       // The leading assignments carry execution or expansion semantics that
       // rule matching must not silently discard (#10192, #10197). Keep the
       // command intact so it cannot hit a concrete allow rule and resolves
       // to `ask` instead of `allow`.
+      debugLogger.debug(
+        `Env-assignment prefix kept intact (unsafe): "${trimmed}"`,
+      );
       return trimmed;
     }
 
@@ -1638,6 +1794,10 @@ export interface PathMatchContext {
  * @param domain - Domain (for WebFetch rules)
  * @param pathContext - Project root and cwd for resolving relative path patterns
  * @param pathMatchMode - Whether path rules also match canonical destinations
+ * @param envPrefixMode - How leading `NAME=value` assignments are stripped
+ *   when matching a command specifier. Restrictive (deny/ask) rules must pass
+ *   `'always'` so a hostile prefix cannot hide the underlying command from
+ *   them; allow rules use the default `'safe-only'` (#10192 review).
  */
 export function matchesRule(
   rule: PermissionRule,
@@ -1650,6 +1810,7 @@ export function matchesRule(
   toolParams?: Record<string, unknown>,
   toolAliases?: readonly string[],
   pathMatchMode: 'lexical' | 'canonical' = 'lexical',
+  envPrefixMode: EnvPrefixStripMode = 'safe-only',
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1719,7 +1880,11 @@ export function matchesRule(
         if (command === undefined) {
           return false;
         }
-        specifierMatched = matchesCommandPattern(rule.specifier, command);
+        specifierMatched = matchesCommandPattern(
+          rule.specifier,
+          command,
+          envPrefixMode,
+        );
         break;
       }
 
