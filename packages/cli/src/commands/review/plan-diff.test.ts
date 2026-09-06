@@ -11,7 +11,17 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
     await importOriginal<typeof import('../../config/settings.js')>();
   return { ...actual, loadSettings: settingsMock };
 });
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
@@ -41,6 +51,38 @@ beforeEach(() => {
 afterEach(() => {
   process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('plan-diff — the scratch directory guard', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked .qwen/tmp before writing the plan',
+    () => {
+      // A standalone plan-diff is a round's first writer into `.qwen/tmp`;
+      // the shared entry guard runs here too, so a workspace-planted link
+      // refuses the command with nothing landed through it.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      try {
+        writeFileSync(join(dir, 'diff.txt'), makeDiff('src/a.ts', 3));
+        mkdirSync(join(dir, '.qwen'), { recursive: true });
+        symlinkSync(victim, join(dir, '.qwen', 'tmp'));
+        // The handler reports refusals as a non-zero exit code, not a throw.
+        run(join(dir, 'diff.txt'), join('.qwen', 'tmp', 'plan.json'));
+        expect(process.exitCode).toBe(1);
+        expect(readdirSync(victim)).toEqual([]);
+
+        // …and an `--out` that stays outside the scratch directory is not
+        // this command's business: it writes nothing there, so a redirect
+        // it never touches must not refuse the round.
+        process.exitCode = undefined;
+        run(join(dir, 'diff.txt'), join(dir, 'elsewhere', 'plan.json'));
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'elsewhere', 'plan.json'))).toBe(true);
+        expect(readdirSync(victim)).toEqual([]);
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('plan-diff — the round cap the handler actually records', () => {

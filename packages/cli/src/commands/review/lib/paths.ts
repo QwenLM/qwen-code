@@ -20,6 +20,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sanitizeFilenameComponent, Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
+import { gitRaw } from './git.js';
 import { inertText } from './inert-text.js';
 
 /**
@@ -213,7 +214,7 @@ export function reviewWorkflowScriptPath(
 export const LEASE_PREFIX = 'qwen-review-lease-';
 
 /**
- * Where the skill tees `qwen review parse-args`'s verdict (SKILL Step 0). A fixed,
+ * Where `qwen review parse-args --out` writes its verdict (SKILL Step 0). A fixed,
  * conventional name so a capture command can read back the effort the parser
  * already resolved without the orchestrator threading the `--effort` value through
  * by hand — see `resolveEffort`.
@@ -385,6 +386,190 @@ export function tmpPrefix(target: string): string {
 }
 
 /**
+ * Create `.qwen/tmp` for a review round, refusing to run through a link.
+ *
+ * Every side file a round writes lands there under a deterministic name —
+ * the plan, the diff, the stop sidecar, the candidate, the worktree — and
+ * the directory is in-repo, so a contributor branch can commit `.qwen` or
+ * `.qwen/tmp` as a symlink (gitignore does not stop `git add -f`) and have
+ * all of them land wherever it points, with the plan then read back from
+ * there to orchestrate the round. Guarding the writers one at a time
+ * re-created that class every round; the directory is where the round's own
+ * writers are refused at once, and a redirected scratch directory is not a
+ * round that can run. (The skill-args file the slash-command loader writes
+ * before any of this runs has its own guard, and its own gap — issue #10974.)
+ *
+ * Checked by `lstat` on the two in-repo components, not by resolving the
+ * whole chain: a symlink ABOVE the repository is the machine's, not the
+ * workspace's, and refusing on it would refuse every review on a checkout
+ * reached through a junction or a linked home directory. The same threat
+ * one level down — a committed symlink at a deterministic FILE name inside
+ * the directory (`qwen-review-local-diff.txt`), which a plain write follows,
+ * or a committed SUBMODULE whose tree carries one — is what the tracked-entry
+ * sweep refuses: nothing this review owns is ever tracked, so a tracked link
+ * or gitlink under its scratch directory can only be a plant. Tracked REGULAR
+ * files are left alone (the review overwrites them), which keeps a fixture
+ * that `git add -A`s its whole tree runnable.
+ *
+ * Every subcommand that can be a round's FIRST writer into the directory
+ * calls this (both captures, `parse-args --out`, `fetch-diff`, `plan-diff`,
+ * `submit`'s receipts); the rest run after one of them in the same checkout.
+ */
+export function ensureReviewTmpDir(command: string): void {
+  for (const dir of [dirname(REVIEW_TMP_DIR), REVIEW_TMP_DIR]) {
+    let isLink = false;
+    try {
+      isLink = lstatSync(dir).isSymbolicLink();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      break; // absent — created below as a real directory
+    }
+    if (isLink) {
+      throw new Error(
+        `${command}: ${dir} is a symbolic link — every file this review ` +
+          `writes (plan, diff, candidate, stop sidecar, worktree) would land ` +
+          `wherever it points, and the plan would be read back from there. ` +
+          `Refusing to run; nothing here can tell your own link from a ` +
+          `committed one. If it is YOURS — this directory holds a full ` +
+          `worktree per PR, so redirecting it onto other storage is a ` +
+          `reasonable thing to have done — neither ${dirname(REVIEW_TMP_DIR)} ` +
+          `nor ${REVIEW_TMP_DIR} can be one: redirect the checkout itself, ` +
+          `or a directory the review never names.`,
+      );
+    }
+  }
+  // `-s` carries the mode; `120000` is a symlink entry. Filtered here rather
+  // than by a pathspec: on a case-insensitive filesystem the plain write to
+  // `.qwen/tmp/<name>` resolves through `.QWEN/tmp/<name>`, and a pathspec
+  // spelt the way the review writes would miss the entry the write reaches
+  // (pathspec magic that could fold case is switched off by an environment
+  // this process does not control). The listing is git's own cwd subtree —
+  // the same subtree `REVIEW_TMP_DIR` names, since both are cwd-relative, so
+  // an entry this misses is one no write of this round can reach.
+  // Raw and fail-closed: a listing sized past a buffer, or a git that could
+  // not answer, must not read as "tracks nothing" — only a directory outside
+  // any repository may pass, and every capture needs git for the diff.
+  // A `160000` gitlink AT the scratch directory — or at `.qwen` — is refused
+  // like a link: a committed submodule there is a real directory to `lstat`,
+  // and the planted link then lives in the submodule's own tree, which this
+  // index never lists, so the gitlink itself is the plant and no recursion
+  // into it is needed.
+  //
+  // Below it, a gitlink is refused too — EXCEPT at the names the review
+  // creates worktrees under, because `git add -A` in a checkout that does
+  // not ignore `.qwen/tmp` records one of those as a gitlink with only a
+  // hint. Refusing on that blocked every review in the checkout,
+  // `parse-args` included, over the round's own scratch worktree — and
+  // removing the worktree leaves the index entry behind, so the obvious
+  // remedy did not clear it. Those names hide nothing: nothing this round
+  // writes goes THROUGH one (its side files are `qwen-review-*` siblings),
+  // and a submodule checked out where a worktree goes makes `git worktree
+  // add` fail loudly rather than silently redirect. Every other name below
+  // stays refused, because the round does write through some of them — the
+  // per-target prompt-record directory above all.
+  let listing: string;
+  try {
+    listing = gitRaw('ls-files', '-s', '-z').toString('utf8');
+  } catch (err) {
+    // Decided WITHOUT asking git again: a git that could not list the index
+    // is one that cannot say whether this is a repository either, and
+    // reading its silence as "not one" let a checkout with git off PATH, or
+    // refused by dubious ownership, write through the very link the listing
+    // would have named. The `.git` entry git's own discovery walks to is the
+    // witness instead.
+    if (insideRepository()) {
+      throw new Error(
+        `${command}: could not list the tracked entries under ` +
+          // Uncapped past the default: git's own remedy rides this message
+          // (`fatal: detected dubious ownership … git config --global
+          // --add safe.directory <path>`), and the 200-char default clips
+          // it mid-command on a long checkout path — an operator told
+          // there is a fix but not what it is.
+          `${REVIEW_TMP_DIR} (${inertText((err as Error).message, 2000)}) — ` +
+          `refusing to run rather than write through a link the listing ` +
+          `might have named. Lightweight mode (\`fetch-diff\`) is the one ` +
+          `flow that could otherwise proceed without git; every other one ` +
+          `needs it for the diff itself.`,
+      );
+    }
+    listing = '';
+  }
+  const scratch = REVIEW_TMP_DIR.split(sep).join('/').toLowerCase();
+  const planted = listing.split('\0').find((entry) => {
+    const gitlink = entry.startsWith('160000 ');
+    if (!entry.startsWith('120000 ') && !gitlink) return false;
+    const path = entry.slice(entry.indexOf('\t') + 1).toLowerCase();
+    if (path === dirname(scratch) || path === scratch) return true;
+    if (!path.startsWith(`${scratch}/`)) return false;
+    return !gitlink || !isReviewWorktreeName(path.slice(scratch.length + 1));
+  });
+  if (planted !== undefined) {
+    const path = planted.slice(planted.indexOf('\t') + 1);
+    const what = planted.startsWith('160000 ')
+      ? 'a submodule'
+      : 'a symbolic link';
+    throw new Error(
+      `${command}: the workspace tracks ${what} at ${inertText(path)} — on ` +
+        `the scratch directory ${REVIEW_TMP_DIR} or a path through it — and ` +
+        `a plain write to that name would follow it out of the tree. ` +
+        `Refusing to run; untrack it and retry.`,
+    );
+  }
+  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+}
+
+/**
+ * Whether an `--out` the caller chose lands in the review's scratch
+ * directory, and so needs `ensureReviewTmpDir` before it is written.
+ *
+ * One copy, because the three commands whose `--out` decides this
+ * (`parse-args`, `fetch-diff`, `plan-diff`) are the call sites the guarded-set
+ * inventory cannot see — it keys on the shared path helpers, and a caller's
+ * own `--out` names the directory without touching one. Three hand-copied
+ * predicates would drift with nothing to catch it.
+ *
+ * Case-folded, like the guard's own index sweep and for its reason: on a
+ * case-insensitive filesystem `--out .QWEN/tmp/x` reaches the very directory
+ * the guard is about to check. That over-matches on a case-sensitive one,
+ * where `.QWEN/tmp` is a different directory — in the safe direction, since
+ * the answer only decides whether to CHECK.
+ */
+export function writesIntoReviewTmp(out: string): boolean {
+  const scratch = resolve(REVIEW_TMP_DIR).toLowerCase();
+  const target = resolve(out).toLowerCase();
+  return target === scratch || target.startsWith(scratch + sep);
+}
+
+/**
+ * Whether `name` is a path the review creates a git WORKTREE at, relative to
+ * the scratch directory — `review-pr-<n>` and the probe, base and scratch
+ * trees derived from it (`worktreePath` and its siblings). Those are the
+ * only names `git add -A` can record as a gitlink without anyone planting
+ * one, and nothing this round writes resolves through them.
+ */
+function isReviewWorktreeName(name: string): boolean {
+  // `[^/]*`, not `.*`: the argument is about names `git add -A` records as
+  // a single gitlink, and a real scratch tree carries its own `.git`, so it
+  // is recorded at its own name and never as something nested below it.
+  return /^review-pr-\d+(-probe|-base|-scratch-[^/]*)?$/.test(name);
+}
+
+/**
+ * Whether the cwd is inside a repository, by git's own discovery rule — a
+ * `.git` entry (directory or file) at the cwd or any ancestor — decided
+ * without running git, for the branch where git could not answer.
+ */
+function insideRepository(): boolean {
+  let dir = resolve('.');
+  for (;;) {
+    if (existsSync(join(dir, '.git'))) return true;
+    const parent = dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
+
+/**
  * A PR-controlled path, flattened for display inside a brief, a prompt, or a
  * terminal line. The brief is the file the agent is told is the whole of its
  * instructions — a git path can legally contain newlines, and a newline inside
@@ -516,10 +701,10 @@ export function repoRelativeOf(
  * against its lexical form catches a link ANYWHERE in the chain, which is
  * what the final-element guard cannot do.
  *
- * Shared, because the three writers that need it are the three that write a
- * deterministic in-repo path — the promoted cache and both candidate files —
- * and the one that had it while the others did not is how a candidate whose
- * path the plan then advertised became an attacker-chosen file.
+ * Kept for the promoted cache under `.qwen/review-cache`, which no entry
+ * guard covers. The captures' side files no longer need it: `ensureReviewTmpDir`
+ * refuses a redirected `.qwen/tmp` before the round writes anything, for
+ * every writer at once.
  */
 export function assertUnredirectedParent(
   target: string,

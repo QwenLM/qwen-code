@@ -44,6 +44,12 @@ const fsState = vi.hoisted(() => ({
   effortReadError: undefined as Error | undefined,
 }));
 
+const ensureReviewTmpDirMock = vi.hoisted(() => vi.fn());
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  return { ...actual, ensureReviewTmpDir: ensureReviewTmpDirMock };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
   const mock = {
@@ -2155,5 +2161,60 @@ describe('--resume', () => {
     const d = parseReviewArgs('--resume');
     expect(d.effort).toBe('medium'); // the local default, untouched
     expect(d.effortSource).toBe('default');
+  });
+});
+
+describe('parse-args — the scratch directory guard', () => {
+  it('guards a --out under .qwen/tmp, and only there', () => {
+    // Step 0's write is the round's first into `.qwen/tmp`: the shared
+    // entry guard refuses a workspace-planted link before it lands. A
+    // `--out` elsewhere is the caller's directory, not the scratch one.
+    const out = join('.qwen', 'tmp', 'qwen-review-parse-args.json');
+    ensureReviewTmpDirMock.mockClear();
+    fsState.written.delete(out);
+    ensureReviewTmpDirMock.mockImplementationOnce(() => {
+      throw new Error('parse-args: .qwen/tmp is a symbolic link');
+    });
+    expect(() =>
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '',
+        out,
+        _: ['review', 'parse-args'],
+      }),
+    ).toThrow(/symbolic link/);
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+    // …and the refusal came BEFORE the write, or the guard is decoration.
+    expect(fsState.written.has(out)).toBe(false);
+    // …and the spelling a case-insensitive filesystem resolves through:
+    // `--out .QWEN/tmp/x` reaches the very directory the guard is about to
+    // check, so the predicate folds case. Over-matching on a case-sensitive
+    // filesystem is the safe direction — the answer only decides whether to
+    // CHECK.
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('.QWEN', 'tmp', 'qwen-review-parse-args.json'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+
+    // The scratch directory ITSELF must reach the guard: it is equal to the
+    // guard's path rather than under it, and the predicate has to admit
+    // that shape. (The write that follows would then die EISDIR — this
+    // pins which paths are GUARDED, not which are usable.)
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('.qwen', 'tmp'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('elsewhere', 'parse-args.json'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).not.toHaveBeenCalled();
   });
 });

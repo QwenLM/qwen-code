@@ -28,7 +28,11 @@ import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { isAoneCanonicalHost } from './lib/remote-match.js';
-import { lastReviewEffortPath } from './lib/paths.js';
+import {
+  ensureReviewTmpDir,
+  lastReviewEffortPath,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -1282,6 +1286,10 @@ export const parseArgsCommand: CommandModule = {
     );
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
+      // Step 0's write is the round's FIRST into `.qwen/tmp`: the scratch
+      // directory is refused here when the workspace redirected it, before
+      // this file — or anything after it — lands through the link.
+      if (writesIntoReviewTmp(out)) ensureReviewTmpDir('parse-args');
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, json, 'utf8');
     }

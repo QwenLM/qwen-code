@@ -15,7 +15,11 @@ import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
-import { assertWritableOutPath } from './lib/paths.js';
+import {
+  assertWritableOutPath,
+  ensureReviewTmpDir,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -47,6 +51,11 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
   // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
   // fetch — classify it before fetching.
   assertWritableOutPath(args.out);
+  // Lightweight mode's first writer into `.qwen/tmp`: refused before the
+  // auth gate and the fetch, like every other guarded command — a
+  // redirected scratch directory is not a round that can run, and nothing
+  // it costs should be paid first.
+  if (writesIntoReviewTmp(args.out)) ensureReviewTmpDir('fetch-diff');
   const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
 

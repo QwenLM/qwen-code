@@ -27,7 +27,7 @@ import type { ReviewEffort } from '../parse-args.js';
 /**
  * The effort to record in a capture command's plan. An explicit `--effort` wins;
  * otherwise fall back to the level `parse-args` resolved (read from
- * `PARSE_ARGS_REPORT`, relative to the same CWD the skill tee'd it in). `undefined`
+ * `PARSE_ARGS_REPORT`, relative to the same CWD the skill wrote it in). `undefined`
  * when neither is available — the roster then fail-safes to the full set, exactly as
  * before, so a missing report never *reduces* coverage.
  */

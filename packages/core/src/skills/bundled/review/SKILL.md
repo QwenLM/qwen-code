@@ -42,16 +42,18 @@ Your goal here is to understand the scope of changes so you can dispatch agents 
 
 If the args file is genuinely absent (an older CLI, or a write that failed), fall back to `write_file`-ing the raw argument string **verbatim and unmodified** — copying **the user's argument**, not an example from these instructions — and say in your output that you did, so a wrong target is at least attributable. For a no-argument `/review`, no file is written and none is needed; run the parser with an empty stdin.
 
-**Every command below is written `"${QWEN_CODE_CLI:-qwen}" review …`, and that is not decoration — copy it as written.** `QWEN_CODE_CLI` is the entry of the CLI **running this skill**, exported to your shell for you; a bare `qwen` is whatever the machine's `PATH` happens to resolve to, which is a different program the moment a global install is older than the build you are in. A stale `PATH` `qwen` has already killed a review mid-run on exactly this version skew (measured; DESIGN.md — The stale PATH qwen). The `:-qwen` fallback keeps older hosts that do not export it working. It is POSIX parameter expansion, which makes the POSIX-shell requirement this skill already had (Step 0 pipes through `tee`) total: on Windows, run the review from git-bash — cmd.exe passes `${…:-…}` through literally and PowerShell errors on it.
+**Every command below is written `"${QWEN_CODE_CLI:-qwen}" review …`, and that is not decoration — copy it as written.** `QWEN_CODE_CLI` is the entry of the CLI **running this skill**, exported to your shell for you; a bare `qwen` is whatever the machine's `PATH` happens to resolve to, which is a different program the moment a global install is older than the build you are in. A stale `PATH` `qwen` has already killed a review mid-run on exactly this version skew (measured; DESIGN.md — The stale PATH qwen). The `:-qwen` fallback keeps older hosts that do not export it working. It is POSIX parameter expansion, which makes the POSIX-shell requirement this skill already had (Step 0's `:` null command) total: on Windows, run the review from git-bash — cmd.exe passes `${…:-…}` through literally and PowerShell errors on it.
 
 Then run:
 
 ```bash
 # The CLI wrote this file; you did not, and must not.
-"${QWEN_CODE_CLI:-qwen}" review parse-args --stdin < <the path in the <skill-args-file> note> \
-  | tee .qwen/tmp/qwen-review-parse-args.json
+"${QWEN_CODE_CLI:-qwen}" review parse-args --stdin --out .qwen/tmp/qwen-review-parse-args.json \
+  < <the path in the <skill-args-file> note>
 # No arguments at all (`/review` bare) — no args file exists:
-#   : | "${QWEN_CODE_CLI:-qwen}" review parse-args --stdin | tee .qwen/tmp/qwen-review-parse-args.json
+#   : | "${QWEN_CODE_CLI:-qwen}" review parse-args --stdin --out .qwen/tmp/qwen-review-parse-args.json
+# `--out`, not `tee`: the command still prints the JSON, and it refuses a
+# `.qwen/tmp` the workspace redirected before this first write lands there.
 ```
 
 **If any `qwen review …` command prints `review: the bundle these commands run from was NOT built from the review sources in this tree`, stop and tell the user before doing anything else.** Every step below runs the built bundle, so a review source changed since that build takes no effect and this run measures the old behaviour — silently. That is true of bundled launches; an `npm start` or `npm run dev` session runs the `tsc` output in `packages/cli/dist/` instead, which lags `src/` the same way but is a layout this check does not cover — there `npm run build:packages` is what refreshes what runs. Measured on 2026-08-02: a round against #8368 exercised commands that had merged that morning and were simply absent from the binary, and reproduced a bug whose fix had merged but was not in the build — it had to be discarded. The user reads your summary, not this stderr, so a line you do not repeat is a line nobody sees. Say what it said, and let them decide whether to rebuild or to read every result as being about the older build. (A related note, `review: could not check whether the bundle is current`, means the same risk is present and unmeasurable — pass it on the same way.)

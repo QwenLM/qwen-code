@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const {
   ghRawMock,
@@ -31,6 +31,12 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     ensureAuthenticated: ensureAuthenticatedMock,
     setGhHost: setGhHostMock,
   };
+});
+
+const ensureReviewTmpDirMock = vi.hoisted(() => vi.fn());
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  return { ...actual, ensureReviewTmpDir: ensureReviewTmpDirMock };
 });
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -266,5 +272,42 @@ describe('fetchDiffCommand handler', () => {
     expect(process.exitCode).toBe(2);
     expect(ghRawMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetch-diff — the scratch directory guard', () => {
+  it('guards an --out under .qwen/tmp, and only there', () => {
+    // Lightweight mode's first writer into `.qwen/tmp`: the shared entry
+    // guard refuses a workspace-planted link before the diff lands.
+    ghRawMock.mockReturnValue('d');
+    ensureReviewTmpDirMock.mockClear();
+    writeFileSyncMock.mockClear();
+    ensureReviewTmpDirMock.mockImplementationOnce(() => {
+      throw new Error('fetch-diff: .qwen/tmp is a symbolic link');
+    });
+    expect(() =>
+      runFetchDiff({
+        prNumber: 1,
+        repo: 'QwenLM/qwen-code',
+        out: join('.qwen', 'tmp', 'qwen-review-pr-1-diff.txt'),
+      }),
+    ).toThrow(/symbolic link/);
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('fetch-diff');
+    // …and the refusal came BEFORE the write, or the guard is decoration.
+    expect(writeFileSyncMock).not.toHaveBeenCalled();
+    // The scratch directory ITSELF is equal to the guard's path, not under
+    // it, and still has to reach the guard. (The write that follows would
+    // then die EISDIR — this pins which paths are GUARDED, not which are
+    // usable.)
+    ensureReviewTmpDirMock.mockClear();
+    runFetchDiff({
+      prNumber: 1,
+      repo: 'QwenLM/qwen-code',
+      out: join('.qwen', 'tmp'),
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('fetch-diff');
+    ensureReviewTmpDirMock.mockClear();
+    runFetchDiff({ prNumber: 1, repo: 'QwenLM/qwen-code', out: OUT });
+    expect(ensureReviewTmpDirMock).not.toHaveBeenCalled();
   });
 });
