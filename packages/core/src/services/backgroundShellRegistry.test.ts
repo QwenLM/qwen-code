@@ -725,24 +725,16 @@ describe('BackgroundShellRegistry', () => {
       expect(reg.get('b')!.notified).toBe(false);
     });
 
-    it('defers a terminal notification dropped with no callback and redelivers it on rebind (#11119)', () => {
+    it('redelivers a retained terminal notification when the same registry is rebound', () => {
       const reg = new BackgroundShellRegistry();
       const outputPath = makeOutputFile('done\n');
       reg.register(
         makeEntry({ shellId: 'a', command: 'npm test', outputPath }),
       );
 
-      // The shell finishes while no consumer is bound — the owning Session
-      // was disposed/recycled. Previously this was consumed and lost forever.
       reg.complete('a', 0, 2000);
+      expect(reg.get('a')!.notified).toBe(false);
 
-      const dropped = reg.get('a')!;
-      expect(dropped.notified).toBe(false);
-      expect(dropped.notificationPending).toBe(true);
-
-      // A new Session re-registers a callback (resume / new runtime
-      // generation). The deferred notification must be replayed exactly once
-      // instead of silently planting the session.
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
 
@@ -756,32 +748,30 @@ describe('BackgroundShellRegistry', () => {
         status: 'completed',
         exitCode: 0,
       });
-
-      const healed = reg.get('a')!;
-      expect(healed.notified).toBe(true);
-      expect(healed.notificationPending).toBe(false);
+      expect(reg.get('a')!.notified).toBe(true);
     });
 
-    it('redelivers deferred notifications once and never resurrects abortAll cancellations (#11119)', () => {
+    it('redelivers retained terminal states once and suppresses shutdown cancellations', () => {
       const reg = new BackgroundShellRegistry();
-      // 'a' finishes while unbound → deferred. 'b' is settled by shutdown
-      // cleanup (abortAll), which intentionally emits no notification.
       reg.register(makeEntry({ shellId: 'a' }));
       reg.register(makeEntry({ shellId: 'b' }));
+      reg.register(makeEntry({ shellId: 'c' }));
+      reg.register(makeEntry({ shellId: 'shutdown' }));
       reg.complete('a', 0, 2000);
+      reg.fail('b', 'boom', 2001);
+      reg.cancel('c', 2002);
       reg.abortAll();
-
-      expect(reg.get('a')!.notificationPending).toBe(true);
-      expect(reg.get('b')!.notificationPending).toBeFalsy();
 
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
 
-      // Only the deferred 'a' replays; the suppressed 'b' stays silent.
-      expect(callback).toHaveBeenCalledTimes(1);
-      expect(callback.mock.calls[0][2]).toMatchObject({ shellId: 'a' });
+      expect(callback.mock.calls.map((call) => call[2])).toEqual([
+        { shellId: 'a', status: 'completed', exitCode: 0 },
+        { shellId: 'b', status: 'failed' },
+        { shellId: 'c', status: 'cancelled' },
+      ]);
+      expect(reg.get('shutdown')!.notified).toBe(false);
 
-      // Rebinding a second time must not double-deliver the consumed 'a'.
       const callback2 = vi.fn();
       reg.setNotificationCallback(callback2);
       expect(callback2).not.toHaveBeenCalled();
