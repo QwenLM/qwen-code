@@ -37,8 +37,10 @@ import {
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
   useDaemonTranscriptHistory,
+  useDaemonTranscriptLedger,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
+  useDaemonTurnIndex,
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
@@ -113,6 +115,24 @@ interface MockSession {
     nextCursor?: string;
     partial?: true;
     replayError?: string;
+    targetRecordId?: string;
+    hasOlder?: boolean;
+  }>;
+  getTurnIndexPage: (opts: unknown) => Promise<{
+    v: 1;
+    sessionId: string;
+    snapshot: string;
+    totalTurns: number;
+    start: number;
+    turns: Array<{
+      ordinal: number;
+      turnId: string;
+      kind: 'prompt' | 'realtime' | 'scheduled';
+      promptId?: string;
+      timestamp?: string;
+      label: string;
+      detail?: string;
+    }>;
   }>;
   replaySnapshot: {
     compactedReplay: DaemonEvent[];
@@ -195,6 +215,10 @@ interface MockClient {
     sessionId: string,
     opts: unknown,
   ) => Promise<unknown>;
+  getSessionTurnIndexPage: (
+    sessionId: string,
+    opts: unknown,
+  ) => Promise<unknown>;
 }
 
 const sdkMocks = vi.hoisted(() => {
@@ -239,6 +263,7 @@ const sdkMocks = vi.hoisted(() => {
   const removeMidTurnMessage = vi.fn();
   const branchSession = vi.fn();
   const getSessionTranscriptPage = vi.fn();
+  const getSessionTurnIndexPage = vi.fn();
 
   class MockDaemonClient {
     constructor(opts: unknown) {
@@ -281,6 +306,7 @@ const sdkMocks = vi.hoisted(() => {
     removeMidTurnMessage = removeMidTurnMessage;
     branchSession = branchSession;
     getSessionTranscriptPage = getSessionTranscriptPage;
+    getSessionTurnIndexPage = getSessionTurnIndexPage;
     dispose = vi.fn();
   }
 
@@ -358,6 +384,7 @@ const sdkMocks = vi.hoisted(() => {
     removeMidTurnMessage,
     branchSession,
     getSessionTranscriptPage,
+    getSessionTurnIndexPage,
     reset() {
       sessions.length = 0;
       daemonClientOptions.length = 0;
@@ -513,6 +540,7 @@ const sdkMocks = vi.hoisted(() => {
         displayName: 'Branch Session',
       });
       getSessionTranscriptPage.mockReset();
+      getSessionTurnIndexPage.mockReset();
       MockDaemonSessionClient.createOrAttach.mockReset();
       MockDaemonSessionClient.createOrAttach.mockImplementation(
         async (client: unknown, _req: unknown): Promise<MockSession> =>
@@ -17684,6 +17712,466 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  describe('turn navigation (Phase 2)', () => {
+    const turnNavigationFeatures = ['session_turn_navigation'];
+
+    function assistantChunkEvent(
+      id: number,
+      text: string,
+      recordId: string,
+    ): DaemonEvent {
+      return {
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              'qwen.session.recordId': recordId,
+              qwenTranscript: { sourceRecordIds: [recordId] },
+            },
+          },
+        },
+      } as DaemonEvent;
+    }
+
+    function turnIndexTailPage(
+      sessionId: string,
+      turnCount: number,
+      snapshot = 'snap-1',
+    ) {
+      return {
+        v: 1 as const,
+        sessionId,
+        snapshot,
+        totalTurns: turnCount,
+        start: 0,
+        turns: Array.from({ length: turnCount }, (_, ordinal) => ({
+          ordinal,
+          turnId: `turn-${ordinal}`,
+          kind: 'prompt' as const,
+          label: `turn ${ordinal}`,
+        })),
+      };
+    }
+
+    async function renderTurnNavSession(input?: {
+      features?: string[];
+      replayEvents?: DaemonEvent[];
+      turnCount?: number;
+      providerProps?: Partial<DaemonSessionProviderProps>;
+    }) {
+      const features = input?.features ?? turnNavigationFeatures;
+      const turnCount = input?.turnCount ?? 3;
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features,
+      });
+      const session = createMockSession({
+        replaySnapshot: {
+          compactedReplay: input?.replayEvents ?? [
+            assistantChunkEvent(1, 'live reply', 'record-live'),
+          ],
+          liveJournal: [],
+        },
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexTailPage(session.sessionId, turnCount),
+      );
+      let actions: DaemonSessionActions | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      let turnIndex: ReturnType<typeof useDaemonTurnIndex>;
+      let ledger: ReturnType<typeof useDaemonTranscriptLedger>;
+
+      function Harness() {
+        actions = useDaemonActions();
+        blocks = useDaemonTranscriptBlocks();
+        turnIndex = useDaemonTurnIndex();
+        ledger = useDaemonTranscriptLedger();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 25,
+        ...input?.providerProps,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      return {
+        session,
+        getActions: () => requireActions(actions),
+        getBlocks: () => blocks,
+        getTurnIndex: () => turnIndex,
+        getLedger: () => ledger,
+      };
+    }
+
+    it('seeds the turn index on attach when the capability is advertised', async () => {
+      const { session, getTurnIndex } = await renderTurnNavSession();
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledWith(
+        session.sessionId,
+        { limit: 200, clientId: session.clientId },
+      );
+      expect(getTurnIndex()).toMatchObject({
+        sessionId: session.sessionId,
+        status: 'ready',
+        snapshot: 'snap-1',
+        totalTurns: 3,
+      });
+    });
+
+    it('keeps the index disabled without the capability', async () => {
+      const { getTurnIndex } = await renderTurnNavSession({ features: [] });
+      expect(sdkMocks.getSessionTurnIndexPage).not.toHaveBeenCalled();
+      expect(getTurnIndex()?.status).toBe('disabled');
+    });
+
+    it('lands an anchored page at a persisted turn without disturbing the live tail', async () => {
+      const { session, getActions, getBlocks, getLedger } =
+        await renderTurnNavSession();
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [assistantChunkEvent(10, 'anchored reply', 'record-1')],
+        hasMore: false,
+        hasOlder: true,
+        targetRecordId: 'turn-1',
+      });
+
+      let result: unknown;
+      await act(async () => {
+        result = await getActions().openTranscriptAtTurn('turn-1');
+      });
+      expect(result).toEqual({ ok: true, targetRecordId: 'turn-1' });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+        session.sessionId,
+        {
+          atRecordId: 'turn-1',
+          snapshot: 'snap-1',
+          limit: 25,
+          clientId: session.clientId,
+        },
+      );
+      const texts = getBlocks().map(
+        (block) => (block as { text?: string }).text,
+      );
+      expect(texts).toContain('anchored reply');
+      expect(texts).toContain('live reply');
+      const ledger = getLedger();
+      expect(ledger?.entries).toHaveLength(2);
+      expect(ledger?.entries[0]).toMatchObject({
+        source: 'anchored',
+        snapshot: 'snap-1',
+        firstRecordId: 'record-1',
+      });
+      expect(ledger?.entries[1]?.source).toBe('load');
+      expect(ledger?.gaps[0]).toEqual({
+        older: { beforeRecordId: 'record-1', snapshot: 'snap-1' },
+      });
+    });
+
+    it('rejects an anchor missing from the index without fetching', async () => {
+      const { getActions } = await renderTurnNavSession();
+      let result: unknown;
+      await act(async () => {
+        result = await getActions().openTranscriptAtTurn('turn-999');
+      });
+      expect(result).toEqual({ ok: false, reason: 'invalid_anchor' });
+      expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
+    });
+
+    it('reports unsupported when the capability is absent', async () => {
+      const { getActions } = await renderTurnNavSession({ features: [] });
+      let result: unknown;
+      await act(async () => {
+        result = await getActions().openTranscriptAtTurn('turn-1');
+      });
+      expect(result).toEqual({ ok: false, reason: 'unsupported' });
+    });
+
+    it('distinguishes window_full (retryable) from window_impossible (terminal)', async () => {
+      // maxBlocks 2 with 2 retained blocks: a 1-block page no longer fits
+      // (1+2 > 2) but could fit after eviction → retryable window_full.
+      const full = await renderTurnNavSession({
+        replayEvents: [
+          assistantChunkEvent(1, 'live reply one', 'record-live-1'),
+          assistantChunkEvent(2, 'live reply two', 'record-live-2'),
+        ],
+        providerProps: { maxBlocks: 2 },
+      });
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: full.session.sessionId,
+        events: [assistantChunkEvent(10, 'anchored reply', 'record-1')],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'turn-1',
+      });
+      let fullResult: unknown;
+      await act(async () => {
+        fullResult = await full.getActions().openTranscriptAtTurn('turn-1');
+      });
+      expect(fullResult).toEqual({ ok: false, reason: 'window_full' });
+
+      // maxBlocks 1: a 1-block page alone fills the window → terminal.
+      const impossible = await renderTurnNavSession({
+        providerProps: { maxBlocks: 1 },
+      });
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: impossible.session.sessionId,
+        events: [assistantChunkEvent(10, 'anchored reply', 'record-1')],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'turn-1',
+      });
+      let impossibleResult: unknown;
+      await act(async () => {
+        impossibleResult = await impossible
+          .getActions()
+          .openTranscriptAtTurn('turn-1');
+      });
+      expect(impossibleResult).toEqual({
+        ok: false,
+        reason: 'window_impossible',
+      });
+    });
+
+    it('maps server refusals to distinct reasons', async () => {
+      const { session, getActions } = await renderTurnNavSession();
+      const cases: Array<[DaemonHttpError, string]> = [
+        [
+          new DaemonHttpError(
+            409,
+            { code: 'transcript_snapshot_unavailable' },
+            'gone',
+          ),
+          'snapshot_gone',
+        ],
+        [
+          new DaemonHttpError(400, { code: 'invalid_turn_anchor' }, 'anchor'),
+          'invalid_anchor',
+        ],
+        [
+          new DaemonHttpError(
+            413,
+            { code: 'transcript_page_too_large' },
+            'large',
+          ),
+          'page_too_large',
+        ],
+      ];
+      for (const [error, reason] of cases) {
+        sdkMocks.getSessionTranscriptPage.mockRejectedValueOnce(error);
+        const result = await act(async () =>
+          getActions().openTranscriptAtTurn('turn-1'),
+        );
+        expect(result).toEqual({ ok: false, reason });
+        // Recovery paths re-fetch the index (refresh / re-seed).
+        await act(async () => {
+          await flushPromises();
+        });
+      }
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(3);
+      void session;
+    });
+
+    it('dedupes an anchored page against retained records', async () => {
+      const { session, getActions, getBlocks } = await renderTurnNavSession();
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [assistantChunkEvent(10, 'live reply', 'record-live')],
+        hasMore: false,
+        hasOlder: true,
+        targetRecordId: 'turn-1',
+      });
+      let result: unknown;
+      await act(async () => {
+        result = await getActions().openTranscriptAtTurn('turn-1');
+      });
+      expect(result).toEqual({ ok: true, targetRecordId: 'turn-1' });
+      const liveBlocks = getBlocks().filter(
+        (block) => (block as { text?: string }).text === 'live reply',
+      );
+      expect(liveBlocks).toHaveLength(1);
+    });
+
+    it('continues newer with the stored cursor sent alone', async () => {
+      const { session, getActions, getBlocks, getLedger } =
+        await renderTurnNavSession();
+      sdkMocks.getSessionTranscriptPage.mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [assistantChunkEvent(10, 'anchored reply', 'record-1')],
+        hasMore: true,
+        hasOlder: true,
+        nextCursor: 'cursor-1',
+        targetRecordId: 'turn-1',
+      });
+      await act(async () => {
+        await getActions().openTranscriptAtTurn('turn-1');
+      });
+      const anchoredEntryId = getLedger()?.entries[0]?.id;
+      expect(anchoredEntryId).toBeDefined();
+      expect(getLedger()?.entries[0]?.nextCursor).toBe('cursor-1');
+
+      sdkMocks.getSessionTranscriptPage.mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [assistantChunkEvent(11, 'continuation reply', 'record-2')],
+        hasMore: false,
+      });
+      let result: unknown;
+      await act(async () => {
+        result = await getActions().continueTranscriptNewer(anchoredEntryId!);
+      });
+      expect(result).toEqual({ ok: true });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenLastCalledWith(
+        session.sessionId,
+        { cursor: 'cursor-1', limit: 25, clientId: session.clientId },
+      );
+      const texts = getBlocks().map(
+        (block) => (block as { text?: string }).text,
+      );
+      expect(texts).toContain('continuation reply');
+      const entries = getLedger()?.entries ?? [];
+      expect(entries).toHaveLength(3);
+      expect(entries[1]).toMatchObject({
+        source: 'continuation',
+        snapshot: 'snap-1',
+      });
+    });
+
+    it('continues older with beforeRecordId plus the entry snapshot', async () => {
+      const { session, getActions, getLedger } = await renderTurnNavSession();
+      sdkMocks.getSessionTranscriptPage.mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [assistantChunkEvent(10, 'anchored reply', 'record-1')],
+        hasMore: false,
+        hasOlder: true,
+        targetRecordId: 'turn-1',
+      });
+      await act(async () => {
+        await getActions().openTranscriptAtTurn('turn-1');
+      });
+      const anchoredEntryId = getLedger()?.entries[0]?.id;
+      expect(anchoredEntryId).toBeDefined();
+
+      sdkMocks.getSessionTranscriptPage.mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [assistantChunkEvent(9, 'older reply', 'record-0')],
+        hasMore: false,
+        hasOlder: false,
+      });
+      let result: unknown;
+      await act(async () => {
+        result = await getActions().continueTranscriptOlder(anchoredEntryId!);
+      });
+      expect(result).toEqual({ ok: true });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenLastCalledWith(
+        session.sessionId,
+        {
+          beforeRecordId: 'record-1',
+          snapshot: 'snap-1',
+          limit: 25,
+          clientId: session.clientId,
+        },
+      );
+      const entries = getLedger()?.entries ?? [];
+      expect(entries).toHaveLength(3);
+      expect(entries[0]).toMatchObject({
+        source: 'continuation',
+        firstRecordId: 'record-0',
+      });
+      // The older continuation butts against the anchored page.
+      expect(getLedger()?.gaps[1]).toEqual({});
+    });
+
+    it('appends a live provisional when a prompt is admitted', async () => {
+      const { getActions, getTurnIndex } = await renderTurnNavSession();
+      await act(async () => {
+        await getActions().submitPrompt('queued hello');
+      });
+      expect(getTurnIndex()?.liveEntries).toEqual([
+        {
+          id: 'live:prompt-1',
+          kind: 'prompt',
+          promptId: 'prompt-1',
+          label: 'queued hello',
+        },
+      ]);
+    });
+
+    it('refreshes the tail on prompt terminal', async () => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: turnNavigationFeatures,
+      });
+      const turnComplete = createDeferred<void>();
+      const events = vi.fn(async function* terminalRefreshEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          turnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 1,
+          type: 'turn_complete',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+      });
+      const session = createMockSession({ events });
+      sdkMocks.sessions.push(session);
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexTailPage(session.sessionId, 3),
+      );
+      let actions: DaemonSessionActions | undefined;
+
+      function Harness() {
+        actions = useDaemonActions();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+
+      let prompt: Promise<unknown> | undefined;
+      await act(async () => {
+        prompt = requireActions(actions).sendPrompt('hello');
+        await flushPromises();
+      });
+      turnComplete.resolve();
+      const pendingPrompt = prompt;
+      if (!pendingPrompt) throw new Error('prompt was not started');
+      await act(async () => {
+        await pendingPrompt;
+        await flushPromises();
+      });
+      // The terminal triggered the coalesced tail refresh (validation
+      // fetch without a snapshot).
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(2);
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenLastCalledWith(
+        session.sessionId,
+        { limit: 200, clientId: session.clientId },
+      );
+    });
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
@@ -17909,6 +18397,32 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
           nextCursor?: string;
           partial?: true;
           replayError?: string;
+          targetRecordId?: string;
+          hasOlder?: boolean;
+        };
+      }),
+    getTurnIndexPage:
+      opts.getTurnIndexPage ??
+      vi.fn(async (pageOpts: unknown) => {
+        if (!session.client) throw new Error('Session client is unavailable');
+        return (await session.client.getSessionTurnIndexPage(
+          session.sessionId,
+          pageOpts,
+        )) as {
+          v: 1;
+          sessionId: string;
+          snapshot: string;
+          totalTurns: number;
+          start: number;
+          turns: Array<{
+            ordinal: number;
+            turnId: string;
+            kind: 'prompt' | 'realtime' | 'scheduled';
+            promptId?: string;
+            timestamp?: string;
+            label: string;
+            detail?: string;
+          }>;
         };
       }),
     replaySnapshot: opts.replaySnapshot ?? {

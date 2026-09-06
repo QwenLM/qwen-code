@@ -90,6 +90,14 @@ export interface DaemonMessageMeta {
   timestamp?: number;
   /** Stable transcript blocks folded into this rendered message. */
   sourceBlockIds?: string[];
+  /**
+   * Persisted transcript record ids backing this message, carried from the
+   * block's `sourceRecordIds`. This is the message layer's canonical
+   * persisted identity — the turn-navigation locator keys on it.
+   */
+  sourceRecordIds?: readonly string[];
+  /** Persisted prompt id of the turn this message belongs to, when known. */
+  promptId?: string;
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {

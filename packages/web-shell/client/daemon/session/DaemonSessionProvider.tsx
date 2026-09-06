@@ -38,6 +38,7 @@ import {
   type DaemonApprovalMode,
   type DaemonEvent,
   type DaemonSseConnectReason,
+  type DaemonSessionTranscriptPage,
   type DaemonStandaloneSessionOptions,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -67,6 +68,16 @@ import {
   persistStableClientId,
 } from './clientLifecycle.js';
 import { extractHttpStatus, isRecord } from './httpErrors.js';
+import {
+  ledgerEntryFromBlocks,
+  TranscriptPageLedger,
+  type TranscriptGap,
+  type TranscriptPageLedgerEntry,
+} from './transcriptPageLedger.js';
+import {
+  SessionTurnIndexStore,
+  type SessionTurnIndexState,
+} from './turnIndexStore.js';
 import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
@@ -123,6 +134,7 @@ import {
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
+  ContinueTranscriptWindowResult,
   DaemonConnectionState,
   DaemonPromptStatus,
   DaemonSessionActions,
@@ -132,8 +144,10 @@ import type {
   DaemonSessionProviderProps,
   DaemonProductSessionContext,
   DaemonWorkspaceEventSignals,
+  OpenTranscriptAtTurnResult,
   PendingSessionLoad,
   SettledPrompt,
+  TranscriptWindowFailure,
 } from './types.js';
 
 export type {
@@ -202,6 +216,7 @@ type TranscriptHistoryAdmission =
     };
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
+const SESSION_TURN_NAVIGATION_FEATURE = 'session_turn_navigation';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
@@ -314,6 +329,21 @@ function materializeTranscriptHistory(
   current: DaemonTranscriptState,
   events: DaemonUiEvent[],
   maxBlocks: number,
+  options?: {
+    /**
+     * The prepend-only boundary-echo dedup compares the page's newest user
+     * block against the window's OLDEST block; it is meaningless (and can
+     * false-positive) for pages landing mid-window, so anchored and
+     * continuation reads disable it. Prompt-id matching subsumes the echo
+     * case whenever both sides carry identity.
+     */
+    boundaryEchoDedup?: boolean;
+    /**
+     * Anchored-path dedup: drop events whose promptId is already displayed.
+     * Never applied to the legacy prepend path.
+     */
+    promptIdDedup?: boolean;
+  },
 ): TranscriptHistoryAdmission {
   // Drop fetched events whose source records are already displayed.
   // `beforeRecordId` pagination is exclusive of the anchor but the anchor
@@ -358,18 +388,36 @@ function materializeTranscriptHistory(
   };
   const oldestRetainedBlock = current.blocks[0];
   const boundaryEchoKey =
+    options?.boundaryEchoDedup !== false &&
     (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) === 0
       ? userBlockBoundaryKey(oldestRetainedBlock)
       : undefined;
-  const freshEvents =
-    displayedRecordIds.size === 0
-      ? events
-      : events.filter(
-          (event) =>
-            !event.sourceRecordIds?.some((recordId) =>
-              displayedRecordIds.has(recordId),
-            ),
-        );
+  const displayedPromptIds =
+    options?.promptIdDedup === true
+      ? new Set(
+          current.blocks
+            .map((block) => block.promptId)
+            .filter((promptId): promptId is string => promptId !== undefined),
+        )
+      : undefined;
+  const freshEvents = events.filter((event) => {
+    if (
+      displayedRecordIds.size > 0 &&
+      event.sourceRecordIds?.some((recordId) =>
+        displayedRecordIds.has(recordId),
+      )
+    ) {
+      return false;
+    }
+    if (
+      displayedPromptIds !== undefined &&
+      event.promptId !== undefined &&
+      displayedPromptIds.has(event.promptId)
+    ) {
+      return false;
+    }
+    return true;
+  });
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
     // Trim-free by intent: a media-heavy page would otherwise cross the
@@ -456,6 +504,35 @@ function applyTranscriptHistory(
   current: DaemonTranscriptState,
   history: TranscriptHistoryMaterialization,
 ): DaemonTranscriptState {
+  return mergeTranscriptPage(current, history, [
+    ...history.blocks,
+    ...current.blocks,
+  ]);
+}
+
+/**
+ * Insert-at-ledger-position admission for pages that are neither
+ * older-than-window nor live (anchored opens, newer-direction
+ * continuations): the flat store keeps its `[pages…, liveTail]` layout
+ * with the page spliced in at `insertBlockIndex`.
+ */
+function applyTranscriptPageInsert(
+  current: DaemonTranscriptState,
+  history: TranscriptHistoryMaterialization,
+  insertBlockIndex: number,
+): DaemonTranscriptState {
+  return mergeTranscriptPage(current, history, [
+    ...current.blocks.slice(0, insertBlockIndex),
+    ...history.blocks,
+    ...current.blocks.slice(insertBlockIndex),
+  ]);
+}
+
+function mergeTranscriptPage(
+  current: DaemonTranscriptState,
+  history: TranscriptHistoryMaterialization,
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptState {
   // A page-resurrected real block mapping must win over the current window's
   // TRIMMED sentinel for the same callId — otherwise the resurrected block is
   // orphaned and every later live update for that tool hits the sentinel
@@ -502,7 +579,7 @@ function applyTranscriptHistory(
   }
   return {
     ...current,
-    blocks: [...history.blocks, ...current.blocks],
+    blocks,
     retainedBytes: current.retainedBytes + history.retainedBytes,
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId,
@@ -515,6 +592,81 @@ function applyTranscriptHistory(
       ...current.unrecognizedDiagnostics,
     ].slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT),
   };
+}
+
+/**
+ * Ledger position for an anchored page: the first entry whose minimum
+ * index-known ordinal sits past the target. Entries without index-known
+ * turn ids are live-tail-adjacent and count as newer than everything.
+ */
+function computeLedgerInsertIndex(
+  ledger: TranscriptPageLedger,
+  ordinalByTurnId: ReadonlyMap<string, number>,
+  targetOrdinal: number,
+): number {
+  const entries = ledger.getEntries();
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    let minOrdinal: number | undefined;
+    for (const turnId of entry.turnIds) {
+      const ordinal = ordinalByTurnId.get(turnId);
+      if (ordinal === undefined) continue;
+      minOrdinal =
+        minOrdinal === undefined ? ordinal : Math.min(minOrdinal, ordinal);
+    }
+    if (minOrdinal === undefined || minOrdinal > targetOrdinal) return index;
+  }
+  return entries.length;
+}
+
+/**
+ * Flat-store block index at which a page inserted at ledger `insertIndex`
+ * lands: the next entry's first block, or the live-tail start (one past
+ * the newest entry's last block) when appending after the newest page.
+ */
+function computeInsertBlockIndex(
+  state: DaemonTranscriptState,
+  ledger: TranscriptPageLedger,
+  insertIndex: number,
+): number {
+  const entries = ledger.getEntries();
+  const nextEntry = entries[insertIndex];
+  if (nextEntry !== undefined) {
+    return state.blockIndexById[nextEntry.firstBlockId] ?? state.blocks.length;
+  }
+  const newest = entries[entries.length - 1];
+  if (newest === undefined) return state.blocks.length;
+  const lastIndex = state.blockIndexById[newest.lastBlockId];
+  return lastIndex === undefined ? state.blocks.length : lastIndex + 1;
+}
+
+/** Map a transcript-window fetch failure to its distinct client reason. */
+function transcriptWindowFailureReason(
+  error: unknown,
+): TranscriptWindowFailure['reason'] | undefined {
+  if (!(error instanceof DaemonHttpError)) return undefined;
+  const code =
+    isRecord(error.body) && typeof error.body['code'] === 'string'
+      ? error.body['code']
+      : undefined;
+  if (error.status === 400 && code === 'invalid_turn_anchor') {
+    return 'invalid_anchor';
+  }
+  // Snapshot-bound failures after replacement/rewind are expected
+  // invalidation, not a retryable error storm.
+  if (
+    (error.status === 409 && code === 'transcript_snapshot_unavailable') ||
+    (error.status === 400 && code === 'invalid_transcript_cursor')
+  ) {
+    return 'snapshot_gone';
+  }
+  if (error.status === 413 && code === 'transcript_page_too_large') {
+    return 'page_too_large';
+  }
+  if (error.status === 413 && code === 'transcript_too_large') {
+    return 'unsupported';
+  }
+  return undefined;
 }
 
 function boundedString(value: unknown, maxLength: number): string | undefined {
@@ -657,6 +809,17 @@ const DaemonActionsContext = createContext<DaemonSessionActions | undefined>(
 );
 const DaemonTranscriptHistoryContext = createContext<
   DaemonTranscriptHistory | undefined
+>(undefined);
+const DaemonTurnIndexContext = createContext<SessionTurnIndexState | undefined>(
+  undefined,
+);
+/** Read model over the provider-owned transcript page ledger. */
+export interface DaemonTranscriptLedgerView {
+  entries: readonly TranscriptPageLedgerEntry[];
+  gaps: readonly TranscriptGap[];
+}
+const DaemonTranscriptLedgerContext = createContext<
+  DaemonTranscriptLedgerView | undefined
 >(undefined);
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
@@ -868,6 +1031,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   // moved mid-fetch, so a stale page can never advance the anchor below the
   // evicted band.
   const paginationGenerationRef = useRef(0);
+  // Page ledger over the flat transcript store: records which block ranges
+  // arrived as which fetched page plus the explicit gaps between them, so
+  // eviction leaves re-fetchable locators instead of untracked holes.
+  const transcriptPageLedgerRef = useRef(new TranscriptPageLedger());
+  // Per-session turn-index store (capability-gated). Created on session
+  // attach; disposed and recreated when the session identity changes.
+  const turnIndexStoreRef = useRef<SessionTurnIndexStore | undefined>(
+    undefined,
+  );
+  const [turnIndexState, setTurnIndexState] = useState<
+    SessionTurnIndexState | undefined
+  >(undefined);
+  // Bumped after every provider-side ledger mutation so the read model
+  // re-derives (the ledger itself is a mutable ref, not a store).
+  const [ledgerVersion, setLedgerVersion] = useState(0);
   const store = useMemo(
     () =>
       createDaemonTranscriptStore({
@@ -890,6 +1068,44 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // re-based after the blocks it points past are evicted). A rewind
           // (`evictedOldest === false`) drops the newest blocks and leaves
           // the oldest anchor intact, so it must not trigger re-anchoring.
+          // Reconcile the page ledger with the trim/rewind. The callback
+          // fires mid-reduce while `store.getSnapshot()` is still pre-trim,
+          // which is exactly the state the ledger needs to locate the
+          // evicted prefix (trim) or dropped suffix (rewind).
+          if (detail.evictedOldest !== false) {
+            transcriptPageLedgerRef.current.applyPrefixTrim(
+              store.getSnapshot(),
+              detail,
+            );
+          } else {
+            transcriptPageLedgerRef.current.applyRewind(
+              store.getSnapshot(),
+              detail,
+            );
+            // A rewind invalidates snapshot-bound index pages and prompt
+            // provisionals; the store re-seeds from a fresh tail request.
+            void turnIndexStoreRef.current?.handleRewind();
+          }
+          setLedgerVersion((version) => version + 1);
+          // Shell overlays die with their live block. The store snapshot is
+          // still pre-trim inside this callback, so the sweep is deferred
+          // to a microtask — it runs after the dispatch completes, while
+          // the batcher (≥16ms macrotask) cannot have dispatched again.
+          {
+            const indexStore = turnIndexStoreRef.current;
+            if (indexStore !== undefined) {
+              queueMicrotask(() => {
+                const retained = store.getSnapshot().blockIndexById;
+                for (const entry of indexStore.getState().liveEntries) {
+                  if (entry.kind !== 'shell') continue;
+                  const blockId = entry.id.slice('shell:'.length);
+                  if (retained[blockId] === undefined) {
+                    indexStore.removeLiveShell(blockId);
+                  }
+                }
+              });
+            }
+          }
           if (detail.evictedOldest !== false) {
             if (detail.oldestRetainedRecordId !== undefined) {
               history.beforeRecordId = detail.oldestRetainedRecordId;
@@ -1260,6 +1476,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       // Swallow a reducer throw (log it) so it cannot escape as an uncaught
       // timer error or — via flushTranscriptSync — abort the catch block's
       // error recovery and the unmount cleanup.
+      const tailBlockIdBefore = store.getSnapshot().blocks.at(-1)?.id;
       try {
         store.dispatch(batch);
       } catch (error) {
@@ -1267,6 +1484,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           '[DaemonSessionProvider] batched transcript dispatch failed',
           { eventCount: batch.length, error },
         );
+      }
+      // Feed the turn-index store: reconcile prompt provisionals against
+      // freshly admitted blocks and register shell-command overlays. The
+      // pre-dispatch tail block anchors the scan so a trim inside the same
+      // dispatch cannot skew a length-based slice; if the anchor itself
+      // was trimmed away, skip this flush — reconciliation retries on the
+      // next refresh.
+      const indexStore = turnIndexStoreRef.current;
+      if (indexStore !== undefined) {
+        const committedBlocks = store.getSnapshot().blocks;
+        const anchorIndex =
+          tailBlockIdBefore === undefined
+            ? -1
+            : (store.getSnapshot().blockIndexById[tailBlockIdBefore] ?? -2);
+        const newBlocks =
+          anchorIndex === -2 ? [] : committedBlocks.slice(anchorIndex + 1);
+        if (newBlocks.length > 0) {
+          indexStore.observeAdmittedBlocks(newBlocks);
+          for (const block of newBlocks) {
+            if (block.kind === 'user_shell') {
+              indexStore.addLiveShell({
+                blockId: block.id,
+                label: (block as { command?: string }).command ?? block.id,
+              });
+            }
+          }
+        }
       }
     };
     const cancelTranscriptFlush = () => {
@@ -2171,6 +2415,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // (firstPersistedRecordId, replayHistoryWasTruncated) recompute
           // empty on delta-resume reconnects; keep the history state that
           // the original injection initialized instead of clobbering it.
+          const ledgerSessionReinit =
+            !repairingEpisode &&
+            (replayInjected ||
+              transcriptHistoryRef.current.sessionId !==
+                activeSession.sessionId);
           if (
             !repairingEpisode &&
             (replayInjected ||
@@ -2202,6 +2451,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               firstPersistedRecordId;
             transcriptHistoryRef.current.cursor = undefined;
           }
+          let replayCommittedRebuild = false;
           if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
@@ -2338,6 +2588,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               needsStoreReset ||
               store.getSnapshot().blocks.length === 0;
             if (rebuildReplay) {
+              replayCommittedRebuild = true;
               // Ordinary replay rebuilds under the same cap as live growth:
               // a session loaded mid-turn can carry a live journal with tens
               // of thousands of events, and retaining it all (the previous
@@ -2544,6 +2795,79 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // so dropping it unpins busy-session snapshots that can reach
             // tens of MiB after adaptive journal growth.
             activeSession.consumeReplaySnapshot();
+          }
+          // Create (or replace) the per-session turn-index store once the
+          // session attaches. The fetch closure routes through sessionRef
+          // so a reconnect rebinds the session client without recreating
+          // the store; a same-session delta-resume keeps the existing
+          // store and its cached pages.
+          if (
+            ledgerSessionReinit ||
+            turnIndexStoreRef.current === undefined ||
+            turnIndexStoreRef.current.getState().sessionId !==
+              activeSession.sessionId
+          ) {
+            turnIndexStoreRef.current?.dispose();
+            const turnNavigationSupported =
+              Array.isArray(capabilities?.features) &&
+              capabilities.features.includes(SESSION_TURN_NAVIGATION_FEATURE);
+            const indexStore = new SessionTurnIndexStore({
+              sessionId: activeSession.sessionId,
+              enabled: turnNavigationSupported,
+              fetchPage: (opts) => {
+                const current = sessionRef.current;
+                if (
+                  current === undefined ||
+                  current.sessionId !== activeSession.sessionId
+                ) {
+                  return Promise.reject(
+                    new Error('Turn index fetch after session change'),
+                  );
+                }
+                return current.getTurnIndexPage({
+                  ...opts,
+                  clientId: current.clientId,
+                });
+              },
+            });
+            indexStore.subscribe(() =>
+              setTurnIndexState(indexStore.getState()),
+            );
+            turnIndexStoreRef.current = indexStore;
+            setTurnIndexState(indexStore.getState());
+            // Seeding is fire-and-forget: index failures never fail the
+            // session load, prompt streaming, or retained history.
+            void indexStore.seed();
+          }
+          // Record the committed window as the ledger's first page. A full
+          // rebuild (ordinary replay, repair rebuild, or a fresh-session
+          // reset) replaces the store wholesale, so any earlier entries are
+          // void; a delta-resume append keeps both store and ledger. The
+          // older gap mirrors the reconciled pagination anchor — including
+          // the capacity reconciliation above, which can re-anchor or close
+          // the affordance after a replay trim.
+          if (ledgerSessionReinit || replayCommittedRebuild) {
+            const committedBlocks = store.getSnapshot().blocks;
+            const loadEntry = ledgerEntryFromBlocks('load', committedBlocks);
+            const ledger = transcriptPageLedgerRef.current;
+            if (loadEntry !== undefined) {
+              ledger.recordInitialLoad(loadEntry);
+            } else {
+              ledger.clear();
+            }
+            turnIndexStoreRef.current?.observeAdmittedBlocks(committedBlocks);
+            const committedHistory = transcriptHistoryRef.current;
+            ledger.setOlderGap(
+              committedHistory.hasMore &&
+                committedHistory.beforeRecordId !== undefined
+                ? {
+                    older: {
+                      beforeRecordId: committedHistory.beforeRecordId,
+                    },
+                  }
+                : undefined,
+            );
+            setLedgerVersion((version) => version + 1);
           }
           setConnection((current) => ({
             ...current,
@@ -2895,6 +3219,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setPromptStatus('idle');
             clearPendingTranscriptEvents();
             store.reset();
+            transcriptPageLedgerRef.current.clear();
+            setLedgerVersion((version) => version + 1);
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
@@ -3062,6 +3388,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('idle');
                 }
               }
+              // Prompt terminal: coalesced tail refresh of the turn index.
+              // Fire-and-forget — index failures never affect streaming.
+              if (
+                event.type === 'turn_complete' ||
+                event.type === 'turn_error'
+              ) {
+                void turnIndexStoreRef.current?.refreshTail();
+              }
               const hasBlockPathDebugEvent = uiEvents.some(
                 (e) =>
                   e.type === 'debug' &&
@@ -3211,6 +3545,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   }
                   clearPendingTranscriptEvents();
                   store.reset();
+                  transcriptPageLedgerRef.current.clear();
+                  setLedgerVersion((version) => version + 1);
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
@@ -3958,7 +4294,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     heartbeatIntervalMs,
   ]);
 
-  const actions = useMemo<DaemonSessionActions>(
+  const baseActions = useMemo(
     () =>
       createDaemonSessionActions({
         store,
@@ -4081,6 +4417,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current?.controller?.abort();
           liveJournalRepairRef.current = undefined;
         },
+        onPromptAdmitted: ({ promptId, label }) => {
+          turnIndexStoreRef.current?.addLivePrompt({
+            promptId,
+            label: label.slice(0, 160),
+          });
+        },
       }),
     [
       addNotice,
@@ -4091,7 +4433,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       store,
     ],
   );
-  repairReloadRef.current = actions.reloadSession;
+  repairReloadRef.current = baseActions.reloadSession;
   useEffect(() => {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());
@@ -4287,6 +4629,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         history.beforeRecordId = nextBeforeRecordId;
         history.hasMore = page.hasMore && hasCapacity;
         history.loading = false;
+        if (historyMaterialization) {
+          const prependEntry = ledgerEntryFromBlocks(
+            'prepend',
+            historyMaterialization.blocks,
+          );
+          if (prependEntry !== undefined) {
+            transcriptPageLedgerRef.current.recordPrepend(
+              prependEntry,
+              history.hasMore && history.beforeRecordId !== undefined
+                ? { older: { beforeRecordId: history.beforeRecordId } }
+                : undefined,
+            );
+          }
+          turnIndexStoreRef.current?.observeAdmittedBlocks(
+            historyMaterialization.blocks,
+          );
+          setLedgerVersion((version) => version + 1);
+        }
         setTranscriptHistoryState({
           hasMore: history.hasMore,
           loading: false,
@@ -4351,6 +4711,389 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     },
     [addNotice, dismissNotice, maxBlocks, store],
   );
+  // Monotonic selection counter for transcript-window requests: only the
+  // newest anchored open / continuation may commit.
+  const anchoredSelectionRef = useRef(0);
+  // Shared normalization for fetched transcript-window pages (anchored
+  // opens and continuations), mirroring the load-older pipeline.
+  const normalizeTranscriptWindowEvents = useCallback(
+    (
+      events: DaemonEvent[],
+      activeSession: DaemonSessionClient,
+    ): DaemonUiEvent[] => {
+      const replayOpts = {
+        ...eventOptionsRef.current,
+        suppressOwnUserEcho: false,
+      };
+      const uiEvents: DaemonUiEvent[] = [];
+      for (const replayEvent of events) {
+        try {
+          const transcriptEvents = filterDaemonUiEventsForTranscript(
+            replayEvent,
+            normalizeAndFilterEvent(
+              replayEvent,
+              activeSession.clientId,
+              replayOpts,
+              setConnection,
+              { updateConnection: false },
+            ),
+            addNotice,
+            dismissNotice,
+          );
+          uiEvents.push(
+            ...(subagentTranscriptModeRef.current === 'summary'
+              ? projectMainTranscriptEvents(transcriptEvents)
+              : transcriptEvents),
+          );
+        } catch (error) {
+          addNotice({
+            severity: 'warning',
+            category: 'protocol',
+            operation: 'normalize_event',
+            code: 'daemon.replay_event_malformed',
+            message: 'Skipped malformed history event',
+            debugMessage:
+              error instanceof Error ? error.message : String(error),
+            recoverable: true,
+          });
+        }
+      }
+      return uiEvents;
+    },
+    [addNotice, dismissNotice],
+  );
+  // Atomic admission for anchored/continuation pages: materialize against
+  // the window budget (record-id then prompt-id dedup; the prepend-only
+  // boundary-echo comparison is disabled), splice at the ledger position,
+  // and record the ledger entry. A failed admission leaves the window
+  // unchanged.
+  const admitTranscriptWindowPage = useCallback(
+    (args: {
+      page: DaemonSessionTranscriptPage;
+      uiEvents: DaemonUiEvent[];
+      source: 'anchored' | 'continuation';
+      insertIndex: number;
+      snapshot?: string;
+      gapOlderSnapshot?: string;
+      /**
+       * Only forward reads (anchored opens, newer continuations) mint a
+       * forward `nextCursor` on the ledger entry; a backward read's cursor
+       * continues backward and must never be stored as one.
+       */
+      mintForwardCursor?: boolean;
+      /**
+       * Continuations butt against their neighbor and close the displaced
+       * gap; an anchored open preserves it (its locator still backfills
+       * the range between the new page and the next entry).
+       */
+      buttAfter?: boolean;
+    }):
+      | { ok: true }
+      | { ok: false; reason: 'window_full' | 'window_impossible' } => {
+      const admission = materializeTranscriptHistory(
+        store.getSnapshot(),
+        args.uiEvents,
+        maxBlocks,
+        { boundaryEchoDedup: false, promptIdDedup: true },
+      );
+      if (!admission.admitted) {
+        return {
+          ok: false,
+          reason: admission.impossible ? 'window_impossible' : 'window_full',
+        };
+      }
+      const ledger = transcriptPageLedgerRef.current;
+      const state = store.getSnapshot();
+      store.reset(
+        applyTranscriptPageInsert(
+          state,
+          admission.materialization,
+          computeInsertBlockIndex(state, ledger, args.insertIndex),
+        ),
+      );
+      const entryInput = ledgerEntryFromBlocks(
+        args.source,
+        admission.materialization.blocks,
+        {
+          ...(args.snapshot !== undefined ? { snapshot: args.snapshot } : {}),
+          ...(args.mintForwardCursor === true &&
+          args.page.hasMore &&
+          args.page.nextCursor !== undefined
+            ? { nextCursor: args.page.nextCursor }
+            : {}),
+        },
+      );
+      if (entryInput !== undefined) {
+        const gapBefore: TranscriptGap | undefined =
+          args.gapOlderSnapshot !== undefined &&
+          args.page.hasOlder === true &&
+          entryInput.firstRecordId !== undefined
+            ? {
+                older: {
+                  beforeRecordId: entryInput.firstRecordId,
+                  snapshot: args.gapOlderSnapshot,
+                },
+              }
+            : undefined;
+        ledger.insertEntry(
+          entryInput,
+          args.insertIndex,
+          gapBefore,
+          args.buttAfter === true ? {} : undefined,
+        );
+      }
+      turnIndexStoreRef.current?.observeAdmittedBlocks(
+        admission.materialization.blocks,
+      );
+      setLedgerVersion((version) => version + 1);
+      return { ok: true };
+    },
+    [maxBlocks, store],
+  );
+  const openTranscriptAtTurn = useCallback(
+    async (turnId: string): Promise<OpenTranscriptAtTurnResult> => {
+      const activeSession = sessionRef.current;
+      const indexStore = turnIndexStoreRef.current;
+      if (activeSession === undefined || indexStore === undefined) {
+        return { ok: false, reason: 'unavailable' };
+      }
+      const indexStatus = indexStore.getState().status;
+      if (indexStatus === 'disabled' || indexStatus === 'unsupported') {
+        return { ok: false, reason: 'unsupported' };
+      }
+      // Jumps require the seeded index; anything else is a temporary
+      // unavailability (seed in flight, transient error), not a bad anchor.
+      if (indexStatus !== 'ready') {
+        return { ok: false, reason: 'unavailable' };
+      }
+      const located = indexStore.findTurn(turnId);
+      if (located === undefined) {
+        return { ok: false, reason: 'invalid_anchor' };
+      }
+      const selection = ++anchoredSelectionRef.current;
+      const fetchPaginationGeneration = paginationGenerationRef.current;
+      try {
+        const page = await activeSession.getTranscriptPage({
+          atRecordId: turnId,
+          snapshot: located.snapshot,
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        });
+        if (
+          sessionRef.current !== activeSession ||
+          turnIndexStoreRef.current !== indexStore ||
+          anchoredSelectionRef.current !== selection ||
+          paginationGenerationRef.current !== fetchPaginationGeneration
+        ) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        if (page.partial || page.replayError) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const uiEvents = normalizeTranscriptWindowEvents(
+          page.events,
+          activeSession,
+        );
+        if (uiEvents.length === 0) {
+          return { ok: true, targetRecordId: page.targetRecordId ?? turnId };
+        }
+        const ordinalByTurnId = new Map<string, number>();
+        for (const indexPage of indexStore.getState().pages.values()) {
+          for (const entry of indexPage.turns) {
+            ordinalByTurnId.set(entry.turnId, entry.ordinal);
+          }
+        }
+        const insertIndex = computeLedgerInsertIndex(
+          transcriptPageLedgerRef.current,
+          ordinalByTurnId,
+          located.entry.ordinal,
+        );
+        const admitted = admitTranscriptWindowPage({
+          page,
+          uiEvents,
+          source: 'anchored',
+          insertIndex,
+          snapshot: located.snapshot,
+          gapOlderSnapshot: located.snapshot,
+          mintForwardCursor: true,
+        });
+        if (!admitted.ok) return admitted;
+        return { ok: true, targetRecordId: page.targetRecordId ?? turnId };
+      } catch (error) {
+        if (
+          sessionRef.current !== activeSession ||
+          turnIndexStoreRef.current !== indexStore
+        ) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const reason = transcriptWindowFailureReason(error);
+        // Snapshot-bound failures after invalidation events are expected;
+        // refresh or re-seed the index instead of error-storming.
+        if (reason === 'invalid_anchor') {
+          void indexStore.refreshTail();
+        } else if (reason === 'snapshot_gone') {
+          void indexStore.invalidateAndReseed();
+        } else if (reason === 'unsupported') {
+          indexStore.markUnsupported();
+        }
+        return { ok: false, reason: reason ?? 'unavailable' };
+      }
+    },
+    [admitTranscriptWindowPage, normalizeTranscriptWindowEvents],
+  );
+  const continueTranscriptOlder = useCallback(
+    async (entryId: string): Promise<ContinueTranscriptWindowResult> => {
+      const activeSession = sessionRef.current;
+      const ledger = transcriptPageLedgerRef.current;
+      const entry = ledger.getEntry(entryId);
+      if (
+        activeSession === undefined ||
+        entry === undefined ||
+        entry.snapshot === undefined ||
+        entry.firstRecordId === undefined
+      ) {
+        return { ok: false, reason: 'unavailable' };
+      }
+      const selection = ++anchoredSelectionRef.current;
+      const fetchPaginationGeneration = paginationGenerationRef.current;
+      try {
+        const page = await activeSession.getTranscriptPage({
+          beforeRecordId: entry.firstRecordId,
+          snapshot: entry.snapshot,
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        });
+        if (
+          sessionRef.current !== activeSession ||
+          anchoredSelectionRef.current !== selection ||
+          paginationGenerationRef.current !== fetchPaginationGeneration
+        ) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        if (page.partial || page.replayError) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const uiEvents = normalizeTranscriptWindowEvents(
+          page.events,
+          activeSession,
+        );
+        if (uiEvents.length === 0) {
+          return { ok: true };
+        }
+        const insertIndex = ledger
+          .getEntries()
+          .findIndex((item) => item.id === entryId);
+        if (insertIndex < 0) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        return admitTranscriptWindowPage({
+          page,
+          uiEvents,
+          source: 'continuation',
+          insertIndex,
+          snapshot: entry.snapshot,
+          gapOlderSnapshot: entry.snapshot,
+          buttAfter: true,
+        });
+      } catch (error) {
+        if (sessionRef.current !== activeSession) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const reason = transcriptWindowFailureReason(error);
+        if (reason === 'snapshot_gone') {
+          void turnIndexStoreRef.current?.invalidateAndReseed();
+        } else if (reason === 'unsupported') {
+          turnIndexStoreRef.current?.markUnsupported();
+        }
+        return { ok: false, reason: reason ?? 'unavailable' };
+      }
+    },
+    [admitTranscriptWindowPage, normalizeTranscriptWindowEvents],
+  );
+  const continueTranscriptNewer = useCallback(
+    async (entryId: string): Promise<ContinueTranscriptWindowResult> => {
+      const activeSession = sessionRef.current;
+      const ledger = transcriptPageLedgerRef.current;
+      const entry = ledger.getEntry(entryId);
+      if (
+        activeSession === undefined ||
+        entry === undefined ||
+        entry.nextCursor === undefined
+      ) {
+        return { ok: false, reason: 'unavailable' };
+      }
+      const selection = ++anchoredSelectionRef.current;
+      const fetchPaginationGeneration = paginationGenerationRef.current;
+      try {
+        // The signed cursor is sent alone: it already encodes the frozen
+        // file identity, byte size, leaf, and position; pairing it with a
+        // snapshot or record anchor is a 400.
+        const page = await activeSession.getTranscriptPage({
+          cursor: entry.nextCursor,
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        });
+        if (
+          sessionRef.current !== activeSession ||
+          anchoredSelectionRef.current !== selection ||
+          paginationGenerationRef.current !== fetchPaginationGeneration
+        ) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        if (page.partial || page.replayError) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const uiEvents = normalizeTranscriptWindowEvents(
+          page.events,
+          activeSession,
+        );
+        if (uiEvents.length === 0) {
+          return { ok: true };
+        }
+        const entryIndex = ledger
+          .getEntries()
+          .findIndex((item) => item.id === entryId);
+        if (entryIndex < 0) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        return admitTranscriptWindowPage({
+          page,
+          uiEvents,
+          source: 'continuation',
+          insertIndex: entryIndex + 1,
+          snapshot: entry.snapshot,
+          mintForwardCursor: true,
+          buttAfter: true,
+        });
+      } catch (error) {
+        if (sessionRef.current !== activeSession) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const reason = transcriptWindowFailureReason(error);
+        if (reason === 'snapshot_gone') {
+          void turnIndexStoreRef.current?.invalidateAndReseed();
+        } else if (reason === 'unsupported') {
+          turnIndexStoreRef.current?.markUnsupported();
+        }
+        return { ok: false, reason: reason ?? 'unavailable' };
+      }
+    },
+    [admitTranscriptWindowPage, normalizeTranscriptWindowEvents],
+  );
+  const actions = useMemo<DaemonSessionActions>(
+    () => ({
+      ...baseActions,
+      openTranscriptAtTurn,
+      continueTranscriptOlder,
+      continueTranscriptNewer,
+    }),
+    [
+      baseActions,
+      openTranscriptAtTurn,
+      continueTranscriptOlder,
+      continueTranscriptNewer,
+    ],
+  );
   const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {
     const active =
       connection.sessionId === transcriptHistoryRef.current.sessionId &&
@@ -4363,6 +5106,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       loadMore: loadMoreTranscript,
     };
   }, [connection.sessionId, loadMoreTranscript, transcriptHistoryState]);
+  // The turn-index state is only exposed while it describes the attached
+  // session; a store created for a previous session must never leak its
+  // snapshot-bound pages into the new session's consumers.
+  const turnIndexValue = useMemo<SessionTurnIndexState | undefined>(() => {
+    if (
+      turnIndexState === undefined ||
+      connection.sessionId !== turnIndexState.sessionId ||
+      sessionRef.current?.sessionId !== turnIndexState.sessionId
+    ) {
+      return undefined;
+    }
+    return turnIndexState;
+  }, [connection.sessionId, turnIndexState]);
+  // Read model over the page ledger, gated to the attached session like the
+  // transcript-history value above. `ledgerVersion` re-derives the snapshot
+  // after every provider-side ledger mutation.
+  const transcriptLedgerValue = useMemo<
+    DaemonTranscriptLedgerView | undefined
+  >(() => {
+    void ledgerVersion;
+    const active =
+      connection.sessionId !== undefined &&
+      connection.sessionId === transcriptHistoryRef.current.sessionId &&
+      sessionRef.current?.sessionId === transcriptHistoryRef.current.sessionId;
+    if (!active) return undefined;
+    const ledger = transcriptPageLedgerRef.current;
+    return { entries: ledger.getEntries(), gaps: ledger.getGaps() };
+  }, [connection.sessionId, ledgerVersion]);
   const lastHandledSessionIdRef = useRef<
     string | undefined | typeof UNHANDLED_SESSION
   >(UNHANDLED_SESSION);
@@ -4455,7 +5226,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   <DaemonTranscriptHistoryContext.Provider
                     value={transcriptHistoryValue}
                   >
-                    {children}
+                    <DaemonTurnIndexContext.Provider value={turnIndexValue}>
+                      <DaemonTranscriptLedgerContext.Provider
+                        value={transcriptLedgerValue}
+                      >
+                        {children}
+                      </DaemonTranscriptLedgerContext.Provider>
+                    </DaemonTurnIndexContext.Provider>
                   </DaemonTranscriptHistoryContext.Provider>
                 </DaemonSessionOwnerGuardContext.Provider>
               </DaemonActionsContext.Provider>
@@ -4752,6 +5529,29 @@ export function useDaemonTranscriptHistory(): DaemonTranscriptHistory {
     );
   }
   return history;
+}
+
+/**
+ * Session-wide turn-index state for turn navigation. Returns undefined
+ * whenever random access is unavailable for the attached session — the
+ * daemon did not advertise `session_turn_navigation`, the store has not
+ * been created yet, or the state describes another session — so consumers
+ * must keep a loaded-messages fallback.
+ */
+export function useDaemonTurnIndex(): SessionTurnIndexState | undefined {
+  return useContext(DaemonTurnIndexContext);
+}
+
+/**
+ * Read model over the transcript page ledger: which block ranges arrived as
+ * which fetched page, plus the explicit gaps between them. Undefined while
+ * no session is attached. Phase 3's render path interleaves gap sentinel
+ * rows from this; Phase 2 consumers are the window actions and tests.
+ */
+export function useDaemonTranscriptLedger():
+  | DaemonTranscriptLedgerView
+  | undefined {
+  return useContext(DaemonTranscriptLedgerContext);
 }
 
 export function useDaemonTranscriptState(): DaemonTranscriptState {

@@ -1023,8 +1023,53 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   synchronizeToolGroupSourceIdentity(messages);
+  applyPersistedIdentity(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
+}
+
+/**
+ * Carry the blocks' persisted identity (`sourceRecordIds` / `promptId`)
+ * onto the rendered messages. Runs after tool-group identity
+ * synchronization so folded blocks contribute their record ids through the
+ * unioned `sourceBlockIds`, and before `stripSourceIdentity` so the
+ * persisted identity survives regardless of `includeSourceIdentity`.
+ */
+function applyPersistedIdentity(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const identityByBlockId = new Map<
+    string,
+    { sourceRecordIds?: readonly string[]; promptId?: string }
+  >();
+  for (const block of blocks) {
+    if (block.sourceRecordIds === undefined && block.promptId === undefined) {
+      continue;
+    }
+    identityByBlockId.set(block.id, {
+      sourceRecordIds: block.sourceRecordIds,
+      promptId: block.promptId,
+    });
+  }
+  if (identityByBlockId.size === 0) return;
+  for (const message of messages) {
+    const recordIds: string[] = [];
+    const seen = new Set<string>();
+    let promptId: string | undefined;
+    for (const blockId of message.sourceBlockIds ?? []) {
+      const identity = identityByBlockId.get(blockId);
+      if (identity === undefined) continue;
+      for (const recordId of identity.sourceRecordIds ?? []) {
+        if (seen.has(recordId)) continue;
+        seen.add(recordId);
+        recordIds.push(recordId);
+      }
+      promptId ??= identity.promptId;
+    }
+    if (recordIds.length > 0) message.sourceRecordIds = recordIds;
+    if (promptId !== undefined) message.promptId = promptId;
+  }
 }
 
 function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {

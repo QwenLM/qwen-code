@@ -4861,3 +4861,67 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentB!.subContent).toBeUndefined();
   });
 });
+
+describe('Persisted identity on messages', () => {
+  it('carries sourceRecordIds and promptId from the backing block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('u1', 'user', 'hello', 1, false, {
+        sourceRecordIds: ['rec-1'],
+        promptId: 'prompt-1',
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'user',
+      sourceRecordIds: ['rec-1'],
+      promptId: 'prompt-1',
+    });
+  });
+
+  it('survives source-identity stripping', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock('u1', 'user', 'hello', 1, false, {
+          sourceRecordIds: ['rec-1'],
+          promptId: 'prompt-1',
+        }),
+      ],
+      { includeSourceIdentity: false },
+    );
+
+    expect(messages[0]).not.toHaveProperty('sourceBlockIds');
+    expect(messages[0]).toMatchObject({
+      sourceRecordIds: ['rec-1'],
+      promptId: 'prompt-1',
+    });
+  });
+
+  it('omits both fields when the block carries no persisted identity', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('u1', 'user', 'hello', 1),
+    ]);
+
+    expect(messages[0]).not.toHaveProperty('sourceRecordIds');
+    expect(messages[0]).not.toHaveProperty('promptId');
+  });
+
+  it('unions record ids across blocks merged into one message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'part one ', 1, false, {
+        sourceRecordIds: ['rec-1'],
+        promptId: 'prompt-1',
+      }),
+      textBlock('a2', 'assistant', 'part two', 2, false, {
+        sourceRecordIds: ['rec-2'],
+        promptId: 'prompt-1',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      sourceRecordIds: ['rec-1', 'rec-2'],
+      promptId: 'prompt-1',
+    });
+  });
+});

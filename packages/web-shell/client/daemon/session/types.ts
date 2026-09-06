@@ -407,6 +407,37 @@ export interface SubmitPromptResult {
   removedAfterAbort?: true;
 }
 
+/** Failure surface shared by the anchored-open and continuation actions. */
+export type TranscriptWindowFailure = {
+  ok: false;
+  reason:
+    | 'unsupported'
+    | 'invalid_anchor'
+    | 'snapshot_gone'
+    | 'page_too_large'
+    | 'window_full'
+    | 'window_impossible'
+    | 'unavailable';
+};
+
+export type OpenTranscriptAtTurnResult =
+  | { ok: true; targetRecordId: string }
+  | TranscriptWindowFailure;
+
+export type ContinueTranscriptWindowResult =
+  | { ok: true }
+  | TranscriptWindowFailure;
+
+/**
+ * Actions implemented by the `createDaemonSessionActions` factory. The
+ * provider layers the transcript-window actions (which need provider-owned
+ * stores) on top to form the full `DaemonSessionActions`.
+ */
+export type DaemonSessionCoreActions = Omit<
+  DaemonSessionActions,
+  'openTranscriptAtTurn' | 'continueTranscriptOlder' | 'continueTranscriptNewer'
+>;
+
 export interface DaemonSessionActions {
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
   /**
@@ -458,6 +489,30 @@ export interface DaemonSessionActions {
     signal: AbortSignal,
     options?: { replaySource?: 'configured' | 'memory' },
   ): Promise<void>;
+  /**
+   * Open a random-access transcript window at a persisted navigation turn
+   * (Phase 2 of Web Shell turn navigation; the rail lands in Phase 3). The
+   * anchored page is admitted without disturbing the connected live tail.
+   * The failure reasons are deliberately distinct: `page_too_large` is the
+   * daemon's whole-response refusal, `window_full` is a retryable client
+   * window rejection, `window_impossible` is terminal for that turn.
+   */
+  openTranscriptAtTurn(turnId: string): Promise<OpenTranscriptAtTurnResult>;
+  /**
+   * Continue a ledger page in the older direction: `beforeRecordId` on the
+   * entry's first persisted record, sent with the entry's own snapshot.
+   */
+  continueTranscriptOlder(
+    entryId: string,
+  ): Promise<ContinueTranscriptWindowResult>;
+  /**
+   * Continue a ledger page in the newer direction: the entry's stored
+   * `nextCursor`, sent alone (the signed cursor carries its frozen
+   * binding), toward the same frozen tail.
+   */
+  continueTranscriptNewer(
+    entryId: string,
+  ): Promise<ContinueTranscriptWindowResult>;
   resumeSession(
     sessionId: string,
     options?: {

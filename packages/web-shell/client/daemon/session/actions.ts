@@ -78,7 +78,7 @@ import type {
   DaemonNoticeOperation,
   DaemonPromptFile,
   DaemonPromptStatus,
-  DaemonSessionActions,
+  DaemonSessionCoreActions,
   SettledPrompt,
   PendingSessionLoad,
   DaemonProductSessionContext,
@@ -213,6 +213,11 @@ export interface CreateDaemonSessionActionsArgs {
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
   clearLiveJournalRepair?: () => void;
+  /**
+   * Fired when a prompt is admitted to the session (daemon-accepted). Used
+   * by the provider to append a turn-index live provisional entry.
+   */
+  onPromptAdmitted?: (info: { promptId: string; label: string }) => void;
 }
 
 export function getWorkspaceModelsAfterSessionClear(
@@ -357,7 +362,8 @@ export function createDaemonSessionActions({
   setAttachSessionNonce,
   setNewSessionNonce,
   clearLiveJournalRepair = () => undefined,
-}: CreateDaemonSessionActionsArgs): DaemonSessionActions {
+  onPromptAdmitted,
+}: CreateDaemonSessionActionsArgs): DaemonSessionCoreActions {
   const silentHardFailureNoticeKeys = new Set<string>();
   let noticeOwner = sessionRef.current;
   let reasoningActionToken = 0;
@@ -984,6 +990,7 @@ export function createDaemonSessionActions({
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.();
+        onPromptAdmitted?.({ promptId: accepted.promptId, label: text });
         return await waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,
@@ -1154,6 +1161,7 @@ export function createDaemonSessionActions({
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         );
       }
+      onPromptAdmitted?.({ promptId: accepted.promptId, label: text });
       return { promptId: accepted.promptId };
     },
 
