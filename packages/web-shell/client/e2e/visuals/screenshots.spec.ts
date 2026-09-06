@@ -5,7 +5,7 @@
  */
 
 import { devices, expect, test } from '@playwright/test';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
+import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -938,9 +938,33 @@ for (const theme of THEMES) {
       // turn this into a cryptic "not visible" failure.
       const primaryCwd = '/tmp/qwen-web-shell-e2e';
       const primarySessionName = 'Run auth migration';
+      const secondaryCwd = '/tmp/qwen-api-service';
+      const secondarySessionName = 'Audit API retries';
+      const sessions = [
+        {
+          sessionId: 'workspace-primary-session',
+          workspaceCwd: primaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: primarySessionName,
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'workspace-secondary-session',
+          workspaceCwd: secondaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: secondarySessionName,
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ] satisfies DaemonSessionSummary[];
       const scenario = createWebShellDaemonScenario({
         workspaceCwd: primaryCwd,
         displayName: primarySessionName,
+        sessions,
+        sessionId: 'workspace-primary-session',
         capabilities: {
           workspaces: [
             {
@@ -951,7 +975,7 @@ for (const theme of THEMES) {
             },
             {
               id: 'ws-api',
-              cwd: '/tmp/qwen-api-service',
+              cwd: secondaryCwd,
               primary: false,
               trusted: true,
             },
@@ -976,12 +1000,15 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
+      const sessionRow = (name: string) =>
+        sidebar.locator('[data-web-shell-session-title]').filter({
+          hasText: name,
+        });
+      await expect(sessionRow(primarySessionName)).toHaveCount(1);
+      await expect(sessionRow(secondarySessionName)).toHaveCount(1);
       await expect(
-        sidebar.getByRole('button', {
-          name: primarySessionName,
-          exact: true,
-        }),
-      ).toBeVisible();
+        sessionRow(primarySessionName).locator('..'),
+      ).toHaveAttribute('aria-current', 'page');
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
