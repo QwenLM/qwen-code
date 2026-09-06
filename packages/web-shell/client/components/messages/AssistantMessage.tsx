@@ -5,6 +5,10 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
 } from '../../customization';
 import { useI18n } from '../../i18n';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { formatTimestamp } from '../MessageTimestamp';
 import {
   warnClipboardWriteFailure,
@@ -39,10 +43,12 @@ export const AssistantMessage = memo(function AssistantMessage({
   customFooterInfo,
 }: AssistantMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
-  const showFooter = !!content && !isStreaming && showFooterActions;
+  const showFooter =
+    !!content && !isStreaming && showFooterActions && !documentMode;
   const customFooter = useMemo(
     () =>
       customFooterInfo
@@ -226,6 +232,7 @@ function cacheThinkingTranslation(
 interface ThinkingSummaryHeaderProps {
   thinkingActive: boolean;
   thinkingExpanded: boolean;
+  documentMode: boolean;
   /** Pre-localized running/done label, including the elapsed duration. */
   summaryText: string;
   /**
@@ -247,6 +254,7 @@ interface ThinkingSummaryHeaderProps {
 const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
   thinkingActive,
   thinkingExpanded,
+  documentMode,
   summaryText,
   translateContent,
   showTranslateButton,
@@ -260,16 +268,27 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
         thinkingExpanded ? ` ${styles.thinkingHeaderExpanded}` : ''
       }`}
       onClick={(event) => {
-        if (event.currentTarget.contains(event.target as Node)) {
+        if (
+          !documentMode &&
+          event.currentTarget.contains(event.target as Node)
+        ) {
           onToggle();
         }
       }}
     >
       <button
         type="button"
+        disabled={documentMode}
+        tabIndex={documentMode ? -1 : undefined}
         className={styles.thinkingSummary}
-        aria-expanded={thinkingExpanded}
-        title={thinkingExpanded ? t('thinking.collapse') : t('thinking.expand')}
+        aria-expanded={documentMode ? undefined : thinkingExpanded}
+        title={
+          documentMode
+            ? undefined
+            : thinkingExpanded
+              ? t('thinking.collapse')
+              : t('thinking.expand')
+        }
       >
         <span className={styles.thinkingSummaryIcon} aria-hidden="true">
           <ThinkingDoneIcon />
@@ -313,7 +332,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   generateContent,
 }: ThinkingMessageProps) {
   const { language, t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
   const sawActiveRef = useRef(thinkingActive);
@@ -357,8 +380,8 @@ export const ThinkingMessage = memo(function ThinkingMessage({
       : '';
 
   const handleToggle = useCallback(() => {
-    setThinkingExpanded((v) => !v);
-  }, []);
+    if (!documentMode) setThinkingExpanded((v) => !v);
+  }, [documentMode]);
 
   const summaryText = t(
     thinkingSummaryKey,
@@ -376,10 +399,12 @@ export const ThinkingMessage = memo(function ThinkingMessage({
           <div className={styles.thinkingBody}>
             <ThinkingSummaryHeader
               thinkingActive={thinkingActive}
-              thinkingExpanded={thinkingExpanded}
+              thinkingExpanded={showThinking}
+              documentMode={documentMode}
               summaryText={summaryText}
               translateContent={thinkingActive ? undefined : content}
               showTranslateButton={
+                !documentMode &&
                 language === 'zh-CN' &&
                 !thinkingActive &&
                 generateContent !== undefined
@@ -387,7 +412,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               generateContent={generateContent}
               onToggle={handleToggle}
             />
-            {thinkingExpanded && (
+            {showThinking && (
               <div className={styles.thinkingExpandedClip}>
                 <div className={styles.thinkingExpandedInner}>
                   <div className={styles.thinkingExpandedWrap}>

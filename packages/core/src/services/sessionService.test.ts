@@ -46,7 +46,7 @@ import { SessionTranscriptChangedError } from './session-writer-lease.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import { readSessionPrs, writeSessionPrs } from './session-pr-service.js';
+import { moveSessionPrSidecar } from './session-pr-service.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 
 vi.mock('./usageHistoryService.js', () => ({
@@ -60,11 +60,13 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
-// Keep the real merge logic; only the sidecar I/O is controlled per test.
+// The archive-transition move is mocked here: it runs real filesystem
+// locks, which this suite's mocked-fs environment cannot host — its
+// semantics (rename, split-pair merge, lock coverage) are pinned in
+// session-pr-service.test.ts instead.
 vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
-  readSessionPrs: vi.fn(),
-  writeSessionPrs: vi.fn(),
+  moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('SessionService', () => {
@@ -2724,42 +2726,25 @@ describe('SessionService', () => {
 
     it('should move the pr sidecar into the archive directory', async () => {
       mockActiveSessionOnly();
-      existsSyncSpy.mockImplementation((filePath) =>
-        filePath.toString().endsWith(`/chats/${sessionIdA}.pr.json`),
-      );
 
       const result = await sessionService.archiveSessions([sessionIdA]);
 
       expect(result.archived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(renameSyncSpy).toHaveBeenCalledWith(
+      // The move runs through the locked service function: the session
+      // child's shell binder may hold a pending write on either half.
+      expect(moveSessionPrSidecar).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        undefined,
       );
     });
 
-    it('should merge split pr sidecars on archive instead of wedging', async () => {
+    it('should warn but still archive when the pr sidecar move fails', async () => {
       mockActiveSessionOnly();
-      existsSyncSpy.mockImplementation((filePath) => {
-        const value = filePath.toString();
-        return (
-          value.endsWith(`/chats/${sessionIdA}.pr.json`) ||
-          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
-        );
-      });
-      const archivedEntry = {
-        number: 100,
-        url: 'https://github.com/o/r/pull/100',
-        createdAt: '2026-08-20T00:00:00.000Z',
-      };
-      const activeEntry = {
-        number: 101,
-        url: 'https://github.com/o/r/pull/101',
-        createdAt: '2026-08-20T01:00:00.000Z',
-      };
-      vi.mocked(readSessionPrs)
-        .mockResolvedValueOnce([archivedEntry])
-        .mockResolvedValueOnce([activeEntry]);
+      vi.mocked(moveSessionPrSidecar).mockRejectedValueOnce(
+        new Error('pr move failed'),
+      );
       const warnings: string[] = [];
       const service = new SessionService('/test/project/root', {
         onWarning: (message) => warnings.push(message),
@@ -2769,14 +2754,11 @@ describe('SessionService', () => {
 
       expect(result.archived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(warnings).toEqual([]);
-      expect(writeSessionPrs).toHaveBeenCalledWith(
-        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
-        [archivedEntry, activeEntry],
-      );
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
-      );
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move pr sidecar'),
+        ),
+      ).toBe(true);
     });
 
     it('passes cleanup ownership to an asynchronous pr-sidecar commit', async () => {
@@ -2788,14 +2770,6 @@ describe('SessionService', () => {
           value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
         );
       });
-      const entry = {
-        number: 100,
-        url: 'https://github.com/o/r/pull/100',
-        createdAt: '2026-08-20T00:00:00.000Z',
-      };
-      vi.mocked(readSessionPrs)
-        .mockResolvedValueOnce([entry])
-        .mockResolvedValueOnce([entry]);
       const assertCanMutate = vi.fn();
       const assertCleanupOwned = vi.fn();
 
@@ -2806,10 +2780,12 @@ describe('SessionService', () => {
 
       expect(result.errors).toEqual([]);
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(writeSessionPrs).toHaveBeenCalledWith(
+      // The locked sidecar move carries the cleanup-ownership fence so an
+      // asynchronous commit cannot land after ownership was lost.
+      expect(moveSessionPrSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
-        [entry],
-        { assertCanCommit: assertCleanupOwned },
+        assertCleanupOwned,
       );
     });
 
@@ -2822,24 +2798,11 @@ describe('SessionService', () => {
           value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
         );
       });
-      const entry = {
-        number: 100,
-        url: 'https://github.com/o/r/pull/100',
-        createdAt: '2026-08-20T00:00:00.000Z',
-      };
-      vi.mocked(readSessionPrs).mockResolvedValue([entry]);
-      vi.mocked(writeSessionPrs).mockImplementation(
-        async (_filePath, _entries, options) => {
-          options?.assertCanCommit?.();
-        },
-      );
+      // The locked move runs the ownership fence inside the lock; a loss
+      // surfaces as its rejection and must not be downgraded to a warning.
       const ownershipLost = new SessionWriterLostError();
-      const assertCleanupOwned = vi
-        .fn()
-        .mockImplementationOnce(() => undefined)
-        .mockImplementation(() => {
-          throw ownershipLost;
-        });
+      vi.mocked(moveSessionPrSidecar).mockRejectedValueOnce(ownershipLost);
+      const assertCleanupOwned = vi.fn();
 
       const result = await sessionService.archiveSessions([sessionIdA], {
         assertCanMutate: vi.fn(),
@@ -2847,7 +2810,11 @@ describe('SessionService', () => {
       });
 
       expect(result.errors[0]?.error).toBe(ownershipLost);
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(2);
+      expect(moveSessionPrSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        assertCleanupOwned,
+      );
     });
 
     it('should archive JSONL and warn when archiving worktree sidecar fails', async () => {
@@ -3249,47 +3216,23 @@ describe('SessionService', () => {
 
     it('should move the pr sidecar back to the active directory', async () => {
       mockArchivedSessionOnly();
-      existsSyncSpy.mockImplementation((filePath) =>
-        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.pr.json`),
-      );
 
       const result = await sessionService.unarchiveSessions([sessionIdA]);
 
       expect(result.unarchived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(renameSyncSpy).toHaveBeenCalledWith(
+      expect(moveSessionPrSidecar).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
         expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        undefined,
       );
     });
 
-    it('should merge a split pr sidecar pair on unarchive, keeping the full history', async () => {
+    it('should warn but still unarchive when the pr sidecar move fails', async () => {
       mockArchivedSessionOnly();
-      existsSyncSpy.mockImplementation((filePath) => {
-        const value = filePath.toString();
-        return (
-          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`) ||
-          value.endsWith(`/chats/${sessionIdA}.pr.json`)
-        );
-      });
-      const olderOne = {
-        number: 100,
-        url: 'https://github.com/o/r/pull/100',
-        createdAt: '2026-08-20T00:00:00.000Z',
-      };
-      const olderTwo = {
-        number: 101,
-        url: 'https://github.com/o/r/pull/101',
-        createdAt: '2026-08-20T00:30:00.000Z',
-      };
-      const orphan = {
-        number: 102,
-        url: 'https://github.com/o/r/pull/102',
-        createdAt: '2026-08-20T01:00:00.000Z',
-      };
-      vi.mocked(readSessionPrs)
-        .mockResolvedValueOnce([orphan])
-        .mockResolvedValueOnce([olderOne, olderTwo]);
+      vi.mocked(moveSessionPrSidecar).mockRejectedValueOnce(
+        new Error('pr move failed'),
+      );
       const warnings: string[] = [];
       const service = new SessionService('/test/project/root', {
         onWarning: (message) => warnings.push(message),
@@ -3299,14 +3242,11 @@ describe('SessionService', () => {
 
       expect(result.unarchived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(warnings).toEqual([]);
-      expect(writeSessionPrs).toHaveBeenCalledWith(
-        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
-        [olderOne, olderTwo, orphan],
-      );
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
-      );
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move pr sidecar'),
+        ),
+      ).toBe(true);
     });
 
     it('should unarchive known archived sessions', async () => {

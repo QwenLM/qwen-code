@@ -22,15 +22,15 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
+import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   SessionService,
-  buildSessionRecoveryPlan,
   computeUniqueBranchTitle,
-  SessionStartSource,
-  type ChatRecord,
-  type Config,
-  type ResumedSessionData,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type { ResumedSessionData } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -141,13 +141,6 @@ export async function handleResumeSession(
     if (!sessionData) {
       // Nothing was replayed — close this attempt's unarmed transaction.
       config.getLlmClient()?.commitTelemetrySwap?.();
-      host.addItem(
-        {
-          type: MessageType.ERROR,
-          text: `Session ${sessionId} could not be loaded.`,
-        },
-        Date.now(),
-      );
       return;
     }
     const customTitle = sessionService.getSessionTitle(sessionId);
@@ -194,7 +187,6 @@ export async function handleResumeSession(
     // 2. UI swap. The commit point is the UI-side session re-key: from here
     //    on a failure must not roll core back OR undo the telemetry replay.
     host.startNewSession(sessionId);
-    uiSwapped = true;
     host.setSessionName(customTitle ?? null);
     host.clearPendingState();
     host.clearItems();
@@ -206,6 +198,7 @@ export async function handleResumeSession(
         Date.now(),
       );
     }
+    uiSwapped = true;
     config.getLlmClient()?.commitTelemetrySwap?.();
   } catch (error) {
     if (coreSwapped && !uiSwapped) {
@@ -365,11 +358,11 @@ export async function handleBranchSession(
     // 8. UI swap.
     const uiHistoryItems = buildUiHistoryItems(resumed, host);
     host.startNewSession(newSessionId);
-    uiSwapped = true;
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
     host.resetTranscript(resumeEventsFromSession(resumed, config));
+    uiSwapped = true;
     resetBackgroundStateForSessionSwitch(config);
     // The UI re-key commits the swap: from here on a failure keeps the
     // replay — it belongs to the session the user is on.

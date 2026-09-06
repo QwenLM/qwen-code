@@ -11,6 +11,7 @@ import {
   deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
+  installSessionWorkflowRevisionWriteThrough,
   type Config,
 } from '../../config/config.js';
 import {
@@ -969,6 +970,10 @@ async function runOverridePath(
     effectiveContext = deriveWorktreeConfig(config, worktreeIsolation.path, {
       customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
     });
+    // Session-global Session Workflow revision state must not shadow on
+    // the dir-scoped wrapper (see
+    // installSessionWorkflowRevisionWriteThrough).
+    installSessionWorkflowRevisionWriteThrough(effectiveContext, config);
   } else if (opts.workingDir !== undefined) {
     if (
       typeof opts.workingDir !== 'string' ||
@@ -999,6 +1004,7 @@ async function runOverridePath(
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {
       customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
     });
+    installSessionWorkflowRevisionWriteThrough(effectiveContext, config);
   }
 
   if (effectiveContext !== config) {
@@ -1588,6 +1594,12 @@ async function createSchemaConfigOverride(
   schema: Record<string, unknown>,
 ): Promise<Config> {
   const override = deriveConfig(base);
+  // Same session-global revision contract as the dir-scoped dispatch
+  // wrappers — the schema wrapper is the outermost layer when both
+  // apply, so its write-through must also reach the wrapped Config
+  // (which may itself be a wrapper; the chain bottoms out at the
+  // root Config).
+  installSessionWorkflowRevisionWriteThrough(override, base);
   await rebuildToolRegistryOnOverride(override, base);
   const registry = override.getToolRegistry();
   registry.registerTool(new SyntheticOutputTool(schema));

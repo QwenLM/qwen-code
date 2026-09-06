@@ -5,7 +5,7 @@
  */
 
 import { devices, expect, test } from '@playwright/test';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
+import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -82,6 +82,67 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`usage-limited goal status`, async ({ page }, testInfo) => {
+      // Seed the compatibility card together with its canonical V2 state, as
+      // emitted by both live goal updates and transcript replay.
+      const usageLimitedGoalEvent: DaemonEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-visual-usage-limited',
+                  revision: 2,
+                  objective: 'Finish the evaluation suite',
+                  status: 'usage_limited',
+                  limitKind: 'token_budget',
+                  evidenceCursor: { recordId: 'goal-visual-record' },
+                  turnCount: 4,
+                  activeTimeMs: 5000,
+                  tokensUsed: 1000,
+                  createdAt: 1234,
+                  updatedAt: 2345,
+                  lastReason: 'Token budget reached',
+                },
+              },
+              goalStatus: {
+                kind: 'aborted',
+                condition: 'Finish the evaluation suite',
+                iterations: 4,
+                durationMs: 5000,
+                lastReason: 'Token budget reached',
+              },
+            },
+          },
+        },
+      };
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Finish the evaluation suite.', { id: 1 }),
+          usageLimitedGoalEvent,
+          turnCompleteEvent('prompt-goal-usage-limited', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).toContainText('Token budget reached');
+      await captureScreenshot(page, `goal-usage-limited-${theme}`);
     });
 
     test(`terminal turn error`, async ({ browser, page }, testInfo) => {
@@ -877,9 +938,33 @@ for (const theme of THEMES) {
       // turn this into a cryptic "not visible" failure.
       const primaryCwd = '/tmp/qwen-web-shell-e2e';
       const primarySessionName = 'Run auth migration';
+      const secondaryCwd = '/tmp/qwen-api-service';
+      const secondarySessionName = 'Audit API retries';
+      const sessions = [
+        {
+          sessionId: 'workspace-primary-session',
+          workspaceCwd: primaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: primarySessionName,
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'workspace-secondary-session',
+          workspaceCwd: secondaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: secondarySessionName,
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ] satisfies DaemonSessionSummary[];
       const scenario = createWebShellDaemonScenario({
         workspaceCwd: primaryCwd,
         displayName: primarySessionName,
+        sessions,
+        sessionId: 'workspace-primary-session',
         capabilities: {
           workspaces: [
             {
@@ -890,7 +975,7 @@ for (const theme of THEMES) {
             },
             {
               id: 'ws-api',
-              cwd: '/tmp/qwen-api-service',
+              cwd: secondaryCwd,
               primary: false,
               trusted: true,
             },
@@ -915,12 +1000,15 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
+      const sessionRow = (name: string) =>
+        sidebar.locator('[data-web-shell-session-title]').filter({
+          hasText: name,
+        });
+      await expect(sessionRow(primarySessionName)).toHaveCount(1);
+      await expect(sessionRow(secondarySessionName)).toHaveCount(1);
       await expect(
-        sidebar.getByRole('button', {
-          name: primarySessionName,
-          exact: true,
-        }),
-      ).toBeVisible();
+        sessionRow(primarySessionName).locator('..'),
+      ).toHaveAttribute('aria-current', 'page');
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 

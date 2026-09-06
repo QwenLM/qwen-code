@@ -20,7 +20,10 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SESSION_PR_URL_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -2185,7 +2188,9 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
-   * `qwen/notify/session/terminal-sequence`, and
+   * `qwen/notify/session/terminal-sequence`,
+   * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
+   * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
@@ -2433,6 +2438,50 @@ export class BridgeClient implements Client {
       } catch {
         /* bus already closed */
       }
+      return;
+    }
+    if (method === 'qwen/notify/session/pr-binding') {
+      // The child persists the PR sidecar itself (the daemon never sees the
+      // write); this notification only carries the catalog-clock mark so
+      // version-watching clients refetch the catalog that now includes the
+      // binding — the same propagation automatic title updates use. Validate
+      // the payload anyway: sessionId becomes a log/lookup key and the url a
+      // rendered link target on other consumers of this channel.
+      const sessionId = params['sessionId'];
+      const pr = params['pr'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        pr === null ||
+        typeof pr !== 'object' ||
+        Array.isArray(pr)
+      ) {
+        return;
+      }
+      const record = pr as Record<string, unknown>;
+      const number = record['number'];
+      const url = record['url'];
+      if (
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length === 0 ||
+        url.length > SESSION_PR_URL_MAX_LENGTH ||
+        !/^https?:\/\//i.test(url) ||
+        // Mirrors the bridge's hasControlCharacter: the url lands in an
+        // audit line, so control characters would forge log lines.
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        })
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
       return;
     }
     if (method === 'qwen/notify/session/recording-degraded') {

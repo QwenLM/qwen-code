@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
 import { GoogleGenAI } from '@google/genai';
+import type { Config } from '../../config/config.js';
 
 const mockReportLlmRequest = vi.hoisted(() => vi.fn());
 const mockReportLlmResponse = vi.hoisted(() => vi.fn());
@@ -111,6 +112,207 @@ describe('LlmContentGenerator', () => {
       expectedResponse,
     );
     expect(response).toBe(expectedResponse);
+  });
+
+  it('adds the current session ID to Routify Gemini requests', async () => {
+    const getSessionId = vi.fn().mockReturnValue('session-1');
+    const cliConfig = {
+      getSessionId,
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: {
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+        },
+      },
+      {
+        model: 'gemini-1.5-flash',
+        baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+      },
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-1',
+    );
+    getSessionId.mockReturnValue('session-2');
+    await sessionGenerator.generateContent(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-2',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions
+        .headers,
+    ).toEqual({ session_id: 'session-1' });
+    expect(
+      googleGenAI.models.generateContent.mock.calls[1][0].config.httpOptions
+        .headers,
+    ).toEqual({ session_id: 'session-2' });
+  });
+
+  it('uses the constructor base URL for Gemini session ID injection', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: {
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+        },
+      },
+      undefined,
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions
+        .headers,
+    ).toEqual({ session_id: 'session-1' });
+  });
+
+  it('does not use a fallback base URL over the constructor destination', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: { baseUrl: 'https://generativelanguage.googleapis.com' },
+      },
+      {
+        model: 'gemini-1.5-flash',
+        baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+      },
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions,
+    ).toBeUndefined();
+  });
+
+  it('uses a non-Routify request destination over a Routify constructor destination', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: {
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+        },
+      },
+      undefined,
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      {
+        model: 'gemini-1.5-flash',
+        contents: [],
+        config: {
+          httpOptions: {
+            baseUrl: 'https://generativelanguage.googleapis.com',
+            headers: { 'X-Request': 'request-value' },
+          },
+        },
+      },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions,
+    ).toEqual({
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      headers: { 'X-Request': 'request-value' },
+    });
+  });
+
+  it('injects alongside request headers for a request-level Routify destination', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: { baseUrl: 'https://generativelanguage.googleapis.com' },
+      },
+      undefined,
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      {
+        model: 'gemini-1.5-flash',
+        contents: [],
+        config: {
+          httpOptions: {
+            baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+            headers: { 'X-Request': 'request-value' },
+          },
+        },
+      },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions,
+    ).toEqual({
+      baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+      headers: {
+        'X-Request': 'request-value',
+        session_id: 'session-1',
+      },
+    });
+  });
+
+  it('does not infer the SDK destination from content generator config', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      { apiKey: 'test-api-key' },
+      {
+        model: 'gemini-1.5-flash',
+        baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+      },
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions,
+    ).toBeUndefined();
   });
 
   it('passes ordered multi-part startup reminder content through unchanged', async () => {
@@ -218,6 +420,37 @@ describe('LlmContentGenerator', () => {
 
     expect(mockGoogleGenAI.models.embedContent).toHaveBeenCalledWith(request);
     expect(response).toBe(expectedResponse);
+  });
+
+  it('adds the current session ID to Routify embedding requests', async () => {
+    const cliConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+    const sessionGenerator = new LlmContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: {
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+        },
+      },
+      {
+        model: 'embedding-model',
+        baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+      },
+      cliConfig,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.embedContent.mockResolvedValue({ embeddings: [] });
+
+    await sessionGenerator.embedContent({
+      model: 'embedding-model',
+      contents: [],
+    });
+
+    expect(
+      googleGenAI.models.embedContent.mock.calls[0][0].config.httpOptions
+        .headers,
+    ).toEqual({ session_id: 'session-1' });
   });
 
   it('should prioritize contentGeneratorConfig samplingParams over request config', async () => {

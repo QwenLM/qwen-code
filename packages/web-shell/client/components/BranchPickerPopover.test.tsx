@@ -86,8 +86,9 @@ const { BranchPickerPopover, deriveActionHints, listingContradictsStatus } =
   await import('./BranchPickerPopover');
 
 // A branch with an upstream it is behind on, so the Update Project row is
-// enabled (the action hints disable it without an upstream).
-const BRANCHES = {
+// enabled (the action hints disable it without an upstream). Annotated with
+// the wire type so overrides (e.g. push-side fields) typecheck.
+const BRANCHES: DaemonGitBranchesResult = {
   v: 1,
   workspaceCwd: '/repo',
   available: true,
@@ -98,6 +99,11 @@ const BRANCHES = {
       upstream: 'origin/main',
       ahead: 0,
       behind: 1,
+      pushTarget: 'origin/main',
+      pushAhead: 0,
+      pushBehind: 1,
+      commitDate: 0,
+      commitSubject: '',
     },
   ],
   remote: [],
@@ -187,8 +193,10 @@ afterEach(() => {
 });
 workspaceGit.mockRejectedValue(new Error('no status'));
 
-function mountWithBranches(): void {
-  workspaceGitBranches.mockResolvedValue(BRANCHES);
+function mountWithBranches(
+  branchesResult: DaemonGitBranchesResult = BRANCHES,
+): void {
+  workspaceGitBranches.mockResolvedValue(branchesResult);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -430,7 +438,22 @@ describe('BranchPickerPopover actions', () => {
       success: true,
       output: 'pushed to origin',
     });
-    mountWithBranches();
+    // Triangular fixture: behind the tracking upstream (so a real pull can
+    // fail with the 409 that raises the panel) while ahead of a *different*
+    // push remote — real git counts both atoms against one ref when they
+    // name the same destination, so only distinct refs can disagree.
+    mountWithBranches({
+      ...BRANCHES,
+      local: [
+        {
+          ...BRANCHES.local[0],
+          upstream: 'upstream/main',
+          pushTarget: 'origin/main',
+          pushAhead: 1,
+          pushBehind: 0,
+        },
+      ],
+    });
     await flush();
 
     clickButton('Update Project');
@@ -644,6 +667,9 @@ describe('BranchPickerPopover actions', () => {
       'cannot discard changes: the workspace is a subdirectory',
     );
     expect(footerText()).toContain('Stash Changes and Update');
+    // The daemon declared discarding impossible for this workspace; the
+    // action is gone rather than looping the same refusal.
+    expect(footerText()).not.toContain('Discard Changes and Update');
     expect(footerText()).not.toContain('Discard and Update');
   });
 
@@ -747,7 +773,7 @@ describe('deriveActionHints', () => {
   it('dims pull/push/commit when tracking upstream, in sync, and clean', () => {
     const h = deriveActionHints(
       tKey,
-      branches({ upstream: 'origin/main' }),
+      branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
       status(),
     );
     expect(h.pull).toEqual({
@@ -766,14 +792,24 @@ describe('deriveActionHints', () => {
     });
   });
 
-  it('shows behind count with upstream for a clean tree', () => {
+  it('warns on push, without disabling, when behind the destination', () => {
+    // The counts are a last-fetch snapshot and remote acceptance is not
+    // locally decidable (refspecs, forcing refspecs, staleness), so the row
+    // warns and stays clickable — git answers authoritatively on click.
     const h = deriveActionHints(
       tKey,
-      branches({ upstream: 'origin/main', behind: 3 }),
+      branches({
+        upstream: 'origin/main',
+        behind: 3,
+        pushTarget: 'origin/main',
+        pushBehind: 3,
+      }),
       status(),
     );
     expect(h.pull).toEqual({ text: '↓3 · origin/main', tone: 'info' });
     expect(h.pullDisabled).toBe(false);
+    expect(h.push).toEqual({ text: '↓3', tone: 'warning' });
+    expect(h.pushDisabled).toBe(false);
   });
 
   it('warns on pull when behind with uncommitted changes', () => {
@@ -821,24 +857,152 @@ describe('deriveActionHints', () => {
     expect(h.pushDisabled).toBe(false);
   });
 
+  it('reasons about the push target, not the upstream, when they differ', () => {
+    // Triangular (fork) workflow: behind the tracking upstream, ahead of the
+    // push remote — `git push` fast-forwards origin and succeeds.
+    const triangular = branches({
+      upstream: 'upstream/main',
+      behind: 3,
+      pushTarget: 'origin/main',
+      pushAhead: 2,
+      pushBehind: 0,
+    });
+    const h = deriveActionHints(tKey, triangular, status());
+    expect(h.pull).toEqual({ text: '↓3 · upstream/main', tone: 'info' });
+    expect(h.push).toEqual({ text: '↑2', tone: 'info' });
+    expect(h.pushDisabled).toBe(false);
+
+    // Diverged from the push target itself: warning with push-side counts,
+    // still clickable.
+    const diverged = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        behind: 0,
+        pushTarget: 'origin/main',
+        pushAhead: 1,
+        pushBehind: 1,
+      }),
+      status(),
+    );
+    expect(diverged.push).toEqual({
+      text: 'branchPicker.hint.aheadBehind:{"ahead":1,"behind":1}',
+      tone: 'warning',
+    });
+    expect(diverged.pushDisabled).toBe(false);
+
+    // Push side known and behind while the upstream is gone: the push-side
+    // warning shows even though `hasUpstream` is false.
+    const goneUpstream = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        upstreamGone: true,
+        pushTarget: 'origin/main',
+        pushAhead: 0,
+        pushBehind: 1,
+      }),
+      status(),
+    );
+    expect(goneUpstream.push).toEqual({ text: '↓1', tone: 'warning' });
+    expect(goneUpstream.pushDisabled).toBe(false);
+
+    // Gone upstream with a resolved, in-sync destination: the destination
+    // rules on its own, so this is "Nothing to push" and not the no-upstream
+    // branch's "Sets upstream on push".
+    const goneInSync = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        upstreamGone: true,
+        pushTarget: 'origin/main',
+        pushAhead: 0,
+        pushBehind: 0,
+      }),
+      status(),
+    );
+    expect(goneInSync.push).toEqual({
+      text: 'branchPicker.hint.nothingToPush',
+      tone: 'muted',
+    });
+  });
+
+  it('says nothing on push when git names no destination for a live upstream', () => {
+    // The shapes core reports as `upstream` set with no `pushTarget`:
+    // `push.default=simple` in a triangular repo, a `remote.<name>.push`
+    // refspec (Gerrit), an upstream whose name the branch does not match,
+    // and `push.default=nothing`. Git refuses some of those pushes outright
+    // and routes others where the listing cannot follow, so the row carries
+    // no hint and stays enabled rather than dress a pull-side count as a
+    // push-side one.
+    const triangular = deriveActionHints(
+      tKey,
+      branches({ upstream: 'upstream/main', behind: 3 }),
+      status(),
+    );
+    expect(triangular.push).toBeUndefined();
+    expect(triangular.pushDisabled).toBe(false);
+
+    const nameMismatch = deriveActionHints(
+      tKey,
+      branches({ upstream: 'origin/bar', ahead: 1 }),
+      status(),
+    );
+    expect(nameMismatch.push).toBeUndefined();
+    expect(nameMismatch.pushDisabled).toBe(false);
+  });
+
+  it('labels a missing push ref as branch creation, never "Nothing to push"', () => {
+    const h = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        behind: 2,
+        pushTarget: 'origin/feat',
+        pushGone: true,
+      }),
+      status(),
+    );
+    expect(h.push).toEqual({
+      text: 'branchPicker.hint.createsPushBranch:{"target":"origin/feat"}',
+      tone: 'info',
+    });
+    expect(h.pushDisabled).toBe(false);
+  });
+
   it('shows ahead count on push and warns when also behind', () => {
-    expect(
-      deriveActionHints(
-        tKey,
-        branches({ upstream: 'origin/main', ahead: 2 }),
-        status(),
-      ).push,
-    ).toEqual({ text: '↑2', tone: 'info' });
-    expect(
-      deriveActionHints(
-        tKey,
-        branches({ upstream: 'origin/main', ahead: 2, behind: 1 }),
-        status(),
-      ).push,
-    ).toEqual({
+    const ahead = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'origin/main',
+        ahead: 2,
+        pushTarget: 'origin/main',
+        pushAhead: 2,
+        pushBehind: 0,
+      }),
+      status(),
+    );
+    expect(ahead.push).toEqual({ text: '↑2', tone: 'info' });
+    // Only a detached HEAD is locally provable, so this stays clickable.
+    expect(ahead.pushDisabled).toBe(false);
+
+    const diverged = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'origin/main',
+        ahead: 2,
+        behind: 1,
+        pushTarget: 'origin/main',
+        pushAhead: 2,
+        pushBehind: 1,
+      }),
+      status(),
+    );
+    expect(diverged.push).toEqual({
       text: 'branchPicker.hint.aheadBehind:{"ahead":2,"behind":1}',
       tone: 'warning',
     });
+    expect(diverged.pushDisabled).toBe(false);
   });
 
   it('counts changes (entries, not files) for commit and calls out untracked ones', () => {
@@ -884,6 +1048,8 @@ describe('deriveActionHints', () => {
     expect(op.pull).toEqual({ text: 'git.operation.merge', tone: 'warning' });
     expect(op.pullDisabled).toBe(true);
     expect(op.push).toEqual({ text: 'git.operation.merge', tone: 'warning' });
+    // behind > 0, but mid-operation the behind count is in flux (the merge
+    // being concluded is what resolves it), so the row only warns.
     expect(op.pushDisabled).toBe(false);
 
     const conflict = deriveActionHints(
@@ -940,6 +1106,9 @@ describe('deriveActionHints', () => {
       status({ hasUpstream: true, behind: 4 }),
     );
     expect(h.pull?.text).toBe('↓4');
+    // No listing entry means no push-side atoms either, so the status
+    // counters are all there is: the row must not go silent here.
+    expect(h.push).toEqual({ text: '↓4', tone: 'warning' });
   });
 
   it('shows no hints at all when neither source is known', () => {
@@ -1004,7 +1173,7 @@ describe('BranchPickerPopover action hints', () => {
 
   it('dims every row on an in-sync clean tree', async () => {
     workspaceGitBranches.mockResolvedValue(
-      branches({ upstream: 'origin/main' }),
+      branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
     );
     setup();
     mount({ onOpenCommit: vi.fn(), status: status() });
@@ -1077,6 +1246,51 @@ describe('BranchPickerPopover action hints', () => {
       expect(btn?.disabled).toBe(true);
       expect(btn?.textContent).toContain('Rebasing');
     }
+  });
+
+  it('warns on a behind or diverged push row but keeps it clickable', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({
+        upstream: 'origin/main',
+        ahead: 1,
+        behind: 2,
+        pushTarget: 'origin/main',
+        pushAhead: 1,
+        pushBehind: 2,
+      }),
+    );
+    setup();
+    mount({ status: status() });
+    await flush();
+
+    const push = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-push"]',
+    );
+    expect(push?.disabled).toBe(false);
+    expect(
+      push
+        ?.querySelector('[data-testid="branch-picker-action-hint"]')
+        ?.getAttribute('data-tone'),
+    ).toBe('warning');
+    expect(push?.textContent).toContain('diverged');
+  });
+
+  it("breaks a computedAt tie in favor of the popover's own fetch", async () => {
+    // The caller's snapshot and the on-open fetch can carry the same stamp
+    // (the daemon dedupes concurrent computations); the fresher fetch wins.
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main' }),
+    );
+    workspaceGit.mockResolvedValue(status({ unstaged: 3, computedAt: 100 }));
+    setup();
+    mount({ onOpenCommit: vi.fn(), status: status({ computedAt: 100 }) });
+    await flush();
+
+    const commit = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-commit"]',
+    );
+    expect(commit?.textContent).toContain('3 changes');
+    expect(commit?.textContent).not.toContain('No changes');
   });
 
   it('keeps push clickable during a conflicted merge on a branch', async () => {
@@ -1219,6 +1433,193 @@ describe('BranchPickerPopover action hints', () => {
     });
     await flush();
     expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BranchPickerPopover post-failure refresh', () => {
+  function mountFresh(overrides: Parameters<typeof mount>[0] = {}): void {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mount({ status: status(), ...overrides });
+  }
+
+  function row(id: 'pull' | 'commit' | 'push'): HTMLButtonElement | null {
+    return document.body.querySelector<HTMLButtonElement>(
+      `[data-testid="branch-picker-${id}"]`,
+    );
+  }
+
+  it('re-fetches the listing when a pull fails, so the rows leave the pre-pull snapshot', async () => {
+    workspaceGitBranches
+      .mockResolvedValueOnce(
+        branches({
+          upstream: 'origin/main',
+          behind: 2,
+          pushTarget: 'origin/main',
+          pushBehind: 2,
+        }),
+      )
+      .mockResolvedValue(
+        branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
+      );
+    workspaceGitPull.mockRejectedValueOnce(new Error('fetch refused'));
+    mountFresh();
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('fetch refused');
+    // The refreshed listing must actually drive the rows: the pre-pull
+    // snapshot said behind 2 (pull ↓2, push warning ↓2); the re-fetched
+    // listing is in sync.
+    expect(row('pull')?.textContent).toContain('Up to date');
+    expect(row('pull')?.textContent).not.toContain('↓2');
+    expect(row('push')?.textContent).toContain('Nothing to push');
+  });
+
+  it('re-fetches the listing when a push is rejected, so the rows leave the pre-push snapshot', async () => {
+    workspaceGitBranches
+      .mockResolvedValueOnce(
+        branches({
+          upstream: 'origin/main',
+          pushTarget: 'origin/main',
+          pushAhead: 2,
+        }),
+      )
+      .mockResolvedValue(
+        branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
+      );
+    // The refresh re-reads the working tree too, so give the on-open status
+    // fetch nothing and the post-push one a dirty tree.
+    workspaceGit
+      .mockRejectedValueOnce(new Error('no status'))
+      .mockResolvedValue(status({ unstaged: 4, computedAt: 500 }));
+    workspaceGitPush.mockRejectedValueOnce(new Error('non-fast-forward'));
+    mountFresh({ onOpenCommit: vi.fn() });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+    expect(row('push')?.textContent).toContain('↑2');
+
+    clickButton('Push');
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('non-fast-forward');
+    expect(row('push')?.textContent).toContain('Nothing to push');
+    expect(row('push')?.textContent).not.toContain('↑2');
+    expect(row('commit')?.textContent).toContain('4 changes');
+  });
+
+  it('keeps the stale rows when the post-failure re-read itself fails', async () => {
+    // A rejected push and a closing daemon generation fail both calls with
+    // one correlated cause; the listing on screen is stale but usable, so
+    // the refresh must not replace it with its own error.
+    workspaceGitBranches
+      .mockResolvedValueOnce(
+        branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
+      )
+      .mockRejectedValueOnce(new Error('daemon generation closed'));
+    workspaceGitPush.mockRejectedValueOnce(new Error('non-fast-forward'));
+    mountFresh();
+    await flush();
+
+    clickButton('Push');
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('non-fast-forward');
+    expect(document.body.textContent).not.toContain('daemon generation closed');
+    expect(row('push')).toBeTruthy();
+    expect(row('pull')).toBeTruthy();
+  });
+
+  it('leaves the resolution panel usable while the post-failure refresh is in flight', async () => {
+    let settleListing: ((value: DaemonGitBranchesResult) => void) | undefined;
+    workspaceGitBranches.mockResolvedValueOnce(BRANCHES).mockImplementationOnce(
+      () =>
+        new Promise<DaemonGitBranchesResult>((resolve) => {
+          settleListing = resolve;
+        }),
+    );
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountFresh();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    // The 409 raised the panel; its buttons must not wait on a listing
+    // round-trip the panel never needed.
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    for (const label of [
+      'Stash Changes and Update',
+      'Discard Changes and Update',
+      'Cancel',
+    ]) {
+      const button = Array.from(document.body.querySelectorAll('button')).find(
+        (b) => b.textContent?.includes(label),
+      );
+      expect(button).toBeTruthy();
+      expect(button?.disabled).toBe(false);
+    }
+
+    await act(async () => {
+      settleListing?.(BRANCHES);
+    });
+    await flush();
+  });
+
+  it('keeps the stale rows mounted and the push row busy while the post-rejection refresh is in flight', async () => {
+    let settleListing: ((value: DaemonGitBranchesResult) => void) | undefined;
+    workspaceGitBranches
+      .mockResolvedValueOnce(
+        branches({
+          upstream: 'origin/main',
+          pushTarget: 'origin/main',
+          pushAhead: 2,
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<DaemonGitBranchesResult>((resolve) => {
+            settleListing = resolve;
+          }),
+      );
+    workspaceGitPush.mockRejectedValueOnce(new Error('non-fast-forward'));
+    mountFresh();
+    await flush();
+    expect(row('push')?.textContent).toContain('↑2');
+
+    clickButton('Push');
+    await flush();
+
+    // The silent re-read must not trade the stale-but-usable rows for the
+    // loading placeholder — the spinner the push-side `await` holds up is only
+    // visible while its row stays mounted.
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('non-fast-forward');
+    expect(document.body.textContent).not.toContain('Loading branches');
+    expect(row('push')).toBeTruthy();
+    expect(row('pull')).toBeTruthy();
+    expect(row('push')?.textContent).toContain('↑2');
+    // Awaiting the refresh (rather than firing it) is what keeps busyAction set
+    // until the re-read lands, so the row cannot re-enable on pre-push counts.
+    expect(row('push')?.disabled).toBe(true);
+
+    await act(async () => {
+      settleListing?.(
+        branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
+      );
+    });
+    await flush();
+
+    expect(row('push')?.disabled).toBe(false);
+    expect(row('push')?.textContent).toContain('Nothing to push');
+    expect(row('push')?.textContent).not.toContain('↑2');
   });
 });
 

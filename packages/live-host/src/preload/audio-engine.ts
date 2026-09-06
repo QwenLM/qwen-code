@@ -56,6 +56,8 @@ export class HostAudioEngine {
       event: string,
       details: AudioDiagnosticDetails,
     ) => void = () => {},
+    private readonly onPlaybackStarted: () => void = () => {},
+    private readonly onPlaybackCompleted: () => void = () => {},
   ) {}
 
   private readonly handleDeviceChange = (): void => {
@@ -255,10 +257,23 @@ export class HostAudioEngine {
         currentGeneration: this.outputGeneration,
         remainingSources: this.outputSources.size,
       });
+      // Only fire completion for a natural end (generation matches);
+      // clearOutput increments generation before stopping sources,
+      // so a stop-triggered onended sees a mismatch and stays silent.
+      if (
+        this.outputSources.size === 0 &&
+        generation === this.outputGeneration
+      ) {
+        this.onPlaybackCompleted();
+      }
     };
+    const wasEmpty = this.outputSources.size === 0;
     this.outputSources.add(source);
     source.start(schedule.startAt);
     this.outputCursor = schedule.endAt;
+    if (wasEmpty) {
+      this.onPlaybackStarted();
+    }
     this.onDiagnostic('output_frame_scheduled', {
       bytes: frame.byteLength,
       generation,

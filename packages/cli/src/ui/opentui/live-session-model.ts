@@ -163,12 +163,16 @@ function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
 export function foldLiveEvent(
   prev: readonly LiveHistoryItem[],
   ev: OpenTuiStreamEvent,
-): LiveHistoryItem[] {
+): readonly LiveHistoryItem[] {
   const items = [...prev];
   const last = items[items.length - 1];
 
   switch (ev.type) {
     case 'user': {
+      // Both `addItem` implementations collapse a user item identical to the
+      // one before it, and this is the chokepoint the projected and live
+      // echoes share: two identical steers in a row are one row.
+      if (last?.kind === 'user' && last.text === ev.text) return prev;
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({
@@ -526,27 +530,6 @@ export function settleOpenTools(
     };
   });
   return changed ? items : prev;
-}
-
-export type LivePhase =
-  | 'idle'
-  | 'thinking'
-  | 'tool'
-  | 'approving'
-  | 'responding';
-
-/** Streaming phase exposed to the status bar / spinner / border. */
-export function livePhase(
-  items: readonly LiveHistoryItem[],
-  streaming: boolean,
-): LivePhase {
-  if (!streaming) return 'idle';
-  const last = items[items.length - 1];
-  if (last?.kind === 'thinking' && !last.done) return 'thinking';
-  if (last?.kind === 'tool' && !last.done)
-    return last.confirm === 'pending' ? 'approving' : 'tool';
-  if (last?.kind === 'task' && !last.done) return 'tool';
-  return 'responding';
 }
 
 /** Semantic palette slot of a goal card; the backend maps it to theme colors. */

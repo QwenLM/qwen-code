@@ -121,6 +121,8 @@ $ThemeBinaryName = "cua-cursor-theme.exe"
 $Script:CuaDriverRsBakedVersion = "0.20.3"
 # ~~~ END_BAKED_VERSION ~~~
 $CursorThemeRequiredFrom = [version]"0.12.7"
+$LegacyUiaRequiredFrom = [version]"0.2.8"
+$SignedUiaRequiredFrom = [version]"0.20.3"
 
 # ---------- Path resolution ------------------------------------------------
 
@@ -1385,6 +1387,8 @@ Write-Step "  target      : $target"
 $Script:CuaDriverRsSelectedChannel = Resolve-SelectedChannel
 $version = Resolve-Version
 $versionedDir = Join-Path $ReleasesDir "$version-$target"
+$requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom
+$requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and -not $requiresSignedUia
 
 # If the per-version dir is already populated, skip the download — the
 # binary is immutable per version, so a repeat install is a no-op apart
@@ -1392,9 +1396,16 @@ $versionedDir = Join-Path $ReleasesDir "$version-$target"
 $skipDownload = $false
 $uiaSecureDir = Join-Path $env:ProgramFiles "Qwen\CuaDriver\$version"
 $uiaSecurePath = Join-Path $uiaSecureDir 'qwen-cua-driver-uia.exe'
-if ((Test-Path -LiteralPath (Join-Path $versionedDir $BinaryName)) -and
-    (Test-Path -LiteralPath $uiaSecurePath) -and
-    (Get-AuthenticodeSignature -LiteralPath $uiaSecurePath).Status -eq 'Valid') {
+$hasRequiredUia = $true
+if ($requiresSignedUia) {
+    $hasRequiredUia = (Test-Path -LiteralPath $uiaSecurePath) -and
+        (Get-AuthenticodeSignature -LiteralPath $uiaSecurePath).Status -eq 'Valid'
+}
+elseif ($requiresLegacyUia) {
+    $hasRequiredUia = (Test-Path -LiteralPath (Join-Path $versionedDir 'qwen-cua-driver-uia.exe')) -or
+        (Test-Path -LiteralPath (Join-Path $versionedDir 'cua-driver-uia.exe'))
+}
+if ((Test-Path -LiteralPath (Join-Path $versionedDir $BinaryName)) -and $hasRequiredUia) {
     Write-Step "release $version is already on disk at $versionedDir (skipping download)"
     $skipDownload = $true
 }
@@ -1411,6 +1422,8 @@ if (-not $skipDownload) {
         if ($asset.Version -ne $version) {
             $version = $asset.Version
             $versionedDir = Join-Path $ReleasesDir "$version-$target"
+            $requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom
+            $requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and -not $requiresSignedUia
             $uiaSecureDir = Join-Path $env:ProgramFiles "Qwen\CuaDriver\$version"
             $uiaSecurePath = Join-Path $uiaSecureDir 'qwen-cua-driver-uia.exe'
         }
@@ -1435,29 +1448,40 @@ if (-not $skipDownload) {
             }
             Write-Step "installed $versionedDir\$BinaryName (version $version, target $target)"
         }
-        # The UIAccess worker is required for foreground acquisition and input
-        # delivery. Windows only grants uiAccess to a signed binary installed
-        # under a secure system path, so do not fall back to the per-user
-        # release directory.
-        $uiaStage = Join-Path $stageDir 'qwen-cua-driver-uia.exe'
-        if (-not (Test-Path -LiteralPath $uiaStage)) {
-            throw "release archive is missing required qwen-cua-driver-uia.exe"
-        }
-        $uiaSignature = Get-AuthenticodeSignature -LiteralPath $uiaStage
-        if ($uiaSignature.Status -ne 'Valid') {
-            throw "qwen-cua-driver-uia.exe has invalid Authenticode status $($uiaSignature.Status)"
-        }
-        if (Test-Path -LiteralPath $uiaSecurePath) {
-            $installedSignature = Get-AuthenticodeSignature -LiteralPath $uiaSecurePath
-            if ($installedSignature.Status -ne 'Valid') {
-                throw "installed qwen-cua-driver-uia.exe has invalid Authenticode status $($installedSignature.Status)"
+        if (-not $requiresSignedUia) {
+            foreach ($legacyUiaName in @('qwen-cua-driver-uia.exe', 'cua-driver-uia.exe')) {
+                $legacyUiaStage = Join-Path $stageDir $legacyUiaName
+                if (Test-Path -LiteralPath $legacyUiaStage) {
+                    Copy-Item -LiteralPath $legacyUiaStage -Destination (Join-Path $versionedDir $legacyUiaName) -Force
+                    Write-Step "installed $versionedDir\$legacyUiaName (legacy uiAccess worker)"
+                    break
+                }
             }
-            Write-Step "signed uiAccess worker already installed at $uiaSecurePath"
         }
-        else {
-            New-Item -ItemType Directory -Force -Path $uiaSecureDir | Out-Null
-            Copy-Item -LiteralPath $uiaStage -Destination $uiaSecurePath
-            Write-Step "installed $uiaSecurePath (signed uiAccess worker)"
+        if ($requiresSignedUia) {
+            # The UIAccess worker is required for foreground acquisition and
+            # input delivery. Windows only grants uiAccess to a signed binary
+            # installed under a secure system path.
+            $uiaStage = Join-Path $stageDir 'qwen-cua-driver-uia.exe'
+            if (-not (Test-Path -LiteralPath $uiaStage)) {
+                throw "release archive is missing required qwen-cua-driver-uia.exe"
+            }
+            $uiaSignature = Get-AuthenticodeSignature -LiteralPath $uiaStage
+            if ($uiaSignature.Status -ne 'Valid') {
+                throw "qwen-cua-driver-uia.exe has invalid Authenticode status $($uiaSignature.Status)"
+            }
+            if (Test-Path -LiteralPath $uiaSecurePath) {
+                $installedSignature = Get-AuthenticodeSignature -LiteralPath $uiaSecurePath
+                if ($installedSignature.Status -ne 'Valid') {
+                    throw "installed qwen-cua-driver-uia.exe has invalid Authenticode status $($installedSignature.Status)"
+                }
+                Write-Step "signed uiAccess worker already installed at $uiaSecurePath"
+            }
+            else {
+                New-Item -ItemType Directory -Force -Path $uiaSecureDir | Out-Null
+                Copy-Item -LiteralPath $uiaStage -Destination $uiaSecurePath
+                Write-Step "installed $uiaSecurePath (signed uiAccess worker)"
+            }
         }
     }
     finally {

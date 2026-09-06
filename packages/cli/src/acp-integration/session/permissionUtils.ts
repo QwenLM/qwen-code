@@ -76,7 +76,12 @@ function filterAlwaysAllowOptions(
   const visibleOptions = hideAlwaysAllow
     ? options.filter((option) => option.kind !== 'allow_always')
     : options;
-  if (!confirmation.autoModeFallback) return visibleOptions;
+  if (
+    confirmation.autoModeFallback?.reason !== 'classifier_unavailable' &&
+    confirmation.autoModeFallback?.reason !== 'consecutive_unavailable'
+  ) {
+    return visibleOptions;
+  }
 
   const switchOption: PermissionOption = {
     optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
