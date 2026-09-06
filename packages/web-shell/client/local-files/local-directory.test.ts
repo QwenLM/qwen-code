@@ -167,6 +167,7 @@ describe('splitRelativePath', () => {
     ['embedded parent escape', 'src/../../etc/passwd'],
     ['absolute posix path', '/etc/passwd'],
     ['windows drive path', 'C:\\Users\\me\\file.txt'],
+    ['windows drive path with forward slash', 'C:/Users/me/file.txt'],
     ['backslash separator', 'src\\main.ts'],
     ['control character', 'src/ma\u0000in.ts'],
   ])('rejects %s', async (_label, path) => {
@@ -184,6 +185,14 @@ describe('splitRelativePath', () => {
 
   it('does not reject a literal percent sign (paths are never URL-decoded)', () => {
     expect(splitRelativePath('100%/done.txt')).toEqual(['100%', 'done.txt']);
+  });
+
+  it('accepts a colon inside a relative name (not a drive form)', () => {
+    expect(splitRelativePath('a:b.txt')).toEqual(['a:b.txt']);
+    expect(splitRelativePath('notes/todo:urgent.md')).toEqual([
+      'notes',
+      'todo:urgent.md',
+    ]);
   });
 });
 

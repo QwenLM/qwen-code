@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LocalFilesWindowLike } from './capabilities.js';
-import { LocalDirectory } from './local-directory.js';
 import {
   ensureReadwritePermission,
-  openLocalDirectory,
   pickDirectoryHandle,
 } from './pick-directory.js';
 
@@ -136,13 +134,5 @@ describe('ensureReadwritePermission', () => {
     expect(
       await ensureReadwritePermission(handle, { allowRequest: true }),
     ).toEqual({ state: 'denied', requested: true });
-  });
-});
-
-describe('openLocalDirectory', () => {
-  it('wraps a real handle in the path-safe facade', async () => {
-    const directory = openLocalDirectory(handleWith({ query: 'granted' }));
-    expect(directory).toBeInstanceOf(LocalDirectory);
-    expect(directory.name).toBe('ai_coding');
   });
 });

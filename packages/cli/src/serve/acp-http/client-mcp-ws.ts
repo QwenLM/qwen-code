@@ -149,6 +149,12 @@ export class ClientMcpWsConnection {
    * session id would either miss the session's copy or hit the workspace path.
    */
   private readonly serverScopes = new Map<string, ClientMcpServerScope>();
+  /**
+   * Identity of the in-flight register per server name, so a stale late-failing
+   * register cannot roll back the registrar advertisement and scope entry a
+   * newer register of the same name on this connection installed.
+   */
+  private readonly registerAttemptIds = new Map<string, object>();
 
   constructor(
     private readonly sendFrame: WsFrameSender,
@@ -256,6 +262,8 @@ export class ClientMcpWsConnection {
     // handshake (which the provider triggers synchronously) can route frames.
     this.registrar.registerServer(server);
     if (scope) this.serverScopes.set(server, scope);
+    const attempt = {};
+    this.registerAttemptIds.set(server, attempt);
     try {
       const { toolCount } = await this.provider.registerClientMcpServer(
         server,
@@ -267,8 +275,11 @@ export class ClientMcpWsConnection {
       // resolves, so the provider would otherwise be left holding a zombie
       // runtime MCP server. Re-check and tear it back down.
       if (this.disposed) {
-        this.registrar.unregisterServer(server);
-        this.serverScopes.delete(server);
+        if (this.registerAttemptIds.get(server) === attempt) {
+          this.registrar.unregisterServer(server);
+          this.serverScopes.delete(server);
+          this.registerAttemptIds.delete(server);
+        }
         await this.provider.unregisterClientMcpServer(server, scope);
         return {
           kind: 'error',
@@ -276,11 +287,25 @@ export class ClientMcpWsConnection {
           message: 'connection disposed during register',
         };
       }
+      this.registerAttemptIds.delete(server);
       return { kind: 'registered', server, toolCount };
     } catch (err) {
-      // Roll back the registrar advertisement on failure.
-      this.registrar.unregisterServer(server);
-      this.serverScopes.delete(server);
+      // Roll back the registrar advertisement on failure - scoped to THIS
+      // attempt, so a stale late-failing register cannot undo a newer
+      // register of the same name on this connection (which would leave the
+      // survivor's route advertising a sender the registrar no longer knows).
+      if (this.registerAttemptIds.get(server) === attempt) {
+        this.registrar.unregisterServer(server);
+        this.serverScopes.delete(server);
+        this.registerAttemptIds.delete(server);
+      }
+      if (this.disposed) {
+        return {
+          kind: 'error',
+          code: 'closed',
+          message: 'connection disposed during register',
+        };
+      }
       return {
         kind: 'error',
         code: 'register_failed',

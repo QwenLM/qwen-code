@@ -15,7 +15,6 @@ import {
   type LocalFilesBlocker,
   type LocalFilesWindowLike,
 } from './capabilities.js';
-import { LocalDirectory } from './local-directory.js';
 
 export type PickResult =
   | { kind: 'picked'; handle: FileSystemDirectoryHandle }
@@ -33,17 +32,6 @@ export interface DirectoryPickerLike {
 
 /** Same picker id every time so Chrome reopens the user's last choice. */
 const PICKER_ID = 'qwen-local-files';
-
-/**
- * Wrap a granted handle in the path-safe facade. This is the seam where the
- * real `FileSystemDirectoryHandle` meets the structural interfaces
- * `LocalDirectory` is written against.
- */
-export function openLocalDirectory(
-  handle: FileSystemDirectoryHandle,
-): LocalDirectory {
-  return new LocalDirectory(handle);
-}
 
 export function pickDirectoryHandle(
   win: LocalFilesWindowLike,

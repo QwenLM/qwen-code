@@ -169,7 +169,7 @@ export function splitRelativePath(path: unknown): string[] {
       'Absolute paths are not allowed; paths are relative to the granted directory.',
     );
   }
-  if (/^[a-zA-Z]:/.test(input)) {
+  if (/^[a-zA-Z]:[\\/]/.test(input)) {
     throw new LocalDirectoryError(
       'invalid_path',
       'Windows drive paths are not allowed; paths are relative to the granted directory.',
@@ -188,7 +188,7 @@ export function splitRelativePath(path: unknown): string[] {
     if (/[\u0000-\u001f]/.test(raw)) {
       throw new LocalDirectoryError(
         'invalid_path',
-        'Control characters are not allowed in a path.',
+        'C0 control characters (U+0000-U+001F) are not allowed in a path.',
       );
     }
     segments.push(raw);

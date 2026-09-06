@@ -22,6 +22,7 @@ import type {
   ClientMcpServerProvider,
   ClientMcpServerScope,
 } from './client-mcp-ws.js';
+import { ClientMcpWsConnection } from './client-mcp-ws.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
@@ -495,5 +496,120 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
         sessionId: 'session-1',
       });
     });
+  });
+});
+
+describe('client_mcp_over_ws connection-level register rollback', () => {
+  function makeConnection(provider: ClientMcpServerProvider) {
+    const frames: Array<Record<string, unknown>> = [];
+    const conn = new ClientMcpWsConnection(
+      ((frame: unknown) => {
+        frames.push(frame as Record<string, unknown>);
+      }) as never,
+      provider,
+    );
+    return { conn, frames };
+  }
+
+  function controllableProvider() {
+    let addCalls = 0;
+    let failFirst: ((err: Error) => void) | undefined;
+    let resolveFirst: ((value: { toolCount: number }) => void) | undefined;
+    const unregisterCalls: Array<[string, ClientMcpServerScope | undefined]> =
+      [];
+    const provider: ClientMcpServerProvider = {
+      registerClientMcpServer: async (_name, _send, _scope) => {
+        addCalls += 1;
+        if (addCalls === 1) {
+          return new Promise<{ toolCount: number }>((resolve, reject) => {
+            failFirst = reject;
+            resolveFirst = resolve;
+          });
+        }
+        return { toolCount: 1 };
+      },
+      unregisterClientMcpServer: async (name, scope) => {
+        unregisterCalls.push([name, scope]);
+      },
+    };
+    return {
+      provider,
+      unregisterCalls,
+      failFirstAdd: () => failFirst!(new Error('late failure')),
+      resolveFirstAdd: () => resolveFirst!({ toolCount: 1 }),
+    };
+  }
+
+  it('a stale late-failing register cannot undo a newer register', async () => {
+    const { provider, unregisterCalls, failFirstAdd } = controllableProvider();
+    const { conn } = makeConnection(provider);
+
+    const first = conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    await Promise.resolve();
+    // Reconnect shape: unregister, then register again while add #1 is still
+    // in flight.
+    await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
+    const second = await conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    expect(second).toMatchObject({ kind: 'registered' });
+
+    // The stale attempt finally fails: its rollback must not touch the
+    // survivor's registrar advertisement or scope entry. The only provider
+    // teardown so far is the explicit unregister frame above.
+    failFirstAdd();
+    expect(await first).toMatchObject({
+      kind: 'error',
+      code: 'register_failed',
+    });
+    expect(conn.registeredServers()).toContain('lf');
+    expect(unregisterCalls).toEqual([['lf', { sessionId: 'S' }]]);
+  });
+
+  it('reports closed when dispose lands while the add is in flight', async () => {
+    const { provider, unregisterCalls, resolveFirstAdd } =
+      controllableProvider();
+    const { conn } = makeConnection(provider);
+    const first = conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    await Promise.resolve();
+    await conn.dispose();
+    resolveFirstAdd();
+    expect(await first).toMatchObject({ kind: 'error', code: 'closed' });
+    // dispose's teardown plus the disposed-branch rollback both reach the
+    // provider with the session scope.
+    expect(unregisterCalls).toEqual([
+      ['lf', { sessionId: 'S' }],
+      ['lf', { sessionId: 'S' }],
+    ]);
+  });
+
+  it('unregister tears down with the scope the register used', async () => {
+    const unregisterCalls: Array<[string, ClientMcpServerScope | undefined]> =
+      [];
+    const provider: ClientMcpServerProvider = {
+      registerClientMcpServer: async () => ({ toolCount: 1 }),
+      unregisterClientMcpServer: async (name, scope) => {
+        unregisterCalls.push([name, scope]);
+      },
+    };
+    const { conn } = makeConnection(provider);
+    await conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
+    expect(unregisterCalls).toEqual([['lf', { sessionId: 'S' }]]);
+    expect(conn.registeredServers()).toEqual([]);
   });
 });

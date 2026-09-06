@@ -140,6 +140,11 @@ export class ClientMcpSenderRegistry {
     return this.sessionSenders.get(serverName)?.get(sessionId)?.owner === owner;
   }
 
+  /** Whether any connection currently owns a sender route for the session. */
+  hasSession(serverName: string, sessionId: string): boolean {
+    return this.sessionSenders.get(serverName)?.has(sessionId) === true;
+  }
+
   deleteSession(
     serverName: string,
     sessionId: string,
@@ -158,6 +163,11 @@ export class ClientMcpSenderRegistry {
     bySession!.delete(sessionId);
     if (bySession!.size === 0) {
       this.sessionSenders.delete(serverName);
+      // Release the reservation too: keeping it would reject every later
+      // workspace-wide registration of the name for the daemon's lifetime
+      // while acking nothing, and the reservation's only purpose (blocking
+      // cross-scope collisions) ends with the last session entry.
+      this.sessionScopedServerNames.delete(serverName);
     }
     return true;
   }
@@ -319,6 +329,19 @@ async function registerSessionScopedClientMcpServer(
     }
     // A peer may have re-registered the same (server, session) while we awaited.
     if (!registry.ownsSession(serverName, sessionId, originatorClientId)) {
+      // Dispose-during-add: the entry is gone entirely and our child-side add
+      // just completed, so nothing else will remove the runtime server we
+      // created. A peer-owned entry means the survivor's name-keyed child
+      // server is the live one - leave it alone.
+      if (!registry.hasSession(serverName, sessionId)) {
+        await bridge
+          .removeSessionRuntimeMcpServer(
+            sessionId,
+            serverName,
+            originatorClientId,
+          )
+          .catch(() => {});
+      }
       throw new Error(
         `client MCP registration for '${serverName}' was superseded`,
       );

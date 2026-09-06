@@ -389,4 +389,64 @@ describe('createClientMcpServerProvider (session scope)', () => {
       'connA',
     );
   });
+
+  it('releases the name reservation when the last session entry goes', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await provider.registerClientMcpServer(
+      'local-files',
+      vi.fn(async () => msg(1)),
+      { sessionId: SESSION },
+    );
+    await provider.unregisterClientMcpServer('local-files', {
+      sessionId: SESSION,
+    });
+
+    // The reservation must not outlive the last session entry, or every
+    // later workspace-wide registration of the name is acked and then
+    // rejected at lookup for the daemon's lifetime.
+    await expect(
+      provider.registerClientMcpServer(
+        'local-files',
+        vi.fn(async () => msg(2)),
+      ),
+    ).resolves.toEqual({ toolCount: 1 });
+    expect(bridge.addRuntimeMcpServer).toHaveBeenCalled();
+    const bound = registry.lookup('local-files');
+    expect(bound).toBeTypeOf('function');
+    await expect(bound!(msg(3))).resolves.toBeDefined();
+  });
+
+  it('removes the child-side server when the route disappears mid-add', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    let resolveAdd: ((value: { toolCount: number }) => void) | undefined;
+    bridge.addSessionRuntimeMcpServer = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveAdd = resolve;
+        }),
+    ) as unknown as typeof bridge.addSessionRuntimeMcpServer;
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    const pending = provider.registerClientMcpServer(
+      'local-files',
+      vi.fn(async () => msg(1)),
+      { sessionId: SESSION },
+    );
+    await Promise.resolve();
+    // dispose() equivalent: the connection teardown deletes the entry while
+    // the child-side add is still in flight.
+    registry.deleteSession('local-files', SESSION, 'connA');
+    resolveAdd!({ toolCount: 1 });
+
+    await expect(pending).rejects.toThrow(/superseded/);
+    expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      SESSION,
+      'local-files',
+      'connA',
+    );
+  });
 });

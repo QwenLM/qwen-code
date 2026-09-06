@@ -18,6 +18,45 @@ import {
   resolveLocalFilesWorkspaceRoute,
 } from './LocalFilesControl';
 
+const capturedHookOptions = vi.hoisted(() => ({
+  current: undefined as unknown,
+}));
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useConnection: () => ({ sessionId: 'session-1', workspaceCwd: '/primary' }),
+  useWorkspace: () => ({
+    baseUrl: 'https://daemon.example/',
+    token: undefined,
+    capabilities: {
+      qwenCodeVersion: '1.2.3',
+      workspaceCwd: '/primary',
+      features: ['dynamic_workspace_registration'],
+      workspaces: [
+        {
+          id: 'ws-1',
+          cwd: '/primary',
+          kind: 'directory',
+          primary: true,
+          trusted: false,
+        },
+      ],
+    },
+    client: {},
+  }),
+  useWorkspaceActions: () => ({ preheatAcp: vi.fn() }),
+}));
+
+vi.mock('../local-files/useLocalFilesBridge', () => ({
+  useLocalFilesBridge: (options: unknown) => {
+    capturedHookOptions.current = options;
+    return {
+      status: { phase: 'idle', blocker: null },
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
+}));
+
 const primary = {
   id: 'ws-1',
   cwd: '/primary',
@@ -218,5 +257,34 @@ describe('createLocalFilesRewarm', () => {
       })(),
     ).rejects.toThrow(/runtime spawn failed/);
     expect(preheat).not.toHaveBeenCalled();
+  });
+});
+
+describe('LocalFilesControl wiring', () => {
+  it('passes the withheld blocker into the bridge hook for an untrusted primary', async () => {
+    // The resolver's decision is pinned above; this pins its APPLICATION -
+    // without the wiring line the hook never sees the blocker and the trust
+    // fix never reaches the bridge.
+    const { act } = await import('react');
+    const { createRoot } = await import('react-dom/client');
+    const { I18nProvider } = await import('../i18n');
+    const { LocalFilesControl } = await import('./LocalFilesControl');
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <LocalFilesControl triggerClassName="t" />
+        </I18nProvider>,
+      );
+    });
+    const options = capturedHookOptions.current as {
+      withheldBlocker?: string;
+    };
+    expect(options.withheldBlocker).toBe('workspace-ineligible');
+    act(() => root.unmount());
+    container.remove();
   });
 });
