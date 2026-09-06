@@ -104,7 +104,7 @@ implementation does not relitigate them.
 
 | # | Decision | Consequence |
 | --- | --- | --- |
-| 16 | Three gates: **12 auto turns / 200k tokens / 30 minutes wall-clock**, per thread tree. | Whichever trips first stops dispatch and says why in the thread. |
+| 16 | Two gates: **12 auto turns / 200k tokens**, per thread tree. | Whichever trips first stops dispatch and says why in the thread. A wall-clock gate was specified and then removed: elapsed time is not cost, and measuring it would have refused a thread revisited the next day. A stuck run is the sweeper's job (18), not the budget's. |
 | 17 | **A sub-thread shares its root's budget.** | Closes the hole where creating threads mints new budget. |
 | 18 | A run is stuck when **N minutes pass with no activity** — not by total duration. | A legitimate two-hour investigation is never killed for being slow. |
 | 19 | A stuck run, and any run still `running` after a **daemon restart**, is **revived and continued**, told it timed out. Failing again marks it `failed`. | One recovery path for both. Cheap — completed work is not repeated — and the agent can report its own progress. |
@@ -121,13 +121,18 @@ implementation does not relitigate them.
 
 ```
 MeshAgent           id, name, description, color, agentType, model,
-                    maxConcurrentRuns, queueLimit, enabled, createdAt,
+                    queueLimit, enabled, createdAt,
                     backgroundAgentId, hostSessionId          ← execution binding
 
 Thread              id, title, body, status, assigneeAgentId, createdAt,
                     createdBy, messages[], runs[],
                     parentThreadId, rootThreadId,             ← budget is on the root
-                    autoTurnsUsed, tokensUsed, firstDispatchedAt
+                    autoTurnsUsed, tokensUsed
+
+There is no `maxConcurrentRuns`. Decisions 5 and 10 — one long-lived body per
+agent, serial across threads — already cap an agent at one running run, so the
+field would have been dead and `defer: agent_at_capacity` collapses into
+`defer: busy_elsewhere`.
 
 ThreadMessage       id, from, text, mentions[], at
 ThreadRun           id, agentId, sessionId, status, triggerMessageIds[],
@@ -191,7 +196,6 @@ mechanism, and it is why the guards are not optional.
 | `coalesce: queued_run` | target has a queued, unstarted run | one run answers both posts instead of two racing |
 | `coalesce: running_same_thread` | target is executing **this** thread | mid-run steering — the thing Multica cannot do |
 | `defer: busy_elsewhere` | target is executing **another** thread | serial per agent; the waiting thread says which thread it is on |
-| `defer: agent_at_capacity` | agent is at `maxConcurrentRuns` | resolves by waiting |
 | `dispatch` | none of the above | book a run |
 
 Budget is charged at **booking**, not completion, so a pair of agents that keep
@@ -219,9 +223,10 @@ Landed on this branch (storage and rules; nothing starts an agent yet):
 2. `dispatch-policy.ts` — split `defer: active_run` into
    `coalesce: running_same_thread` and `defer: busy_elsewhere` (decision 9); add
    `skip: queue_full` (11); evaluate the budget against the **root** thread (17);
-   add the token and wall-clock gates (16).
-3. `mesh-store.ts` — parent/root linkage and its cycle check.
-4. `thread-actions.ts` — charge tokens and stamp `firstDispatchedAt`; reset only
+   add the token gate and drop `agent_at_capacity` (16).
+3. `mesh-store.ts` — parent/root linkage and its cycle check; drop
+   `maxConcurrentRuns` and `agentConcurrencyLimit`.
+4. `thread-actions.ts` — charge tokens from each run's stats delta; reset only
    the turn counter on a human post.
 
 Still to build:
@@ -237,7 +242,96 @@ Still to build:
 | Web Shell: roster, thread list, thread view, run transcripts | `web-shell/client/` |
 | #11140's sidebar entry, absorbed | `web-shell/client/components/sidebar/` |
 
-## 6. Demo
+## 6. What an agent actually receives
+
+The dispatcher's prompt is load-bearing, and a one-line "thread context plus new
+posts" would have left the hardest part unspecified.
+
+Because an agent is one long-lived body across threads (decision 5), its
+previous memory may be from a different thread. Every wake therefore opens with
+an explicit thread frame — without it, cross-thread confusion is not a risk but
+a certainty:
+
+```
+── You are now working on thread <id>: <title> ──
+<body>
+Status: in_progress · Your last post on this thread: <when>
+
+New since your last run here:
+  [alice · 3m ago] ...
+  [you were @-mentioned] ...
+
+Who you can @ in this workspace:
+  @alice — reads CI logs
+  @bob   — reads code
+You can: thread_post · thread_status (blocked / in_review) ·
+         thread_create (sub-thread) · thread_read (any thread)
+```
+
+Three rules:
+
+- **Mention tokens are handed over verbatim**, never left to be guessed. Multica
+  gives its squad leader ready-made mention markdown for the same reason: a
+  misspelled name is a message that silently reaches nobody.
+- **First entry to a thread gets the whole thread**; later wakes get the delta.
+  Title and body are always included. When the whole thread exceeds the prompt
+  budget, it is truncated to the title, body and the most recent stretch, with
+  an explicit note that N earlier posts exist and `thread_read` will fetch them
+  — the agent is never quietly given a short view it believes is complete.
+- **Thread tools take no thread id from the model.** They act on the run's
+  thread, resolved from ambient context the way Agent Team resolves teammate
+  identity (`runWithTeammateIdentity`, AsyncLocalStorage). Under a long-lived
+  cross-thread body, an agent posting its conclusion into an unrelated thread is
+  a predictable failure, not an unlucky one, and a model-supplied id would make
+  it reachable.
+
+Token accounting comes from each run's stats delta on the background task
+registry, so a thread's `tokensUsed` reflects work done for that thread rather
+than the agent's whole conversation.
+
+## 7. How this compares to Multica
+
+Three kinds of difference, and they are not the same kind of thing.
+
+**Ahead, in one place.** Mid-run steering. Multica cannot deliver into an
+executing run because it drives someone else's CLI process and has no inbound
+channel but a fresh launch. Qwen Code's `queueMessage` lands the message in the
+next tool round.
+
+**Deliberately not built.** Writing code, branches, PRs and review gates
+(decision 1 — read-only until isolation is settled); multi-user roles and access
+scopes; self-hosting and multi-tenancy; Projects grouping several repos.
+
+**Missing and worth having.** Runtime binding — agents that run on another
+machine or in the cloud, and agents that are not Qwen Code — is the one hard
+gap. Scheduled and external-event triggers are absent but the cron scheduler and
+channel workers already exist to carry them. Board views, labels, search and
+cross-issue references have no equivalent.
+
+| Capability | Reach | Note |
+| --- | --- | --- |
+| Multi-agent collaboration itself | ~85% | routing, hand-off, sub-thread reporting, serialisation, gates; no squad-leader role routing, but mid-run steering added |
+| Run records and observability | ~80% | transcript as log, replayable tool calls, per-run tokens, retry and timeout |
+| Skills | ~70% | carried by the agent definition |
+| Agent identity | ~50% | identity, persona, enable/disable, workload — runtime binding is zero |
+| Triggers | ~50% | assignment and `@`; scheduled and external events unconnected |
+| Work items | ~40% | assignable item with conversation and status; no board, labels or search |
+| Notifications | ~40% | four events to existing channels; no inbox |
+| Multiple surfaces | ~30% | Web Shell and desktop shell |
+| Projects | ~15% | a workspace is one cwd |
+| Multi-user, self-hosting | ~5% | single user, single machine |
+| Producing code changes | 0% | decision 1 |
+
+As a product, roughly 35-40%. That number mixes two unlike things: Multica is a
+multi-user server product (Go, Postgres, tenancy, self-hosting) and this is a
+single-machine daemon over files. Most of the remaining 60% is that category
+difference, not a backlog.
+
+**Measured against multi-agent collaboration itself — hand-off, observability,
+steering, guardrails — this reaches roughly 80%**, which is the part that was
+actually asked for.
+
+## 8. Demo
 
 Two agents investigating a real problem, with a person steering.
 
@@ -257,23 +351,26 @@ Two agents investigating a real problem, with a person steering.
 Captured with the web-shell Playwright visuals config, which renders real
 screenshots locally and in CI.
 
-## 7. What remains genuinely open
+## 9. What remains genuinely open
 
 Everything from the earlier risk list is now decided except these:
 
 1. **Agent-to-agent prompt injection.** A post written by agent A is fed to agent
-   B, and B has tools. Decisions 2 and 3 bound the blast radius (read-only, a
-   built-in shell ceiling), and decision 16 bounds the duration, but there is no
-   trust boundary. Open question: should posts reach the model inside an explicit
-   provenance envelope that marks them as data rather than instruction?
+   B, and B has tools. Decisions 2 and 3 bound the blast radius (read-only, with
+   a built-in shell ceiling) and decision 16 bounds the duration, but there is no
+   trust boundary. A provenance envelope marking posts as data rather than
+   instruction was considered and deliberately deferred; it stays the first thing
+   to add if agents ever gain write access.
 2. **Retention is lossy and silent.** `MAX_THREAD_MESSAGES` / `MAX_THREAD_RUNS`
    trim the oldest without saying so.
 3. **Cancellation.** `finishRun(cancelled)` exists; no UI or API calls it.
-4. **Concurrency counting is best effort** — sibling threads are read without
-   their locks, so the limit can overshoot by one. Made less pressing by decision
-   10 (serial per agent) but not eliminated.
+4. **Serialisation is enforced per post, not globally.** Two posts on different
+   threads naming the same agent are decided under different thread locks, so a
+   race can book two runs for an agent that is meant to be serial. The dispatcher
+   is the second line of defence and must refuse to start a second body for an
+   agent that already has one.
 
-## 8. Out of scope
+## 10. Out of scope
 
 Real OS-process isolation and cross-machine agents (#10078's session-boundary
 decision and #10247 §5's stalled wiring choice); durable history after a thread
