@@ -59,7 +59,9 @@ test('keeps yaml-dependent helper suites on the full profile', () => {
   // dependency-free github_ci_only lane can never execute it; downgrading a
   // PR that only edits that suite would green-light it without running it.
   assert.equal(
-    classifyChangedFiles(['.github/scripts/web-shell-visuals-publish.test.mjs']),
+    classifyChangedFiles([
+      '.github/scripts/web-shell-visuals-publish.test.mjs',
+    ]),
     'full',
   );
 });
