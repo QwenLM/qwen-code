@@ -2634,6 +2634,51 @@ describe('SessionRouter', () => {
       });
     });
 
+    it('releases the binding when a managed restore is invalidated mid-load', async () => {
+      const { persistPath } = setup();
+      let finishLoad!: (sessionId: string) => void;
+      let bindingToken: object | undefined;
+      let released = false;
+      bridge = {
+        ...mockBridge(),
+        listSessions: vi
+          .fn()
+          .mockReturnValue([worktreeAttestation('worktree-session')]),
+        loadSession: vi.fn(
+          (
+            _sessionId: string,
+            _cwd: string,
+            _options: unknown,
+            token?: object,
+          ) =>
+            new Promise<string>((resolve) => {
+              bindingToken = token;
+              finishLoad = resolve;
+            }),
+        ),
+        // Token-guarded like the real bridges: a mismatched expected
+        // token releases nothing, so this stays green only when the
+        // invalidation cleanup discards without a token.
+        discardSession: vi.fn(async (_sessionId: string, expected?: object) => {
+          if (expected !== undefined && expected !== bindingToken) return;
+          released = true;
+        }),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      const restore = router.restoreSessions();
+      await Promise.resolve();
+      router.removeSession('ch', 'alice', 'chat1');
+      finishLoad('worktree-session');
+
+      await expect(restore).resolves.toEqual({ restored: 0, failed: 1 });
+      expect(bridge.discardSession).toHaveBeenCalledWith('worktree-session');
+      expect(released).toBe(true);
+      expect(router.isSessionLive('worktree-session')).toBe(false);
+      expect(router.getTarget('worktree-session')).toBeUndefined();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
     it('routes the replacement when the restored session was superseded', async () => {
       const { persistPath } = setup();
       bridge = {

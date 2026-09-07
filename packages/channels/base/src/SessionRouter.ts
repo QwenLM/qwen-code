@@ -1126,10 +1126,19 @@ export class SessionRouter {
             try {
               this.assertOperationCurrent(operation);
             } catch (error) {
-              this.scheduleDiscardInvalidatedSession(
-                managed.sessionId,
-                operation,
-              );
+              // loadManagedSession binds with its own token, so an
+              // operation-keyed discard can never match here; release
+              // tokenless and roll back the maps the load committed.
+              // No persist — the loop's guarded final write owns the file.
+              if (![...this.toSession.values()].includes(managed.sessionId)) {
+                void this.bridge
+                  .discardSession?.(managed.sessionId)
+                  .catch(() => undefined);
+                this.toTarget.delete(managed.sessionId);
+                this.toCwd.delete(managed.sessionId);
+                this.toManagedMeta.delete(managed.sessionId);
+                this.liveSessionIds.delete(managed.sessionId);
+              }
               throw error;
             }
             this.toSession.set(key, managed.sessionId);
