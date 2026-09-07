@@ -2804,6 +2804,12 @@ describe('pending edit approval rows', () => {
       toolName: 'write',
       status: 'in_progress',
       args: { file_path: 'package.json' },
+      // The hand-back only matters if the edit is on screen again, so the
+      // fixture has to carry the diff the lock presupposes — without content
+      // `extractDiff` returns '' and the expanded card renders empty.
+      content: [
+        { type: 'diff', oldText: 'old content', newText: 'handed back content' },
+      ],
     });
 
     // While the host shows the diff natively the row is deliberately locked:
@@ -2842,5 +2848,9 @@ describe('pending edit approval rows', () => {
       handedBack.querySelector('[class*="lineExpandable"]'),
     ).not.toBeNull();
     expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    // ...and the edit itself is lookable again — the whole point of the
+    // hand-back (#10557). Without content in the fixture the expanded card is
+    // empty and the two assertions above pass with nothing on screen.
+    expect(handedBack.textContent).toContain('handed back content');
   });
 });
