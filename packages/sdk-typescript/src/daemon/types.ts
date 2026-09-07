@@ -55,6 +55,19 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal's own turns, as the daemon's Goal meter
+   * counts them: subagent work and the verifier's own checks are not
+   * included. Optional because a daemon older than the field sends a snapshot
+   * without it.
+   */
+  tokensUsed?: number;
+  /**
+   * The ceiling `tokensUsed` may reach before the Goal stops and waits for
+   * the user. Absent means the Goal is unbounded, which is also what an older
+   * daemon's snapshot looks like.
+   */
+  tokenBudget?: number;
   createdAt: number;
   updatedAt: number;
   lastReason?: string;
