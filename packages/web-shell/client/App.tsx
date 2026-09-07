@@ -3482,8 +3482,14 @@ export function App({
   const standaloneWriterBlocked = Boolean(
     connection.sessionId &&
       connection.error &&
-      isSessionWriterBlockedCode(standaloneDirectoryErrorCode),
+      connection.sessionContext?.kind === 'standalone' &&
+      isSessionWriterBlockedCode(connection.standaloneSession?.errorCode),
   );
+  const standaloneRetryRef = useRef<{ sessionId: string } | undefined>(
+    undefined,
+  );
+  const [standaloneRetrySessionId, setStandaloneRetrySessionId] =
+    useState<string>();
   const [standaloneRecoveryResolution, setStandaloneRecoveryResolution] =
     useState<StandaloneRecoveryResolution>('idle');
   const standaloneRecoveryRequestRef = useRef(0);
@@ -9900,7 +9906,7 @@ export function App({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     connected,
-    writeBlocked: sessionWriteBlocked,
+    writeBlocked: sessionWriteBlocked || standaloneWriterBlocked,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -11175,8 +11181,12 @@ export function App({
   // forever (#10406).
   const lastReportedConnectionErrorRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!connection.error || standaloneWriterBlocked) {
+    if (!connection.error) {
       lastReportedConnectionErrorRef.current = undefined;
+      return;
+    }
+    if (standaloneWriterBlocked) {
+      lastReportedConnectionErrorRef.current = connection.error;
       return;
     }
     if (lastReportedConnectionErrorRef.current === connection.error) return;
@@ -12408,6 +12418,22 @@ export function App({
       setPendingSessionContext,
     ],
   );
+
+  const handleRetryStandaloneSession = useCallback(() => {
+    const sessionId = connectionRef.current.sessionId;
+    if (!sessionId || standaloneRetryRef.current?.sessionId === sessionId)
+      return;
+    const request = { sessionId };
+    standaloneRetryRef.current = request;
+    setStandaloneRetrySessionId(sessionId);
+    void loadSidebarSession(sessionId, undefined, { kind: 'standalone' })
+      .catch(() => undefined)
+      .finally(() => {
+        if (standaloneRetryRef.current !== request) return;
+        standaloneRetryRef.current = undefined;
+        setStandaloneRetrySessionId(undefined);
+      });
+  }, [loadSidebarSession]);
 
   const handleCheckStandaloneRecovery = useCallback(async () => {
     const recovery = connectionRef.current.standaloneSession?.creationRecovery;
@@ -17733,14 +17759,8 @@ export function App({
                             <button
                               type="button"
                               className={styles.composerActionTipButton}
-                              onClick={() => {
-                                const id = connectionRef.current.sessionId;
-                                if (id) {
-                                  void loadSidebarSession(id, undefined, {
-                                    kind: 'standalone',
-                                  }).catch(() => undefined);
-                                }
-                              }}
+                              disabled={standaloneRetrySessionId === connection.sessionId}
+                              onClick={handleRetryStandaloneSession}
                             >
                               {t('common.retry')}
                             </button>

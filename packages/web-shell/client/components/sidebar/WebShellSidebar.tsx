@@ -5388,6 +5388,12 @@ export function WebShellSidebar({
               collapsed={collapsed}
               onExpand={() => onCollapsedChange(false)}
               currentSessionId={connection.sessionId}
+              currentSessionReady={
+                connection.status === 'connected' &&
+                !connection.error &&
+                !connection.loadingTranscript &&
+                !connection.catchingUp
+              }
               onLoadSession={onLoadStandaloneSession}
               onRenameSession={(sessionId, displayName) =>
                 onSessionRenameConfirmed?.(undefined, sessionId, displayName)

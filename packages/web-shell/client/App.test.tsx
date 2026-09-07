@@ -510,6 +510,7 @@ const {
       messages: [] as unknown[],
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
+      queuedPromptWriteBlocked: false,
       queuedPromptStreamingState: 'idle',
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
@@ -834,9 +835,11 @@ vi.mock('./hooks/useAnimationFrameValue', () => ({
 vi.mock('./hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
     holdQueuedPromptsLocally?: boolean;
+    writeBlocked?: boolean;
     streamingState: string;
     sessionHasActivePrompt?: boolean;
   }) => {
+    testState.queuedPromptWriteBlocked = args.writeBlocked === true;
     testState.queuedPromptHoldHistory.push(
       args.holdQueuedPromptsLocally === true,
     );
@@ -33455,13 +33458,32 @@ describe('App connection error reporting (#10406)', () => {
       );
       expect(banner?.textContent).toContain('fenced');
       expect(onError).not.toHaveBeenCalled();
-      await act(async () =>
-        (banner?.querySelector('button') as HTMLButtonElement)?.click(),
-      );
+      expect(testState.latestChatEditorProps).toMatchObject({ disabled: true });
+      const retry = deferred<void>();
+      mockSessionActions.loadSession.mockReturnValueOnce(retry.promise);
+      await act(async () => {
+        (banner?.querySelector('button') as HTMLButtonElement)?.click();
+        (banner?.querySelector('button') as HTMLButtonElement)?.click();
+      });
+      expect(banner?.querySelector('button')?.disabled).toBe(true);
+      expect(mockSessionActions.loadSession).toHaveBeenCalledOnce();
+      await act(async () => retry.reject(new Error('still fenced')));
+      expect(banner?.querySelector('button')?.disabled).toBe(false);
       expect(mockSessionActions.loadSession).toHaveBeenCalledWith('fenced', {
         workspaceCwd: undefined,
         sessionContext: { kind: 'standalone' },
       });
+      mockConnection.status = 'connected';
+      mockConnection.error = undefined;
+      mockConnection.standaloneSession = {};
+      rerender({ onError });
+      await flush();
+      expect(testState.latestChatEditorProps).toMatchObject({
+        disabled: false,
+      });
+      expect(
+        container.querySelector('[data-testid="standalone-writer-blocked"]'),
+      ).toBeNull();
       mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
       mockConnection.sessionId = 'different';
       mockConnection.standaloneSession = undefined;
@@ -33565,5 +33587,109 @@ describe('App connection error reporting (#10406)', () => {
     await flush();
 
     expect(calls).toEqual(['daemon unreachable']);
+  });
+});
+
+describe('Standalone writer-blocked navigation', () => {
+  it('keeps writer feedback local after a pending workspace and failed standalone open', async () => {
+    const onError = vi.fn();
+    const { container, rerender } = renderApp({ onError });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-other-workspace"]',
+        )
+        ?.click(),
+    );
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionContext = { kind: 'standalone' };
+      mockConnection.workspaceCwd = '';
+      mockConnection.sessionId = 'standalone-session-2';
+      mockConnection.status = 'error';
+      mockConnection.loadingTranscript = false;
+      mockConnection.error = 'writer fenced';
+      mockConnection.standaloneSession = {
+        errorCode: 'session_writer_conflict',
+      };
+      throw new DaemonHttpError(409, 'writer fenced', {
+        body: { code: 'session_writer_conflict' },
+      });
+    });
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )
+        ?.click(),
+    );
+    rerender({ onError });
+    await flush();
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'standalone-session-2',
+      {
+        workspaceCwd: undefined,
+        sessionContext: { kind: 'standalone' },
+      },
+    );
+    expect
+      .soft(
+        container.querySelector('[data-testid="standalone-writer-blocked"]'),
+      )
+      .not.toBeNull();
+    expect.soft(onError).not.toHaveBeenCalled();
+    expect
+      .soft(testState.latestChatEditorProps)
+      .toMatchObject({ disabled: true });
+    const reportsAfterFirstFailure = onError.mock.calls.length;
+    const repeatLoad = deferred<void>();
+    mockSessionActions.loadSession.mockReturnValueOnce(repeatLoad.promise);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )
+        ?.click(),
+    );
+    await flush();
+    await act(async () =>
+      repeatLoad.reject(
+        new DaemonHttpError(409, 'writer fenced', {
+          body: { code: 'session_writer_conflict' },
+        }),
+      ),
+    );
+    await flush();
+    expect.soft(onError).toHaveBeenCalledTimes(reportsAfterFirstFailure);
+  });
+
+  it('blocks queued writes when the standalone writer banner is visible', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.sessionId = 'fenced';
+    mockConnection.status = 'error';
+    mockConnection.error = 'writer fenced';
+    mockConnection.loadingTranscript = false;
+    mockConnection.standaloneSession = { errorCode: 'session_writer_conflict' };
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="standalone-writer-blocked"]'),
+    ).not.toBeNull();
+    expect(testState.latestChatEditorProps).toMatchObject({ disabled: true });
+    expect(testState.queuedPromptWriteBlocked).toBe(true);
+  });
+
+  it('keeps direct submit rejected by connection error status', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.status = 'error';
+    mockConnection.error = 'writer fenced';
+    mockConnection.standaloneSession = { errorCode: 'session_writer_conflict' };
+    const { container } = renderApp();
+    await flush();
+    await clickSubmit(container);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
   });
 });

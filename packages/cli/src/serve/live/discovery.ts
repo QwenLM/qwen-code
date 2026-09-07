@@ -453,7 +453,14 @@ export async function assertLiveDiscoveryPublisher(
       await lock.release();
       lock.assertHealthy();
     } catch (error) {
-      throw new LiveDiscoveryStateError(error);
+      throw new LiveDiscoveryStateError(
+        operationError
+          ? new AggregateError(
+              [operationError, error],
+              'Live discovery admission cleanup failed.',
+            )
+          : error,
+      );
     }
     if (operationError) throw operationError;
   } catch (error) {

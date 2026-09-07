@@ -43,6 +43,7 @@ interface StandaloneRecentsProps {
   collapsed: boolean;
   onExpand: () => void;
   currentSessionId?: string;
+  currentSessionReady?: boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onError: (error: unknown, fallback: string) => void;
@@ -107,6 +108,7 @@ export function StandaloneRecents({
   collapsed,
   onExpand,
   currentSessionId,
+  currentSessionReady = false,
   onLoadSession,
   onRenameSession,
   onError,
@@ -141,6 +143,7 @@ export function StandaloneRecents({
   >({});
   const [sessionError, setSessionError] = useState<{
     sessionId: string;
+    kind: 'open' | 'action';
     message: string;
     retry: () => void;
   }>();
@@ -178,8 +181,9 @@ export function StandaloneRecents({
         );
         if (!preserveLoadedPages) setActiveCursor(activePage.nextCursor);
         setListErrors((current) => ({ ...current, active: undefined }));
-      } catch {
+      } catch (error) {
         if (loadGenerationRef.current !== generation) return;
+        console.warn('[web-shell] standalone session list failed:', error);
         setListErrors((current) => ({ ...current, active: {} }));
       } finally {
         if (loadGenerationRef.current === generation) setLoadingActive(false);
@@ -213,8 +217,9 @@ export function StandaloneRecents({
         );
         if (!preserveLoadedPages) setArchivedCursor(page.nextCursor);
         setListErrors((current) => ({ ...current, archived: undefined }));
-      } catch {
+      } catch (error) {
         if (archivedLoadGenerationRef.current !== generation) return;
+        console.warn('[web-shell] archived session list failed:', error);
         setListErrors((current) => ({ ...current, archived: {} }));
       } finally {
         if (archivedLoadGenerationRef.current === generation) {
@@ -255,7 +260,7 @@ export function StandaloneRecents({
           setArchivedCursor(page.nextCursor);
         }
         setListErrors((current) => ({ ...current, [archiveState]: undefined }));
-      } catch {
+      } catch (error) {
         if (
           (archiveState === 'active'
             ? loadGenerationRef.current
@@ -263,6 +268,7 @@ export function StandaloneRecents({
         ) {
           return;
         }
+        console.warn('[web-shell] standalone session page failed:', error);
         setListErrors((current) => ({
           ...current,
           [archiveState]: { cursor },
@@ -281,10 +287,22 @@ export function StandaloneRecents({
   );
 
   useEffect(() => {
-    setSessionError(undefined);
+    setSessionError((current) =>
+      current?.kind === 'open' ? undefined : current,
+    );
     if (openingSessionIdRef.current !== currentSessionId)
       ++openGenerationRef.current;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    if (currentSessionReady) {
+      setSessionError((current) =>
+        current?.kind === 'open' && current.sessionId === currentSessionId
+          ? undefined
+          : current,
+      );
+    }
+  }, [currentSessionId, currentSessionReady]);
 
   useEffect(() => {
     void load(true);
@@ -304,6 +322,9 @@ export function StandaloneRecents({
     await Promise.all([load(), archivedExpanded ? loadArchived() : undefined]);
   }, [archivedExpanded, load, loadArchived]);
 
+  const refreshListsRef = useRef(refreshLists);
+  refreshListsRef.current = refreshLists;
+
   const run = useCallback(
     async (
       sessionId: string,
@@ -311,16 +332,14 @@ export function StandaloneRecents({
       refresh = true,
     ): Promise<boolean> => {
       if (busySessionIdRef.current) return false;
-      const generation = openGenerationRef.current;
       busySessionIdRef.current = sessionId;
       setBusySessionId(sessionId);
       setSessionError(undefined);
       try {
         await action();
-        if (refresh) await refreshLists();
+        if (refresh) await refreshListsRef.current();
         return true;
       } catch (error) {
-        if (generation !== openGenerationRef.current) return false;
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) {
           setRenameCandidate((current) =>
             current?.sessionId === sessionId ? undefined : current,
@@ -330,6 +349,7 @@ export function StandaloneRecents({
           );
           setSessionError({
             sessionId,
+            kind: 'action',
             message: t('session.writerBlocked'),
             retry: () => {
               void run(sessionId, action, refresh);
@@ -344,7 +364,7 @@ export function StandaloneRecents({
         setBusySessionId(undefined);
       }
     },
-    [onError, refreshLists, t],
+    [onError, t],
   );
 
   const archiveSession = useCallback(
@@ -431,13 +451,12 @@ export function StandaloneRecents({
         await onLoadSession(sessionId);
       } catch (error) {
         if (generation !== openGenerationRef.current) return;
+        if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) return;
+        console.warn('[web-shell] standalone session load failed:', error);
         setSessionError({
           sessionId,
-          message: t(
-            isSessionWriterBlockedCode(getDaemonErrorCode(error))
-              ? 'session.writerBlocked'
-              : 'session.loadFailed',
-          ),
+          kind: 'open',
+          message: t('session.loadFailed'),
           retry: () => {
             void openSession(sessionId);
           },
@@ -449,13 +468,22 @@ export function StandaloneRecents({
 
   if (!supported) return null;
   if (collapsed) {
+    const label =
+      listErrors.active || listErrors.archived
+        ? `${t('sidebar.recents')}: ${t('sidebar.standaloneLoadFailed')}`
+        : t('sidebar.recents');
     return (
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        title={t('sidebar.recents')}
-        aria-label={t('sidebar.recents')}
+        title={label}
+        aria-label={label}
+        className={
+          listErrors.active || listErrors.archived
+            ? 'text-destructive'
+            : undefined
+        }
         onClick={onExpand}
       >
         <MessageSquareIcon />
@@ -491,7 +519,7 @@ export function StandaloneRecents({
             <Button
               variant="ghost"
               size="sm"
-              disabled={loadingActive || loadingMore === 'active'}
+              disabled={loadingActive || loadingMore !== undefined}
               onClick={() => {
                 const cursor = listErrors.active?.cursor;
                 void (cursor ? loadMore('active', cursor) : load(true));
@@ -550,7 +578,7 @@ export function StandaloneRecents({
             variant="ghost"
             size="sm"
             className="w-full"
-            disabled={loadingMore === 'active'}
+            disabled={loadingMore !== undefined}
             onClick={() => void loadMore('active', activeCursor)}
           >
             {t('sidebar.showAllSessions')}
@@ -571,7 +599,7 @@ export function StandaloneRecents({
             <Button
               variant="ghost"
               size="sm"
-              disabled={loadingArchived || loadingMore === 'archived'}
+              disabled={loadingArchived || loadingMore !== undefined}
               onClick={() => {
                 const cursor = listErrors.archived?.cursor;
                 void (cursor
@@ -623,7 +651,7 @@ export function StandaloneRecents({
             variant="ghost"
             size="sm"
             className="w-full"
-            disabled={loadingMore === 'archived'}
+            disabled={loadingMore !== undefined}
             onClick={() => void loadMore('archived', archivedCursor)}
           >
             {t('sidebar.showAllSessions')}

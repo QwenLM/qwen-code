@@ -18,6 +18,13 @@ Close the conversation in the owning Qwen process normally, then use **Try
 again** in the affected conversation. You can continue using other sessions.
 Do not create a replacement conversation merely to make the error disappear.
 
+After an ungraceful shutdown, a Linux reboot or a container restart into a new
+PID namespace can leave an unsealed active writer record fenced indefinitely.
+There may be no surviving owner to close. Follow
+[Operator recovery for a residual lock](#operator-recovery-for-a-residual-lock)
+instead of repeatedly retrying; this release does not reclaim across those
+identity boundaries automatically.
+
 If it persists, enable local debug logging (`QWEN_DEBUG_LOG_FILE=1`) when
 starting the affected daemon and inspect the daemon and ACP child's diagnostics.
 Lease-acquisition diagnostics include the session ID, error kind, and exact
@@ -27,6 +34,9 @@ intentionally omit paths and ownership records. Keep diagnostic files private;
 do not publish owner tokens or unredacted lock contents.
 
 ## Which state can recover automatically?
+
+These rules apply to session writer leases. Legacy global owner records use
+the more limited compatibility check described below.
 
 - Normal close releases the lease. A certified sealed handoff is accepted only
   when its transcript proof is still valid.
@@ -73,6 +83,14 @@ updated binaries. An updated daemon encountering a live legacy owner returns
 `503 conversation_runtime_in_use`; after that owner exits, retry without
 restarting. Only an exactly revalidated stale legacy record is retired.
 Malformed or unsafe legacy state requires operator investigation.
+
+The legacy `conversations/runtime-owner.json` record carries a PID and nonce,
+but no hostname, boot ID, or PID-namespace identity. Its compatibility check
+can only test whether that PID exists in the updated daemon's own host and
+PID namespace. It cannot detect an old writer that is alive elsewhere on shared
+storage. This is another reason to fence every possible writer before starting
+an updated daemon; the check does not make mixed-host or mixed-namespace
+upgrades safe.
 
 Before rollback, drain and fence every updated daemon and writer too. Inventory
 active, sealed, claim, retired, and extended-schema records. Confirm the target

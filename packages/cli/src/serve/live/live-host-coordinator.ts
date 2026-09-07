@@ -6,6 +6,7 @@
 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
@@ -362,7 +363,7 @@ export class LiveHostCoordinator {
     message: 'The dedicated Appshot channel has not been verified.',
   };
   private call?: LiveCall;
-  private pendingStartMode?: { mode: 'new'; generation: number };
+  private pendingStartMode?: 'new';
   private actionGeneration = 0;
   private nextEpoch = 0;
   private inputMuted = false;
@@ -597,10 +598,7 @@ export class LiveHostCoordinator {
     }
     if (this.call) {
       const replacedCall = this.call;
-      this.pendingStartMode = {
-        mode: 'new',
-        generation: this.actionGeneration,
-      };
+      this.pendingStartMode = 'new';
       this.beginCallStop(replacedCall);
       const reportedCall = this.call ?? replacedCall;
       return {
@@ -1155,11 +1153,11 @@ export class LiveHostCoordinator {
         this.sendState(error.status);
         return;
       }
-      this.sendState({
-        ...this.getStatus(),
-        state: 'error',
-        message: 'Live Voice failed to start.',
-      });
+      this.lastCallError =
+        error instanceof ConversationRuntimeOwnershipError
+          ? error.message
+          : 'Live Voice failed to start.';
+      this.sendState(this.buildStatus(false));
     });
   }
 
@@ -1288,10 +1286,10 @@ export class LiveHostCoordinator {
     ++this.nextEpoch;
     const pendingStartMode = this.pendingStartMode;
     this.pendingStartMode = undefined;
-    if (pendingStartMode?.generation === this.actionGeneration) {
+    if (pendingStartMode) {
       const status = this.getStatus();
       if (status.available) {
-        this.startCall(pendingStartMode.mode);
+        this.startCall(pendingStartMode);
         return;
       }
     }

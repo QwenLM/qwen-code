@@ -11,6 +11,7 @@ import {
   LiveHostCoordinator,
   LiveUnavailableError,
 } from './live-host-coordinator.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
@@ -114,6 +115,88 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it.each(['toggle', 'new'] as const)(
+    'retains a Host %s ownership admission refusal in status',
+    async (action) => {
+      const failure = new ConversationRuntimeOwnershipError(
+        'conversation_runtime_in_use',
+        true,
+        { cause: new Error('/private/locator pid=1234 nonce=secret') },
+      );
+      const beforeStart = vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue(undefined);
+      const onStart = vi.fn();
+      const value = coordinator({ handlers: { beforeStart, onStart } });
+      const socket = connectReady(value);
+      socket.receive({ type: 'host.action', action });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(beforeStart).toHaveBeenCalledOnce();
+      expect(onStart).not.toHaveBeenCalled();
+      expect
+        .soft(
+          socket
+            .messages()
+            .filter((message) => message.type === 'host.state')
+            .at(-1),
+        )
+        .toMatchObject({
+          status: { state: 'error', message: failure.message },
+        });
+      expect.soft(value.getStatus()).toMatchObject({
+        available: true,
+        state: 'error',
+        message: failure.message,
+      });
+      expect(JSON.stringify(socket.messages())).not.toContain('/private');
+      expect(JSON.stringify(value.getStatus())).not.toContain('secret');
+      socket.close();
+      const reconnected = connectReady(value);
+      expect
+        .soft(
+          reconnected
+            .messages()
+            .find((message) => message.type === 'host.welcome'),
+        )
+        .toMatchObject({
+          status: { state: 'error', message: failure.message },
+        });
+      reconnected.receive({ type: 'host.action', action });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(onStart).toHaveBeenCalledOnce();
+      expect(value.getStatus().message).toBeUndefined();
+    },
+  );
+
+  it('retains a sanitized arbitrary admission failure', async () => {
+    const value = coordinator({
+      handlers: {
+        beforeStart: async () => {
+          throw new Error('/private/locator pid=1234 nonce=secret');
+        },
+      },
+    });
+    const socket = connectReady(value);
+    socket.receive({ type: 'host.action', action: 'toggle' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(
+      socket
+        .messages()
+        .filter((message) => message.type === 'host.state')
+        .at(-1),
+    ).toMatchObject({
+      status: { state: 'error', message: 'Live Voice failed to start.' },
+    });
+    expect.soft(value.getStatus()).toMatchObject({
+      available: true,
+      state: 'error',
+      message: 'Live Voice failed to start.',
+    });
+    expect(JSON.stringify(socket.messages())).not.toContain('/private');
+    expect(JSON.stringify(value.getStatus())).not.toContain('secret');
+  });
+
   it.each(['stop', 'deactivate', 'dispose', 'detach'] as const)(
     'invalidates an admission pending before %s',
     async (action) => {

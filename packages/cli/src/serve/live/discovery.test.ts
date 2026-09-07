@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getLiveDiscoveryPath,
   assertLiveDiscoveryPublisher,
@@ -39,6 +39,7 @@ function record(instanceNonce: string, pid = process.pid): LiveDiscoveryRecord {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -90,6 +91,50 @@ describe('Live discovery file', () => {
     ).rejects.toMatchObject({
       code: 'conversation_runtime_ownership_compromised',
     });
+  });
+
+  it('retains both admission and lock release failures in the cause chain', async () => {
+    const runtime = await temporaryRuntime();
+    const current = record('daemon_instance_nonce_admission');
+    const file = await writeLiveDiscoveryFile(runtime, current);
+    const originalBytes = await fs.readFile(file, 'utf8');
+    const releaseError = Object.assign(new Error('release denied'), {
+      code: 'EACCES',
+    });
+    const lockfile = (await import('proper-lockfile')).default;
+    const realLock = lockfile.lock.bind(lockfile);
+    const releaseFailure = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementationOnce(async (target, options) => {
+        const release = await realLock(target, options);
+        return async () => {
+          await release();
+          throw releaseError;
+        };
+      });
+
+    const rejection = await assertLiveDiscoveryPublisher(runtime, {
+      pid: current.pid,
+      instanceNonce: 'daemon_instance_nonce_foreign',
+    }).catch((error: unknown) => error);
+
+    expect(releaseFailure).toHaveBeenCalledOnce();
+    expect(rejection).toMatchObject({
+      code: 'conversation_runtime_ownership_compromised',
+      retryable: false,
+      cause: {
+        cause: {
+          errors: [
+            expect.objectContaining({
+              code: 'conversation_runtime_in_use',
+              retryable: true,
+            }),
+            releaseError,
+          ],
+        },
+      },
+    });
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(originalBytes);
   });
 
   it('publishes an atomic mode-0600 record below the runtime directory', async () => {

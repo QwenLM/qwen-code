@@ -117,6 +117,88 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
+  it('rejects a vanished previously observed state directory without recreating it', async () => {
+    const root = await workspace.getRoot();
+    const record = await makeRecord('prepared');
+    await journal.writePrepared(record, root);
+    await journal.clear(SESSION_ID, root);
+    await fs.rmdir(path.join(ownerDirectory, 'deletions'));
+    await fs.rmdir(ownerDirectory);
+
+    for (const operation of [
+      () => journal.hasRecord(SESSION_ID),
+      () => journal.listSessionIds(),
+      () => journal.read(SESSION_ID, root),
+      () => journal.clear(SESSION_ID, root),
+      () => journal.writePrepared(record, root),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        reason: 'compromised',
+      });
+      await expect(fs.lstat(ownerDirectory)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    }
+  });
+
+  it.each(['base', 'state'] as const)(
+    'rejects a complete private replacement %s tree on every operation',
+    async (parent) => {
+      const root = await workspace.getRoot();
+      const record = await makeRecord('prepared');
+      await journal.writePrepared(record, root);
+      const directory = parent === 'base' ? stableBaseDir : ownerDirectory;
+      const saved = `${directory}.saved`;
+      const original = await fs.lstat(directory);
+      const originalRecord = await fs.readFile(journalPath('prepared'), 'utf8');
+      await fs.rename(directory, saved);
+      await fs.mkdir(path.join(ownerDirectory, 'deletions'), {
+        recursive: true,
+        mode: 0o700,
+      });
+      for (const candidate of [
+        stableBaseDir,
+        ownerDirectory,
+        path.join(ownerDirectory, 'deletions'),
+      ]) {
+        const stat = await fs.lstat(candidate);
+        expect(stat.isDirectory()).toBe(true);
+        expect(stat.isSymbolicLink()).toBe(false);
+        if (process.platform !== 'win32') {
+          expect(stat.mode & 0o777).toBe(0o700);
+          expect(stat.uid).toBe(process.getuid?.());
+        }
+      }
+      expect((await fs.lstat(directory)).ino).not.toBe(original.ino);
+      for (const operation of [
+        () => journal.hasRecord(SESSION_ID),
+        () => journal.listSessionIds(),
+        () => journal.read(SESSION_ID, root),
+        () => journal.clear(SESSION_ID, root),
+        () => journal.writePrepared(record, root),
+      ]) {
+        await expect(operation()).rejects.toMatchObject({
+          reason: 'compromised',
+        });
+      }
+      const savedOwnerDirectory =
+        parent === 'base' ? path.join(saved, 'conversations') : saved;
+      await expect(
+        fs.readFile(
+          path.join(
+            savedOwnerDirectory,
+            'deletions',
+            path.basename(journalPath('prepared')),
+          ),
+          'utf8',
+        ),
+      ).resolves.toBe(originalRecord);
+      await expect(
+        fs.readdir(path.join(ownerDirectory, 'deletions')),
+      ).resolves.toEqual([]);
+    },
+  );
+
   it.each(['base', 'state'] as const)(
     'rejects a replaced %s parent on every operation',
     async (parent) => {

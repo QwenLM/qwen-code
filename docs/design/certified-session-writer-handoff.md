@@ -1,14 +1,15 @@
 # Certified session writer handoff
 
-> **Proposed standalone update (2026-09-02):**
+> **Conversations-runtime update (2026-09-06):**
 > [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
-> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) proposes
-> enabling this protocol for every writer hosted by the Conversations runtime,
-> which would supersede this document's exclusion of standalone ACP writers. Its
-> certified handoff remains unchanged. A hardened local policy would additionally
-> reclaim only a provably dead writer in the same local identity domain, including
-> the same boot and PID namespace on Linux; sealed, foreign, identity-less, and
-> ambiguous states remain fail closed.
+> is implemented by [#10924](https://github.com/QwenLM/qwen-code/pull/10924)'s
+> mandatory writer fences and [#11207](https://github.com/QwenLM/qwen-code/pull/11207)'s
+> global-owner cutover. Every writer hosted by Conversations now participates,
+> superseding this document's exclusion of standalone ACP writers. Certified
+> handoff remains unchanged. Hardened local recovery additionally permits only
+> a provably dead active writer in the same local identity domain, including
+> the same boot and PID namespace on Linux; foreign, identity-less, and
+> ambiguous active records remain fenced.
 
 ## Problem
 

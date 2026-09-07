@@ -1,13 +1,13 @@
 # Session writer lease P0a
 
-> **Proposed Conversations-runtime update (2026-09-02):**
+> **Conversations-runtime update (2026-09-06):**
 > [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
-> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) proposes
-> forcing this lease for every writer hosted by the Conversations runtime,
-> independent of the experimental setting. It also hardens stale recovery to the
-> same local identity domain, including boot and PID-namespace identity on Linux,
-> before selecting that policy for managed Conversations writers. Other ACP,
-> interactive, and headless gates remain unchanged.
+> is implemented by [#10924](https://github.com/QwenLM/qwen-code/pull/10924)'s
+> mandatory writer fences and [#11207](https://github.com/QwenLM/qwen-code/pull/11207)'s
+> global-owner cutover. Every writer hosted by Conversations uses this lease
+> independently of the experimental setting, with hardened local stale recovery
+> restricted to the same identity domain, including boot and PID namespace on
+> Linux. Other ACP, interactive, and headless gates remain unchanged.
 
 ## Problem
 
