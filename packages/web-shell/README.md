@@ -295,6 +295,13 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
 
+`Live` 会话分组默认不向嵌入宿主展示；此前版本会默认展示，依赖该分组的宿主升级时
+需要显式开启：
+
+```tsx
+<WebShellWithProviders sidebar={{ showLive: true }} />
+```
+
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 
 ```tsx

@@ -250,18 +250,14 @@
   overflow: hidden;
 }
 
-:global(
-    [data-web-shell-toolbar-popover][data-web-shell-compact-overlay]
-  ) {
+:global([data-web-shell-toolbar-popover][data-web-shell-compact-overlay]) {
   width: min(360px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
   box-sizing: border-box;
   padding: 6px;
 }
 
-:global(
-    [data-web-shell-toolbar-popover][data-web-shell-compact-overlay]
-  )
+:global([data-web-shell-toolbar-popover][data-web-shell-compact-overlay])
   .dropdownItemDesc {
   display: -webkit-box;
   overflow-wrap: anywhere;
@@ -1329,10 +1325,7 @@
   border-radius: 6px;
 }
 
-.editorShell[data-web-shell-compact-composer]
-  .toolbarRight
-  button
-  svg {
+.editorShell[data-web-shell-compact-composer] .toolbarRight button svg {
   width: 16px;
   height: 16px;
 }
