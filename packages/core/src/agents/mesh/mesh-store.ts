@@ -1105,54 +1105,71 @@ export async function updateThread(
   });
 }
 
+export interface CreateThreadInput {
+  title: string;
+  body?: string;
+  createdBy?: string;
+  assigneeAgentId?: string;
+  parentThreadId?: string;
+}
+
+/**
+ * Creates a thread inside an open transaction.
+ *
+ * Exposed separately so a caller that must create a thread *and* do something
+ * else atomically — assigning it, which books a run — can do both under one
+ * lock. Two transactions would leave a crash window in which an assigned
+ * sub-thread exists with nothing scheduled to work it.
+ */
+export async function createThreadInTransaction(
+  transaction: MeshStoreTransaction,
+  input: CreateThreadInput,
+): Promise<Thread> {
+  const id = generateThreadId();
+  let rootThreadId = id;
+  let autoTurnsUsed = 0;
+  if (input.parentThreadId) {
+    const parent = await transaction.readThread(input.parentThreadId);
+    if (!parent) {
+      throw new Error(`No parent thread with id "${input.parentThreadId}".`);
+    }
+    rootThreadId = parent.rootThreadId;
+    autoTurnsUsed = parent.autoTurnsUsed;
+    const root = await transaction.readThread(rootThreadId);
+    if (!root || root.rootThreadId !== root.id) {
+      throw new Error(`No valid root thread with id "${rootThreadId}".`);
+    }
+  }
+  return transaction.writeThread({
+    schemaVersion: MESH_SCHEMA_VERSION,
+    id,
+    title: input.title,
+    body: input.body ?? '',
+    status: 'open',
+    createdAt: Date.now(),
+    createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
+    rootThreadId,
+    messages: [],
+    runs: [],
+    nextMessageSequence: 1,
+    deliveryByAgent: {},
+    outbox: [],
+    autoTurnsUsed,
+    tokensUsed: 0,
+    ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
+    ...(input.assigneeAgentId
+      ? { assigneeAgentId: input.assigneeAgentId }
+      : {}),
+  });
+}
+
 export async function createThread(
   projectRoot: string,
-  input: {
-    title: string;
-    body?: string;
-    createdBy?: string;
-    assigneeAgentId?: string;
-    parentThreadId?: string;
-  },
+  input: CreateThreadInput,
 ): Promise<Thread> {
-  return withMeshStoreTransaction(projectRoot, async (transaction) => {
-    const id = generateThreadId();
-    let rootThreadId = id;
-    let autoTurnsUsed = 0;
-    if (input.parentThreadId) {
-      const parent = await transaction.readThread(input.parentThreadId);
-      if (!parent) {
-        throw new Error(`No parent thread with id "${input.parentThreadId}".`);
-      }
-      rootThreadId = parent.rootThreadId;
-      autoTurnsUsed = parent.autoTurnsUsed;
-      const root = await transaction.readThread(rootThreadId);
-      if (!root || root.rootThreadId !== root.id) {
-        throw new Error(`No valid root thread with id "${rootThreadId}".`);
-      }
-    }
-    return transaction.writeThread({
-      schemaVersion: MESH_SCHEMA_VERSION,
-      id,
-      title: input.title,
-      body: input.body ?? '',
-      status: 'open',
-      createdAt: Date.now(),
-      createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
-      rootThreadId,
-      messages: [],
-      runs: [],
-      nextMessageSequence: 1,
-      deliveryByAgent: {},
-      outbox: [],
-      autoTurnsUsed,
-      tokensUsed: 0,
-      ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
-      ...(input.assigneeAgentId
-        ? { assigneeAgentId: input.assigneeAgentId }
-        : {}),
-    });
-  });
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    createThreadInTransaction(transaction, input),
+  );
 }
 
 export async function readTokenBudgetThread(
