@@ -7,6 +7,7 @@
 import {
   claimMeshHostSession,
   readMeshWorkspace,
+  releaseMeshHostSession,
   type MeshAgent,
   type MeshAgentLaunchResult,
 } from '@qwen-code/qwen-code-core';
@@ -50,7 +51,11 @@ export function startMeshHostSessionOwner(options: {
     options.resumeTimeoutMs ?? DEFAULT_MESH_RESUME_TIMEOUT_MS;
   let ensuring: Promise<string> | undefined;
   let reviving:
-    | { completion: Promise<unknown>; deadline: Promise<unknown> }
+    | {
+        completion: Promise<unknown>;
+        deadline: Promise<unknown>;
+        definitivelyFailed: boolean;
+      }
     | undefined;
 
   const ensure = async (): Promise<string> => {
@@ -70,14 +75,33 @@ export function startMeshHostSessionOwner(options: {
             },
             resumeTimeoutMs,
           );
-          reviving = started;
+          const current = {
+            ...started,
+            definitivelyFailed: false,
+          };
+          reviving = current;
           void started.completion
+            .catch((error: unknown) => {
+              current.definitivelyFailed = true;
+              throw error;
+            })
             .finally(() => {
-              if (reviving === started) reviving = undefined;
+              if (reviving === current) reviving = undefined;
             })
             .catch(() => {});
         }
-        await reviving.deadline;
+        const current = reviving;
+        try {
+          await current.deadline;
+        } catch (error) {
+          await Promise.resolve();
+          if (!current.definitivelyFailed) throw error;
+          await releaseMeshHostSession(
+            workspaceCwd,
+            workspace.hostSessionId,
+          );
+          return ensure();
+        }
       }
       return workspace.hostSessionId;
     }

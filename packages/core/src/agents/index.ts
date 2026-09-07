@@ -38,6 +38,7 @@ export {
   readMeshAgents,
   readMeshWorkspace,
   readThread,
+  releaseMeshHostSession,
   updateMeshAgents,
   updateThread,
 } from './mesh/mesh-store.js';

@@ -83,8 +83,25 @@ export function inspectBody(config: Config, agent: MeshAgent): MeshBodyState {
     .get(meshBackgroundAgentId(agent));
   if (!entry) return { kind: 'absent' };
   switch (entry.status) {
-    case 'running':
-      return { kind: 'running' };
+    case 'running': {
+      const meshRun = readAgentMeta(
+        getAgentMetaPath(
+          config.storage.getProjectDir(),
+          config.getSessionId(),
+          meshBackgroundAgentId(agent),
+        ),
+      )?.meshRun;
+      return {
+        kind: 'running',
+        ...(meshRun
+          ? {
+              threadId: meshRun.threadId,
+              runId: meshRun.runId,
+              attempt: meshRun.attempt,
+            }
+          : {}),
+      };
+    }
     case 'paused':
       return { kind: 'paused' };
     case 'completed':
@@ -189,6 +206,25 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
   return {
     async inspect(agent) {
       return inspectBody(config, agent);
+    },
+    async deliver({ agent, prompt, deliveryId, threadId, runId, attempt }) {
+      const metaPath = getAgentMetaPath(
+        config.storage.getProjectDir(),
+        config.getSessionId(),
+        meshBackgroundAgentId(agent),
+      );
+      const binding = readAgentMeta(metaPath)?.meshRun;
+      if (
+        binding?.threadId !== threadId ||
+        binding.runId !== runId ||
+        binding.attempt !== attempt
+      ) {
+        return false;
+      }
+      return config.getBackgroundTaskRegistry().queueExternalInput(
+        meshBackgroundAgentId(agent),
+        { kind: 'message', text: prompt, deliveryId },
+      );
     },
     async start({
       action,

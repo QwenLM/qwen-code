@@ -124,6 +124,18 @@ Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/
 Gate: failure injection at each named point, as separate tests: enqueue returns false; process exit after `acceptedMessageIds` write; process exit after transcript record but before `consumedMessageIds` write; process exit after parent apply but before acknowledge; daemon restart with one `running` and one `queued` run; a stored host session that cannot be resumed is replaced once; N-minute stall. Each test asserts the thread file's final state and that no message id is both unconsumed and unbooked.
 Evidence: the injection matrix as a table in the PR, one row per test, with the asserted final state.
 
+**Production path implemented; gate not run.** The dispatcher now sends a
+structured, correlated input only to the exact ambient run binding; a rejected
+or raced delivery detaches its unaccepted trigger ids into the queued
+successor. Accepted-but-unconsumed input survives restart and is replayed once;
+late callbacks are attempt-guarded. Stored running work is resumed once and a
+second failure becomes terminal. The hidden host binding is replaced only
+after the resume promise definitively rejects, never merely on its timeout.
+Mesh reuses the existing three-minute workflow watchdog, including its
+tool-in-flight suspension, and requeues the first stalled attempt. Per the
+demo-first instruction, no local tests, lint, typecheck, build, or CI wait was
+performed for this implementation.
+
 ### Step 9 — REST and Web Shell
 
 Design direction is settled ahead of the build in [`2026-09-07-mesh-web-shell-design.md`](./2026-09-07-mesh-web-shell-design.md): the thread view is a ledger of outstanding obligations with the conversation as evidence, not a chat log with a status badge. It inherits Web Shell's existing tokens and adds no new colour or typeface. Step 9 renders `resolveThreadStatus`'s `status` and `reason` rather than inventing a second status vocabulary, shows one lane per agent that has worked the thread, and bounds every transcript view to the run's own slice.
@@ -173,7 +185,7 @@ Evidence: the channel transcript.
 
 ## 3. Product decisions the implementer must not make
 
-Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), and persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, and definition read at revive only.
+Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), channel notification destination (§9.12), token reservation vs accounting (§9.5), and persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, notification events retained without broadcasting, accounting limit with overshoot, and definition read at revive only.
 
 The owner settled three step-3 inputs: v1 denies every MCP tool; the v1 schema declares the full §3 shape in one migration; and runtime is a first-class concept, represented by generic `runtimeId` beside the local `backgroundAgentId`. Step 4 keeps the launcher surface minimal and supplies the local implementation first.
 

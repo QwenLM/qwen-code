@@ -1432,6 +1432,7 @@ export class BackgroundAgentResumeService {
                     projectRoot: this.config.getProjectRoot(),
                     context: meshRun,
                     emitter: bgEmitter,
+                    abortController: turnAbortController,
                     metaPath,
                     transcriptPath: outputFile,
                     body,

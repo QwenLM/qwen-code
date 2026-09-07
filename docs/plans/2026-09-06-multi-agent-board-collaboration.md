@@ -1,7 +1,8 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: The two-agent happy-path live slice is verified; dispatcher
-> reliability, daemon integration, Web Shell, and notifications remain.
+> Status: The two-agent happy path and Web demo are verified. Dispatcher
+> reliability is implemented but not failure-injection verified; channel
+> delivery remains.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Verification: §0.2 separates earlier targeted checks from the first live
 > two-agent run and from everything still unverified
@@ -134,10 +135,13 @@ removed the unintended bookings and completed the loop.
 **Still unverified.** Running-delivery miss reconciliation, the 12-turn
 ping-pong gate, restart and stall recovery, daemon host replacement/reaper,
 bare-mode tool exposure, visual CI, and notifications have not been run end to
-end. Cancellation, transcript slicing, blocked-question rendering, inline
-children, and deleted-agent tombstones have now been exercised through the
-real daemon and browser. The negative paths in §4 remain reasoned and locally
-checked contracts, not live-system evidence.
+end. Production paths now exist for correlated running delivery, delivery-race
+rebooking, one retry after restart or a three-minute no-activity stall, stale
+host replacement after a definitive resume failure, and attempt-guarded late
+callbacks. They have deliberately not been tested locally while the demo path
+is being completed. Cancellation, transcript slicing, blocked-question
+rendering, inline children, and deleted-agent tombstones have been exercised
+through the real daemon and browser.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
@@ -234,7 +238,7 @@ read-only; a private server or trusted-looking name is not evidence.
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 16  | Two gates: **12 unattended agent deliveries per thread / 200k accounted tokens per thread tree**. A human post resets only that thread's turn counter; the token gate applies to every trigger. `coalesce(running)` costs a turn, `coalesce(queued)` does not.                                                                                | Turn count is a local loop breaker; token count is money. A sibling comment cannot reset a loop, and a human message cannot bypass known spend; strict reservation versus bounded in-flight overshoot remains §9.5. |
 | 17  | A child **inherits the parent's current turn count** and charges tokens to the root.                                                                                                                                                                                                                                                          | Creating a child does not mint immediate unattended turns; a child created at the limit may be gated immediately. Later human input resets only the child being supervised.                                         |
-| 18  | A run is stuck when **N minutes pass with no activity** — not by total duration.                                                                                                                                                                                                                                                              | A legitimate two-hour investigation is never killed for being slow.                                                                                                                                                 |
+| 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Mesh reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                                                                                           | A legitimate long-running tool is never killed for being slow, and mesh does not invent a second watchdog policy.                                                                                                   |
 | 19  | A stuck run, and any run still `running` after a **daemon restart**, is reconciled once. Restart-recovered registry entries are `paused` and use `resumeBackgroundAgent`; completed entries use resident continue or cold revive. A second execution failure is terminal. A launch failure is typed and terminal unless classified transient. | Recovery follows the runtime's actual state machine and replays only work not committed by the delivery watermark; queued launch failures cannot poison the backlog indefinitely.                                   |
 
 ### Surfaces
@@ -908,7 +912,7 @@ cross-issue references have no equivalent.
 | Capability                       | Target reach | Note                                                                                             |
 | -------------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
 | Multi-agent collaboration itself | ~85%         | routing, hand-off, sub-thread reporting, serialisation, gates; mid-run steering remains unproved |
-| Run records and observability    | ~80%         | shared transcript with per-run slices, per-run tokens, retry and timeout are designed, not built |
+| Run records and observability    | ~80%         | shared transcript with per-run slices and tokens; retry and timeout are implemented but unverified |
 | Skills                           | ~70%         | carried by the agent definition                                                                  |
 | Agent identity                   | ~50%         | identity, persona, enable/disable, workload — runtime binding is zero                            |
 | Triggers                         | ~50%         | assignment and `@`; scheduled and external events unconnected                                    |
@@ -1067,6 +1071,13 @@ remain genuinely open:
     reply aimed at `@bob` must not silently clear an unrelated question raised
     by Alice. Decide whether acknowledgement follows mentioned targets, the
     assignee, or an explicit blocker id.
+12. **Channel notification destination.** Existing channel workers can send a
+    message only with a concrete `(channelName, user|chat, targetId)`. A thread
+    created in Web Shell has none, and “one configured channel” identifies a
+    connector but not a recipient. Decide whether a thread retains the channel
+    origin that created it, the workspace declares one notification target, or
+    both with an explicit precedence. Broadcasting is not a safe default; until
+    this is settled, notification outbox events remain pending.
 
 ### Resolved during step 3
 
@@ -1074,7 +1085,7 @@ Runtime shape is settled: runtime is a first-class concept. V1 carries
 `runtimeId` beside `backgroundAgentId`; step 4 exposes the smallest launcher
 contract with the local background agent as its first implementation. Remote,
 cloud, and foreign-runtime adapters remain out of scope for v1. This settles
-the schema dependency formerly listed here as open question 12 without deciding
+the former runtime-shape schema dependency without deciding
 whether #9402 becomes the seed of a later adapter.
 
 ## 10. Out of scope

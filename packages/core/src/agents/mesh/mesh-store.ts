@@ -1042,6 +1042,26 @@ export async function claimMeshHostSession(
   });
 }
 
+export async function releaseMeshHostSession(
+  projectRoot: string,
+  expectedSessionId: string,
+): Promise<boolean> {
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    if (workspace.hostSessionId !== expectedSessionId) return false;
+    await atomicWriteJSON(
+      getWorkspaceFilePath(projectRoot),
+      {
+        schemaVersion: workspace.schemaVersion,
+        workspaceId: workspace.workspaceId,
+        nextRunSequence: workspace.nextRunSequence,
+      },
+      { noFollow: true },
+    );
+    return true;
+  });
+}
+
 export async function readMeshAgents(
   projectRoot: string,
 ): Promise<MeshAgent[]> {

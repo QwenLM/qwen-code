@@ -3841,6 +3841,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                           projectRoot: this.config.getProjectRoot(),
                           context: meshRun,
                           emitter: bgEventEmitter,
+                          abortController: turnAbortController,
                           metaPath,
                           transcriptPath: jsonlPath,
                           body,

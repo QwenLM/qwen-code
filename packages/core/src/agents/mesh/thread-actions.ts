@@ -522,6 +522,7 @@ export async function bindRunSession(
 export async function consumeRunDelivery(
   projectRoot: string,
   context: MeshRunContext,
+  deliveryId = context.runId,
 ): Promise<Thread> {
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(context.threadId);
@@ -539,8 +540,13 @@ export async function consumeRunDelivery(
       );
     }
 
+    const deliveredMessage = thread.messages.find(
+      (message) => message.id === deliveryId,
+    );
     const through =
-      context.contextThroughSequence ?? run.contextThroughSequence;
+      deliveryId === context.runId
+        ? (context.contextThroughSequence ?? run.contextThroughSequence)
+        : deliveredMessage?.sequence;
     if (through === undefined) return thread;
     const previousCommitted =
       thread.deliveryByAgent[run.agentId]?.committedThroughSequence ?? 0;
@@ -568,13 +574,50 @@ export async function consumeRunDelivery(
               ...entry,
               acceptedMessageIds,
               consumedMessageIds: Array.from(
-                new Set([...entry.consumedMessageIds, ...acceptedMessageIds]),
+                new Set([...entry.consumedMessageIds, ...deliveredMessageIds]),
               ),
               contextThroughSequence: through,
             }
           : entry,
       ),
     });
+  });
+}
+
+export async function requeueRun(
+  projectRoot: string,
+  input: { threadId: string; runId: string; attempt: number },
+): Promise<boolean> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    const run = thread?.runs.find((entry) => entry.id === input.runId);
+    if (
+      !thread ||
+      !run ||
+      run.status !== 'running' ||
+      run.attempts !== input.attempt
+    ) {
+      return false;
+    }
+    await transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((entry) =>
+        entry.id === run.id
+          ? {
+              ...entry,
+              status: 'queued',
+              sessionId: undefined,
+              startedAt: undefined,
+              endedAt: undefined,
+              transcriptStartOffset: undefined,
+              transcriptEndOffset: undefined,
+              error: undefined,
+              failureStage: undefined,
+            }
+          : entry,
+      ),
+    });
+    return true;
   });
 }
 
@@ -622,6 +665,7 @@ export async function finishRun(
   runId: string,
   outcome: {
     status: 'completed' | 'failed' | 'cancelled';
+    attempt?: number;
     error?: string;
     failureStage?: string;
     transcriptEndOffset?: number;
