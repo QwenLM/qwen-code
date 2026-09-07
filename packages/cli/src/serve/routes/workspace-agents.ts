@@ -32,6 +32,9 @@ import {
   assignThread,
   createAssignedThread,
   createThread,
+  THREAD_PRIORITY_ORDER,
+  DEFAULT_THREAD_PRIORITY,
+  type ThreadPriority,
   decideDispatch,
   finishRunInTransaction,
   generateAgentId,
@@ -461,6 +464,10 @@ export function registerWorkspaceAgentRoutes(
         id: thread.id,
         title: thread.title,
         body: thread.body,
+        ...(thread.acceptanceCriteria
+          ? { acceptanceCriteria: thread.acceptanceCriteria }
+          : {}),
+        priority: thread.priority ?? DEFAULT_THREAD_PRIORITY,
         ...(thread.assigneeAgentId
           ? { assigneeName: agentName(agents, thread.assigneeAgentId) }
           : {}),
@@ -788,16 +795,38 @@ export function registerWorkspaceAgentRoutes(
         }
         const body =
           typeof payload.body === 'string' ? payload.body : undefined;
+        const acceptanceCriteria =
+          typeof payload.acceptanceCriteria === 'string'
+            ? payload.acceptanceCriteria
+            : undefined;
+        // An unrecognised priority is rejected rather than coerced: silently
+        // reading "critical" as normal would file work at an order nobody
+        // chose, and the caller would never learn its word meant nothing.
+        const priority = payload.priority;
+        if (
+          priority !== undefined &&
+          !THREAD_PRIORITY_ORDER.includes(priority as ThreadPriority)
+        ) {
+          res.status(400).json({ error: 'priority_unknown' });
+          return;
+        }
+        const extra = {
+          ...(body !== undefined ? { body } : {}),
+          ...(acceptanceCriteria !== undefined ? { acceptanceCriteria } : {}),
+          ...(priority !== undefined
+            ? { priority: priority as ThreadPriority }
+            : {}),
+        };
         const created = assignee
           ? await createAssignedThread(root, {
               title,
-              ...(body !== undefined ? { body } : {}),
+              ...extra,
               assignee,
             })
           : {
               thread: await createThread(root, {
                 title,
-                ...(body !== undefined ? { body } : {}),
+                ...extra,
               }),
             };
         const thread = created.thread;

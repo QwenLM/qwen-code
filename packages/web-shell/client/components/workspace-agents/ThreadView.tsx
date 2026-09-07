@@ -33,6 +33,9 @@ export interface ThreadDetailView {
   id: string;
   title: string;
   body: string;
+  /** What "done" means here, in the author's words. */
+  acceptanceCriteria?: string;
+  priority?: 'urgent' | 'high' | 'normal' | 'low';
   assigneeName?: string;
   status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done';
   /** The resolver's sentence. Rendered verbatim. */
@@ -315,6 +318,23 @@ export function ThreadView({
               ))}
           </select>
         ) : null}
+        {thread.priority && thread.priority !== 'normal' ? (
+          // Only when it is not the default: a chip on every thread saying
+          // "Normal" would be a label where no decision was made.
+          <span
+            className={
+              thread.priority === 'urgent'
+                ? `${styles.priorityChip} ${styles.priorityUrgent}`
+                : styles.priorityChip
+            }
+          >
+            {thread.priority === 'urgent'
+              ? 'Urgent'
+              : thread.priority === 'high'
+                ? 'High priority'
+                : 'Low priority'}
+          </span>
+        ) : null}
         {active ? (
           <span className={styles.workingChip}>
             <span className={styles.workingDot} aria-hidden="true" />
@@ -348,6 +368,13 @@ export function ThreadView({
 
           {thread.body ? (
             <p className={styles.threadBody}>{thread.body}</p>
+          ) : null}
+
+          {thread.acceptanceCriteria ? (
+            <section className={styles.criteria}>
+              <h2 className={styles.criteriaTitle}>Done when</h2>
+              <p className={styles.criteriaText}>{thread.acceptanceCriteria}</p>
+            </section>
           ) : null}
 
           {thread.children && thread.children.length > 0 ? (

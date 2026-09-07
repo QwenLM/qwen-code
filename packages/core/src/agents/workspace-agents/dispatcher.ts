@@ -50,6 +50,7 @@ import type {
   ThreadEvent,
   ThreadRun,
 } from './types.js';
+import { threadPriorityRank } from './types.js';
 
 /** What the runtime says about an agent's long-lived body. */
 export type AgentBodyState =
@@ -349,11 +350,22 @@ export function selectCandidates(
     }
   }
 
-  // One global FIFO, then fill each agent up to its remaining capacity. Sorting
-  // first is what keeps the order a workspace-wide queue rather than a
+  // One global queue, then fill each agent up to its remaining capacity.
+  // Sorting first is what keeps the order a workspace-wide queue rather than a
   // per-agent one: an agent with room does not jump ahead of older work it
   // could also have taken.
-  queued.sort((a, b) => a.run.queueSequence - b.run.queueSequence);
+  //
+  // Priority outranks age, and is the only thing that does. Within a priority
+  // the order is still the lock-issued `queueSequence`, so equal work is
+  // strictly first-come and a thread cannot be starved by a steady arrival of
+  // peers. A thread with no priority ranks as the default, which is why
+  // marking one urgent moves it and marking nothing changes nothing.
+  queued.sort(
+    (a, b) =>
+      threadPriorityRank(a.thread.priority) -
+        threadPriorityRank(b.thread.priority) ||
+      a.run.queueSequence - b.run.queueSequence,
+  );
   const taken: Candidate[] = [];
   const room = new Map<string, number>();
   for (const candidate of queued) {

@@ -135,6 +135,47 @@
   white-space: pre-wrap;
 }
 
+.priorityChip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.priorityUrgent {
+  border-color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+  color: var(--status-attention-fg);
+}
+
+/* The standard the work is judged against, given its own edge so it does not
+   read as more of the body. The rule sits on the inline start so it aligns
+   with the run rows below, which are marked the same way. */
+.criteria {
+  max-width: 72ch;
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid var(--border);
+}
+
+.criteriaTitle {
+  margin: 0 0 4px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.criteriaText {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
 .children {
   display: flex;
   flex-direction: column;

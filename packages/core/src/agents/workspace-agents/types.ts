@@ -160,6 +160,40 @@ export type ThreadStatus =
   | 'done';
 
 /**
+ * How urgently a thread wants a turn, highest first.
+ *
+ * These names are ours. Multica's issue carries a priority, but its value set
+ * was not verified from source, so inventing a match would be a guess wearing
+ * a citation. Four levels is what an ordering needs: one above normal for
+ * "before the queue", one for "soon", the default, and one for "whenever".
+ */
+export type ThreadPriority = 'urgent' | 'high' | 'normal' | 'low';
+
+/** Priorities in dispatch order. Index is the rank; lower goes first. */
+export const THREAD_PRIORITY_ORDER: readonly ThreadPriority[] = [
+  'urgent',
+  'high',
+  'normal',
+  'low',
+];
+
+export const DEFAULT_THREAD_PRIORITY: ThreadPriority = 'normal';
+
+/**
+ * Dispatch rank of a thread's priority. An absent priority ranks as the
+ * default, so a thread written before this field existed keeps its place
+ * rather than sinking or jumping the queue.
+ */
+export function threadPriorityRank(priority?: ThreadPriority): number {
+  const rank = THREAD_PRIORITY_ORDER.indexOf(
+    priority ?? DEFAULT_THREAD_PRIORITY,
+  );
+  return rank === -1
+    ? THREAD_PRIORITY_ORDER.indexOf(DEFAULT_THREAD_PRIORITY)
+    : rank;
+}
+
+/**
  * One post on a thread. Append-only: an agent's turn is evidence, and
  * rewriting it would let a later run change what an earlier one is recorded
  * as having said.
@@ -275,7 +309,20 @@ export interface Thread {
   id: string;
   title: string;
   body: string;
+  /**
+   * What "done" means for this thread, in the author's words.
+   *
+   * Separate from `body` because it is the one part an agent is checked
+   * against: it goes into the turn envelope as the standard to meet, and a
+   * review hand-back reports against it. A body says what to do; this says
+   * when to stop.
+   */
+  acceptanceCriteria?: string;
   status: ThreadStatus;
+  /**
+   * Dispatch order within one agent's queue. Absent means the default.
+   */
+  priority?: ThreadPriority;
   /** Agent that owns the thread when no message names someone explicitly. */
   assigneeAgentId?: string;
   createdAt: number;

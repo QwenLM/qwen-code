@@ -77,11 +77,15 @@ export {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
   HUMAN_AUTHOR_ID,
+  THREAD_PRIORITY_ORDER,
+  DEFAULT_THREAD_PRIORITY,
+  threadPriorityRank,
 } from './workspace-agents/types.js';
 export type {
   WorkspaceAgent,
   AgentWorkspaceState,
   Thread,
   ThreadRun,
+  ThreadPriority,
 } from './workspace-agents/types.js';
 export * from './tasks/types.js';

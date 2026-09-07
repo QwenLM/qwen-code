@@ -52,9 +52,14 @@ export interface NewWorkspaceAgent {
   agentType?: string;
 }
 
+export type ThreadPriorityChoice = 'urgent' | 'high' | 'normal' | 'low';
+
 export interface NewThread {
   title: string;
   body: string;
+  /** What "done" means. Sent only when written, so a blank stays absent. */
+  acceptanceCriteria?: string;
+  priority?: ThreadPriorityChoice;
   assignee?: string;
 }
 
@@ -158,9 +163,19 @@ export function ThreadsPage({
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const assignee = String(data.get('assignee') ?? '');
+    const acceptanceCriteria = String(
+      data.get('acceptanceCriteria') ?? '',
+    ).trim();
+    const priority = String(data.get('priority') ?? '');
     onCreateThread({
       title: String(data.get('title') ?? '').trim(),
       body: String(data.get('body') ?? '').trim(),
+      // Left out when blank or ordinary, so the thread records a decision
+      // only where one was made.
+      ...(acceptanceCriteria ? { acceptanceCriteria } : {}),
+      ...(priority && priority !== 'normal'
+        ? { priority: priority as ThreadPriorityChoice }
+        : {}),
       ...(assignee ? { assignee } : {}),
     });
     onPreviewThread?.(undefined);
@@ -243,6 +258,21 @@ export function ThreadsPage({
               placeholder="Give the team the full task"
               required
             />
+            <textarea
+              className={styles.field}
+              name="acceptanceCriteria"
+              placeholder="Done when… (the agent is told this, and reports against it)"
+            />
+            <select
+              className={styles.field}
+              name="priority"
+              defaultValue="normal"
+            >
+              <option value="urgent">Urgent</option>
+              <option value="high">High</option>
+              <option value="normal">Normal priority</option>
+              <option value="low">Low</option>
+            </select>
             <select
               className={styles.field}
               name="assignee"

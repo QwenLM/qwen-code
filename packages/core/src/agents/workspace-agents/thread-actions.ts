@@ -34,6 +34,7 @@ import {
   type Thread,
   type ThreadMessage,
   type ThreadRun,
+  type ThreadPriority,
 } from './types.js';
 
 export interface PostMessageInput {
@@ -387,6 +388,8 @@ export async function createAssignedThread(
   input: {
     title: string;
     body?: string;
+    acceptanceCriteria?: string;
+    priority?: ThreadPriority;
     assignee: WorkspaceAgent;
   },
 ): Promise<{ thread: Thread; assignment: PostMessageResult }> {
@@ -399,6 +402,10 @@ export async function createAssignedThread(
     const thread = await prepareThreadInTransaction(transaction, {
       title: input.title,
       ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.acceptanceCriteria !== undefined
+        ? { acceptanceCriteria: input.acceptanceCriteria }
+        : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
       assigneeAgentId: assignee.id,
     });
     const assignment = await postMessageInTransaction(

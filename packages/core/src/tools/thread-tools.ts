@@ -326,7 +326,10 @@ export class ThreadReviewTool extends BaseDeclarativeTool<
         properties: {
           summary: {
             type: 'string',
-            description: 'What you concluded, and what a person should check.',
+            description:
+              'What you concluded, and what a person should check. When the ' +
+              'thread frame states "Done when", answer it point by point and ' +
+              'say plainly which parts you did not meet.',
           },
         },
         required: ['summary'],
@@ -352,6 +355,7 @@ export class ThreadReviewTool extends BaseDeclarativeTool<
 export interface ThreadCreateParams {
   title: string;
   body?: string;
+  acceptanceCriteria?: string;
   assignee?: string;
 }
 
@@ -416,6 +420,12 @@ class ThreadCreateInvocation extends BaseToolInvocation<
           const child = await prepareThreadInTransaction(transaction, {
             title,
             ...(this.params.body ? { body: this.params.body } : {}),
+            // A hand-off that does not say what "done" means is how a
+            // sub-thread comes back wrong and nobody can say why. The child's
+            // envelope states this the same way the parent's states its own.
+            ...(this.params.acceptanceCriteria
+              ? { acceptanceCriteria: this.params.acceptanceCriteria }
+              : {}),
             createdBy: context.agentId,
             parentThreadId: context.threadId,
             ...(assignee ? { assigneeAgentId: assignee.id } : {}),
@@ -499,6 +509,11 @@ export class ThreadCreateTool extends BaseDeclarativeTool<
           body: {
             type: 'string',
             description: 'What the assignee needs to know to start.',
+          },
+          acceptanceCriteria: {
+            type: 'string',
+            description:
+              'What "done" means for this sub-task. The assignee is told this and reports against it.',
           },
           assignee: {
             type: 'string',

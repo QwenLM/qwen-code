@@ -34,6 +34,9 @@ import {
   type ThreadRun,
   type ThreadRunStatus,
   type ThreadStatus,
+  type ThreadPriority,
+  THREAD_PRIORITY_ORDER,
+  DEFAULT_THREAD_PRIORITY,
 } from './types.js';
 
 const AGENTS_DIRNAME = 'agent-host';
@@ -214,6 +217,8 @@ const THREAD_STATUSES = new Set<ThreadStatus>([
   'done',
 ]);
 
+const THREAD_PRIORITIES = new Set<ThreadPriority>(THREAD_PRIORITY_ORDER);
+
 const CLOSE_KINDS = new Set<RunCloseKind>([
   'waiting',
   'blocked',
@@ -381,7 +386,15 @@ function isValidThread(value: unknown): value is Thread {
     (value['parentThreadId'] !== undefined &&
       !isValidId(value['parentThreadId'])) ||
     (value['assigneeAgentId'] !== undefined &&
-      !isValidId(value['assigneeAgentId']))
+      !isValidId(value['assigneeAgentId'])) ||
+    // Absent is valid on both: a thread written before these fields existed
+    // has no criteria and the default priority. A present but malformed one
+    // is not — an unreadable standard would be shown to an agent as its
+    // standard, and an unreadable priority would silently reorder the queue.
+    (value['acceptanceCriteria'] !== undefined &&
+      typeof value['acceptanceCriteria'] !== 'string') ||
+    (value['priority'] !== undefined &&
+      !THREAD_PRIORITIES.has(value['priority'] as ThreadPriority))
   ) {
     return false;
   }
@@ -1299,6 +1312,10 @@ export async function updateThread(
 export interface CreateThreadInput {
   title: string;
   body?: string;
+  /** What "done" means here. Goes to the agent as the standard to meet. */
+  acceptanceCriteria?: string;
+  /** Dispatch order within an agent's queue. Omitted means the default. */
+  priority?: ThreadPriority;
   createdBy?: string;
   assigneeAgentId?: string;
   parentThreadId?: string;
@@ -1357,6 +1374,15 @@ export async function prepareThreadInTransaction(
     ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
     ...(input.assigneeAgentId
       ? { assigneeAgentId: input.assigneeAgentId }
+      : {}),
+    ...(input.acceptanceCriteria
+      ? { acceptanceCriteria: input.acceptanceCriteria }
+      : {}),
+    // Stored only when it differs from the default, so a thread nobody
+    // prioritised stays indistinguishable from one written before the field
+    // existed. Both rank the same, and neither claims a decision was made.
+    ...(input.priority && input.priority !== DEFAULT_THREAD_PRIORITY
+      ? { priority: input.priority }
       : {}),
   };
 }
