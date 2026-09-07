@@ -10,6 +10,7 @@ import type {
   CronJob,
   GoalJournal,
   GoalRuntime,
+  GoalSnapshotV2,
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   ToolCallRequestInfo,
@@ -55,6 +56,7 @@ import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
+  formatGoalState,
   skipHeadlessLoopSentinel,
   TurnInterruptedError,
 } from './nonInteractiveCli.js';
@@ -8623,5 +8625,93 @@ describe('runNonInteractive', () => {
         await fs.rm(realTmpDir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('formatGoalState', () => {
+  const goalSnapshot = (
+    overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+  ): GoalSnapshotV2 => ({
+    v: 2,
+    activity: 'idle',
+    goal: {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the release notes',
+      status: 'active',
+      evidenceCursor: { recordId: null },
+      turnCount: 0,
+      activeTimeMs: 0,
+      tokensUsed: 0,
+      createdAt: 0,
+      updatedAt: 0,
+      ...overrides,
+    },
+  });
+
+  it('reports turns and spend against the budget', () => {
+    // Spelled out rather than abbreviated: this output is read in a terminal
+    // and piped into scripts, neither of which is helped by `1.2k`.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          turnCount: 3,
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal active: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens',
+    );
+  });
+
+  it('reports spend alone when the Goal has no budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, tokensUsed: 900 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn · 900 tokens');
+  });
+
+  it('omits the spend it has none of', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 2, tokenBudget: 30_000_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 2 turns');
+  });
+
+  it('says nothing about usage for a Goal that has not run', () => {
+    expect(formatGoalState(goalSnapshot(), 'status')).toBe(
+      'Goal active: ship the release notes',
+    );
+  });
+
+  it('keeps the stop reason below the usage line', () => {
+    // The reason is why the Goal is where it is; the figures are context for
+    // it, so they read first.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+          lastReason: 'Paused with /goal pause.',
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens\nReason: Paused with /goal pause.',
+    );
+  });
+
+  it('has no usage to report for a cleared Goal', () => {
+    expect(
+      formatGoalState({ v: 2, activity: 'idle', goal: null }, 'clear'),
+    ).toBe('Goal cleared.');
   });
 });

@@ -18,12 +18,12 @@ The Session collector remains an unfiltered statement of local truth. Category n
 
 ## Negotiation and compatibility
 
-The protocol version remains v1. The daemon initialize request advertises `agent`, `notification`, and `shell`; the child answers with the intersection it supports. A request with no `categories` is the pre-negotiation v1 baseline, `agent` and `notification`.
+The protocol version remains v1. The daemon initialize request advertises every current category; the child answers with the intersection it supports. A request with no `categories` is the pre-negotiation v1 baseline, `agent` and `notification`.
 
 | Peers                                      | Reporting result                         | Ordinary automatic cleanup                            |
 | ------------------------------------------ | ---------------------------------------- | ----------------------------------------------------- |
-| new daemon + new child                     | `full`; shell hold crosses the wire      | existing conditional-close flow                       |
-| new daemon + old v1 child                  | `partial`; `shell` is missing            | disabled for that Session                             |
+| new daemon + new child                     | `full`; current holds cross the wire     | existing conditional-close flow                       |
+| new daemon + old v1 child                  | `partial`; newer categories are missing  | disabled for that Session                             |
 | old v1 daemon + new child                  | wire contains only the legacy categories | local conditional close still rejects a running shell |
 | daemon + child with no active-work support | `none`                                   | historical legacy cleanup                             |
 
@@ -37,13 +37,13 @@ At shell completion, the registry invokes the notification callback before publi
 
 `Session.isIdle()` consumes the same unfiltered collector. Workspace reload therefore skips a Session while a background shell or its terminal continuation is active.
 
-Conditional close reads the unfiltered collector once before disturbing active turns and again after those turns drain, while the Session close gate remains held. The final read closes the window where an already-running, otherwise out-of-scope cron or automatic turn registers a shell during drain; the new shell refuses ordinary teardown without adding cron itself to `activeWork`.
+Conditional close reads the unfiltered collector once before disturbing active turns and again after those turns drain, while the Session close gate remains held. Child-owned cron, goal, history-mutation, and Monitor-continuation work is now represented by the aggregate `session` category, so it refuses ordinary teardown before the drain begins.
 
 ## Boundaries
 
 This change tracks the logical lifecycle owned by `BackgroundShellRegistry`; it does not use PID probes or sidecars to reconstruct process liveness. `task_stop` follows the registry's terminal status and does not promise an additional OS-level exit confirmation. A promoted or externally detached process that the registry no longer tracks is outside the signal.
 
-Long-running development servers consequently keep `activeWork: true`. This is the intended retention fact, not shell-stall detection or a restart lease. Monitor, workflow, cron, and follow-up work remain out of scope, and the public health shape, persistence formats, shell admission policy, heartbeat behavior, and watchdog behavior do not change.
+Long-running development servers consequently keep `activeWork: true`. This is the intended retention fact, not shell-stall detection or a restart lease. Running Monitors, follow-up work, and external processes remain out of scope, and the public health shape, persistence formats, shell admission policy, heartbeat behavior, and watchdog behavior do not change.
 
 ## Verification
 
