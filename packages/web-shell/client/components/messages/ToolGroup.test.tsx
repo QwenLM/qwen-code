@@ -2808,7 +2808,11 @@ describe('pending edit approval rows', () => {
       // fixture has to carry the diff the lock presupposes — without content
       // `extractDiff` returns '' and the expanded card renders empty.
       content: [
-        { type: 'diff', oldText: 'old content', newText: 'handed back content' },
+        {
+          type: 'diff',
+          oldText: 'old content',
+          newText: 'handed back content',
+        },
       ],
     });
 
