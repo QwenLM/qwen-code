@@ -31,5 +31,43 @@ export {
 export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
 export { launchMeshAgent } from './mesh/launcher.js';
 export type { MeshAgentLaunchResult } from './mesh/launcher.js';
-export type { MeshAgent } from './mesh/types.js';
+// The daemon's REST surface renders threads, so it needs the store's readers,
+// the status resolver and the admission rules. It gets the *rules*, not a copy
+// of them: the routing preview a person sees before posting runs the same pure
+// functions admission runs, so the two cannot drift.
+export {
+  createThread,
+  generateAgentId,
+  listThreadIds,
+  listThreads,
+  readMeshAgents,
+  readMeshWorkspace,
+  readThread,
+  updateMeshAgents,
+  updateThread,
+  writeThread,
+} from './mesh/mesh-store.js';
+export { parseMentions, mentionToken } from './mesh/mentions.js';
+export { decideDispatch, resolveTargets } from './mesh/dispatch-policy.js';
+export { postMessage } from './mesh/thread-actions.js';
+export {
+  resolveThreadStatus,
+  outstandingCloseObligations,
+} from './mesh/thread-status.js';
+export { hasLiveDescendant } from './mesh/run-lifecycle.js';
+export {
+  DEFAULT_QUEUE_LIMIT,
+  DEFAULT_THREAD_AUTO_TURN_BUDGET,
+  DEFAULT_THREAD_TOKEN_BUDGET,
+  HUMAN_AUTHOR_ID,
+  MESH_SCHEMA_VERSION,
+} from './mesh/types.js';
+export type {
+  MeshAgent,
+  MessageOutcome,
+  Thread,
+  ThreadMessage,
+  ThreadRun,
+  ThreadStatus,
+} from './mesh/types.js';
 export * from './tasks/types.js';
