@@ -208,7 +208,15 @@ async function rebookUndeliveredTriggers(
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(threadId);
     const run = thread?.runs.find((entry) => entry.id === runId);
-    if (!thread || !run || run.attempts !== attempt || thread.status === 'done') {
+    if (
+      !thread ||
+      !run ||
+      run.attempts !== attempt ||
+      thread.status === 'done' ||
+      (run.status !== 'running' &&
+        run.status !== 'finishing' &&
+        run.status !== 'completed')
+    ) {
       return undefined;
     }
     const pending = pendingTriggerIds(run);

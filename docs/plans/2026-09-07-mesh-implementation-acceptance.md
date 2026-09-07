@@ -150,7 +150,9 @@ and tells the agent to ask a person when the missing context is required.
 Undelivered triggers are rebooked only from a running, finishing, or completed
 attempt where delivery can genuinely have raced completion. Failed and
 cancelled runs remain terminal, so a later dispatcher pass cannot undo an
-explicit cancellation or retry a definition/start failure forever.
+explicit cancellation or retry a definition/start failure forever. The
+rebooking transaction checks that status again rather than trusting its scan
+snapshot, closing the cancellation-versus-delivery race.
 Cancellation admission now reads and changes the run under one workspace lock.
 A queued run cannot be claimed between the route's observation and its write,
 and the response is based on the stored post-dispatch state rather than the
