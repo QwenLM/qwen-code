@@ -31,14 +31,7 @@ import {
   acknowledgeCloseObligations,
   resolveThreadStatus,
 } from './thread-status.js';
-import {
-  HUMAN_AUTHOR_ID,
-  type MeshAgent,
-  type Thread,
-  type ThreadEvent,
-  type ThreadMessage,
-  type ThreadRun,
-} from './types.js';
+import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
 export type RunCloseRequest =
@@ -408,42 +401,3 @@ export async function finishRunInTransaction(
   next = await applyAggregateStatus(transaction, next, now);
   return transaction.writeThread(next);
 }
-
-/**
- * Records that a person's or an agent's post booked work, discharging the
- * obligations an earlier failure or unclosed return left behind.
- *
- * Separate from the close path because the trigger is different: this is
- * "something new is running now", not "a run finished".
- */
-export function acknowledgeAfterBooking(
-  thread: Thread,
-  atSequence: number,
-): Thread {
-  return acknowledgeCloseObligations(thread, atSequence);
-}
-
-/** Agents currently holding a live run on this thread, for UI and dispatch. */
-export function liveRunsFor(
-  thread: Thread,
-  agents: readonly MeshAgent[],
-): Array<{ run: ThreadRun; agent?: MeshAgent }> {
-  return thread.runs
-    .filter(
-      (run) =>
-        run.status === 'queued' ||
-        run.status === 'running' ||
-        run.status === 'finishing' ||
-        run.status === 'cancelling',
-    )
-    .map((run) => ({
-      run,
-      ...(agents.find((agent) => agent.id === run.agentId)
-        ? { agent: agents.find((agent) => agent.id === run.agentId)! }
-        : {}),
-    }));
-}
-
-/** Author id used when the system, not a person or agent, appends a post. */
-export const SYSTEM_AUTHOR_ID = 'system';
-export { HUMAN_AUTHOR_ID };

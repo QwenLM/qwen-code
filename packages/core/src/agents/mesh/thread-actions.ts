@@ -36,7 +36,21 @@ export interface PostMessageInput {
   from: string;
   text: string;
   originEventId?: string;
+  /**
+   * `system` for a structured trigger — an assignment, or a parent dependency
+   * report. Derived from `from` when absent. A system trigger still records the
+   * run or human action that caused it, so it is charged as unattended work
+   * without being suppressed as an ordinary self-authored post.
+   */
+  authorKind?: ThreadMessage['authorKind'];
+  /** The run that caused this post. Server-derived; never model-supplied. */
+  sourceRunId?: string;
+  /** What kind of trigger this was, e.g. `assignment`. */
+  triggerKind?: string;
 }
+
+/** Author id recorded for a post neither a person nor an agent wrote. */
+export const SYSTEM_AUTHOR_ID = 'system';
 
 export interface TargetOutcome {
   agentId?: string;
@@ -181,16 +195,20 @@ export async function postMessageInTransaction(
   const message: ThreadMessage = {
     id: generateMessageId(),
     sequence: current.nextMessageSequence,
-    authorKind: input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent',
+    authorKind:
+      input.authorKind ??
+      (input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent'),
     from: input.from,
     authorNameSnapshot:
-      input.from === HUMAN_AUTHOR_ID
-        ? HUMAN_AUTHOR_ID
+      input.from === HUMAN_AUTHOR_ID || input.from === SYSTEM_AUTHOR_ID
+        ? input.from
         : (agents.find((agent) => agent.id === input.from)?.name ?? input.from),
     text: input.text,
     mentions: parsed.ids,
     outcomes: [],
     at: now,
+    ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
+    ...(input.triggerKind ? { triggerKind: input.triggerKind } : {}),
     ...(input.originEventId ? { originEventId: input.originEventId } : {}),
   };
   const outcomes: TargetOutcome[] = parsed.unknown.map((agentName) => ({
