@@ -5,25 +5,57 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig } from '../test-helper.js';
+import {
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+  TestRig,
+} from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
 
 describe('JSON output', () => {
   let rig: TestRig;
+  let fakeServer: FakeOpenAIServer;
+  let restoreNoProxy: () => void;
 
   beforeEach(async () => {
     rig = new TestRig();
+    restoreNoProxy = applyContainerSandboxNoProxy();
+    fakeServer = await startFakeOpenAIServer(
+      ({ body }) =>
+        body['stream'] === true
+          ? { content: 'Paris' }
+          : { content: '{"selected_memories":[]}' },
+      fakeServerHostOptions(),
+    );
     await rig.setup('json-output-test');
   });
 
   afterEach(async () => {
+    await fakeServer.close();
+    restoreNoProxy();
     await rig.cleanup();
   });
+
+  const fakeModelArgs = () => [
+    '--auth-type',
+    'openai',
+    '--model',
+    'fake-model',
+    '--openai-base-url',
+    fakeServer.baseUrl,
+    '--openai-api-key',
+    'fake-key',
+  ];
 
   it('should return a valid JSON array with result message containing response and stats', async () => {
     const result = await rig.run(
       'What is the capital of France?',
       '--output-format',
       'json',
+      ...fakeModelArgs(),
     );
     const parsed = JSON.parse(result);
 
@@ -58,6 +90,7 @@ describe('JSON output', () => {
       'What is the capital of France?',
       '--output-format',
       'stream-json',
+      ...fakeModelArgs(),
     );
 
     // Stream-json output is line-delimited JSON (one JSON object per line)
@@ -133,6 +166,7 @@ describe('JSON output', () => {
       '--output-format',
       'stream-json',
       '--include-partial-messages',
+      ...fakeModelArgs(),
     );
 
     // Stream-json output is line-delimited JSON (one JSON object per line)
