@@ -1021,6 +1021,25 @@ export async function readMeshWorkspace(
   });
 }
 
+export async function claimMeshHostSession(
+  projectRoot: string,
+  candidateSessionId: string,
+): Promise<string> {
+  if (!isNonEmptyString(candidateSessionId)) {
+    throw new Error('Mesh host session id must be a non-empty string.');
+  }
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    if (workspace.hostSessionId) return workspace.hostSessionId;
+    await atomicWriteJSON(
+      getWorkspaceFilePath(projectRoot),
+      { ...workspace, hostSessionId: candidateSessionId },
+      { noFollow: true },
+    );
+    return candidateSessionId;
+  });
+}
+
 export async function readMeshAgents(
   projectRoot: string,
 ): Promise<MeshAgent[]> {
