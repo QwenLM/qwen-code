@@ -738,10 +738,12 @@ describe('assertVersionUnreleased', () => {
     `Version 1.2.3 has already shipped; refusing to force-push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`;
 
   it('pins the full published-package set', () => {
-    // The push-time guard derives from this list; the workflow's publish
-    // steps hardcode the same set separately, so adding or removing a
-    // package must update both this pin and the publish steps in
-    // release.yml so every consumer is reviewed together.
+    // The push-time guard derives from this list; the publish allowlist in
+    // `.github/scripts/run-release-step.sh` enumerates the same channels
+    // separately, so adding or removing a package must update both. The two
+    // are pinned against each other by "keeps the publish allowlist and the
+    // guard package set in step" in release-workflow.test.js — release.yml
+    // itself no longer contains any publish step.
     expect(PUBLISHED_PACKAGES).toEqual([
       '@qwen-code/qwen-code',
       '@qwen-code/external-context-mem0',

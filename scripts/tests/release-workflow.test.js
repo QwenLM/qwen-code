@@ -24,6 +24,7 @@ import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { getWorkspacePackageJsonPaths } from '../workspaces.js';
+import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
 // extension. Probe the host before asserting GNU-specific path behavior.
@@ -407,38 +408,70 @@ describe('release workflow', () => {
     }
   });
 
-  it('re-pins trusted runners before credential-bearing release steps', () => {
-    for (const [jobId, stepName] of [
-      ['prepare', 'Get the version'],
-      ['publish', 'Conditionally push release branch'],
-      ['publish', 'Publish npm packages'],
-      ['publish', 'Auto-label internal CI PRs for release notes exclusion'],
-      ['publish', 'Create GitHub Release and Tag'],
-      ['publish', 'Trigger ECS runner qwen update'],
-    ]) {
-      const steps = releaseYaml.jobs[jobId].steps;
-      const protectedStepIndex = steps.findIndex(
-        (step) => step.name === stepName,
-      );
-      const checkoutIndex = steps.findLastIndex(
-        (step, index) =>
-          index < protectedStepIndex &&
-          step.name === 'Checkout release workflow scripts',
-      );
-      const resetIndex = steps.findLastIndex(
-        (step, index) =>
-          index < checkoutIndex &&
-          step.name === 'Reset release workflow scripts',
-      );
+  it('re-pins trusted runners before every step that runs one', () => {
+    // Swept, not hand-listed: a list of protected step names cannot fail for
+    // the steps it omits, which is how `Build Bundle and Prepare Package`,
+    // `Build Standalone Archives` and `Verify Standalone Archives` came to
+    // execute the trusted runner from a tree that selected-ref npm code had
+    // already run over. Every step invoking `.release-workflow/` is checked.
+    let swept = 0;
+    for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
+      const steps = job.steps ?? [];
+      for (const [index, step] of steps.entries()) {
+        if (!String(step.run ?? '').includes('.release-workflow/')) continue;
+        swept += 1;
+        const label = `${jobId}:${step.name}`;
+        const checkoutIndex = steps.findLastIndex(
+          (candidate, candidateIndex) =>
+            candidateIndex < index &&
+            candidate.name === 'Checkout release workflow scripts',
+        );
+        expect(checkoutIndex, label).toBeGreaterThanOrEqual(0);
+        // Nothing between the trusted checkout and the step it protects may
+        // run selected-ref npm code, which could overwrite the runner in
+        // place — including npm lifecycle scripts fired by `npm publish`.
+        expect(
+          steps
+            .slice(checkoutIndex + 1, index)
+            .some((candidate) => /\bnpm\b/.test(String(candidate.run ?? ''))),
+          label,
+        ).toBe(false);
+      }
 
-      expect(resetIndex, `${jobId}:${stepName}`).toBe(checkoutIndex - 1);
-      expect(
-        steps
-          .slice(checkoutIndex + 1, protectedStepIndex)
-          .some((step) => /\bnpm\b/.test(String(step.run ?? ''))),
-        `${jobId}:${stepName}`,
-      ).toBe(false);
+      // Every re-checkout discards the previous tree first; the job's first
+      // checkout has nothing to reset.
+      const checkouts = steps
+        .map((step, index) =>
+          step.name === 'Checkout release workflow scripts' ? index : -1,
+        )
+        .filter((index) => index >= 0);
+      for (const [ordinal, index] of checkouts.entries()) {
+        if (ordinal === 0) continue;
+        expect(steps[index - 1]?.name, `${jobId}:checkout@${index}`).toBe(
+          'Reset release workflow scripts',
+        );
+      }
     }
+    expect(swept).toBeGreaterThan(10);
+  });
+
+  it('keeps the publish allowlist and the guard package set in step', () => {
+    // The push-time guard only probes what `PUBLISHED_PACKAGES` lists. A
+    // channel added to the publish loop but not to that array ships without
+    // ever being probed, so a retry of a partial release reports
+    // "unreleased" and force-pushes over the tip the shipped package anchors
+    // to. Before this, the only tie was a comment pointing at publish steps
+    // that no longer exist in release.yml.
+    const loop = releaseStepScript.match(/for channel in ([^;]+); do/);
+    expect(loop, 'publish-packages channel loop').not.toBeNull();
+    const published = loop[1].trim().split(/\s+/).sort();
+    const guarded = PUBLISHED_PACKAGES.filter((name) =>
+      name.startsWith('@qwen-code/channel-'),
+    )
+      .map((name) => name.replace('@qwen-code/channel-', ''))
+      .filter((name) => name !== 'base')
+      .sort();
+    expect(published).toEqual(guarded);
   });
 
   it('keeps the workflow focused on orchestration', () => {

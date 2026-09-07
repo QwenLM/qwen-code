@@ -664,10 +664,16 @@ jobs:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
 
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
       - name: 'Build Bundle and Prepare Package'
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
 
       - name: 'Build Standalone Archives'
         env:
@@ -687,6 +693,9 @@ jobs:
           PUBLISH_AUDIO_CAPTURE: "${{ github.repository == 'QwenLM/qwen-code' }}"
           PUBLISH_EXTERNAL_CONTEXT_MEM0: "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh publish-packages'
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
 
       - name: 'Verify Standalone Archives'
         env:
