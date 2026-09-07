@@ -766,6 +766,39 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('carries the spend figures into a scheduled Goal continuation', async () => {
+    // The host copies `usage` onto its own turn record. The field is optional
+    // on both sides, so a dropped copy typechecks and costs the prompt its
+    // budget line on this host alone.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-usage',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+    );
+  });
+
   it('carries the objective-updated notice into a scheduled Goal continuation', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);

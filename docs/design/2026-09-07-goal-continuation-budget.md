@@ -60,6 +60,13 @@ line asking for "a different concrete action now" would contradict it. The
 budget line is kept there, because a hand-off reports the numbers it stopped
 at.
 
+The judge-your-previous-turn line is also held back on the Goal's first turn.
+`create` schedules a continuation before any Goal turn has finished, so on
+that one turn there is no previous turn to judge, and asking for the judgement
+invites the model to describe one. A host that reports no figures at all says
+nothing about which turn this is, so the line stands there: silence is not
+evidence of a first turn.
+
 **Where the figures come from.** `GoalTurnHost.startGoalTurn` gains an optional
 `usage`, and `flushContinuation` reads it off the record at scheduling time,
 before the broadcast hands listeners a snapshot they may act on. The three
@@ -72,9 +79,9 @@ every test written before them, renders exactly the prompt it did before.
 
 ## Scope
 
-- `goal-continuation-prompt.ts`: the `usage` input, `renderBudgetLine`,
-  `PROGRESS_LINES`, their placement, and the `buildGoalContinuationParts`
-  pass-through.
+- `goal-continuation-prompt.ts`: the `usage` input, `renderBudgetLine`, the
+  four progress lines, their placement and their two exceptions, and the
+  `buildGoalContinuationParts` pass-through.
 - `goal-runtime.ts`: the `usage` field on the host contract, and reading it off
   the record in `flushContinuation`.
 - `useMessageQueue.ts` and `use-llm-stream.ts`, `Session.ts`,
@@ -93,9 +100,16 @@ separate work.
   prompt carry the new lines; the budget line is pinned for the with-budget,
   no-budget, and overspent cases; its position above the objective-updated
   notice is pinned; a host with no figures renders no budget line; the
-  wind-down turn carries the budget line and not the progress lines.
+  wind-down turn carries the budget line and not the progress lines; the first
+  turn carries the other three progress lines but not the judgement one, and a
+  turn after it carries all four.
+- `useMessageQueue.test.ts`, `use-llm-stream.test.tsx`, `Session.test.ts`,
+  `nonInteractiveCli.test.ts`: one case per host, pinning that the figures
+  survive that host's copy. The field is optional on both sides of every hop,
+  so a dropped copy typechecks and would cost the budget line on that host
+  alone; each case fails when its copy is removed.
 - `goal-runtime.test.ts`: the host receives the figures the record held when
   the turn was scheduled, before and after a turn bills; a Goal with no ceiling
   reports none; the wind-down hand-off carries them too.
-- `.qwen/e2e-tests/2026-09-07-goal-continuation-budget.md`: the rendered prompt
-  read out of a real session transcript.
+- End to end against a real model: the rendered prompt read out of a session
+  transcript, in this change's pull request under Evidence.

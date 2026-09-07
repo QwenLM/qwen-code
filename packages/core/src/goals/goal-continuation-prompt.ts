@@ -117,12 +117,22 @@ function renderBudgetLine(
  * the turn that proposes nothing. These lines ask the model to make that
  * judgement itself, before it spends the turn.
  */
-const PROGRESS_LINES = [
-  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported.",
-  'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.',
-  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.',
-  'Before proposing that the Goal is complete, check every explicit requirement in the objective against evidence you can cite. Missing, indirect, or self-reported evidence means not done: keep working.',
-];
+const EVIDENCE_LINE =
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported.";
+
+const FIDELITY_LINE =
+  'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';
+
+/**
+ * Held back on the Goal's first turn. `create` schedules a continuation
+ * before any Goal turn has finished, and asking a model to judge a previous
+ * turn that does not exist invites it to describe one.
+ */
+const NO_PROGRESS_LINE =
+  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.';
+
+const COMPLETION_AUDIT_LINE =
+  'Before proposing that the Goal is complete, check every explicit requirement in the objective against evidence you can cite. Missing, indirect, or self-reported evidence means not done: keep working.';
 
 /**
  * Sent once per spend window, on the continuation the budget gate grants
@@ -171,7 +181,13 @@ export function renderGoalContinuationPrompt(
   // what these lines ask for; the budget line above still belongs there,
   // since a hand-off reports the numbers it stopped at.
   if (!input.windDown) {
-    lines.push(...PROGRESS_LINES);
+    lines.push(EVIDENCE_LINE, FIDELITY_LINE);
+    // A host that reports no figures says nothing about which turn this is,
+    // so the line stands: silence is not evidence of a first turn.
+    if (input.usage === undefined || input.usage.turnCount > 0) {
+      lines.push(NO_PROGRESS_LINE);
+    }
+    lines.push(COMPLETION_AUDIT_LINE);
   }
 
   if (input.objectiveUpdated) {
