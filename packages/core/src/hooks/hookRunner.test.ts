@@ -1214,6 +1214,113 @@ describe('HookRunner', () => {
       },
     );
 
+    const startWindowsSurvivingHook = (
+      eventName: (typeof parentExitSurvivingEvents)[number],
+      survivingPid: number,
+    ) => {
+      const statusListeners: Array<(chunk: Buffer) => void> = [];
+      const mockProcess = createControllableMockProcess();
+      // The supervisor reports the pid of the shell it spawned over fd 3.
+      (mockProcess as unknown as { stdio: unknown[] }).stdio = [
+        null,
+        null,
+        null,
+        {
+          on: vi.fn((event: string, callback: (chunk: Buffer) => void) => {
+            if (event === 'data') {
+              statusListeners.push(callback);
+            }
+          }),
+          unref: vi.fn(),
+        },
+      ];
+      mockSpawn.mockReturnValue(mockProcess);
+      const controller = new AbortController();
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        eventName,
+        createMockInput({ hook_event_name: eventName }),
+        controller.signal,
+      );
+      for (const listener of statusListeners) {
+        listener(Buffer.from(`pid:${survivingPid}\n`));
+      }
+      return { mockProcess, controller, resultPromise };
+    };
+
+    it.each(parentExitSurvivingEvents)(
+      'tree-kills the surviving %s hook on Windows instead of leaving it behind',
+      async (eventName) => {
+        // terminateSurvivingHookProcessGroup used to return immediately on
+        // win32, so nothing ever reaped the hook's cmd.exe tree: the
+        // supervisor is detached and may already be gone, which puts the shell
+        // outside the supervisor's own tree kill. See #11303.
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+        vi.spyOn(process, 'kill').mockReturnValue(true);
+        mockExecFile.mockImplementation(
+          (
+            _file: string,
+            _args: string[],
+            _options: object,
+            callback: (error: Error | null) => void,
+          ) => {
+            callback(null);
+          },
+        );
+        const survivingPid = 9911;
+        const { mockProcess, controller, resultPromise } =
+          startWindowsSurvivingHook(eventName, survivingPid);
+
+        controller.abort();
+        mockProcess.emit('close', null);
+        await resultPromise;
+
+        expect(mockExecFile).toHaveBeenCalledWith(
+          expect.stringMatching(/\\System32\\taskkill\.exe$/i),
+          ['/f', '/t', '/pid', String(survivingPid)],
+          expect.objectContaining({ windowsHide: true }),
+          expect.any(Function),
+        );
+      },
+    );
+
+    it('does not taskkill a surviving Windows hook whose pid already exited', async () => {
+      // Windows has no process group to signal, so a taskkill against a pid
+      // that has already exited could land on a recycled pid — the #6067
+      // collateral-kill failure mode. The liveness probe is the guard.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9912;
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === survivingPid && signal === 0) {
+          throw createNoSuchProcessError();
+        }
+        return true;
+      });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(null);
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(mockExecFile).not.toHaveBeenCalledWith(
+        expect.anything(),
+        ['/f', '/t', '/pid', String(survivingPid)],
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('owns a POSIX process group without signalling it on normal completion', async () => {
       const mockProcess = createMockProcess(0, 'done');
       mockSpawn.mockReturnValue(mockProcess);

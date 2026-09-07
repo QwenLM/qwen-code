@@ -302,6 +302,19 @@ async function waitForProcessGroupExit(
   return true;
 }
 
+/**
+ * Windows has no process groups, so liveness is checked on the pid itself.
+ * `process.kill(pid, 0)` sends no signal; it only reports existence.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isNoSuchProcessError(error);
+  }
+}
+
 function killDirectChild(child: ChildProcess, signal: NodeJS.Signals): void {
   try {
     child.kill(signal);
@@ -406,16 +419,13 @@ async function terminatePosixHookProcessTree(
   );
 }
 
-async function terminateWindowsHookProcessTree(
-  child: ChildProcess,
-): Promise<void> {
-  const pid = child.pid;
-  if (!pid) {
-    killDirectChild(child, 'SIGKILL');
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
+/**
+ * `taskkill /f /t` a pid, resolving to false when the kill did not land so the
+ * caller can fall back. Windows has no process groups to signal, so the tree
+ * walk is the only way to reach a hook's descendants.
+ */
+async function taskkillProcessTree(pid: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     try {
       execFile(
         WINDOWS_TASKKILL,
@@ -429,19 +439,33 @@ async function terminateWindowsHookProcessTree(
             debugLogger.warn(
               `taskkill failed for hook process tree ${pid}: ${error.message}`,
             );
-            killDirectChild(child, 'SIGKILL');
+            resolve(false);
+            return;
           }
-          resolve();
+          resolve(true);
         },
       );
     } catch (error) {
       debugLogger.warn(
         `taskkill threw for hook process tree ${pid}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      killDirectChild(child, 'SIGKILL');
-      resolve();
+      resolve(false);
     }
   });
+}
+
+async function terminateWindowsHookProcessTree(
+  child: ChildProcess,
+): Promise<void> {
+  const pid = child.pid;
+  if (!pid) {
+    killDirectChild(child, 'SIGKILL');
+    return;
+  }
+
+  if (!(await taskkillProcessTree(pid))) {
+    killDirectChild(child, 'SIGKILL');
+  }
 }
 
 async function terminateHookProcessTree(
@@ -460,6 +484,19 @@ async function terminateSurvivingHookProcessGroup(
   graceMs = HOOK_TERMINATE_GRACE_MS,
 ): Promise<void> {
   if (process.platform === 'win32') {
+    // The surviving hook runs under a detached supervisor, so the parent's own
+    // `terminateHookProcessTree` on the supervisor may miss it: the supervisor
+    // can already have exited (leaving the shell reparented and out of its
+    // tree), or its taskkill can fail. Without this branch nothing on Windows
+    // ever reaps the hook's cmd.exe tree. See #11303.
+    //
+    // The liveness probe is the #6067 guard: taskkill has no process-group
+    // equivalent, so it must not be fired at a pid that has already exited and
+    // may have been recycled onto an unrelated application.
+    if (!isProcessAlive(pid)) {
+      return;
+    }
+    await taskkillProcessTree(pid);
     return;
   }
 
