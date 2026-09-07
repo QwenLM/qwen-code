@@ -2632,6 +2632,27 @@ export class DingtalkChannel extends ChannelBase {
     super.onSessionDied(sessionId);
   }
 
+  /**
+   * A crashed standalone bridge never settles its in-flight turns, so their
+   * transient tags and ticking status cards would otherwise assert a live
+   * turn forever. Finish the tags without a terminal result and terminalize
+   * the cards as interrupted. Session state stays: crash recovery restores
+   * the sessions on a fresh bridge.
+   */
+  override onBridgeDisconnected(): void {
+    for (const [sessionId, keys] of this.sessionReactionKeys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
+      }
+    }
+    for (const [sessionId, runId] of this.cardRunBySession) {
+      this.cardRunBySession.delete(sessionId);
+      this.interactionPresenter?.terminalizeRun(runId, 'cancelled');
+      this.cardRuns.delete(runId);
+    }
+  }
+
   protected override onSessionRetiring(sessionId: string): void {
     this.drainBackgroundResponseAggregations(sessionId);
   }

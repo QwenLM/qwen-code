@@ -8,7 +8,7 @@ Expose agent progress consistently on both the inbound DingTalk message and the 
 
 - Start with two tags: `👀` and `🤔 Thinking`.
 - Keep `👀` fixed while replacing only the status tag.
-- Map tool events to the phases in the projection contract table below (`📖 Reading`, `🔎 Searching`, `🖥️ Running`, `🛠️ Editing`, `🗑️ Deleting`, `📦 Moving`, `🤔 Thinking`, `🌐 Fetching`, `🔄 Switching mode`, `🛠️ Working`, or `⚠️ Retrying`).
+- Map tool events to the phases in the projection contract table below (`📖 Reading`, `🔎 Searching`, `🖥️ Running`, `🛠️ Editing`, `🗑️ Deleting`, `📦 Moving`, `🤔 Thinking`, `🌐 Fetching`, `🔄 Switching mode`, `🛠️ Working`, or `⚠️ Tool failed`).
 - Map response text to `✍️ Replying`.
 - On a terminal event, recall both transient tags before adding exactly one of `✅ Done`, `❌ Failed`, or `⏹️ Stopped`.
 
@@ -33,7 +33,7 @@ The same lifecycle mapping drives a replaceable first line in the interactive re
 
 The projection first exactly matches standard ACP kinds, then uses legacy and third-party Bridge aliases. `other` remains the final fallback. Reactions and active card bodies use the same localized phase label. Distinguishing ACP `Agent` from `Other` requires new protocol metadata; the current protocol normalizes both to `other`.
 
-The running card displays only the allowlisted phase label. ACP tool titles are not projected because built-in tools may derive them from commands, paths, or parameters. Reactions remain phase-only. The local bridge retains the safe tool kind from the initial event so kindless terminal updates can drive `Retrying` or return to `Thinking`; meta-only shell-progress heartbeats remain ignored and do not create another response boundary.
+The running card displays only the allowlisted phase label. ACP tool titles are not projected because built-in tools may derive them from commands, paths, or parameters. Reactions remain phase-only. The local bridge retains the safe tool kind from the initial event so kindless terminal updates can drive `Tool failed` or return to `Thinking`; meta-only shell-progress heartbeats remain ignored and do not create another response boundary.
 
 The running card's `statusLine` contains only the configured model and elapsed time. On completion, the process line is removed from the body so only the final assistant response remains; the existing terminal state, model, and elapsed time stay in `statusLine`. Tool descriptions, paths, commands, parameters, raw input, raw output, and model reasoning are never added to card content.
 
@@ -49,4 +49,4 @@ Reaction failures and status-card metadata failures are isolated from each other
 
 ## Cleanup
 
-Prompt cleanup, session death, and adapter disconnect recall both transient tags without adding a terminal result when the real outcome is unknown.
+Prompt cleanup, session death, adapter disconnect, and standalone ACP bridge process exit recall both transient tags without adding a terminal result when the real outcome is unknown. A bridge process exit also terminalizes the running status card as interrupted; crash recovery restores the sessions on a fresh bridge, so session routing state is left untouched.

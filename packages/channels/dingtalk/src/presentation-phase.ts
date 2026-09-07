@@ -11,7 +11,7 @@ export type DingtalkPresentationPhase =
   | 'fetching'
   | 'switching'
   | 'working'
-  | 'retrying'
+  | 'failed'
   | 'replying';
 
 export const DINGTALK_PRESENTATION_PHASE_LABELS: Record<
@@ -28,7 +28,7 @@ export const DINGTALK_PRESENTATION_PHASE_LABELS: Record<
   fetching: '🌐 Fetching',
   switching: '🔄 Switching mode',
   working: '🛠️ Working',
-  retrying: '⚠️ Retrying',
+  failed: '⚠️ Tool failed',
   replying: '✍️ Replying',
 };
 
@@ -46,13 +46,15 @@ const DINGTALK_ZH_PRESENTATION_PHASE_LABELS: Record<
   fetching: '🌐 获取中',
   switching: '🔄 切换模式中',
   working: '🛠️ 处理中',
-  retrying: '⚠️ 重试中',
+  failed: '⚠️ 工具失败',
   replying: '✍️ 回复中',
 };
 
 export function isChinesePresentationLanguage(language?: string): boolean {
   const normalized = language?.trim().toLowerCase().replaceAll('_', '-');
-  return normalized?.startsWith('zh') === true;
+  // Only Simplified Chinese has a label table; zh-TW and other Traditional
+  // locales fall back to English rather than mislabeled Simplified text.
+  return normalized === 'zh' || normalized === 'zh-cn';
 }
 
 export function presentationPhaseLabel(
@@ -102,7 +104,7 @@ export function lifecyclePresentationPhase(
 ): DingtalkPresentationPhase | undefined {
   if (event.type === 'text_chunk') return 'replying';
   if (event.type !== 'tool_call') return undefined;
-  if (/fail|error/iu.test(event.toolCall.status)) return 'retrying';
+  if (/fail|error/iu.test(event.toolCall.status)) return 'failed';
   if (/complete|success/iu.test(event.toolCall.status)) return 'thinking';
   return toolPresentationPhase(event.toolCall.kind);
 }

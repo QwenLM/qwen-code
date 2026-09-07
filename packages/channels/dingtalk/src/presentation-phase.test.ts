@@ -47,7 +47,7 @@ describe('lifecyclePresentationPhase', () => {
 
   it('prioritizes terminal statuses over ACP kinds', () => {
     expect(lifecyclePresentationPhase(toolEvent('fetch', 'failed'))).toBe(
-      'retrying',
+      'failed',
     );
     expect(lifecyclePresentationPhase(toolEvent('delete', 'completed'))).toBe(
       'thinking',
@@ -59,6 +59,17 @@ describe('lifecyclePresentationPhase', () => {
     expect(presentationPhaseLabel('deleting', 'en-US')).toBe('🗑️ Deleting');
     expect(presentationPhaseLabel('moving', 'zh')).toBe('📦 移动中');
     expect(presentationPhaseLabel('switching', 'en')).toBe('🔄 Switching mode');
+  });
+
+  it('labels a failed tool call without claiming a retry', () => {
+    expect(presentationPhaseLabel('failed', 'en')).toBe('⚠️ Tool failed');
+    expect(presentationPhaseLabel('failed', 'zh')).toBe('⚠️ 工具失败');
+  });
+
+  it('falls back to English for Traditional Chinese locales', () => {
+    expect(presentationPhaseLabel('reading', 'zh-TW')).toBe('📖 Reading');
+    expect(presentationPhaseLabel('reading', 'zh-HK')).toBe('📖 Reading');
+    expect(presentationPhaseLabel('reading', 'zh_cn')).toBe('📖 读取中');
   });
 
   it('keeps legacy Bridge kind matching', () => {

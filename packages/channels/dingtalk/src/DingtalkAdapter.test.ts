@@ -1433,7 +1433,7 @@ describe('DingtalkChannel prompt reactions', () => {
     { kind: 'shell', status: 'in_progress', expected: '🖥️ Running' },
     { kind: 'edit', status: 'in_progress', expected: '🛠️ Editing' },
     { kind: 'other', status: 'in_progress', expected: '🛠️ Working' },
-    { kind: 'read_file', status: 'failed', expected: '⚠️ Retrying' },
+    { kind: 'read_file', status: 'failed', expected: '⚠️ Tool failed' },
     { kind: 'read_file', status: 'completed', expected: '🤔 Thinking' },
   ])(
     'maps $kind/$status tool activity to $expected',
@@ -2512,6 +2512,68 @@ describe('DingtalkChannel prompt reactions', () => {
       '🤔 Thinking',
       '👀',
     ]);
+  });
+
+  it('finishes transient tags and stops status cards when the bridge disconnects', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const terminalizeRun = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: { terminalizeRun: typeof terminalizeRun };
+      }
+    ).interactionPresenter = { terminalizeRun };
+    const cardRunBySession = (
+      channel as unknown as { cardRunBySession: Map<string, string> }
+    ).cardRunBySession;
+    cardRunBySession.set('session-1', 'run-1');
+    const cardRuns = (channel as unknown as { cardRuns: Map<string, unknown> })
+      .cardRuns;
+    cardRuns.set('run-1', {});
+    const activeReactionKeys = (
+      channel as unknown as { activeReactionKeys: Set<string> }
+    ).activeReactionKeys;
+
+    seedSeenMessage(channel, 'message-1');
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+    expect(activeReactionKeys.size).toBe(1);
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+
+    channel.onBridgeDisconnected();
+
+    expect(activeReactionKeys.size).toBe(0);
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+    expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '🤔 Thinking',
+      '👀',
+    ]);
+    // The interrupted turn's real outcome is unknown: no terminal tag may be
+    // attached.
+    expect(attachReaction).toHaveBeenCalledTimes(2);
+    expect(terminalizeRun).toHaveBeenCalledWith('run-1', 'cancelled');
+    expect(cardRunBySession.size).toBe(0);
+    expect(cardRuns.size).toBe(0);
   });
 
   it('uses the app access token for emotion replies', async () => {

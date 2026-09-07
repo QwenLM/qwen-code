@@ -10535,6 +10535,36 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: none');
     });
 
+    it('notifies the channel when the bridge disconnects', () => {
+      const ch = createChannel();
+      const disconnected = vi.spyOn(ch, 'onBridgeDisconnected');
+
+      (bridge as unknown as EventEmitter).emit('disconnected', null, 'SIGKILL');
+
+      expect(disconnected).toHaveBeenCalledOnce();
+    });
+
+    it('moves the disconnect notification to the new bridge on setBridge', () => {
+      const ch = createChannel();
+      const disconnected = vi.spyOn(ch, 'onBridgeDisconnected');
+      const oldBridge = bridge;
+      const nextBridge = createBridge();
+      ch.setBridge(nextBridge);
+
+      (oldBridge as unknown as EventEmitter).emit(
+        'disconnected',
+        null,
+        'SIGKILL',
+      );
+      expect(disconnected).not.toHaveBeenCalled();
+      (nextBridge as unknown as EventEmitter).emit(
+        'disconnected',
+        null,
+        'SIGKILL',
+      );
+      expect(disconnected).toHaveBeenCalledOnce();
+    });
+
     it('forgets instructions for a session when the bridge reports that it died', async () => {
       const ch = createChannel({ instructions: 'Be concise.' });
       await ch.handleInbound(envelope({ text: 'first' }));
