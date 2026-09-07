@@ -41,10 +41,11 @@ vi.mock('node:fs', async (importOriginal) => {
 
 let sessionCounter = 0;
 
-// The router canonicalizes the attested worktree path (resolve + realpath),
-// so the fake checkout must be spelled in that canonical form: on Windows
-// path.resolve prefixes the drive letter and a raw POSIX literal never
-// matches getSessionCwd there.
+// The router canonicalizes both of its inputs (the attested worktree
+// path and expectedCwd) itself, so attestations may use any equivalent
+// spelling — but getSessionCwd returns the canonical (resolve + realpath)
+// form, so expectations must use it: on Windows path.resolve prefixes the
+// drive letter and a raw POSIX literal never matches there.
 const worktreeTaskPath = canonicalizeWorkspacePath('/tmp/worktree-task');
 
 function mockBridge(): ChannelAgentBridge {
@@ -621,6 +622,48 @@ describe('SessionRouter', () => {
       expect(router.getSessionCwd('worktree-session')).toBe(worktreeTaskPath);
     });
 
+    it('records the canonical cwd for a differently-spelled attestation', async () => {
+      const managedBridge = {
+        ...mockBridge(),
+        listSessions: vi.fn().mockReturnValue([
+          {
+            sessionId: 'worktree-session',
+            workspaceCwd: '/tmp',
+            hasActivePrompt: false,
+            worktree: {
+              slug: 'task',
+              // Same checkout as worktreeTaskPath, spelled with a trailing
+              // separator.
+              path: '/tmp/worktree-task/',
+              branch: 'task',
+            },
+            worktreeState: 'persisted-v1' as const,
+          },
+        ]),
+        newSession: vi.fn().mockResolvedValue('worktree-session'),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        {
+          recoveryMode: 'lazy',
+        },
+      );
+      const target = {
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+      };
+
+      await expect(
+        router.createManagedSession(target, '/tmp', 'worktree'),
+      ).resolves.toBe('worktree-session');
+
+      expect(router.getSessionCwd('worktree-session')).toBe(worktreeTaskPath);
+    });
+
     it('detaches a worktree task before publishing an invalid attestation', async () => {
       const discardSession = vi.fn().mockResolvedValue(undefined);
       const managedBridge = {
@@ -694,6 +737,16 @@ describe('SessionRouter', () => {
           workspaceCwd: '/tmp',
           hasActivePrompt: false,
           worktree: { slug: 'task', path: '/tmp', branch: 'task' },
+          worktreeState: 'persisted-v1' as const,
+        },
+      ],
+      [
+        'workspace root spelled with a trailing separator',
+        {
+          sessionId: 'worktree-session',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: { slug: 'task', path: '/tmp/', branch: 'task' },
           worktreeState: 'persisted-v1' as const,
         },
       ],
@@ -967,6 +1020,53 @@ describe('SessionRouter', () => {
           target,
           '/tmp',
           worktreeTaskPath,
+          'worktree',
+        ),
+      ).resolves.toEqual({ loaded: false, sessionId: 'worktree-session' });
+
+      expect(managedBridge.loadSession).not.toHaveBeenCalled();
+      expect(router.getSessionCwd('worktree-session')).toBe(worktreeTaskPath);
+    });
+
+    it('matches a differently-spelled expected path when rebinding a live task', async () => {
+      const managedBridge = {
+        ...mockBridge(),
+        listSessions: vi.fn().mockReturnValue([
+          {
+            sessionId: 'worktree-session',
+            workspaceCwd: '/tmp',
+            hasActivePrompt: false,
+            worktree: {
+              slug: 'task',
+              path: worktreeTaskPath,
+              branch: 'task',
+            },
+            worktreeState: 'persisted-v1' as const,
+          },
+        ]),
+        newSession: vi.fn().mockResolvedValue('worktree-session'),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      const target = {
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+      };
+
+      await router.createManagedSession(target, '/tmp', 'worktree');
+      await expect(
+        router.loadManagedSession(
+          'worktree-session',
+          target,
+          '/tmp',
+          // Same expected directory, spelled with a trailing separator.
+          worktreeTaskPath + '/',
           'worktree',
         ),
       ).resolves.toEqual({ loaded: false, sessionId: 'worktree-session' });
