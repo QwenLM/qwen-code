@@ -1,10 +1,10 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: Implemented through the runtime wiring needed for the live slice;
-> the end-to-end model run remains unverified.
+> Status: The two-agent happy-path live slice is verified; dispatcher
+> reliability, daemon integration, Web Shell, and notifications remain.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
-> Verification: targeted tests, build, typecheck, and lint are recorded in §0.2;
-> no agent has run this design end to end
+> Verification: §0.2 separates earlier targeted checks from the first live
+> two-agent run and from everything still unverified
 > Supersedes the Agent-Team-first direction in [`2026-09-06-agent-team-webshell-gap.md`](./2026-09-06-agent-team-webshell-gap.md) §6
 > Related: #9402 (board storage), #10078 (session boundary), #10247 §5, #11072, #11140
 
@@ -84,7 +84,7 @@ continuations already emit `EXTERNAL_MESSAGE`, and cold revival explicitly
 seeds the continuation prompt in the transcript. Mesh still uses structured
 input because correlation, not transcript presence, is the missing contract.
 
-**Verified locally in steps 2-4, not yet end to end.** The capability table and
+**Verified locally in steps 2-4.** The capability table and
 shell predicate pass their named tests. The versioned store tests exercise
 newer-version refusal, v0 migration and backup recovery, two-process sequence
 allocation, source-first outbox replay, persisted admission outcomes, and
@@ -93,13 +93,31 @@ refusal, typed launcher outcomes, a singleton hidden host, default-catalog
 exclusion, and host reload before a subsequent launch. The ACP bridge and child
 handler have focused route tests. These are local observations only until the
 merged step is green in #11206; the reload test runs the real bridge reaper
-in-process with a fake ACP child, not a daemon process, and no mesh agent or
-dispatcher has run against a live model.
+in-process with a fake ACP child, not a daemon process.
 
-**Still never prototyped end to end.** No mesh agent has been launched, no
-thread has been dispatched, no prompt in §6 has been sent to a model. The
-dispatch rules in §4 are reasoned from Multica's and Agent Team's failure modes,
-not from observed behaviour of this system.
+**Verified in the first live happy-path slice (2026-09-07).** A normal,
+non-bare host launched Alice on an assigned root thread. Alice used
+`thread_create` to assign Bob and ended with `thread_wait`; Bob posted three
+results and ended the child with `thread_review`; the durable parent report was
+applied in 13 ms; the same resident Alice body resumed on the root, summarized
+Bob's work, and ended with `thread_review`. The child and root both finished
+`in_review`, and Alice's two runs persisted `waiting` then `review`. All six
+advertised `thread_*` tools were present in the model's function declarations.
+No §6 prompt text changed to obtain this result.
+
+The live run found one runtime-path defect: the continuation binder looked for
+the agent sidecar below the workspace checkout, while background-agent
+transcripts live below `Config.storage.getProjectDir()`. Consequently the first
+parent wake failed before the resident continuation. Using the same storage
+root as the launcher fixed the next run. A separate first attempt mentioned
+both `@alice` and `@bob` in the human instruction and correctly woke both; the
+demo input was corrected to address only Alice, with no routing-rule change.
+
+**Still unverified.** Running-delivery miss reconciliation, the 12-turn
+ping-pong gate, restart and stall recovery, the real daemon host/reaper path,
+bare-mode tool exposure, REST/Web Shell, and notifications have not been run
+end to end. The negative paths in §4 therefore remain reasoned and locally
+checked contracts, not live-system evidence.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
@@ -618,6 +636,11 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    against two live agents before building the full daemon; this is the first
    proof that the chosen reuse seam, prompt contract, and delegation close loop
    work together.
+   Observed on 2026-09-07 with two real agents: Alice closed `waiting`, Bob
+   closed the child `review`, the parent report applied in 13 ms, and the same
+   Alice body continued and closed the root `review`. The first continuation
+   attempt exposed and fixed the sidecar storage-root mismatch described in
+   §0.2.
 8. **Dispatcher reliability** — direct running delivery,
    acceptance recording, completion reconciliation, launch failure, done/
    cancellation, restart and stall recovery, and full outbox replay.
@@ -688,8 +711,9 @@ npx vitest run src/serve/scheduled-task-keepalive.test.ts \
 
 The earlier foundation's targeted lint and core typecheck passed. Step 4's
 targeted `acp-bridge` package build passed; whole-branch compile/style health
-still waits for #11206 CI. None of these checks validates a mesh turn against a
-live model. Update the test counts above when the implementation changes.
+still waits for #11206 CI. Separately, the §0.2 two-agent live run validates the
+minimal delegation and return path; it did not run the negative reliability
+cases below. Update the test counts above when the implementation changes.
 
 Future unit coverage is required for: all twelve admission outcomes; unknown
 mention suppressing assignee fallback; assignment and parent-dependency triggers;
@@ -1041,6 +1065,6 @@ write code, which decision 1 defers until isolation is settled.
 
 **规则修正**：turn gate 改为每线程，token gate 保持根树维度；子线程继承父线程当前 turn 计数；running coalesce 也计 turn；未知 @ 不再误唤醒 assignee；无目标、agent unavailable、capacity wait、launch failure、done/cancel、assignment trigger 都有明确语义；跨线程 queued run 按锁内分配的 `(queueSequence, runId)` 全局 FIFO，`queuedAt` 只用于显示。全局锁只处理并发，跨文件父报告和通知由可重放 outbox 保证，token 则从各 run 的逐轮 usage 推导；`blocked/in_review` 按所有 agent 的 run 聚合，不再由最后一个 agent 覆盖。
 
-**验证边界**：当前规则、存储、capability 和 launcher 路径已有定向测试与编译证据；隐藏 host 的 reload 测试使用注入 bridge，mesh agent 尚未对真实模型运行。线程工具、dispatcher、delivery watermark、恢复、REST、Web Shell、通知都还没端到端跑通。§5.2 把 live vertical slice 提前，§9 记录仍需产品或存储取舍的问题。
+**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。这次运行发现并修复了续跑时 agent sidecar 使用错误存储根目录的问题，没有为了跑通修改 §6 提示词。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、真实 daemon host、bare 模式、REST、Web Shell 和通知仍未端到端验证。
 
 </details>

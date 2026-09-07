@@ -132,7 +132,7 @@ function bindNextTurn(
   binding: MeshRunContext,
 ): void {
   const metaPath = getAgentMetaPath(
-    config.getProjectRoot(),
+    config.storage.getProjectDir(),
     config.getSessionId(),
     meshBackgroundAgentId(agent),
   );
