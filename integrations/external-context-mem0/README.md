@@ -258,13 +258,26 @@ could send two searches for one turn. Use the v2 Extension profile for
 on-demand `context_search`, or the v3 Hook-only profile for Auto Recall, never
 both in one Qwen process.
 
-The Hook requires a non-empty `submitted_prompt` captured by a supported
-interactive TUI submission. It never falls back to the expanded `prompt`, so
-tool-result continuations, retries, steering, cron, notifications, teammates,
-ACP, headless, `serve`, SDK, and remote-input paths do not trigger retrieval in
-the current version. Missing provenance, invalid configuration, a cwd outside
-the repository, an empty result, timeout, or provider failure returns `{}` and
-does not block the user turn after the pinned Node entry point starts.
+The Hook requires a non-empty `submitted_prompt` captured before prompt
+expansion. This includes supported interactive TUI submissions and headless
+CLI user turns (`qwen -p` and stream-json input, including SDK clients using
+that path). The field establishes prompt provenance, not a TUI-only origin.
+The Hook never falls back to the expanded `prompt`; events without
+`submitted_prompt` do not trigger retrieval.
+
+Register this profile only in launchers where automatic retrieval is intended
+for all eligible inputs. To exclude automation, give it a separate
+administrator-controlled `QWEN_HOME` without this Hook and omit the Auto Recall
+configuration and credential from that launcher's environment. The Hook itself
+does not distinguish TUI, SDK, or other transports supplying the field.
+
+Instance and dialect paths must resolve to regular files. FIFOs and other
+special files are rejected before reading configuration.
+
+Missing provenance, invalid configuration, a cwd outside the repository, an
+empty result, timeout, or provider failure returns `{}`. The executable flushes
+stdout and exits zero even if an aborted request retains open handles, allowing
+the user turn to continue after the pinned Node entry point starts.
 
 Before sending the query, the Hook removes fenced code, the configured
 credential, and common secret shapes, then keeps at most 512 Unicode code

@@ -64,6 +64,21 @@ describe('createAutoRecallQuery', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    'my_api_key_suffix=remove-me',
+    '"service.token": "remove me"',
+    "'db.password' = 'remove me'",
+    'client-secret: remove-me',
+    'config: token=remove-me',
+  ])('removes secret assignments in %s', async (assignment) => {
+    const { createAutoRecallQuery } = await import('./auto-recall.js');
+
+    const query = createAutoRecallQuery(`deployment ${assignment}`, '');
+
+    expect(query).not.toContain('remove');
+    expect(query).toContain('deployment');
+  });
+
   it('bounds sanitizer work before applying credential patterns', async () => {
     const { createAutoRecallQuery } = await import('./auto-recall.js');
     const startedAt = Date.now();

@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
-import { createServer, type Server } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { type AddressInfo } from 'node:net';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  createServer as createTcpServer,
+  type AddressInfo,
+  type Server,
+  type Socket,
+} from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,8 +20,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
+const sockets: Socket[] = [];
+const hookBundle = new URL('../dist/auto-recall.js', import.meta.url);
 
 afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.destroy();
   await Promise.all(
     servers
       .splice(0)
@@ -89,51 +97,7 @@ describe('Mem0 Auto Recall local provider', () => {
       server.listen(0, '127.0.0.1', resolve),
     );
     const port = (server.address() as AddressInfo).port;
-    const directory = await makeTemporaryDirectory();
-    const dialectPath = join(directory, 'dialect.json');
-    const configPath = join(directory, 'instance.json');
-    await writeFile(
-      dialectPath,
-      JSON.stringify({
-        dialectVersion: 1,
-        id: 'synthetic-auto-recall-v1',
-        auth: 'authorization-token',
-        search: {
-          method: 'POST',
-          path: '/v2/memories/search/',
-          queryLocation: 'json',
-          userIdLocation: 'json.filters',
-          agentIdLocation: 'omit',
-          appIdLocation: 'omit',
-          limitField: 'limit',
-        },
-        response: {
-          collection: 'results',
-          idField: 'id',
-          contentField: 'memory',
-          titleField: 'omit',
-          uriField: 'omit',
-          scoreField: 'omit',
-          updatedAtField: 'omit',
-        },
-      }),
-    );
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        schemaVersion: 3,
-        autoRecall: { repositoryRoot: directory },
-        dialectPath,
-        endpoint: {
-          origin: `http://127.0.0.1:${port}`,
-          basePath: '',
-          allowInsecureHttp: true,
-        },
-        credentialEnv: 'SYNTHETIC_MEMORY_TOKEN',
-        scope: { userId: 'repository-memory' },
-        timeoutMs: 1500,
-      }),
-    );
+    const { directory, env } = await makeRuntime(`http://127.0.0.1:${port}`);
 
     const result = await runAutoRecallProcess(
       JSON.stringify({
@@ -142,10 +106,7 @@ describe('Mem0 Auto Recall local provider', () => {
         submitted_prompt: 'deployment policy API_KEY=remove-me',
         cwd: directory,
       }),
-      {
-        QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
-        SYNTHETIC_MEMORY_TOKEN: 'runtime-token',
-      },
+      env,
     );
 
     expect(result.exitCode).toBe(0);
@@ -174,6 +135,107 @@ describe('Mem0 Auto Recall local provider', () => {
       },
     });
   });
+
+  it('exits successfully after a provider timeout during a stalled TLS handshake', async () => {
+    let connected = false;
+    const server = createTcpServer((socket) => {
+      connected = true;
+      sockets.push(socket);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const { directory, env } = await makeRuntime(`https://127.0.0.1:${port}`);
+
+    const startedAt = performance.now();
+    const result = await runAutoRecallProcess(
+      JSON.stringify({
+        hook_event_name: 'UserPromptSubmit',
+        submitted_prompt: 'deployment policy',
+        cwd: directory,
+      }),
+      env,
+    );
+
+    expect(connected).toBe(true);
+    expect(result).toEqual({
+      exitCode: 0,
+      signal: null,
+      stdout: '{}',
+      stderr: '',
+    });
+    expect(performance.now() - startedAt).toBeLessThan(5000);
+  }, 10000);
+
+  it.each(['token', 'api_key', 'password', 'secret'])(
+    'bounds repeated %s near misses in the bundle with a process deadline',
+    (keyword) => {
+      const result = spawnSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '--eval',
+          `
+        import { createAutoRecallQuery } from ${JSON.stringify(hookBundle.href)};
+        const query = createAutoRecallQuery(${JSON.stringify(keyword)}.repeat(Math.floor(4096 / ${keyword.length})), '');
+        process.stdout.write(JSON.stringify(query ?? null));
+      `,
+        ],
+        { encoding: 'utf8', timeout: 2000, killSignal: 'SIGKILL' },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.signal).toBeNull();
+      expect(result.stdout).toBe('null');
+      expect(result.stderr).toBe('');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each(['instance', 'dialect'])(
+    'rejects a stalled %s FIFO and exits successfully',
+    async (kind) => {
+      const { directory, env } = await makeRuntime(
+        'https://memory.example.com',
+      );
+      const fifo = join(directory, 'blocked.json');
+      expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
+      if (kind === 'instance') {
+        env.QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG = fifo;
+      } else {
+        const configPath = env.QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG;
+        const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<
+          string,
+          unknown
+        >;
+        await writeFile(
+          configPath,
+          JSON.stringify({ ...config, dialectPath: fifo }),
+        );
+      }
+
+      const startedAt = performance.now();
+      const result = await runAutoRecallProcess(
+        JSON.stringify({
+          hook_event_name: 'UserPromptSubmit',
+          submitted_prompt: 'deployment policy',
+          cwd: directory,
+        }),
+        env,
+      );
+
+      expect(result).toEqual({
+        exitCode: 0,
+        signal: null,
+        stdout: '{}',
+        stderr: '',
+      });
+      expect(performance.now() - startedAt).toBeLessThan(5000);
+    },
+    10000,
+  );
 });
 
 async function runAutoRecallProcess(
@@ -187,20 +249,12 @@ async function runAutoRecallProcess(
 }> {
   const env = { ...process.env };
   delete env['QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG'];
-  const child = spawn(
-    process.execPath,
-    [
-      '--import',
-      'tsx/esm',
-      fileURLToPath(new URL('./auto-recall.ts', import.meta.url)),
-    ],
-    {
-      env: { ...env, ...envOverrides, NODE_NO_WARNINGS: '1' },
-      killSignal: 'SIGKILL',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 8000,
-    },
-  );
+  const child = spawn(process.execPath, [fileURLToPath(hookBundle)], {
+    env: { ...env, ...envOverrides, NODE_NO_WARNINGS: '1' },
+    killSignal: 'SIGKILL',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 8000,
+  });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk: Buffer) => {
@@ -223,4 +277,60 @@ async function makeTemporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'qwen-mem0-auto-e2e-'));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+async function makeRuntime(origin: string) {
+  const directory = await makeTemporaryDirectory();
+  const dialectPath = join(directory, 'dialect.json');
+  const configPath = join(directory, 'instance.json');
+  await writeFile(
+    dialectPath,
+    JSON.stringify({
+      dialectVersion: 1,
+      id: 'synthetic-auto-recall-v1',
+      auth: 'authorization-token',
+      search: {
+        method: 'POST',
+        path: '/v2/memories/search/',
+        queryLocation: 'json',
+        userIdLocation: 'json.filters',
+        agentIdLocation: 'omit',
+        appIdLocation: 'omit',
+        limitField: 'limit',
+      },
+      response: {
+        collection: 'results',
+        idField: 'id',
+        contentField: 'memory',
+        titleField: 'omit',
+        uriField: 'omit',
+        scoreField: 'omit',
+        updatedAtField: 'omit',
+      },
+    }),
+  );
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      schemaVersion: 3,
+      autoRecall: { repositoryRoot: directory },
+      dialectPath,
+      endpoint: {
+        origin,
+        basePath: '',
+        allowInsecureHttp: origin.startsWith('http:'),
+      },
+      credentialEnv: 'SYNTHETIC_MEMORY_TOKEN',
+      scope: { userId: 'repository-memory' },
+      timeoutMs: 1500,
+    }),
+  );
+
+  return {
+    directory,
+    env: {
+      QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
+      SYNTHETIC_MEMORY_TOKEN: 'runtime-token',
+    },
+  };
 }

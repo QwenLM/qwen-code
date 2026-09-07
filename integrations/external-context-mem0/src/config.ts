@@ -5,6 +5,7 @@
  */
 
 import { isAbsolute, parse, relative, sep } from 'node:path';
+import { constants } from 'node:fs';
 import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import {
   ConfigurationError,
@@ -84,7 +85,9 @@ async function readConfigFile(
   let source: Buffer;
   let file: FileHandle | undefined;
   try {
-    file = await open(path, 'r');
+    // A blocked FIFO open can outlive even the Hook's explicit process exit.
+    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    if (!(await file.stat()).isFile()) throw new Error('Not a regular file.');
     source = Buffer.allocUnsafe(MAX_CONFIG_BYTES + 1);
     let offset = 0;
     while (offset < source.byteLength) {

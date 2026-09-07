@@ -18,8 +18,9 @@ const MAX_HOOK_INPUT_BYTES = 1024 * 1024;
 const MAX_AUTO_QUERY_CHARACTERS = 512;
 const MAX_SANITIZER_INPUT_CHARACTERS = 4096;
 const HOOK_WALL_CLOCK_TIMEOUT_MS = 6500;
+// Check each identifier once, without overlapping scans around the keyword.
 const SECRET_ASSIGNMENT_PATTERN =
-  /["']?[A-Za-z0-9_.-]*(?:api[_-]?key|token|password|secret)[A-Za-z0-9_.-]*["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)?/gi;
+  /(?<![A-Za-z0-9_.-])["']?(?=[A-Za-z0-9_.-]*(?:api[_-]?key|token|password|secret))[A-Za-z0-9_.-]+["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)?/gi;
 
 interface HookInput {
   submittedPrompt: string;
@@ -192,4 +193,6 @@ async function isDirectEntryPoint(): Promise<boolean> {
 
 if (await isDirectEntryPoint()) {
   await runAutoRecallCli().catch(() => undefined);
+  // Aborted fetches or filesystem reads can retain handles after output is ready.
+  process.stdout.end(() => process.exit(0));
 }

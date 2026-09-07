@@ -105,12 +105,16 @@ Each eligible invocation starts a new Node process:
 8. Emit `{}` for missing provenance, mismatched paths, empty results, invalid
    configuration, timeouts, transport failures, or invalid provider responses.
 
-The Hook never reads or falls back to the legacy `prompt` field. Qwen currently
-omits `submitted_prompt` for tool-result continuations, retries, steering, cron,
-notifications, teammates, ACP, headless, serve, SDK, and remote-input paths, so
-those paths cannot trigger retrieval.
+The Hook never reads or falls back to the legacy `prompt` field. Eligibility
+depends on `submitted_prompt`, not the input transport: supported TUI
+submissions and headless CLI user turns supply it, including `qwen -p` and
+stream-json user messages from SDK clients. Events without this field, such as
+tool-result continuations, skip retrieval. Do not infer a TUI-only origin or
+exclude a transport merely from its name.
 
-Configuration and dialect files are bounded to 64 KiB. The long-running MCP
+Configuration and dialect paths must resolve to regular files and are bounded
+to 64 KiB. Nonblocking open and descriptor validation reject FIFOs before a
+filesystem worker can block waiting for a writer. The long-running MCP
 process reads them once at startup. The command Hook reads them once per
 eligible invocation, so administrator file changes apply to the next eligible
 submission; changing its environment or Hook registration requires restarting
@@ -129,10 +133,15 @@ Qwen.
 
 There is no retry, redirect, or cache. The Hook writes exactly one JSON object
 to stdout and emits no integration-generated stderr. Once the pinned Node
-entry point starts, all failures return `{}` with exit code zero. A launcher or
-command-resolution failure before Node starts and an outer Qwen timeout retain
-the command-Hook blocking semantics, so administrators must validate the fixed
-binary and bundle paths before rollout.
+entry point starts, handled failures return `{}` with exit code zero. The
+executable flushes stdout and explicitly exits so abandoned connections do not
+keep the event loop alive after the result is ready. Secret-assignment
+matching starts at identifier boundaries and checks the keyword separately from
+the assignment suffix, avoiding overlapping scans on repeated-keyword inputs.
+A launcher failure before Node starts or an outer Qwen timeout follows the
+command-Hook runner's own error policy; ordinary runner timeouts are nonfatal
+but delay the turn. Administrators must validate the fixed binary and bundle
+paths before rollout.
 
 Sanitization is a best-effort reduction, not DLP. The external provider may log
 the sanitized query. Retrieved content is sent to the model provider and may be
@@ -151,6 +160,13 @@ the configuration path and credential through the managed process environment,
 and copies the applicable Hook definition into an administrator-controlled
 `QWEN_HOME/settings.json`.
 
+This registration opts in every eligible input handled by that launcher,
+including headless and stream-json user turns. Administrators who want recall
+only in their interactive launcher must give automation a separate controlled
+`QWEN_HOME` without the Hook and omit its configuration and credential from the
+automation environment. A protocol-level TUI-only filter would require a
+separate Core/CLI provenance change and is outside this package-only design.
+
 The auto-recall process must not enable the package's default Extension
 manifest or configure another on-demand Mem0 MCP server. Otherwise one turn
 could produce both a deterministic Hook request and a model-selected MCP
@@ -165,8 +181,12 @@ launcher and restarts Qwen. It does not delete provider records or access logs.
 Unit tests cover strict v2/v3 parsing, canonical roots, containment, missing
 provenance, legacy-prompt isolation, input limits, credential patterns, Unicode
 bounds, one-request behavior, fail-open output, timeouts, and final context
-bounds. A local fake-provider test exercises configuration, `DialectV1`, the
-real request engine, Hook stdin/stdout, and exact outbound request shape.
+bounds. Package test commands build the shipped bundles before running tests.
+Local subprocess tests execute the Hook bundle with a fake provider and cover
+configuration, `DialectV1`, exact outbound requests, flushed Hook stdout, and
+successful process exit during a stalled TLS handshake and rejection of instance
+or dialect FIFOs. Repeated secret-keyword
+near misses are tested in bundle-importing subprocesses with a real deadline.
 
 Package verification builds both entry points and inspects `npm pack --dry-run`
 to confirm that the tarball contains the runtime, schemas, manifest,
