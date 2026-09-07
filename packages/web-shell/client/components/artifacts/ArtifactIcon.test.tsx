@@ -26,4 +26,29 @@ describe('ArtifactIcon', () => {
     expect(html).toContain('data-custom-image="report"');
     expect(html).not.toContain('data-artifact-icon');
   });
+
+  it.each([
+    ['audio', 'lucide-file-headphone'],
+    ['document', 'lucide-file-text'],
+    ['notebook', 'lucide-notebook-tabs'],
+  ])('keeps the legacy %s icon when no SVG matches', (kind, className) => {
+    const html = renderToStaticMarkup(
+      <ArtifactIcon
+        artifact={{ kind, title: 'Untitled' } as DaemonSessionArtifact}
+      />,
+    );
+
+    expect(html).toContain(className);
+    expect(html).toContain(`data-artifact-icon="${kind}"`);
+  });
+
+  it('uses file.svg when neither SVG nor legacy icon matches', () => {
+    const html = renderToStaticMarkup(
+      <ArtifactIcon
+        artifact={{ kind: 'other', title: 'Untitled' } as DaemonSessionArtifact}
+      />,
+    );
+
+    expect(html).toContain('data-artifact-icon="file"');
+  });
 });

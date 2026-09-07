@@ -1,4 +1,10 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import {
+  FileAudioIcon,
+  FileTextIcon,
+  NotebookTabsIcon,
+  type LucideIcon,
+} from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useWebShellCustomization } from '../../customization';
 import csvIcon from '../../assets/artifacts/csv.svg';
@@ -11,7 +17,7 @@ import pdfIcon from '../../assets/artifacts/pdf.svg';
 import spreadsheetIcon from '../../assets/artifacts/spreadsheet.svg';
 import videoIcon from '../../assets/artifacts/video.svg';
 import wordIcon from '../../assets/artifacts/word.svg';
-import { normalizeArtifactMimeType } from './artifactUtils';
+import { normalizeArtifactMimeType, pathExtension } from './artifactUtils';
 
 export type ArtifactIconKind =
   | 'csv'
@@ -49,6 +55,12 @@ const KIND_ICONS: Readonly<Record<string, ArtifactIconKind>> = {
   spreadsheet: 'spreadsheet',
   video: 'video',
   word: 'word',
+};
+
+const LEGACY_KIND_ICONS: Readonly<Record<string, LucideIcon>> = {
+  audio: FileAudioIcon,
+  document: FileTextIcon,
+  notebook: NotebookTabsIcon,
 };
 
 const EXTENSION_ICONS: Readonly<Record<string, ArtifactIconKind>> = {
@@ -89,7 +101,7 @@ export function getArtifactIconKind(
   if (!artifact) return 'file';
 
   const name = artifact.workspacePath ?? artifact.url ?? artifact.title;
-  const extension = name.split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase();
+  const extension = pathExtension(name).slice(1);
   if (extension && EXTENSION_ICONS[extension]) {
     return EXTENSION_ICONS[extension];
   }
@@ -129,6 +141,17 @@ export function ArtifactIcon({
   }
 
   const kind = getArtifactIconKind(artifact);
+  const legacyKind = kind === 'file' ? artifact?.kind : undefined;
+  const LegacyIcon = legacyKind ? LEGACY_KIND_ICONS[legacyKind] : undefined;
+  if (LegacyIcon) {
+    return (
+      <LegacyIcon
+        className={className}
+        data-artifact-icon={legacyKind}
+        aria-hidden="true"
+      />
+    );
+  }
   return (
     <img
       className={className}

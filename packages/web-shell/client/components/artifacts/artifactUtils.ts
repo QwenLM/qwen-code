@@ -146,7 +146,7 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   return false;
 }
 
-function pathExtension(workspacePath?: string): string {
+export function pathExtension(workspacePath?: string): string {
   const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
   const name = path.split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
