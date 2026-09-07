@@ -1960,27 +1960,6 @@ export class AgentCore {
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
-      onToolCallsUpdate: (toolCalls) => {
-        const started = toolCalls.filter(
-          (call) =>
-            call.status === 'executing' &&
-            !executingToolCallIds.has(call.request.callId),
-        );
-        executingToolCallIds.clear();
-        for (const call of toolCalls) {
-          if (call.status === 'executing') {
-            executingToolCallIds.add(call.request.callId);
-          }
-        }
-        for (const call of started) {
-          this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
-            subagentId: this.subagentId,
-            round: currentRound,
-            callId: call.request.callId,
-            timestamp: Date.now(),
-          } as AgentToolProgressEvent);
-        }
-      },
       outputUpdateHandler: (callId, outputChunk) => {
         this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
           subagentId: this.subagentId,
@@ -2064,6 +2043,26 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        const started = calls.filter(
+          (call) =>
+            call.status === 'executing' &&
+            !executingToolCallIds.has(call.request.callId),
+        );
+        executingToolCallIds.clear();
+        for (const call of calls) {
+          if (call.status === 'executing') {
+            executingToolCallIds.add(call.request.callId);
+          }
+        }
+        for (const call of started) {
+          this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+            subagentId: this.subagentId,
+            round: currentRound,
+            callId: call.request.callId,
+            timestamp: Date.now(),
+          } as AgentToolProgressEvent);
+        }
+
         const awaitingByCallId = new Map(
           calls
             .filter(
