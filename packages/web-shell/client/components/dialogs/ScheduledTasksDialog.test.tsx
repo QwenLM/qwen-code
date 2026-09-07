@@ -1468,6 +1468,11 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     // The primary runtime's Extension renders in the open picker.
     expect(findButtonContaining('primary-only-ext')).toBeDefined();
     expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = '@ext:primary-only-ext keep this';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
 
     // Move the form to the secondary workspace without a pointerdown (e.g.
     // keyboard selection): the stale primary candidate list must close.
@@ -1479,6 +1484,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     await flush();
 
     expect(document.body.textContent).not.toContain('primary-only-ext');
+    expect(prompt.textContent).toContain('keep this');
   });
 
   it('lists and creates tasks in a locked secondary workspace', async () => {

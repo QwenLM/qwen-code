@@ -26,6 +26,7 @@ import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
 const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+const EXTENSIONS_RECONCILE_TIMEOUT_MS = 30_000;
 const MCP_PREPARE_TIMEOUT_MS = 2 * 60_000;
 const MCP_POLL_INTERVAL_MS = 250;
 
@@ -260,21 +261,6 @@ export class WorkspaceRuntimeCoordinator {
       throw new WorkspaceRuntimeInitializationError(error);
     }
     this.assertAcceptingWork();
-    const lifecycle = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
-    if (
-      this.desiredExtensionGeneration === 0 &&
-      this.appliedExtensionGeneration === 0 &&
-      lifecycle.runtimeLive &&
-      this.extensionsStatus.runtimeEpoch !== lifecycle.runtimeEpoch
-    ) {
-      this.extensionsStatus = {
-        state: 'ready',
-        revision: this.extensionsRevision,
-        runtimeEpoch: lifecycle.runtimeEpoch,
-        desiredGeneration: 0,
-        appliedGeneration: 0,
-      };
-    }
     const status = this.status();
     if (!status.runtimeLive) {
       throw new WorkspaceRuntimeInitializationError(
@@ -355,7 +341,7 @@ export class WorkspaceRuntimeCoordinator {
   }
 
   observeExtensionGeneration(generation: number): void {
-    if (generation === this.desiredExtensionGeneration) return;
+    if (generation <= this.desiredExtensionGeneration) return;
     this.desiredExtensionGeneration = generation;
     this.extensionsRevision += 1;
     this.extensionsRefreshFailedRevision = undefined;
@@ -375,6 +361,7 @@ export class WorkspaceRuntimeCoordinator {
 
   async reconcileExtensionGeneration(
     generation: number,
+    options: { skillsOnly?: boolean } = {},
   ): Promise<WorkspaceExtensionReconciliationResult> {
     this.observeExtensionGeneration(generation);
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
@@ -383,30 +370,44 @@ export class WorkspaceRuntimeCoordinator {
         snapshot.runtimeLive && this.draining;
       return { state: 'deferred', refreshed: 0, failed: 0 };
     }
-    // Only the mutation path invalidates derived Skills/MCP capabilities: it
-    // owns rescheduling them on the success gate below. A read-side
-    // invalidation (observeExtensionGeneration) would abort their queued
-    // closures with nothing queueing a replacement.
-    this.invalidateDerivedCapabilities();
+    const current = this.status().capabilities?.extensions;
+    if (
+      current?.state === 'ready' &&
+      current.runtimeEpoch === snapshot.runtimeEpoch &&
+      current.desiredGeneration === generation &&
+      current.appliedGeneration === generation
+    ) {
+      return { state: 'reconciled', refreshed: 0, failed: 0 };
+    }
     const revision = this.extensionsRevision;
     let result: ServeWorkspaceExtensionsRefreshResult | undefined;
     try {
       result = await this.queueExtensionsWork(() =>
-        this.prepareExtensionsRevision(revision, generation),
+        this.prepareExtensionsRevision(revision, generation, options),
       );
     } catch (error) {
       if (this.draining && !this.disposed) {
         this.extensionsReconcileDeferred = true;
         return { state: 'deferred', refreshed: 0, failed: 0 };
       }
+      if (
+        revision !== this.extensionsRevision ||
+        generation !== this.desiredExtensionGeneration
+      ) {
+        return { state: 'deferred', refreshed: 0, failed: 0 };
+      }
       const refresh =
         error instanceof ExtensionRuntimeRefreshError
           ? error.result
           : undefined;
+      this.invalidateDerivedCapabilities();
+      this.scheduleSkillsReconciliation();
+      this.scheduleMcpReconciliation();
       return {
         state: 'failed',
         refreshed: refresh?.sessionsRefreshed ?? 0,
         failed:
+          (refresh?.configsFailed ?? 0) +
           (refresh?.sessionsFailed ?? 0) +
           (refresh?.sessionsSkipped ?? (refresh ? 0 : 1)),
         error: sanitizeExtensionsErrorMessage(
@@ -419,6 +420,7 @@ export class WorkspaceRuntimeCoordinator {
       generation === this.desiredExtensionGeneration &&
       this.appliedExtensionGeneration === generation
     ) {
+      this.invalidateDerivedCapabilities();
       this.scheduleSkillsReconciliation();
       this.scheduleMcpReconciliation();
       return {
@@ -587,6 +589,7 @@ export class WorkspaceRuntimeCoordinator {
   private async prepareExtensionsRevision(
     revision: number,
     generation: number,
+    options: { skillsOnly?: boolean } = {},
   ): Promise<ServeWorkspaceExtensionsRefreshResult | undefined> {
     let snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (!snapshot.runtimeLive) {
@@ -595,6 +598,7 @@ export class WorkspaceRuntimeCoordinator {
         DEFAULT_ENSURE_TIMEOUT_MS,
       );
       snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+      this.assertAcceptingWork();
     }
     const runtimeEpoch = snapshot.runtimeEpoch;
     if (
@@ -614,7 +618,11 @@ export class WorkspaceRuntimeCoordinator {
       const result =
         await this.bridge.invokeWorkspaceCommand<ServeWorkspaceExtensionsRefreshResult>(
           SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
-          { cwd: this.runtime.workspaceCwd },
+          {
+            cwd: this.runtime.workspaceCwd,
+            ...(options.skillsOnly ? { skillsOnly: true } : {}),
+          },
+          { timeoutMs: EXTENSIONS_RECONCILE_TIMEOUT_MS },
         );
       if (
         result.configsFailed > 0 ||
@@ -644,12 +652,6 @@ export class WorkspaceRuntimeCoordinator {
       ) {
         return;
       }
-      if (catalog.errors?.length) {
-        throw new Error(
-          catalog.errors[0]?.error ??
-            'Extension runtime did not return a live snapshot',
-        );
-      }
       if (
         this.draining ||
         !current.runtimeLive ||
@@ -675,6 +677,12 @@ export class WorkspaceRuntimeCoordinator {
       if (catalog.runtimeEpoch !== runtimeEpoch || !catalog.initialized) {
         throw new Error(
           'Extension runtime returned a stale or uninitialized catalog',
+        );
+      }
+      if (catalog.errors?.length) {
+        throw new Error(
+          catalog.errors[0]?.error ??
+            'Extension runtime did not return a live snapshot',
         );
       }
       this.appliedExtensionGeneration = generation;

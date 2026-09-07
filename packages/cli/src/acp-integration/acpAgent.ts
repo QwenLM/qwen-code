@@ -13563,10 +13563,18 @@ class QwenAgent implements Agent {
         };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile: {
+        const rawSkillsOnly = params['skillsOnly'];
+        if (rawSkillsOnly !== undefined && typeof rawSkillsOnly !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'skillsOnly must be a boolean',
+          );
+        }
+        const skillsOnly = rawSkillsOnly === true;
         const sessions = this.getActiveSessions();
         const configs = new Set([
           this.config,
-          ...(this.workspaceMcpDiscoveryConfig
+          ...(!skillsOnly && this.workspaceMcpDiscoveryConfig
             ? [this.workspaceMcpDiscoveryConfig]
             : []),
           ...sessions.map((session) => session.getConfig()),
@@ -13574,12 +13582,28 @@ class QwenAgent implements Agent {
         const configList = [...configs];
         const configResults = await Promise.allSettled(
           configList.map(async (config) => {
+            if (skillsOnly) {
+              await Promise.all(
+                sessions
+                  .filter((session) => session.getConfig() === config)
+                  .map((session) => session.reloadSkillSettings()),
+              );
+            }
             const extensionManager = config.getExtensionManager();
             await extensionManager.refreshCache();
-            await extensionManager.refreshTools();
-            // refreshTools retries the Skill refresh here so a second failure
-            // is surfaced instead of remaining best-effort inside it.
-            await config.getSkillManager()?.refreshCache();
+            if (skillsOnly) {
+              await config
+                .getSkillManager()
+                ?.refreshCache({ throwOnError: true });
+            } else {
+              await extensionManager.refreshTools();
+              // refreshTools retries the Skill refresh here so a second
+              // failure is surfaced instead of remaining best-effort inside
+              // it.
+              await config
+                .getSkillManager()
+                ?.refreshCache({ throwOnError: true });
+            }
             await config.getLlmClient()?.refreshSystemInstruction();
           }),
         );
@@ -13599,9 +13623,16 @@ class QwenAgent implements Agent {
           (session) => !failedConfigs.has(session.getConfig()),
         );
         const sessionResults = await Promise.allSettled(
-          attemptedSessions.map((session) =>
-            session.sendAvailableCommandsUpdateOrThrow(),
-          ),
+          attemptedSessions.map(async (session) => {
+            if (skillsOnly) {
+              await session.refreshSkillsFromSettings({
+                reloadSettings: false,
+                notifyConfigChanged: false,
+              });
+              return;
+            }
+            await session.sendAvailableCommandsUpdateOrThrow();
+          }),
         );
         const sessionErrors: Array<{ sessionId: string; error: string }> = [];
         sessionResults.forEach((result, index) => {

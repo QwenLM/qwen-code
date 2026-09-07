@@ -1344,6 +1344,13 @@ export function ScheduledTasksDialog({
                   disabled={!!editingId || operableWorkspaces.length <= 1}
                   onChange={(e) => {
                     setFormWorkspaceId(e.target.value || undefined);
+                    setPrompt((current) =>
+                      current.replace(
+                        PROMPT_REFERENCE_TOKEN,
+                        (matched, prefix: string, token: string) =>
+                          token.startsWith('@ext:') ? prefix : matched,
+                      ),
+                    );
                     // Reference candidates are scoped to the form's workspace;
                     // an open picker still shows the previous workspace's list.
                     resetReferenceState();

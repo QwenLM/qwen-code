@@ -158,10 +158,6 @@ export function createServeFeatures(
         workspaceRuntimeRemovalAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
-        // The Extension runtime tags gate clients onto trust-guarded routes;
-        // when primary trust is not tracked (legacy embedders) the daemon
-        // treated the single workspace as trusted, so default to trusted.
-        primaryWorkspaceTrusted: deps.isPrimaryWorkspaceTrusted?.() ?? true,
         localPathOpenAvailable,
         localTerminalOpenAvailable,
         workspaceTrustHotReloadAvailable,

@@ -715,11 +715,12 @@ export function createExtensionsController(
                       const coordinator =
                         getWorkspaceRuntimeCoordinatorIfSupported(runtime);
                       if (coordinator) {
-                        // A generation is certified only by the full runtime
-                        // refresh; skillsOnly remains a legacy optimization.
                         const reconciliation =
                           await coordinator.reconcileExtensionGeneration(
                             committedGeneration!,
+                            options.skillsOnly
+                              ? { skillsOnly: true }
+                              : undefined,
                           );
                         const result = {
                           refreshed: reconciliation.refreshed,
@@ -1140,11 +1141,13 @@ export function createExtensionsController(
       initialized: true,
       extensions: entries,
     };
-    extensionsStatusCache = {
-      locale,
-      expiresAt: Date.now() + 2_000,
-      value: status,
-    };
+    if (!currentManager) {
+      extensionsStatusCache = {
+        locale,
+        expiresAt: Date.now() + 2_000,
+        value: status,
+      };
+    }
     return status;
   };
 

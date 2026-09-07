@@ -173,6 +173,23 @@ describe('extensions manager logic', () => {
       details: { skills: ['runtime-skill'] },
     });
 
+    const catalogEntry: ExtensionCatalogEntry = {
+      id: configured.id,
+      name: configured.name,
+      version: configured.version,
+      defaultActivation: 'enabled',
+      workspaceOverrideCount: 0,
+    };
+    expect(
+      mergeExtensionCatalog(
+        [catalogEntry],
+        activation,
+        runtime,
+        coordinator,
+        2,
+      )[0]?.updateState,
+    ).toBe('update available');
+
     expect(
       mergeExtensionCatalog(
         [configured],

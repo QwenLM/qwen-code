@@ -29689,6 +29689,8 @@ describe('sessionLanguage multi-session propagation', () => {
     const sendAvailableCommandsUpdateOrThrow = vi
       .fn()
       .mockResolvedValue(undefined);
+    const reloadSkillSettings = vi.fn().mockResolvedValue(undefined);
+    const refreshSkillsFromSettings = vi.fn().mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
@@ -29704,6 +29706,8 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           sendAvailableCommandsUpdateOrThrow,
+          reloadSkillSettings,
+          refreshSkillsFromSettings,
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
@@ -29790,8 +29794,38 @@ describe('sessionLanguage multi-session propagation', () => {
       sessionsFailed: 0,
       sessionsSkipped: 0,
     });
+    expect(skillManager.refreshCache).toHaveBeenCalledWith({
+      throwOnError: true,
+    });
     expect(sendAvailableCommandsUpdateOrThrow).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+
+    extensionManager.refreshTools.mockClear();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile, {
+        skillsOnly: true,
+      }),
+    ).resolves.toMatchObject({ configsFailed: 0, sessionsFailed: 0 });
+    expect(extensionManager.refreshTools).not.toHaveBeenCalled();
+    expect(reloadSkillSettings).toHaveBeenCalledOnce();
+    expect(refreshSkillsFromSettings).toHaveBeenCalledWith({
+      reloadSettings: false,
+      notifyConfigChanged: false,
+    });
+
+    skillManager.refreshCache.mockRejectedValueOnce(
+      new Error('broken skill cache'),
+    );
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toMatchObject({
+      configsFailed: 1,
+      configErrors: ['broken skill cache'],
+      sessionsSkipped: 1,
+    });
 
     extensionManager.refreshCache.mockRejectedValueOnce(
       new Error('broken session config'),

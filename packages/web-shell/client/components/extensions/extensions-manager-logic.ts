@@ -72,7 +72,7 @@ export function mergeExtensionCatalog(
     return {
       ...configuredEntry,
       ...live,
-      updateState: configuredEntry.updateState,
+      updateState: configuredEntry.updateState ?? live?.updateState,
       isActive:
         live?.isActive ??
         (projection

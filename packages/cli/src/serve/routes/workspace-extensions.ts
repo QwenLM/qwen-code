@@ -809,6 +809,12 @@ export function registerWorkspaceExtensionRoutes(
                             'Extension generation reconciliation failed',
                         );
                       }
+                      if (result.state === 'reconciled') {
+                        runtime.bridge.broadcastExtensionsChanged({
+                          refreshed: result.refreshed,
+                          failed: result.failed,
+                        });
+                      }
                       return;
                     }
                     const result =
@@ -1828,13 +1834,14 @@ export function registerWorkspaceExtensionRoutes(
     req: Request,
     res: Response,
     route: string,
-    manager: ExtensionManager,
+    manager: ExtensionManager | undefined,
     operation: string,
     failureContext: { source?: string; name?: string },
     run: (
       extensionManager: ExtensionManager,
       signal?: AbortSignal,
       context?: ExtensionOperationContext,
+      operationId?: string,
     ) => Promise<ExtensionMutationEvent>,
     options: {
       refreshRuntimes?:
@@ -1844,6 +1851,8 @@ export function registerWorkspaceExtensionRoutes(
       skillsOnly?: boolean;
       deadlineMs?: number;
       assertGenerationOpen?: () => void;
+      createManager?: (operationId: string) => ExtensionManager;
+      onSettled?: (operationId: string) => void;
     } = {},
   ): void => {
     if (
@@ -2120,18 +2129,14 @@ export function registerWorkspaceExtensionRoutes(
       res.status(400).json({ error: 'Invalid initial activation' });
       return;
     }
-    const manager = primaryController.createExtensionManager(
-      boundWorkspace,
-      true,
-    );
     sendOperation(
       req,
       res,
       'POST /extensions/install',
-      manager,
+      undefined,
       'install',
       gitCredential?.persistence === 'one_time' ? {} : { source: sourceValue },
-      async (extensionManager, _signal, context) => {
+      async (extensionManager, _signal, context, operationId) => {
         const prepared = await context!.prepare(async (signal) => {
           const metadata = await parseInstallSource(sourceValue);
           assertDaemonExtensionInstallSource(
@@ -2163,6 +2168,7 @@ export function registerWorkspaceExtensionRoutes(
           if (metadata.type === 'npm' && registryUrl) {
             metadata.registryUrl = registryUrl;
           }
+          supersedeActiveInstallOperations(primaryController, operationId!);
           return await extensionManager.prepareExtensionInstall({
             installMetadata: {
               ...metadata,
@@ -2208,7 +2214,20 @@ export function registerWorkspaceExtensionRoutes(
         }
       },
       {
-        deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+        createManager: (operationId) =>
+          primaryController.createExtensionManager(
+            boundWorkspace,
+            true,
+            extensionInteractionHandlers(primaryController, operationId),
+          ),
+        onSettled: (operationId) => {
+          supersededInstallOperations.delete(operationId);
+          cancelPendingExtensionInteraction(
+            operationId,
+            'Extension operation ended',
+          );
+        },
+        deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
         ...(workspaceRegistry
           ? { refreshRuntimes: () => workspaceRegistry.listAll() }
           : {}),
@@ -2256,21 +2275,20 @@ export function registerWorkspaceExtensionRoutes(
     (req, res) => {
       const extensionId = parseExtensionId(req, res);
       if (!extensionId) return;
-      const manager = primaryController.createExtensionManager(
-        boundWorkspace,
-        true,
-      );
       sendOperation(
         req,
         res,
         'POST /extensions/:extensionId/update',
-        manager,
+        undefined,
         'update',
         { name: extensionId },
-        async (extensionManager, _signal, context) => {
+        async (extensionManager, _signal, context, operationId) => {
           const extension = extensionById(extensionManager, extensionId);
           if (!extension)
             throw new Error(`Extension "${extensionId}" not found`);
+          primaryController.updateOperation(operationId!, {
+            name: extension.name,
+          });
           if (
             extension.installMetadata?.type !== 'git' &&
             extension.installMetadata?.type !== 'archive-url' &&
@@ -2315,7 +2333,19 @@ export function registerWorkspaceExtensionRoutes(
           }
         },
         {
-          deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
+          createManager: (operationId) =>
+            primaryController.createExtensionManager(
+              boundWorkspace,
+              true,
+              extensionInteractionHandlers(primaryController, operationId),
+            ),
+          onSettled: (operationId) => {
+            cancelPendingExtensionInteraction(
+              operationId,
+              'Extension operation ended',
+            );
+          },
+          deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
           ...(workspaceRegistry
             ? { refreshRuntimes: () => workspaceRegistry.listAll() }
             : {}),
@@ -2390,12 +2420,20 @@ export function registerWorkspaceExtensionRoutes(
     ) => {
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       try {
-        res.status(200).json(
+        const status =
           await runtime.workspaceService.getWorkspaceExtensionsStatus({
             route,
             workspaceCwd: runtime.workspaceCwd,
-          }),
-        );
+          });
+        res.status(200).json({
+          ...status,
+          extensions: status.extensions.map((extension) => ({
+            ...extension,
+            ...(extension.source
+              ? { source: redactExtensionDisplaySource(extension.source) }
+              : {}),
+          })),
+        });
       } catch (error) {
         sendBridgeError(res, error, { route });
       }

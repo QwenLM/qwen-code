@@ -315,8 +315,8 @@ MCP discovery 标记和 server-name 级 MCP auth 集合表示物理 work。已�
 status、Catalog、Extension refresh、Skills refresh、MCP discovery/auth、普通 runtime
 mutation 以及 Session create/load/resume/close 都在对应物理工作期间持 lease。
 物理 startup 本身也受启动 lease 和 deadline 保护。当前 `ensure` 覆盖
-preheat/initialize 与 Skills prepare，并在成功后登记 keepalive；其余 capability
-仍由后续阶段接入。
+preheat/initialize 与 Extensions、Skills、MCP prepare，并在成功后登记 keepalive；
+各阶段之间的外层 command-wide lease 仍由后续阶段接入。
 
 Foundation 在 OAuth 返回 pending 后保留 owning Channel 的 auth lease。明确观察到
 同一 Channel 上的 server 已变为 non-pending 时释放；Catalog 中缺少 server 不是完成
@@ -538,15 +538,15 @@ live runtime 和非 ready capability，后台工作继续有界收敛。底层�
 绝对启动 deadline 约束。`GET /runtime/status` 只观察 lifecycle 和 capability，不启动
 或重试 runtime。
 
-#### Foundation（Extensions + Skills + MCP 已实现）
+#### Foundation（Extensions + Skills + MCP 已实现，外层 lease 仍为 Target）
 
 Coordinator 已按 `extensions -> (mcp, skills)` 准备标准能力；Tools 后续接入相同流程：
 
-1. 获取覆盖整个命令的外层 runtime-control lease；
+1. 获取覆盖整个命令的外层 runtime-control lease（Target，见 §8.2）；
 2. 确保 Workspace ACP Runtime 已完成 handshake；
 3. 在当前 epoch 加载 Extension desired generation，或捕获 MCP/Skills revision；
 4. 初始化标准 capability 集合并更新可轮询状态；
-5. 命令完成、失败或安全排空后释放 lease。
+5. 命令完成、失败或安全排空后释放 lease（Target，见 §8.2）。
 
 Extensions 已按 generation + epoch、MCP/Skills 已按 revision + epoch 实现上述收敛；Tools 尚未迁移。
 Coordinator 先 prepare Extensions，再并行处理其派生能力；同一 capability

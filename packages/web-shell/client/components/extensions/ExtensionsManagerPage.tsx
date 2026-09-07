@@ -655,10 +655,23 @@ export function ExtensionsManagerPage({
           }
         }
       } catch (error) {
-        if (requestId === loadRequestRef.current && !preserveMessage) {
-          setMessageOwner(null);
-          setMessageTone('error');
-          setMessage(error instanceof Error ? error.message : String(error));
+        if (requestId === loadRequestRef.current) {
+          if (!preserveMessage) {
+            setMessageOwner(null);
+            setMessageTone('error');
+            setMessage(error instanceof Error ? error.message : String(error));
+          }
+          if (
+            splitRuntimeAvailable &&
+            (!(error instanceof DaemonHttpError) ||
+              error.status === 429 ||
+              error.status >= 500)
+          ) {
+            runtimeRetryTimerRef.current = setTimeout(
+              () => void loadRef.current?.(true),
+              2000,
+            );
+          }
         }
       } finally {
         if (requestId === loadRequestRef.current) setLoading(false);
