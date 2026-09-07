@@ -122,9 +122,16 @@ const REFRESH_MS = 1_000;
 export interface ThreadsRouteProps {
   api?: ThreadsApi;
   onOpenTranscript?: (runId: string) => void;
+  /** Switches the shell to an agent's own session. Absent when embedded
+   * somewhere with no session view to switch to. */
+  onOpenAgentSession?: (sessionId: string) => void;
 }
 
-export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
+export function ThreadsRoute({
+  api,
+  onOpenTranscript,
+  onOpenAgentSession,
+}: ThreadsRouteProps) {
   const workspace = useWorkspace();
   const connection = useConnection();
   const workspaceCwd =
@@ -291,6 +298,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
               );
           }}
           onCloseTranscript={() => setTranscript(undefined)}
+          {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           onCancelRun={(runId) =>
             void mutate(() => client.cancelRun(openId, runId))
           }

@@ -75,6 +75,11 @@ export interface ThreadViewProps {
   onOpenThread?: (threadId: string) => void;
   onOpenTranscript: (runId: string) => void;
   onCloseTranscript?: () => void;
+  /**
+   * Opens the agent session a run ran in. Absent where the shell has no
+   * session view to switch to, which is why every use of it is guarded.
+   */
+  onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
   onMarkDone?: () => void;
   onAssign?: (assignee?: string) => void;
@@ -92,12 +97,15 @@ function formatTime(at: number): string {
 function RunRowView({
   row,
   onOpenTranscript,
+  onOpenAgentSession,
   onCancelRun,
 }: {
   row: RunRow;
   onOpenTranscript: (runId: string) => void;
+  onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
 }) {
+  const sessionId = row.run.sessionId;
   const stateClass = row.outstanding
     ? `${styles.runState} ${styles.runStateOutstanding}`
     : row.live
@@ -136,6 +144,18 @@ function RunRowView({
               onClick={() => onOpenTranscript(row.run.id)}
             >
               transcript
+            </button>
+          </>
+        ) : null}
+        {sessionId && onOpenAgentSession ? (
+          <>
+            {' · '}
+            <button
+              type="button"
+              className={styles.runLink}
+              onClick={() => onOpenAgentSession(sessionId)}
+            >
+              open {row.run.agentName}&rsquo;s session
             </button>
           </>
         ) : null}
@@ -237,6 +257,7 @@ export function ThreadView({
   onOpenThread,
   onOpenTranscript,
   onCloseTranscript,
+  onOpenAgentSession,
   onCancelRun,
   onMarkDone,
   onAssign,
@@ -410,6 +431,7 @@ export function ThreadView({
                   key={row.run.id}
                   row={row}
                   onOpenTranscript={onOpenTranscript}
+                  {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
                   {...(onCancelRun ? { onCancelRun } : {})}
                 />
               ))}
@@ -421,6 +443,12 @@ export function ThreadView({
                           key={row.run.id}
                           row={row}
                           onOpenTranscript={onOpenTranscript}
+                          {...(onOpenAgentSession
+                            ? { onOpenAgentSession }
+                            : {})}
+                          {...(onOpenAgentSession
+                            ? { onOpenAgentSession }
+                            : {})}
                           {...(onCancelRun ? { onCancelRun } : {})}
                         />
                       ))

@@ -2165,6 +2165,7 @@ export class Config {
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
   private systemPrompt: string | undefined;
+  private workspaceAgentName: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -4417,7 +4418,7 @@ export class Config {
    * session's prompt is part of what its transcript means; changing it under a
    * running conversation would make the record a lie.
    */
-  applyWorkspaceAgentPersona(systemPrompt: string): void {
+  applyWorkspaceAgentPersona(systemPrompt: string, agentName: string): void {
     if (this.sessionSourceType !== 'agent') {
       throw new Error(
         'A workspace-agent persona may only be applied to an agent session.',
@@ -4429,6 +4430,18 @@ export class Config {
       );
     }
     this.systemPrompt = systemPrompt;
+    this.workspaceAgentName = agentName;
+  }
+
+  /**
+   * The roster name of the agent this session is, once its persona is applied.
+   *
+   * Carried on the config rather than passed between the spawn steps because
+   * the persona is resolved before the recorder exists and read after: the
+   * identity outlives both, and this is the one place both can see.
+   */
+  getWorkspaceAgentName(): string | undefined {
+    return this.workspaceAgentName;
   }
 
   setSessionSource(sourceType: string, sourceId?: string): void {

@@ -13968,7 +13968,10 @@ class QwenAgent implements Agent {
         // boundary is derived from the definition this would have skipped.
         throw RequestError.invalidParams(undefined, persona.error);
       }
-      config.applyWorkspaceAgentPersona(persona.systemPrompt);
+      config.applyWorkspaceAgentPersona(
+        persona.systemPrompt,
+        persona.agent.name,
+      );
     }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
@@ -14541,6 +14544,21 @@ class QwenAgent implements Agent {
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+      }
+
+      // An agent session belongs in the ordinary session list, so it has to be
+      // legible there. Left alone its display name would be the first prompt —
+      // a turn envelope, which is machine text no one asked to read. Write the
+      // agent's own name instead, once, and only when nothing has named this
+      // session already: a person's `/rename` outranks us, and so does the
+      // title a previous attach wrote, which is why an attach does not repeat
+      // this. `auto` rather than `manual` keeps `/rename` free to replace it.
+      const agentSessionTitle = config.getWorkspaceAgentName();
+      if (agentSessionTitle) {
+        const recording = config.getChatRecordingService();
+        if (recording && !recording.getCurrentCustomTitle()) {
+          await recording.recordCustomTitle(agentSessionTitle, 'auto');
+        }
       }
 
       if (options.deferWorkspaceActivation !== true) {

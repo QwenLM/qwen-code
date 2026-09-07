@@ -25,7 +25,7 @@ import {
   type AgentLevelFilter,
 } from './agents-manager-logic';
 import { AgentCreatePage } from './AgentCreatePage';
-import { ThreadsRoute } from '../agent/ThreadsRoute';
+import { ThreadsRoute } from '../workspace-agents/ThreadsRoute';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -79,6 +79,8 @@ interface AgentsManagerPageProps {
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
+  /** Opens an agent's own session in the shell's session view. */
+  onOpenAgentSession?: (sessionId: string) => void;
 }
 
 function levelLabel(level: string, t: ReturnType<typeof useI18n>['t']): string {
@@ -129,6 +131,7 @@ export function AgentsManagerPage({
   onClose,
   embedded,
   initialCreateScope,
+  onOpenAgentSession,
 }: AgentsManagerPageProps) {
   const { t } = useI18n();
   const {
@@ -323,7 +326,7 @@ export function AgentsManagerPage({
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
-        <ThreadsRoute />
+        <ThreadsRoute {...(onOpenAgentSession ? { onOpenAgentSession } : {})} />
       </div>
     );
   }

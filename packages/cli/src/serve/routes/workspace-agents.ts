@@ -177,6 +177,11 @@ function runView(
     trigger: triggerText(thread, run),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
+    // The session this run's turn was taken in. An agent is its own local
+    // session, so this is where the whole of what it did is readable — the
+    // thread-scoped slice below answers the narrower question of what it did
+    // *here*, which a session serving several threads cannot.
+    ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
     hasTranscriptSlice:
       agent !== undefined &&
       run.transcriptStartOffset !== undefined &&

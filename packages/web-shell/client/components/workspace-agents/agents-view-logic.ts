@@ -123,6 +123,8 @@ export interface RunView {
   trigger: string;
   startedAt?: number;
   endedAt?: number;
+  /** The agent session this run took its turn in, once one is bound. */
+  sessionId?: string;
   hasTranscriptSlice: boolean;
 }
 

@@ -17004,6 +17004,13 @@ export function App({
                           closePanel();
                         }}
                         initialCreateScope={agentsCreateScope}
+                        onOpenAgentSession={(sessionId) => {
+                          // An agent is its own session, so a run opens the
+                          // ordinary session view. `loadSidebarSession`
+                          // already closes this panel on its way there.
+                          setAgentsCreateScope(null);
+                          void loadSidebarSession(sessionId);
+                        }}
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
