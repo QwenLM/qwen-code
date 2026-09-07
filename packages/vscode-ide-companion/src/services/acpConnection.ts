@@ -162,6 +162,13 @@ export class AcpConnection {
     const processExitPromise = new Promise<never>((_resolve, reject) => {
       rejectOnExit = reject;
     });
+    // The only consumer is the Promise.race in initialize(), which attaches
+    // much later. A child that exits before then — a failed startup, or a
+    // superseded child winding down after disconnect() — would otherwise
+    // reject this with no handler attached, i.e. an unhandled rejection in the
+    // extension host. Marking it handled here changes nothing for the race,
+    // which still receives the original promise and still sees the rejection.
+    void processExitPromise.catch(() => {});
 
     ownChild.stderr?.on('data', (data: Buffer) => {
       const message = data.toString();

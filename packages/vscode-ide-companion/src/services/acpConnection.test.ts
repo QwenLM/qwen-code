@@ -288,7 +288,7 @@ describe('AcpConnection child exit cleanup', () => {
     }
   });
 
-  it('a superseded child exiting does not tear down its replacement', () => {
+  it('a superseded child exiting does not tear down its replacement', async () => {
     // disconnect() now lets the CLI wind down on its own, so a superseded child
     // can still be exiting after connect() installed its replacement. An exit
     // handler keyed only on `this.child` would null out the live connection.
@@ -324,6 +324,11 @@ describe('AcpConnection child exit cleanup', () => {
 
     expect(conn.child).toBe(newChild);
     expect(onDisconnected).not.toHaveBeenCalled();
+    // The exit also rejects the promise initialize() races. Nothing has
+    // attached to it at this point, so it must already be marked handled or
+    // this is an unhandled rejection in the extension host — vitest reports it
+    // as a suite error even with every test green.
+    await Promise.resolve();
   });
 
   it('disconnect does not force-kill a CLI that exited on its own', () => {
