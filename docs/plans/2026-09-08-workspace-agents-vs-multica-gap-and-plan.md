@@ -245,6 +245,18 @@ servers were deliberately not added: `classifyAgentTool` denies every name not
 in its table and no MCP tool is in it, so the setting would do nothing.
 Reaching MCP means moving the read-only ceiling, which is a separate decision.
 
+### Found on this branch, outside this subsystem
+
+`client/App.tsx` reads `teamName` off `DaemonSessionAgentTaskStatus` in four
+places, and the wire type does not declare it — the only `teamName` in core is
+in the team test harness, so the daemon does not appear to send it either.
+Measured, not guessed: `packages/web-shell` typechecks to 635 errors on
+`origin/main` and to the same 635 on this branch, but the sets differ — the
+branch fixes three of main's and adds these four. It belongs to the Agent Team
+track rather than to workspace agents, so it is reported here rather than
+fixed: whether the field should be added to the type or the reads removed is a
+question for whoever owns that surface.
+
 ### Still open
 
 - **Definition drift is designed in but never fed.** `bindRunSession` stores a

@@ -68,7 +68,10 @@ export function groupThreads(
   }
   const byRecency = (a: ThreadSummaryView, b: ThreadSummaryView) =>
     b.updatedAt - a.updatedAt;
-  return [
+  // Annotated before `.filter`, which otherwise strips the contextual type and
+  // widens each `key` to `string` — so a typo in one would only be caught by
+  // whatever reads it.
+  const groups: ThreadGroup[] = [
     {
       key: 'needs_you',
       label: 'Needs you',
@@ -93,7 +96,8 @@ export function groupThreads(
       threads: done.sort(byRecency),
       collapsedByDefault: true,
     },
-  ].filter((group) => group.threads.length > 0);
+  ];
+  return groups.filter((group) => group.threads.length > 0);
 }
 
 /** Which threads carry the single attention treatment. */

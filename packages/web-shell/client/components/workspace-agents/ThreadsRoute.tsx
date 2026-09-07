@@ -130,7 +130,7 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
   const connection = useConnection();
   const workspaceCwd =
     connection.workspaceCwd ??
-    workspace.capabilities?.workspaces.find((entry) => entry.primary)?.cwd;
+    workspace.capabilities?.workspaces?.find((entry) => entry.primary)?.cwd;
   const client = useMemo(
     () =>
       api ??
@@ -155,7 +155,7 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
   const error = actionError ?? refreshError;
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  const createAssigneeRef = useRef<string | undefined>();
+  const createAssigneeRef = useRef<string | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     if (!client) return;
