@@ -66,7 +66,7 @@ Use exactly these labels, in this order. Keep the whole objective on one line wh
 Outcome: <one sentence: what is true when done>
 Done when: 1) <command> exits 0 and its output shows <…> (paste that line); 2) <file/state assertion provable via read or grep>; 3) …
 Must not: <files not to touch; tests/thresholds not to weaken; irreversible actions not to take>
-Budget: <user's stopping agreement; otherwise request blocked after 20 turns without measurable progress and mark this default as an assumption>
+Budget: <user's stopping agreement; otherwise stop as blocked after 20 turns, and mark that default [ASSUMPTION] in Context>
 On block: propose blocked with the exact blocker and the decision a human must make; never claim completion without evidence for every Done-when item
 Context: <only facts the agent cannot derive: paths, branch, environment, earlier decisions>
 ```
@@ -86,12 +86,12 @@ For example, an audit's Done-when checks can require a report covering the agree
 
 ### Weak → strong
 
-| Weak                          | Strong                                                                                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| make checkout faster          | Outcome: checkout API p95 is below 250 ms on the documented slow path. Done when: 1) `npm run bench:checkout` exits 0 and prints a p95 below 250 (paste the line); 2) `npm test` exits 0. Must not: change the benchmark, skip tests, touch files outside `src/checkout`. Budget: stop as blocked after 20 turns. On block: report the measured p95 and what blocks it.                          |
-| keep handling the PR comments | Outcome: every unresolved review thread on PR #123 is fixed or answered. Done when: 1) the review-threads query shows zero unresolved threads (paste the count); 2) CI on the head commit is green (paste the check summary). Must not: force-push, resolve a thread without replying to it. Budget: stop as blocked after 30 turns. On block: list the threads that need a maintainer decision. |
-| clean up the auth module      | Not a goal — "clean" has no check. Ask what would be observable (zero lint warnings in `src/auth`? a file count? a coverage threshold?) or offer a refactor plan instead.                                                                                                                                                                                                                        |
-| get the release out           | Not a goal as written — publishing is irreversible. Either narrow it to a checkable pre-release state (tag exists, changelog entry present, `npm run release:dry-run` exits 0) and put "do not publish" in Must not, or leave publishing to a human.                                                                                                                                             |
+| Weak                          | Strong                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| make checkout faster          | Outcome: checkout API p95 is below 250 ms on the documented slow path. Done when: 1) `npm run bench:checkout` exits 0 and prints a p95 below 250 (paste the line); 2) `npm test` exits 0. Must not: change the benchmark, skip tests, touch files outside `src/checkout`. Budget: stop as blocked after 20 turns. On block: report the measured p95 and what blocks it. Context: [ASSUMPTION] the 20-turn budget is the drafter's default, not the user's. |
+| keep handling the PR comments | Outcome: every unresolved review thread on PR #123 is fixed or answered. Done when: 1) the review-threads query shows zero unresolved threads (paste the count); 2) CI on the head commit is green (paste the check summary). Must not: force-push, resolve a thread without replying to it. Budget: stop as blocked after 30 turns. On block: list the threads that need a maintainer decision.                                                           |
+| clean up the auth module      | Not a goal — "clean" has no check. Ask what would be observable (zero lint warnings in `src/auth`? a file count? a coverage threshold?) or offer a refactor plan instead.                                                                                                                                                                                                                                                                                  |
+| get the release out           | Not a goal as written — publishing is irreversible. Either narrow it to a checkable pre-release state (tag exists, changelog entry present, `npm run release:dry-run` exits 0) and put "do not publish" in Must not, or leave publishing to a human.                                                                                                                                                                                                       |
 
 ## Step 5 — self-check, then hand off
 
@@ -103,12 +103,12 @@ Check every line before printing:
 4. No "after the user confirms/approves" as a completion condition — that belongs in On block as a decision a human must make.
 5. Budget or On block is present.
 6. Exactly one Outcome.
-7. Every path and command in Context was verified in the workspace or is marked `<TODO>`.
+7. Every path and command in Context was verified in the workspace; an unverified path or command is essential and stays `<TODO: …>`.
 8. Under ~1200 characters.
 9. Irreversible actions (push, delete, publish) are listed in Must not, or the user explicitly allowed them.
-10. No invented coverage quotas, required defect findings, or claims that a prose budget is enforced by the runtime.
+10. No invented coverage quotas, required defect findings, or claims that a prose budget is enforced by the runtime; an unrequested default Budget is marked `[ASSUMPTION]` in Context.
 
-**If any `<TODO: …>` or essential decision remains**, print only a draft marked "Needs clarification" (in the user's language) and briefly list what is missing. Do not call `propose_goal` or print a runnable `/goal set` or `/goal edit` line. Stop here; the ready-objective hand-off below does not apply.
+**If an essential item remains unresolved — an unknown success criterion, an unverified command or input path, or an unresolved edit-versus-replace choice (each written as `<TODO: …>`) —**, print only a draft marked "Needs clarification" (in the user's language) and briefly list what is missing. Do not call `propose_goal` or print a runnable `/goal set` or `/goal edit` line. Stop here; the ready-objective hand-off below does not apply.
 
 Then hand off, and nothing else:
 
