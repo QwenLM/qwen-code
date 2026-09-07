@@ -6,7 +6,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
-import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
+import type {
+  GoalContinuationPromptInput,
+  GoalTurnHost,
+  GoalTurnPermit,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
@@ -17,6 +21,7 @@ export interface QueuedGoalTurn {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
+  usage?: GoalContinuationPromptInput['usage'];
   verifierFeedback?: string;
 }
 
@@ -200,6 +205,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           ? { objectiveUpdated: input.objectiveUpdated }
           : {}),
         ...(input.windDown ? { windDown: true } : {}),
+        ...(input.usage ? { usage: input.usage } : {}),
         ...(input.verifierFeedback
           ? { verifierFeedback: input.verifierFeedback }
           : {}),

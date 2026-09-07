@@ -133,6 +133,16 @@ export interface GoalTurnHost {
      * `renderGoalContinuationPrompt`.
      */
     windDown?: boolean;
+    /**
+     * The Goal's spend and cadence when the turn was scheduled, for the
+     * prompt's budget line. Hosts pass it straight to
+     * `renderGoalContinuationPrompt`.
+     */
+    usage?: {
+      tokensUsed: number;
+      tokenBudget?: number;
+      turnCount: number;
+    };
     verifierFeedback?: string;
   }): Promise<void>;
   preemptGoalTurn(reason: string): void;
@@ -523,6 +533,15 @@ export function createGoalRuntime(
     continuationQueued = false;
     const scheduledHost = host;
     const continuationContext = snapshot.goal.objective;
+    // Read here, before the broadcast below hands listeners a snapshot they
+    // may act on: these figures describe the turn being scheduled.
+    const usage = {
+      tokensUsed: snapshot.goal.tokensUsed,
+      ...(snapshot.goal.tokenBudget === undefined
+        ? {}
+        : { tokenBudget: snapshot.goal.tokenBudget }),
+      turnCount: snapshot.goal.turnCount,
+    };
     const verifierFeedback = nextVerifierFeedback;
     nextVerifierFeedback = undefined;
     currentTurnFeedback = verifierFeedback;
@@ -592,6 +611,7 @@ export function createGoalRuntime(
         continuationContext,
         ...(objectiveUpdated ? { objectiveUpdated } : {}),
         ...(windDown ? { windDown } : {}),
+        usage,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {

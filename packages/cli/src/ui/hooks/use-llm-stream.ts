@@ -3717,6 +3717,7 @@ export const useLlmStream = (
                       objective: queuedGoal.continuationContext,
                       objectiveUpdated: queuedGoal.objectiveUpdated,
                       windDown: queuedGoal.windDown,
+                      usage: queuedGoal.usage,
                       verifierFeedback: queuedGoal.verifierFeedback,
                     }),
                     shouldProceed: true,

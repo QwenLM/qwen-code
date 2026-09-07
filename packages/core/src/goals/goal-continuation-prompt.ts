@@ -32,6 +32,16 @@ export interface GoalContinuationPromptInput {
    * instead of more work.
    */
   windDown?: boolean;
+  /**
+   * What the Goal has spent and how many turns it has finished, read off the
+   * record when the turn was scheduled. Absent on a host that has no runtime
+   * figures to pass, which is also how every test that predates them reads.
+   */
+  usage?: {
+    tokensUsed: number;
+    tokenBudget?: number;
+    turnCount: number;
+  };
   verifierFeedback?: string;
 }
 
@@ -77,6 +87,44 @@ const OBJECTIVE_UPDATED_LINE =
   'The Goal objective changed since your last turn: the objective above replaces the one you were working on. Stop work that only served the previous objective, and carry over only what also serves this one.';
 
 /**
+ * Figures the model would otherwise have to spend a `get_goal` call to learn,
+ * and which it cannot act on if it learns them too late.
+ *
+ * Kept out of the data block on purpose: that block is untrusted task data
+ * compared by content to decide whether the objective changed, and a number
+ * that moves every turn would make every turn look like an edit.
+ */
+function renderBudgetLine(
+  usage: NonNullable<GoalContinuationPromptInput['usage']>,
+): string {
+  const used = usage.tokensUsed.toLocaleString('en-US');
+  const spend =
+    usage.tokenBudget === undefined
+      ? `${used} tokens used, with no budget on this Goal`
+      : `${used} of ${usage.tokenBudget.toLocaleString('en-US')} tokens used, ${Math.max(
+          0,
+          usage.tokenBudget - usage.tokensUsed,
+        ).toLocaleString('en-US')} remaining`;
+  const turns = `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`;
+  return `Budget: ${spend}; ${turns}.`;
+}
+
+/**
+ * What the runtime cannot check for itself.
+ *
+ * The verifier only ever sees a terminal proposal, so a turn that proposes
+ * nothing is judged by nobody -- and a turn spent restating status is exactly
+ * the turn that proposes nothing. These lines ask the model to make that
+ * judgement itself, before it spends the turn.
+ */
+const PROGRESS_LINES = [
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported.",
+  'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.',
+  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.',
+  'Before proposing that the Goal is complete, check every explicit requirement in the objective against evidence you can cite. Missing, indirect, or self-reported evidence means not done: keep working.',
+];
+
+/**
  * Sent once per spend window, on the continuation the budget gate grants
  * after the window is spent. The Goal stops when this turn ends, so the
  * hand-off is the last thing the model delivers autonomously.
@@ -115,6 +163,17 @@ export function renderGoalContinuationPrompt(
     AUTHORITATIVE_OBJECTIVE_LINE,
   ];
 
+  if (input.usage) {
+    lines.push(renderBudgetLine(input.usage));
+  }
+
+  // The hand-off turn is told not to start new work, which is the opposite of
+  // what these lines ask for; the budget line above still belongs there,
+  // since a hand-off reports the numbers it stopped at.
+  if (!input.windDown) {
+    lines.push(...PROGRESS_LINES);
+  }
+
   if (input.objectiveUpdated) {
     lines.push(OBJECTIVE_UPDATED_LINE);
   }
@@ -136,6 +195,7 @@ export function buildGoalContinuationParts(turn: {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
+  usage?: GoalContinuationPromptInput['usage'];
   verifierFeedback?: string;
 }): Part[] {
   return [
@@ -146,6 +206,7 @@ export function buildGoalContinuationParts(turn: {
         objective: turn.continuationContext,
         objectiveUpdated: turn.objectiveUpdated,
         windDown: turn.windDown,
+        usage: turn.usage,
         verifierFeedback: turn.verifierFeedback,
       }),
     },

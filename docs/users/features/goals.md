@@ -16,6 +16,8 @@ A Goal keeps Qwen Code working across turns until a stated condition is met. Set
 
 Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). Headless usage is covered in [Headless Mode](./headless.md#run-a-persistent-goal).
 
+Each turn the session takes on its own begins with what the Goal has spent so far, the window it is allowed, and how many turns are behind it, so the model can tell an early turn from the last one before the budget stops it. Those turns also carry standing instructions to re-check the workspace rather than trust earlier turns' reports, to work toward the end state the objective asks for, to do something different when the previous turn changed nothing, and to check every requirement against citable evidence before proposing that the Goal is done.
+
 ## Interrupting a Goal
 
 Cancelling a Goal turn pauses the Goal. Press Esc while the model is answering or while its tools are still running, and the turn stops, the Goal moves to `paused`, and the card and `/goal` both say why it stopped. Nothing continues until you run `/goal resume`.

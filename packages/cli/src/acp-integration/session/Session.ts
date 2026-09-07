@@ -41,6 +41,7 @@ import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnHost,
+  GoalContinuationPromptInput,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -623,6 +624,7 @@ interface AcpGoalTurn {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
+  usage?: GoalContinuationPromptInput['usage'];
   verifierFeedback?: string;
   modelStarted: boolean;
 }
@@ -2315,6 +2317,7 @@ export class Session implements SessionContext {
               ? { objectiveUpdated: input.objectiveUpdated }
               : {}),
             ...(input.windDown ? { windDown: true } : {}),
+            ...(input.usage ? { usage: input.usage } : {}),
             ...(input.verifierFeedback
               ? { verifierFeedback: input.verifierFeedback }
               : {}),

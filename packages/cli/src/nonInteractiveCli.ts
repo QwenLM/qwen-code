@@ -13,6 +13,7 @@ import type {
   GoalRuntime,
   GoalSnapshotV2,
   GoalTurnHost,
+  GoalContinuationPromptInput,
   GoalTurnPermit,
   ActiveGoal,
   ToolCallRequestInfo,
@@ -230,6 +231,7 @@ interface HeadlessGoalTurn {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
+  usage?: GoalContinuationPromptInput['usage'];
   verifierFeedback?: string;
 }
 
@@ -644,6 +646,7 @@ export async function runNonInteractive(
             ? { objectiveUpdated: input.objectiveUpdated }
             : {}),
           ...(input.windDown ? { windDown: true } : {}),
+          ...(input.usage ? { usage: input.usage } : {}),
           ...(input.verifierFeedback
             ? { verifierFeedback: input.verifierFeedback }
             : {}),
