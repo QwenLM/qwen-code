@@ -14,6 +14,7 @@ function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
   activity: GoalSnapshotV2['activity'] = 'idle',
   lastReason?: string,
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
 ): GoalSnapshotV2 {
   return {
     v: 2,
@@ -30,6 +31,7 @@ function snapshot(
       createdAt: 1_000,
       updatedAt: 13_000,
       ...(lastReason ? { lastReason } : {}),
+      ...overrides,
     },
   };
 }
@@ -144,5 +146,54 @@ describe('<GoalStatusMessage />', () => {
     if (value.goal?.lastReason) {
       expect(output).toContain(`Reason: ${value.goal.lastReason}`);
     }
+  });
+
+  it('reports spend against the budget on a lifecycle card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('4 turns · 12s · 1.2k/30.0m tokens');
+  });
+
+  it('reports spend alone when the Goal has no budget', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', undefined, {
+          tokensUsed: 1_234,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('1.2k tokens');
+    expect(lastFrame()).not.toContain('1.2k/');
+  });
+
+  it('says nothing about spend before a turn has billed', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          tokenBudget: 30_000_000,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('4 turns · 12s');
+    expect(lastFrame()).not.toContain('tokens');
+  });
+
+  it('leaves the legacy card without spend it cannot know', () => {
+    // The legacy props carry an iteration count and nothing else; there is no
+    // record behind them to read a spend off.
+    const { lastFrame } = render(
+      <GoalStatusMessage kind="set" condition="finish the refactor" />,
+    );
+
+    expect(lastFrame()).not.toContain('tokens');
   });
 });
