@@ -22,7 +22,20 @@ import { AcpConnection } from './acpConnection.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 type AcpConnectionInternal = {
-  child: { killed: boolean; exitCode: number | null; kill?: () => void } | null;
+  child: {
+    killed: boolean;
+    exitCode: number | null;
+    signalCode?: string | null;
+    pid?: number;
+    kill?: () => void;
+    stdin?: {
+      end: () => void;
+      destroyed?: boolean;
+      writableEnded?: boolean;
+      once?: (event: string, listener: () => void) => unknown;
+    } | null;
+    once?: (event: string, listener: () => void) => unknown;
+  } | null;
   sdkConnection: unknown;
   sessionId: string | null;
   lastExitCode: number | null;
@@ -39,11 +52,19 @@ function createConnection(overrides?: Partial<AcpConnectionInternal>) {
   return conn;
 }
 
+function createMockStdin(end = vi.fn()) {
+  return { end, destroyed: false, writableEnded: false, once: vi.fn() };
+}
+
 function createMockChild(overrides?: Record<string, unknown>) {
   return {
     killed: false,
     exitCode: null,
+    signalCode: null,
+    pid: 4242,
     kill: vi.fn(),
+    stdin: createMockStdin(),
+    once: vi.fn(),
     ...overrides,
   } as unknown as AcpConnectionInternal['child'];
 }
@@ -218,16 +239,80 @@ describe('AcpConnection child exit cleanup', () => {
     expect(acpConn.currentSessionId).toBeNull();
   });
 
-  it('disconnect calls kill on the child process', () => {
+  it('disconnect closes the CLI stdin instead of killing it (#11303)', () => {
+    // `child.kill()` is TerminateProcess on Windows: the CLI's
+    // `process.on('exit')` cleanup never runs, so every PTY, ConPTY host and
+    // child process it is tracking is orphaned. Ending stdin closes the ACP
+    // stream, which is the CLI's own graceful shutdown path.
     const mockKill = vi.fn();
+    const mockEnd = vi.fn();
     const conn = createConnection({
-      child: createMockChild({ kill: mockKill }),
+      child: createMockChild({
+        kill: mockKill,
+        stdin: createMockStdin(mockEnd),
+      }),
       sdkConnection: {},
       sessionId: 'test-session',
     });
 
     (conn as unknown as AcpConnection).disconnect();
-    expect(mockKill).toHaveBeenCalledOnce();
+
+    expect(mockEnd).toHaveBeenCalledOnce();
+    expect(mockKill).not.toHaveBeenCalled();
+  });
+
+  it('disconnect force-kills the CLI only after it fails to exit on its own', () => {
+    vi.useFakeTimers();
+    try {
+      const mockKill = vi.fn();
+      const child = createMockChild({ kill: mockKill });
+      const conn = createConnection({
+        child,
+        sdkConnection: {},
+        sessionId: 'test-session',
+      });
+
+      (conn as unknown as AcpConnection).disconnect();
+      expect(mockKill).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(10_000);
+      // On win32 the escalation is a taskkill /t (the CLI is unresponsive, so
+      // nothing else will reap the shells under it); elsewhere it is SIGKILL.
+      if (process.platform === 'win32') {
+        expect(mockKill).not.toHaveBeenCalled();
+      } else {
+        expect(mockKill).toHaveBeenCalledWith('SIGKILL');
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disconnect does not force-kill a CLI that exited on its own', () => {
+    vi.useFakeTimers();
+    try {
+      const mockKill = vi.fn();
+      let exitListener: (() => void) | undefined;
+      const child = createMockChild({
+        kill: mockKill,
+        once: vi.fn((event: string, listener: () => void) => {
+          if (event === 'exit') exitListener = listener;
+        }),
+      });
+      const conn = createConnection({
+        child,
+        sdkConnection: {},
+        sessionId: 'test-session',
+      });
+
+      (conn as unknown as AcpConnection).disconnect();
+      exitListener?.();
+      vi.advanceTimersByTime(10_000);
+
+      expect(mockKill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

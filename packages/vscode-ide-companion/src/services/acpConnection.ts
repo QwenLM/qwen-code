@@ -37,7 +37,7 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
@@ -49,6 +49,18 @@ import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
  * External API preserved for backward compatibility.
  * Internally uses SDK ClientSideConnection + ndJsonStream for protocol handling.
  */
+/**
+ * How long the CLI gets to shut itself down after its stdin is closed, before
+ * its process tree is force-killed.
+ */
+const SHUTDOWN_GRACE_MS = 5_000;
+
+// Resolve taskkill by absolute System32 path, never the bare name: on Windows
+// a bare command is resolved through PATH *and* the current directory, so a
+// taskkill.exe planted in the workspace would run with the extension host's
+// environment.
+const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+
 export class AcpConnection {
   private child: ChildProcess | null = null;
   private sdkConnection: ClientSideConnection | null = null;
@@ -676,12 +688,81 @@ export class AcpConnection {
   }
 
   disconnect(): void {
-    if (this.child) {
-      this.child.kill();
-      this.child = null;
-    }
+    const child = this.child;
+    this.child = null;
     this.sdkConnection = null;
     this.sessionId = null;
+    if (!child) {
+      return;
+    }
+
+    // Close the child's stdin instead of killing it. Ending the ndjson stream
+    // is the CLI's own shutdown path: `await connection.closed` returns, it
+    // fires SessionEnd hooks, drains the MCP pool, disposes its sessions and
+    // exits normally — so its `process.on('exit')` cleanup runs and reaps the
+    // PTYs, ConPTY hosts and child processes it is tracking.
+    //
+    // A bare `child.kill()` is `TerminateProcess` on Windows: none of that
+    // runs, and everything the CLI was tracking is orphaned until the VS Code
+    // window itself closes. That is the teardown half of #11303.
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    child.once('exit', () => {
+      if (graceTimer) {
+        clearTimeout(graceTimer);
+        graceTimer = undefined;
+      }
+    });
+    const stdin = child.stdin;
+    if (stdin && !stdin.destroyed && !stdin.writableEnded) {
+      // A late write error on a pipe whose reader is gone is reported as an
+      // 'error' event, and an unhandled one on an EventEmitter throws — in the
+      // extension host, not here. Swallow it: we are tearing this down anyway.
+      stdin.once('error', () => {});
+      try {
+        stdin.end();
+      } catch (error) {
+        logger.error(
+          '[ACP] Failed to close CLI stdin during disconnect:',
+          error,
+        );
+      }
+    }
+
+    // Escalate only if the graceful path did not land. A tree kill is right
+    // here: at this point the CLI is unresponsive, so nothing else will reap
+    // the shells and ConPTY hosts underneath it.
+    graceTimer = setTimeout(() => {
+      graceTimer = undefined;
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      logger.error(
+        `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing its process tree`,
+      );
+      if (process.platform === 'win32' && child.pid) {
+        execFile(
+          WINDOWS_TASKKILL,
+          ['/f', '/t', '/pid', String(child.pid)],
+          { windowsHide: true },
+          (error) => {
+            if (error) {
+              logger.error('[ACP] taskkill failed for the CLI tree:', error);
+              try {
+                child.kill();
+              } catch {
+                // Already gone.
+              }
+            }
+          },
+        );
+        return;
+      }
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }, SHUTDOWN_GRACE_MS);
   }
 
   get isConnected(): boolean {
