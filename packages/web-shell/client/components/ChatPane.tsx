@@ -12,7 +12,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon } from 'lucide-react';
 import {
   useActions,
   useConnection,
@@ -1296,11 +1296,10 @@ export function ChatPane({
                           : 'splitView.maximizePane',
                       )}
                     >
-                      {/* Same icon vocabulary as the dialog fullscreen toggle. */}
                       {isMaximized ? (
-                        <Minimize2Icon size={16} aria-hidden />
+                        <ShrinkIcon size={16} aria-hidden />
                       ) : (
-                        <Maximize2Icon size={16} aria-hidden />
+                        <ExpandIcon size={16} aria-hidden />
                       )}
                     </button>
                   )}
