@@ -2343,6 +2343,9 @@ export class AcpDispatcher {
               ...(s.sourceId !== undefined ? { sourceId: s.sourceId } : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
+              ...(s.activeWorkState !== undefined
+                ? { activeWorkState: s.activeWorkState }
+                : {}),
               isArchived: s.isArchived === true,
               ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),

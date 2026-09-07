@@ -3132,6 +3132,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
 
+  function entryActiveWorkState(
+    entry: SessionEntry,
+  ): NonNullable<BridgeSessionSummary['activeWorkState']> {
+    if (entryHasLocalWork(entry) || childReportsHeldWork(entry)) {
+      return 'active';
+    }
+    const capability = channelInfoForEntry(entry)?.activeWork;
+    if (!capability) return 'unsupported';
+    if (
+      childWorkIsUnknown(entry) ||
+      ACTIVE_WORK_HOLD_CATEGORIES.some(
+        (category) => !capability.categories.includes(category),
+      )
+    ) {
+      return 'unknown';
+    }
+    return 'idle';
+  }
+
   /**
    * The guards every automatic teardown shares, whichever policy decided it
    * was time to look. Each caller adds its own policy on top (the reaper its
@@ -4204,6 +4223,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
+      activeWorkState: entryActiveWorkState(entry),
       isWaitingForPermission,
       isWaitingForUserQuestion,
       pendingInteractionCount: entry.pendingInteractions.size,

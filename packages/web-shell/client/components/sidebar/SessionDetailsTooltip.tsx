@@ -73,9 +73,13 @@ export function SessionDetailsTooltip({
     );
   const status = session.hasActivePrompt
     ? t('sidebar.running')
-    : completedUnread
-      ? t('sidebar.completedUnread')
-      : t('sidebar.clients', { count: session.clientCount ?? 0 });
+    : session.activeWorkState === 'active'
+      ? t('sidebar.activeWork')
+      : session.activeWorkState === 'unknown'
+        ? t('sidebar.activityUnknown')
+        : completedUnread
+          ? t('sidebar.completedUnread')
+          : t('sidebar.clients', { count: session.clientCount ?? 0 });
 
   useEffect(() => {
     return () => {
