@@ -511,17 +511,21 @@ describe('LocalDirectory.search', () => {
     for (const name of ['d1', 'd2', 'd3']) {
       root.dirs.set(name, new FakeDir(name));
     }
-    const result = await new LocalDirectory(root).search('x', { maxDirs: 2 });
+    const dir = new LocalDirectory(root, {
+      ...DEFAULT_LOCAL_DIRECTORY_LIMITS,
+      maxSearchDirs: 2,
+    });
+    const result = await dir.search('x');
     expect(result.truncatedBy).toBe('directories');
     expect(result.dirsScanned).toBe(2);
     expect(result.hits).toEqual([]);
   });
 
-  it('keeps the file budget for files when directories outnumber it', async () => {
+  it('keeps the file budget for files: the dir cap must not consume it or hide hits', async () => {
     const root = new FakeDir('root');
-    // Five subdirectories each holding one matching file: directory churn
-    // must not spend maxFiles, or the hits vanish behind a definitive
-    // "No match" for files an unbounded walk would have found.
+    // Five subdirectories each holding one matching file: the directory
+    // bound must not spend maxFiles, and the file budget must still cut in
+    // at its own cap without hiding the hits it did reach.
     for (const name of ['d1', 'd2', 'd3', 'd4', 'd5']) {
       root.dirs.set(name, new FakeDir(name).withFile('hit.txt', 'needle'));
     }

@@ -20,6 +20,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LocalFilesBridge,
   LOCAL_FILES_LOCK_NAME,
+  DEFAULT_LOCK_ATTEMPTS,
+  DEFAULT_LOCK_RETRY_DELAY_MS,
   openBrowserSocket,
   type AcpWorkspaceSelector,
   type LocalFilesBridgeState,
@@ -193,6 +195,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const ownedRunRef = useRef(false);
   /**
+   * Generation of the connect() currently in flight, so disconnect() can tell
+   * a connect it already invalidated (which can never write the record) from
+   * one started afterwards (which can).
+   */
+  const connectGenerationRef = useRef(0);
+  /**
    * Bumped by `disconnect()` and by unmount. Every await in `connect()` and
    * `restore()` re-checks it, because both can be waiting on a native picker
    * for tens of seconds: without this a connect that outlives the view would
@@ -204,6 +212,11 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const stopBridge = useCallback(() => {
     const bridge = bridgeRef.current;
     bridgeRef.current = undefined;
+    // The run ends here (or has already ended): the ownership latch must not
+    // outlive it, or a later disconnect would skip arbitration over a lock
+    // this mount no longer holds while a peer's live bridge depends on the
+    // same origin-global record.
+    ownedRunRef.current = false;
     bridge?.stop();
   }, []);
 
@@ -214,7 +227,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // idle mapping overwrite the unavailable status set here.
       const blocker = capabilityRef.current.blocker;
       if (blocker !== null) {
-        setStatus({ phase: 'unavailable', blocker });
+        // Name the grant: the panel's Disconnect — the only store.clear()
+        // caller — must stay reachable over a persisted handle.
+        setStatus({ phase: 'unavailable', blocker, rootName: handle.name });
         return;
       }
       // Remember the grant even when we cannot use it yet: a session may not
@@ -252,6 +267,11 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
             state.phase === 'reconnecting'
           ) {
             ownedRunRef.current = true;
+          }
+          // A run that ended on its own released the lock without this mount
+          // asking: the latch must die with it, not with the next stop.
+          if (state.phase === 'failed' || state.phase === 'held-elsewhere') {
+            ownedRunRef.current = false;
           }
           setStatus(phaseFromBridge(state, handle.name));
         },
@@ -323,7 +343,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // setStatus because stop() emits 'stopped' (mapped to idle).
     if (capability.blocker !== null) {
       stopBridge();
-      setStatus({ phase: 'unavailable', blocker: capability.blocker });
+      // Preserve a name restore() supplied: dropping it here would hide the
+      // panel's Disconnect — the only revoke path — over a stored grant.
+      setStatus((prev) => ({
+        phase: 'unavailable',
+        blocker: capability.blocker,
+        ...(prev.rootName === undefined ? {} : { rootName: prev.rootName }),
+      }));
       return;
     }
     const handle = handleRef.current;
@@ -396,7 +422,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   /** Must be called from a real click handler (it may open a native picker). */
   const connect = useCallback(async () => {
     if (capability.blocker !== null) {
-      setStatus({ phase: 'unavailable', blocker: capability.blocker });
+      // Preserve a name restore() supplied: the revoke path must stay
+      // reachable over a stored grant even while the entry is withheld.
+      setStatus((prev) => ({
+        phase: 'unavailable',
+        blocker: capability.blocker,
+        ...(prev.rootName === undefined ? {} : { rootName: prev.rootName }),
+      }));
       return;
     }
     // One picker at a time: a double click would otherwise open two native
@@ -404,6 +436,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     if (connectInFlightRef.current) return;
     connectInFlightRef.current = true;
     const generation = generationRef.current;
+    connectGenerationRef.current = generation;
     const stale = () => generationRef.current !== generation;
     try {
       // A peer tab's disconnect clears the store without signaling this tab:
@@ -467,6 +500,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // Invalidates any connect() still waiting on the picker, so a grant made
     // after the user asked to disconnect cannot start a bridge behind them.
     const generation = (generationRef.current += 1);
+    // Read the latch before stopBridge() clears it: an owned run held the
+    // lock exclusively, so after stop() no peer can hold it and the revoke
+    // needs no arbitration (our own release may still be settling).
+    const owned = ownedRunRef.current;
     stopBridge();
     handleRef.current = undefined;
     setStatus(
@@ -474,19 +511,16 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         ? { phase: 'unavailable', blocker: capability.blocker }
         : IDLE,
     );
-    // The store is origin-global and a peer tab's live bridge depends on it,
-    // so a mount that never owned a run revokes only when no other context
-    // holds the owner lock: with ifAvailable the callback runs exactly when
-    // the lock is free, and is skipped while a peer still runs. No phase can
-    // answer this — held-elsewhere stays sticky after the owner releases,
-    // and bridge-less phases say nothing about the record. An owned run held
-    // the lock exclusively, so after stop() no peer can hold it and the
-    // revoke needs no arbitration (our own release may still be settling).
-    const owned = ownedRunRef.current;
     const revoke = async () => {
-      // A disconnect that landed while this arbitration awaited must win,
-      // and a connect started since must keep the record it just wrote.
-      if (generationRef.current !== generation || connectInFlightRef.current) {
+      // A later disconnect must win. Only a connect started at or after this
+      // one can still write the record; an earlier in-flight connect was
+      // invalidated by the generation bump above and saves nothing, so it
+      // must not veto the revoke.
+      if (
+        generationRef.current !== generation ||
+        (connectInFlightRef.current &&
+          connectGenerationRef.current >= generation)
+      ) {
         return;
       }
       await store?.clear();
@@ -501,9 +535,33 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       await revoke();
       return;
     }
-    await locks
-      .request(LOCAL_FILES_LOCK_NAME, { ifAvailable: true }, revoke)
-      .catch(() => {});
+    // The store is origin-global and a peer tab's live bridge depends on it,
+    // so a mount that never owned a run revokes only while no other context
+    // holds the owner lock. A conforming manager declines an ifAvailable
+    // request by invoking the callback with null (Web Locks 4.1), and one
+    // attempt cannot tell a peer's lock from this tab's own release still
+    // settling — hence the null guard and the bounded retry, mirroring
+    // start()'s lock acquisition.
+    const delay =
+      optionsRef.current.delay ??
+      ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+    for (let attempt = 0; attempt < DEFAULT_LOCK_ATTEMPTS; attempt++) {
+      if (attempt > 0) await delay(DEFAULT_LOCK_RETRY_DELAY_MS);
+      if (generationRef.current !== generation) return;
+      let settled = false;
+      await locks
+        .request(LOCAL_FILES_LOCK_NAME, { ifAvailable: true }, async (lock) => {
+          if (lock === null || lock === undefined) return;
+          settled = true;
+          await revoke();
+        })
+        .catch(() => {
+          // A rejecting manager is functionally no manager.
+          settled = true;
+          return revoke();
+        });
+      if (settled) return;
+    }
   }, [capability.blocker, stopBridge, store]);
 
   return { status, capability, connect, disconnect, restore };

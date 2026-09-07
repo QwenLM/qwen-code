@@ -107,70 +107,96 @@ describe('LocalFilesPanel degradation matrix', () => {
   // EN[key] ?? key), and nothing in the type system enforces that EN and ZH
   // stay in sync — so every state this panel can render is checked in
   // Chinese against its actual zh string.
-  it.each<[string, LocalFilesStatus, string]>([
-    ['idle', { phase: 'idle', blocker: null }, '未连接'],
+  it.each<[string, LocalFilesStatus, string[]]>([
+    ['idle', { phase: 'idle', blocker: null }, ['未连接']],
     [
       'needs-gesture',
       { phase: 'needs-gesture', blocker: null, rootName: 'd' },
-      '需要重新连接',
+      ['需要重新连接'],
     ],
     [
       'needs-session',
       { phase: 'needs-session', blocker: null, rootName: 'd' },
-      '等待会话',
+      ['等待会话'],
     ],
     [
       'held-elsewhere',
       { phase: 'held-elsewhere', blocker: null },
-      '已在其他标签页连接',
+      ['已在其他标签页连接'],
     ],
-    ['connecting', { phase: 'connecting', blocker: null }, '连接中'],
-    ['registering', { phase: 'registering', blocker: null }, '注册中'],
+    ['connecting', { phase: 'connecting', blocker: null }, ['连接中']],
+    ['registering', { phase: 'registering', blocker: null }, ['注册中']],
     [
       'reconnecting',
       { phase: 'reconnecting', blocker: null, message: 'x' },
-      '重连中',
+      ['重连中'],
     ],
     [
       'connected',
       { phase: 'connected', blocker: null, rootName: 'd', toolCount: 4 },
-      '已连接',
+      ['已连接'],
     ],
-    ['failed', { phase: 'failed', blocker: null, message: 'boom' }, '连接失败'],
+    [
+      'failed',
+      { phase: 'failed', blocker: null, message: 'boom' },
+      ['连接失败'],
+    ],
     [
       'unavailable/insecure',
       { phase: 'unavailable', blocker: 'insecure-context' },
-      '安全上下文',
+      ['安全上下文'],
     ],
     [
       'unavailable/cross-origin',
       { phase: 'unavailable', blocker: 'cross-origin-frame' },
-      '跨源 iframe',
+      ['跨源 iframe'],
     ],
     [
       'unavailable/unsupported',
       { phase: 'unavailable', blocker: 'unsupported-browser' },
-      '当前浏览器没有',
+      ['当前浏览器没有'],
     ],
     [
       'unavailable/workspace-ineligible',
       { phase: 'unavailable', blocker: 'workspace-ineligible' },
-      '该会话的工作区不能托管本地目录',
+      ['该会话的工作区不能托管本地目录'],
     ],
     [
       'unavailable/workspace-resolving',
       { phase: 'unavailable', blocker: 'workspace-resolving' },
-      '尚不能确定该会话所属的工作区',
+      // Every string this render emits, including the transient status
+      // line: t() falls back to English silently, so the blocker sentence
+      // alone would pass with a half-English panel.
+      ['尚不能确定该会话所属的工作区', '解析中…'],
     ],
     [
       'unavailable/unsupported-daemon',
       { phase: 'unavailable', blocker: 'unsupported-daemon' },
-      '该 daemon 未启用客户端文件桥',
+      ['该 daemon 未启用客户端文件桥'],
     ],
   ])('renders %s fully translated', (_label, status, zh) => {
     mount(status, 'zh-CN');
     expect(text()).not.toContain('localFiles.');
-    expect(text()).toContain(zh);
+    for (const line of zh) {
+      expect(text()).toContain(line);
+    }
+  });
+
+  it.each([
+    ['workspace-resolving'],
+    ['workspace-ineligible'],
+    ['unsupported-daemon'],
+  ])('keeps revoke reachable for %s with a stored grant', (blocker) => {
+    // Disconnect is the only store.clear() caller: a withheld entry that
+    // names its stored grant must keep the affordance, not just the copy.
+    mount({
+      phase: 'unavailable',
+      blocker: blocker as LocalFilesStatus['blocker'],
+      rootName: 'ai_coding',
+    });
+    expect(buttonByLabel('Disconnect')).toBeDefined();
+    expect(buttonByLabel('Connect a directory…')).toBeUndefined();
+    expect(text()).toContain('ai_coding');
   });
 
   it('presents the resolving blocker as transient, not permanent', () => {

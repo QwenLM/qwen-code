@@ -130,7 +130,9 @@ function exclusiveLocks(): LockManagerLike {
   const lock = { held: false };
   return {
     request: async (_name, options, callback) => {
-      if (lock.held && options.ifAvailable) return undefined;
+      // A conformant manager declines an ifAvailable request by invoking
+      // the callback with null (Web Locks 4.1), not by skipping it.
+      if (lock.held && options.ifAvailable) return callback(null);
       lock.held = true;
       try {
         await callback({});
@@ -785,6 +787,277 @@ describe('useLocalFilesBridge restore', () => {
     expect(await store.load()).toBe(handle);
     hA.unmount();
     hB.unmount();
+  });
+
+  it('does not let a stale owner latch skip arbitration after its run ended', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: exclusiveLocks(),
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // The session goes away: startBridge parks in needs-session and the run
+    // (with it the lock) ends, while the panel still offers Disconnect.
+    hA.rerender({ ...common, sessionId: undefined });
+    await hA.flush();
+    expect(hA.get().status.phase).toBe('needs-session');
+
+    // Tab B picks the freed lock up and runs a live bridge on the record.
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.sockets).toHaveLength(1);
+
+    await act(async () => {
+      await hA.get().disconnect();
+    });
+    await hB.flush();
+    // A owns nothing any more: the arbitration must see B's lock and keep
+    // the record B's bridge depends on.
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('does not let a terminally failed run skip arbitration either', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: exclusiveLocks(),
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // Exhaust the register budget: fail() tears down and releases the lock
+    // without this mount asking.
+    for (let i = 0; i < 12 && hA.get().status.phase !== 'failed'; i++) {
+      hA.sockets[0]!.emit({
+        type: 'mcp_error',
+        code: 'register_failed',
+        message: 'No live ACP channel',
+      });
+      await hA.flush();
+    }
+    expect(hA.get().status.phase).toBe('failed');
+
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.sockets).toHaveLength(1);
+
+    await act(async () => {
+      await hA.get().disconnect();
+    });
+    await hB.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('retries the arbitration past a still-settling owner release', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 0 };
+    const locks: LockManagerLike = {
+      request: async (_name, options, callback) => {
+        // Conformant decline: invoke the callback with null (Web Locks 4.1).
+        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
+          lock.settling -= 1;
+          return callback(null);
+        }
+        lock.held = true;
+        try {
+          await callback({});
+        } finally {
+          lock.held = false;
+        }
+        return undefined;
+      },
+    };
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+
+    // The owner goes away but its release is still settling: the first
+    // arbitration attempt is declined the way a conformant manager declines,
+    // and only the bounded retry reaches the freed lock.
+    lock.settling = 1;
+    hA.unmount();
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    hB.unmount();
+  });
+
+  it('revokes over a connect the disconnect already invalidated', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'prompt' });
+    let releaseRequest!: (state: PermissionState) => void;
+    const gate = new Promise<PermissionState>((resolve) => {
+      releaseRequest = resolve;
+    });
+    vi.mocked(handle.requestPermission).mockImplementation(() => gate);
+    const store = fakeStore(handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+    });
+    await h.flush();
+    // needs-gesture: both Reconnect and Disconnect render, and the Chrome
+    // permission prompt does not block page input.
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    // Reconnect parks inside requestPermission; Disconnect lands while up.
+    const parkedConnect = act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    // The parked connect was invalidated by this disconnect and saves
+    // nothing, so it must not veto the revoke.
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    releaseRequest('granted');
+    await h.flush();
+    // Balance the act scope the parked connect opened before the test ends,
+    // or the next render inherits an acting React root.
+    await parkedConnect;
+    expect(store.saves).toHaveLength(0);
+    h.unmount();
+  });
+
+  it('keeps the record a connect started after the disconnect writes', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore();
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    // A connect at or after the disconnect's generation still writes the
+    // record, and its save must survive the revoke guard.
+    expect(store.saves).toHaveLength(1);
+    expect(await store.load()).toBe(handle);
+    h.unmount();
+  });
+
+  it('keeps the stored grant named when the session changes under a blocker', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+    };
+    const h = render({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'unsupported-daemon',
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.rootName).toBe('ai_coding');
+
+    h.rerender({
+      ...common,
+      sessionId: 'session-2',
+      withheldBlocker: 'unsupported-daemon',
+    });
+    await h.flush();
+    await h.flush();
+    // The rebind effect's blocker write must not drop the name, or the
+    // panel loses its only revoke affordance over a stored grant.
+    expect(h.get().status).toMatchObject({
+      phase: 'unavailable',
+      blocker: 'unsupported-daemon',
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it('names a grant made while a blocker flips in mid-picker', async () => {
+    let release!: (value: FileSystemDirectoryHandle) => void;
+    const gate = new Promise<FileSystemDirectoryHandle>((resolve) => {
+      release = resolve;
+    });
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore();
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => gate),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    // Not wrapped in act: an open async act scope would defer the rerender's
+    // commit below until the connect settles, racing the capability update.
+    const pending = h.get().connect();
+    await h.flush();
+    // Capabilities resolve the workspace ineligible while the picker is up.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await act(async () => {
+      release(handle);
+      await pending;
+    });
+    await h.flush();
+    // The pick persisted under the blocker; startBridge's blocker return
+    // must name it so the revoke path stays reachable.
+    expect(store.saves).toHaveLength(1);
+    expect(h.get().status).toMatchObject({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
+    expect(h.sockets).toHaveLength(0);
+    h.unmount();
   });
 
   it('names the stored grant under a withheld blocker so revoke stays reachable', async () => {

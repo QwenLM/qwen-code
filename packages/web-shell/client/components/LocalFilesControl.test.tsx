@@ -345,14 +345,17 @@ describe('LocalFilesControl wiring', () => {
       );
     });
     const options = capturedHookOptions.current as
-      | { withheldBlocker?: string }
+      | {
+          withheldBlocker?: string;
+          workspaceSelector?: { kind: string; value: string };
+        }
       | undefined;
     act(() => root.unmount());
     container.remove();
     // Without this a render that never reached the hook would read as
     // "no blocker" and the positive control would pass vacuously.
     if (options === undefined) throw new Error('hook never ran');
-    return options.withheldBlocker;
+    return options;
   };
 
   afterEach(() => {
@@ -365,12 +368,14 @@ describe('LocalFilesControl wiring', () => {
     // The resolver's decision is pinned above; this pins its APPLICATION -
     // without the wiring line the hook never sees the blocker and the trust
     // fix never reaches the bridge. Default mock caps: untrusted primary.
-    expect(await renderCaptured(undefined)).toBe('workspace-ineligible');
+    expect((await renderCaptured(undefined)).withheldBlocker).toBe(
+      'workspace-ineligible',
+    );
   });
 
   it('withholds when the daemon lacks the feature or the snapshot is pending', async () => {
     // Daemon without the reverse channel: no point offering Connect.
-    expect(await renderCaptured({ ...capabilities })).toBe(
+    expect((await renderCaptured({ ...capabilities })).withheldBlocker).toBe(
       'unsupported-daemon',
     );
 
@@ -379,10 +384,14 @@ describe('LocalFilesControl wiring', () => {
     // derive from one fixture, so they differ by exactly the `features` key.
     const noFeatures: Partial<DaemonCapabilities> = { ...capabilities };
     delete noFeatures.features;
-    expect(await renderCaptured(noFeatures)).toBe('unsupported-daemon');
+    expect((await renderCaptured(noFeatures)).withheldBlocker).toBe(
+      'unsupported-daemon',
+    );
 
     // Snapshot pending: starting now would fail open onto the primary mount.
-    expect(await renderCaptured(null)).toBe('workspace-resolving');
+    expect((await renderCaptured(null)).withheldBlocker).toBe(
+      'workspace-resolving',
+    );
   });
 
   it('withholds nothing for eligible routes (positive control)', async () => {
@@ -392,13 +401,19 @@ describe('LocalFilesControl wiring', () => {
     };
     // A mutation that maps an eligible route onto a blocker would silently
     // turn the feature off for everyone: legacy is the most common shape.
-    expect(await renderCaptured(capable)).toBeUndefined();
-    // Trusted secondary: the qualified route shares the same fall-through.
-    expect(
-      await renderCaptured(
-        { ...capable, workspaces: [primary, locked] },
-        { workspaceCwd: '/locked' },
-      ),
-    ).toBeUndefined();
+    const legacy = await renderCaptured(capable);
+    expect(legacy.withheldBlocker).toBeUndefined();
+    // The other half of the wiring: the qualified route must forward the
+    // resolver's selector, or the bridge dials the wrong mount.
+    expect(legacy.workspaceSelector).toBeUndefined();
+    const qualified = await renderCaptured(
+      { ...capable, workspaces: [primary, locked] },
+      { workspaceCwd: '/locked' },
+    );
+    expect(qualified.withheldBlocker).toBeUndefined();
+    expect(qualified.workspaceSelector).toEqual({
+      kind: 'id',
+      value: 'locked-ws',
+    });
   });
 });

@@ -194,8 +194,9 @@ interface LocalFilesControlProps {
  * the entry instead of collapsing onto the primary mount, and
  * `{ kind: 'pending' }` is reserved for "cannot tell yet" (capabilities
  * snapshot or registry entry not landed). The resolver never returns
- * `undefined`, so no caller can mistake an unresolved route for an eligible
- * one.
+ * `undefined`; whether a resolved route may actually be offered also depends
+ * on the daemon's client_mcp_over_ws feature gate, which the caller applies
+ * separately.
  */
 export type LocalFilesWorkspaceRoute =
   | { kind: 'legacy' }

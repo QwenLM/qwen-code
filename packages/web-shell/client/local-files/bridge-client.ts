@@ -103,14 +103,22 @@ export interface LocalFilesBridgeOptions {
   workspaceSelector?: AcpWorkspaceSelector;
 }
 
+/**
+ * Owner-lock acquisition shape, shared with the hook's disconnect
+ * arbitration: one ifAvailable attempt cannot tell a peer's lock from this
+ * context's own release still settling.
+ */
+export const DEFAULT_LOCK_ATTEMPTS = 3;
+export const DEFAULT_LOCK_RETRY_DELAY_MS = 100;
+
 const DEFAULTS = {
   maxRegisterAttempts: 6,
   maxReconnectAttempts: 8,
   reconnectBaseDelayMs: 500,
   initializeTimeoutMs: 15_000,
   registerTimeoutMs: 30_000,
-  lockAttempts: 3,
-  lockRetryDelayMs: 100,
+  lockAttempts: DEFAULT_LOCK_ATTEMPTS,
+  lockRetryDelayMs: DEFAULT_LOCK_RETRY_DELAY_MS,
 };
 
 /** Mirrors the bearer-subprotocol scheme the daemon's WS upgrade accepts. */

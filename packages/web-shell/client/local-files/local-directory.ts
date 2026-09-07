@@ -460,12 +460,7 @@ export class LocalDirectory {
    */
   async search(
     pattern: string,
-    options: {
-      path?: string;
-      maxFiles?: number;
-      maxBytes?: number;
-      maxDirs?: number;
-    } = {},
+    options: { path?: string; maxFiles?: number; maxBytes?: number } = {},
   ): Promise<LocalSearchResult> {
     if (typeof pattern !== 'string' || pattern === '') {
       throw new LocalDirectoryError(
@@ -497,10 +492,6 @@ export class LocalDirectory {
       options.maxBytes ?? this.limits.maxSearchBytes,
       this.limits.maxSearchBytes,
     );
-    const maxDirs = Math.min(
-      options.maxDirs ?? this.limits.maxSearchDirs,
-      this.limits.maxSearchDirs,
-    );
     const hits: LocalSearchHit[] = [];
     let filesScanned = 0;
     let filesExamined = 0;
@@ -519,11 +510,11 @@ export class LocalDirectory {
         for await (const entry of dir.values()) {
           if (truncatedBy !== null) break;
           if (isDirectoryEntry(entry)) {
-            // Directory skeletons need their own bound: charging them to the
-            // file budget lets a node_modules-heavy grant spend maxFiles on
-            // traversal alone and answer a definitive "No match" for files
-            // an unbounded walk would have found.
-            if (dirsExamined >= maxDirs) {
+            // No other cap fires on a directory entry, and each skeleton
+            // costs a values() round trip, so without a bound of its own a
+            // huge near-file-less grant could keep one tool call walking
+            // long after the file, byte and hit budgets were spent.
+            if (dirsExamined >= this.limits.maxSearchDirs) {
               truncatedBy = 'directories';
               break;
             }
