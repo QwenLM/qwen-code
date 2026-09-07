@@ -369,6 +369,7 @@ import {
   type UserMessageContentRenderer,
   type UserMessageContentParser,
   type AssistantTurnFooterRenderer,
+  type WebShellArtifactCustomization,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
@@ -1205,6 +1206,8 @@ export interface WebShellProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /** Artifact-card rendering overrides. */
+  artifact?: WebShellArtifactCustomization;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
@@ -2884,6 +2887,7 @@ export function App({
   composerTagIcons,
   fileUploadEnabled,
   fileUploadDirectory,
+  artifact,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -3139,6 +3143,7 @@ export function App({
   ]);
   const customization = useMemo(
     () => ({
+      artifact,
       askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
@@ -3167,6 +3172,7 @@ export function App({
       fileUploadDirectory,
     }),
     [
+      artifact,
       askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
@@ -17939,6 +17945,13 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
+                            generateContent={
+                              connection.capabilities?.features.includes(
+                                'session_generation',
+                              )
+                                ? sessionActions.generateSessionContent
+                                : undefined
+                            }
                             planTodos={
                               sessionWorkflowEnabled ? approvalPlanTodos : []
                             }

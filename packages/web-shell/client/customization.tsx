@@ -247,6 +247,15 @@ export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
 
+/** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
+export type ArtifactImageRenderer = (
+  artifact: DaemonSessionArtifact,
+) => ReactNode | null | undefined;
+
+export interface WebShellArtifactCustomization {
+  renderImage?: ArtifactImageRenderer;
+}
+
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
   | 'mcp'
@@ -542,6 +551,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
