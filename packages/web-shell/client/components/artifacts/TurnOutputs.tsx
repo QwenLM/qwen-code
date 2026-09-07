@@ -476,20 +476,24 @@ function ArtifactCard({
               {t(downloading ? 'common.downloading' : 'common.download')}
             </button>
           )}
-          <button
-            type="button"
-            className={styles.reviewButton}
-            onClick={onOpen}
+          <span
+            className={styles.openButtonWrapper}
             title={blockedReason ?? artifact.title}
-            disabled={!onOpen}
           >
-            <SquareArrowOutUpRightIcon
-              size={16}
-              strokeWidth={1.8}
-              aria-hidden="true"
-            />
-            {t('common.open')}
-          </button>
+            <button
+              type="button"
+              className={styles.reviewButton}
+              onClick={onOpen}
+              disabled={!onOpen}
+            >
+              <SquareArrowOutUpRightIcon
+                size={16}
+                strokeWidth={1.8}
+                aria-hidden="true"
+              />
+              {t('common.open')}
+            </button>
+          </span>
         </div>
       </div>
     </div>

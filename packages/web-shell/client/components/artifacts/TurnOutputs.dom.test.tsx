@@ -378,7 +378,8 @@ describe('TurnOutputs artifact downloads', () => {
         .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
         ?.click();
       container
-        .querySelector<HTMLButtonElement>('button[title="Secondary artifact"]')
+        .querySelector<HTMLElement>('[title="Secondary artifact"]')
+        ?.querySelector('button')
         ?.click();
       container
         .querySelector<HTMLButtonElement>('button[title="Secondary schedule"]')
@@ -656,7 +657,8 @@ describe('TurnOutputs artifact downloads', () => {
     expect(open?.disabled).toBe(true);
     expect(open?.querySelector('svg')).not.toBeNull();
     expect(container.textContent).not.toContain('w/agent/report.csv');
-    expect(open?.title).toBe(
+    expect(open?.title).toBe('');
+    expect(open?.parentElement?.title).toBe(
       'File not found in the workspace · w/agent/report.csv',
     );
 

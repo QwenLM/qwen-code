@@ -9,6 +9,7 @@ export function artifactKindLabel(
   workspacePath?: string,
 ): string {
   const ext = pathExtension(workspacePath);
+  if (AUDIO_EXTENSIONS.has(ext)) return 'Audio';
   switch (ext) {
     case '.htm':
     case '.html':
@@ -33,11 +34,6 @@ export function artifactKindLabel(
     case '.mp4':
     case '.webm':
       return 'Video';
-    case '.m4a':
-    case '.mp3':
-    case '.ogg':
-    case '.wav':
-      return 'Audio';
     case '.doc':
     case '.docx':
     case '.docm':
@@ -93,16 +89,15 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
   '.odp',
 ]);
 
+const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
+
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
+  ...AUDIO_EXTENSIONS,
   '.pdf',
   '.mp4',
   '.mov',
   '.webm',
-  '.mp3',
-  '.wav',
-  '.m4a',
-  '.ogg',
 ]);
 
 export function isOfficeDocumentPath(workspacePath?: string): boolean {
@@ -151,6 +146,16 @@ export function pathExtension(workspacePath?: string): string {
   const name = path.split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+export function isAudioArtifact(
+  workspacePath?: string,
+  mimeType?: string,
+): boolean {
+  return (
+    AUDIO_EXTENSIONS.has(pathExtension(workspacePath)) ||
+    normalizeArtifactMimeType(mimeType).startsWith('audio/')
+  );
 }
 
 // Mirrors WORKSPACE_CONTENT_SHA256_METADATA_KEY in the core package, which the

@@ -17,7 +17,11 @@ import pdfIcon from '../../assets/artifacts/pdf.svg';
 import spreadsheetIcon from '../../assets/artifacts/spreadsheet.svg';
 import videoIcon from '../../assets/artifacts/video.svg';
 import wordIcon from '../../assets/artifacts/word.svg';
-import { normalizeArtifactMimeType, pathExtension } from './artifactUtils';
+import {
+  isAudioArtifact,
+  normalizeArtifactMimeType,
+  pathExtension,
+} from './artifactUtils';
 
 export type ArtifactIconKind =
   | 'csv'
@@ -141,7 +145,15 @@ export function ArtifactIcon({
   }
 
   const kind = getArtifactIconKind(artifact);
-  const legacyKind = kind === 'file' ? artifact?.kind : undefined;
+  const name = artifact
+    ? (artifact.workspacePath ?? artifact.url ?? artifact.title)
+    : undefined;
+  const legacyKind =
+    kind === 'file' && artifact
+      ? isAudioArtifact(name, artifact.mimeType)
+        ? 'audio'
+        : artifact.kind
+      : undefined;
   const LegacyIcon = legacyKind ? LEGACY_KIND_ICONS[legacyKind] : undefined;
   if (LegacyIcon) {
     return (

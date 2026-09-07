@@ -51,4 +51,63 @@ describe('ArtifactIcon', () => {
 
     expect(html).toContain('data-artifact-icon="file"');
   });
+
+  it.each([
+    ['audio extension', { workspacePath: 'song.mp3' }],
+    ['audio MIME type', { mimeType: 'audio/mpeg' }],
+  ])('uses the legacy audio icon for an %s', (_label, fields) => {
+    const html = renderToStaticMarkup(
+      <ArtifactIcon
+        artifact={
+          { kind: 'file', title: 'Song', ...fields } as DaemonSessionArtifact
+        }
+      />,
+    );
+
+    expect(html).toContain('lucide-file-headphone');
+    expect(html).toContain('data-artifact-icon="audio"');
+  });
+
+  it('keeps a matching SVG ahead of the legacy kind icon', () => {
+    const html = renderToStaticMarkup(
+      <ArtifactIcon
+        artifact={
+          {
+            kind: 'audio',
+            title: 'Transcript',
+            workspacePath: 'transcript.pdf',
+          } as DaemonSessionArtifact
+        }
+      />,
+    );
+
+    expect(html).toContain('data-artifact-icon="pdf"');
+    expect(html).not.toContain('lucide-file-headphone');
+  });
+
+  it('uses file.svg without an artifact', () => {
+    expect(renderToStaticMarkup(<ArtifactIcon />)).toContain(
+      'data-artifact-icon="file"',
+    );
+  });
+
+  it('uses the built-in icon when the host renderer returns false', () => {
+    const html = renderToStaticMarkup(
+      <WebShellCustomizationProvider
+        value={{ artifact: { renderImage: () => false } }}
+      >
+        <ArtifactIcon
+          artifact={
+            {
+              kind: 'file',
+              title: 'Notes',
+              workspacePath: 'notes.md',
+            } as DaemonSessionArtifact
+          }
+        />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(html).toContain('data-artifact-icon="md"');
+  });
 });
