@@ -34,21 +34,18 @@ function hasCredential(env: NodeJS.ProcessEnv): boolean {
 }
 
 export function shouldSkipPromptLatency(env: NodeJS.ProcessEnv): boolean {
-  // Real model round-trips in CI measure shared-gateway contention, not the
-  // daemon: the gateway queues and retries under load, so one queued prompt
-  // in twenty pushes p99 past `promptP99MaxMs`, and each vitest retry
-  // re-issues every prompt into the same degraded window — a single slow
-  // window fails all attempts. That failure class ran the macOS leg — the
-  // only E2E leg left running the probe once the pool skip landed — red on
-  // two unrelated commits within six hours (#11271). The self-hosted pool
-  // disjunct predates the CI-wide one and stays so a pool-shaped shell
-  // outside CI keeps its specific skip reason. Off CI the probe still runs
-  // on a credential, and QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 force-runs
-  // it anywhere.
+  // The pool runners share one ECS host with ~30 concurrent jobs, so the
+  // slowest of the probe's real model round-trips measures that contention
+  // rather than the daemon: `promptP99MaxMs` becomes a coin flip, and every
+  // one of vitest's attempts re-issues all the prompts inside the harness's
+  // 10-minute budget. `integration-tests/vitest.config.ts` exempts the same
+  // runners from the analogous pressure class. The dedicated macOS legs still
+  // record the baseline, and QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 still
+  // force-runs it there.
   return (
     env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
     (env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] !== '1' &&
-      (env['RUNNER_ENVIRONMENT'] === 'self-hosted' || Boolean(env['CI']))) ||
+      env['RUNNER_ENVIRONMENT'] === 'self-hosted') ||
     !hasCredential(env)
   );
 }
@@ -57,20 +54,16 @@ export function promptLatencySkipReason(
   env: NodeJS.ProcessEnv,
   promptIterations: number,
 ): string {
-  // The credential is tested before the environment clauses even though the
-  // predicate above tests them the other way round: `hasCredential` counts
-  // ENABLE=1 as present, so reaching an environment branch means the skip
-  // flag is unset and a real credential exists — leaving an environment
-  // disjunct as the only one that can have fired. The pool branch precedes
-  // the CI branch so a self-hosted CI runner keeps the more specific reason.
+  // The credential is tested before the pool even though the predicate above
+  // tests them the other way round: `hasCredential` counts ENABLE=1 as
+  // present, so reaching the pool branch means the skip flag is unset and a
+  // real credential exists — leaving the self-hosted disjunct as the only one
+  // that can have fired.
   if (env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1') {
     return 'Prompt latency skipped via QWEN_BASELINE_SKIP_PROMPT_LATENCY=1.';
   }
   if (!hasCredential(env)) {
     return 'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.';
   }
-  if (env['RUNNER_ENVIRONMENT'] === 'self-hosted') {
-    return `Shared self-hosted pool: ${promptIterations} real model round-trips would measure host contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.`;
-  }
-  return `CI: ${promptIterations} real model round-trips against the shared gateway would measure gateway contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.`;
+  return `Shared self-hosted pool: ${promptIterations} real model round-trips would measure host contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.`;
 }

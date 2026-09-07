@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import { withTransientModelServingRetry } from './_acp-model-serving-retry.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -999,15 +1000,17 @@ function setupAcpTest(
       expect(setModeResult).toEqual({});
 
       // Try to create a file - this should be blocked by plan mode
-      const promptResult = await sendRequest('session/prompt', {
-        sessionId: newSession.sessionId,
-        prompt: [
-          {
-            type: 'text',
-            text: 'Create a file called test.txt with content "Hello World"',
-          },
-        ],
-      });
+      const promptResult = await withTransientModelServingRetry(() =>
+        sendRequest('session/prompt', {
+          sessionId: newSession.sessionId,
+          prompt: [
+            {
+              type: 'text',
+              text: 'Create a file called test.txt with content "Hello World"',
+            },
+          ],
+        }),
+      );
       expect(promptResult).toBeDefined();
 
       // Give time for tool calls to be processed

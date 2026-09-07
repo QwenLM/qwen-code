@@ -5,8 +5,14 @@
  */
 
 import { existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestRig } from './test-helper.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -39,6 +45,30 @@ describe('TestRig', () => {
     expect(existsSync(staleFile)).toBe(false);
     expect(rig.testDir).not.toBeNull();
     expect(existsSync(rig.testDir!)).toBe(true);
+  });
+
+  it('resets the reused directory with retries against the refill race', async () => {
+    // A vitest retry re-enters setup while the previous attempt's CLI (or a
+    // daemon child it spawned) is still draining writes under the test
+    // directory, and the rm walk can rmdir a directory that refilled
+    // mid-delete — the ENOTEMPTY that killed the acp plan-mode retry in
+    // #11271. The reset has to absorb that race the way globalSetup's
+    // teardown already does; deleting the retry options turns this red.
+    const rig = new TestRig();
+    await rig.setup('reset retries refill race');
+    vi.mocked(rm).mockClear();
+
+    await rig.setup('reset retries refill race');
+
+    expect(rm).toHaveBeenCalledWith(
+      rig.testDir,
+      expect.objectContaining({
+        recursive: true,
+        force: true,
+        maxRetries: expect.any(Number),
+        retryDelay: expect.any(Number),
+      }),
+    );
   });
 
   it('removes the test directory during cleanup', async () => {

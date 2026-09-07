@@ -230,7 +230,17 @@ export class TestRig {
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
-    await rm(this.testDir, { recursive: true, force: true });
+    // A vitest retry re-enters here while the previous attempt's CLI (or a
+    // daemon child it spawned) is still draining writes under this directory,
+    // so the walk can rmdir a directory that refilled mid-delete — the
+    // ENOTEMPTY that failed the acp plan-mode retry in #11271. Retries absorb
+    // that race, the same remedy globalSetup's teardown already uses.
+    await rm(this.testDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector
