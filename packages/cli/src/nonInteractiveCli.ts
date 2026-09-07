@@ -18,6 +18,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
+  ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
