@@ -76,7 +76,7 @@ flowchart LR
     REQ[Request] --> LS["loopback self-origin strip<br/>(server/self-origin.ts)"]
     LS --> LOG["access-log middleware<br/>(DaemonLogger)"]
     LOG --> TID["inbound trace-id capture"]
-    TID --> HA["hostAllowlist<br/>(loopback DNS-rebinding defense;<br/>no-op on non-loopback binds)"]
+    TID --> HA["hostAllowlist<br/>(loopback DNS-rebinding defense;<br/>primary gate passes through on<br/>non-loopback binds, Local Control<br/>keeps its own Host gate)"]
     HA --> SO["remote same-origin check<br/>(credential check + Origin strip)"]
     SO --> AO["allowOriginCors<br/>(mutable allowlist: --allow-origin<br/>patterns + Local Control LAN origin)"]
     AO --> H["pre-auth /health<br/>(loopback, unless --require-auth)"]
