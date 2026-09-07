@@ -93,10 +93,12 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
       const token = ++intent.current;
       const revision = state.revision;
       const boundary = store.captureLiveBoundary();
+      const isCurrentIntent = () =>
+        intent.current === token &&
+        store.getViewportSnapshot().revision === revision;
       const request = {
         isCurrent: () =>
-          intent.current === token &&
-          store.getViewportSnapshot().revision === revision &&
+          isCurrentIntent() &&
           (range !== undefined || boundary.isCurrent()),
       };
       setLoading(true);
@@ -115,7 +117,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
           if (edge.kind === 'cached') rangeId = edge.rangeId;
           else await store.loadViewportBoundary(range.id, direction, request);
         }
-        if (!request.isCurrent()) return;
+        if (!request.isCurrent()) throw new Error('History view changed');
         const admitted = store
           .getViewportSnapshot()
           .ranges.find((range) => range.id === rangeId);
@@ -130,7 +132,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
         }
         setView({ revision, rangeId: admitted.id });
       } catch {
-        if (request.isCurrent()) setError(true);
+        if (isCurrentIntent()) setError(true);
       } finally {
         if (intent.current === token) setLoading(false);
       }

@@ -120,7 +120,7 @@ export const TranscriptViewport = forwardRef<
         list.current?.scrollToMessage(id, callId) ?? false,
       scrollToBottom: (behavior) => {
         if (historical || loading) returnToLive();
-        else list.current?.scrollToBottom(behavior);
+        if (!historical) list.current?.scrollToBottom(behavior);
       },
     }),
     [historical, loading, returnToLive],
