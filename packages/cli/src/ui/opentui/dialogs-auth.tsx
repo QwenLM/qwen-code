@@ -1001,7 +1001,14 @@ function AuthDialogFlow({
       // The swallow is for an error the dialog armed itself; a boot-seeded
       // initialError must fall through, or the auto-opened dialog could never
       // be dismissed with Esc.
-      if (errorMessage && errorMessage !== initialError) return true;
+      if (initialError && errorMessage === initialError) {
+        // ...and falling through means reaching the unauthenticated arm when
+        // no auth type exists yet, which would overwrite the boot diagnostic
+        // with the must-connect message and wedge the dialog shut (R2-1).
+        onClose();
+        return true;
+      }
+      if (errorMessage) return true;
       if (config.getAuthType() === undefined) {
         setErrorMessage(
           t(
