@@ -17,6 +17,9 @@
       "@qwen-code/qwen-code-core/noFollowOpen": [
         "../core/src/utils/no-follow-open.ts"
       ],
+      "@qwen-code/qwen-code-core/debugLogger": [
+        "../core/src/utils/debugLogger.ts"
+      ],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"],
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
       "@qwen-code/acp-bridge/transcriptReplay": [

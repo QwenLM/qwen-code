@@ -54,6 +54,9 @@
       "@qwen-code/qwen-code-core/memoryScopes": [
         "../packages/core/src/memory/scopes.ts"
       ],
+      "@qwen-code/qwen-code-core/debugLogger": [
+        "../packages/core/src/utils/debugLogger.ts"
+      ],
       "@qwen-code/qwen-code-core/userPromptSubmitContext": [
         "../packages/core/src/hooks/user-prompt-submit-context.ts"
       ],

@@ -85,7 +85,10 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
-import { WorkspaceRuntimeCoordinator } from './workspace-runtime-coordinator.js';
+import {
+  ENSURE_KEEP_ALIVE_MS,
+  WorkspaceRuntimeCoordinator,
+} from './workspace-runtime-coordinator.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
@@ -16578,22 +16581,17 @@ describe('runQwenServe startup observability', () => {
         status: 'succeeded',
       });
       await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
-      expect(ensureSpy).toHaveBeenCalledWith({});
+      expect(ensureSpy).toHaveBeenCalledWith({
+        keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+      });
       expect(ensureSpy.mock.instances[0]).toMatchObject({
         runtime: expect.objectContaining({ workspaceCwd: tmpDir }),
       });
-      expect(bridge.preheat).toHaveBeenCalledTimes(1);
-      expect(
-        vi
-          .mocked(bridge.preheat)
-          .mock.calls.some(
-            ([arg]) =>
-              arg !== undefined &&
-              typeof arg === 'object' &&
-              arg !== null &&
-              'keepAliveMs' in arg,
-          ),
-      ).toBe(false);
+      expect(bridge.preheat).toHaveBeenCalledTimes(2);
+      expect(bridge.preheat).toHaveBeenNthCalledWith(1);
+      expect(bridge.preheat).toHaveBeenNthCalledWith(2, {
+        keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+      });
     } finally {
       await handle.close();
     }

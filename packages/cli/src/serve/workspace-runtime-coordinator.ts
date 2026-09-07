@@ -19,7 +19,7 @@ import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
-const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+export const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
 const MCP_PREPARE_TIMEOUT_MS = 2 * 60_000;
 const MCP_POLL_INTERVAL_MS = 250;
 
@@ -28,9 +28,11 @@ export type EnsureOptions = {
   keepAliveMs?: number;
   /**
    * Skip keep-alive preheat when the runtime is already live.
-   * Object-form `ensure({})` defaults this to true (unless `keepAliveMs` is
-   * set) so daemon boot after ACP warm-up does not re-arm the HTTP 10-minute
-   * window. Numeric `ensure()` / `ensure(timeoutMs)` never skip.
+   * Object-form `ensure({})` defaults this to true unless `keepAliveMs` is
+   * set. Numeric `ensure()` / `ensure(timeoutMs)` never skip. Daemon boot
+   * after ACP warm-up must pass `keepAliveMs` so the default
+   * `channelIdleTimeoutMs=0` policy does not reap the child before MCP
+   * prepare finishes.
    */
   skipKeepAlivePreheat?: boolean;
 };
@@ -185,7 +187,8 @@ export class WorkspaceRuntimeCoordinator {
   /**
    * `ensure(timeoutMs)` always keep-alive preheats. `ensure({ ... })` skips
    * that preheat on a live runtime unless `skipKeepAlivePreheat` is false or
-   * `keepAliveMs` is set.
+   * `keepAliveMs` is set. Boot discovery must pass `keepAliveMs` so the
+   * already-warm child stays held through `initializeWorkspaceMcp`.
    */
   async ensure(
     timeoutMsOrOptions: number | EnsureOptions = DEFAULT_ENSURE_TIMEOUT_MS,

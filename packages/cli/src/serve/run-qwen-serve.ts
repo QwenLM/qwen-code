@@ -74,13 +74,15 @@ import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
-import {
-  createDebugLogger,
-  type AuthType,
-  type ProviderSetupInputs,
-  type TelemetryRuntimeConfig,
-  type TelemetrySettings,
+import type {
+  AuthType,
+  ProviderSetupInputs,
+  TelemetryRuntimeConfig,
+  TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+// Named subpath: the core barrel pulls shell/glob/chokidar into the serve
+// pre-listen static closure.
+import { createDebugLogger } from '@qwen-code/qwen-code-core/debugLogger';
 import {
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
@@ -264,6 +266,9 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
 const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
+// Must match workspace-runtime-coordinator ENSURE_KEEP_ALIVE_MS. Defined
+// here so the serve pre-listen graph does not statically import that module.
+const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
 const debugLogger = createDebugLogger('QWEN_SERVE');
 
 function channelDeliveryPublicError(
@@ -8933,6 +8938,12 @@ async function runQwenServeImpl(
       const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
         app: Application,
       ): void => {
+        if (shuttingDown) {
+          debugLogger.debug(
+            'workspace MCP discovery after preheat skipped: shutting down',
+          );
+          return;
+        }
         const registry = app.locals?.['workspaceRegistry'] as
           | WorkspaceRegistry
           | undefined;
@@ -8952,12 +8963,19 @@ async function runQwenServeImpl(
           );
           return;
         }
-        void coordinator.ensure({}).catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          debugLogger.debug(
-            `workspace MCP discovery after preheat failed: ${message}`,
-          );
-        });
+        void coordinator
+          .ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS })
+          .catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            const cause =
+              err instanceof Error && err.cause instanceof Error
+                ? err.cause.message
+                : undefined;
+            debugLogger.debug(
+              `workspace MCP discovery after preheat failed: ${message}` +
+                (cause ? ` (${cause})` : ''),
+            );
+          });
       };
       const startBridgePreheat = (
         bridge: AcpSessionBridge,
