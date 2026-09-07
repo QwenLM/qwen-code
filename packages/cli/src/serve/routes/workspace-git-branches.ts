@@ -8,6 +8,7 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   fetchGitBranches,
   findGitRoot,
+  GitBranchRollbackError,
   gitCheckout,
   gitCreateBranch,
   gitPush,
@@ -48,6 +49,13 @@ function redactGitMessage(detail: string, cwd: string): string {
   return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
 }
 
+function gitOutput(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  if (!('stdout' in err) && !('stderr' in err)) return undefined;
+  const e = err as { stdout?: string; stderr?: string };
+  return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
+}
+
 function sendGitError(
   res: Response,
   err: unknown,
@@ -60,40 +68,42 @@ function sendGitError(
   // false-positive on flags like --set-upstream present in every push
   // invocation. Testing the redacted form also avoids false positives
   // when the workspace path itself contains a keyword (e.g. "dirty").
-  let detail: string;
-  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
-    const e = err as { stdout?: string; stderr?: string };
-    detail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
-  } else {
-    detail = err instanceof Error ? err.message : String(err);
-  }
+  const output = gitOutput(err);
+  const detail = output ?? (err instanceof Error ? err.message : String(err));
+  // Rollback errors keep the original git failure in `cause`, but their
+  // message is a recovery outcome rather than a git diagnostic. Leave those
+  // failures unclassified so branch names and recovery text cannot trigger a
+  // misleading category such as dirty_working_tree.
+  const classificationDetail =
+    err instanceof GitBranchRollbackError ? '' : (output ?? detail);
 
   const message = redactGitMessage(detail, cwd);
+  const classificationMessage = redactGitMessage(classificationDetail, cwd);
 
   if (
-    /not a git repository/i.test(message) ||
-    /invalid reference/i.test(message)
+    /not a git repository/i.test(classificationMessage) ||
+    /invalid reference/i.test(classificationMessage)
   ) {
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
+  if (/dirty|uncommitted|would be overwritten/i.test(classificationMessage)) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
-  if (/already exists/i.test(message)) {
+  if (/already exists/i.test(classificationMessage)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;
   }
-  if (/nothing to commit/i.test(message)) {
+  if (/nothing to commit/i.test(classificationMessage)) {
     res.status(400).json({ error: 'nothing_to_commit', message });
     return;
   }
-  if (/detached HEAD/i.test(message)) {
+  if (/detached HEAD/i.test(classificationMessage)) {
     res.status(409).json({ error: 'detached_head', message });
     return;
   }
-  if (/no upstream|no tracking information/i.test(message)) {
+  if (/no upstream|no tracking information/i.test(classificationMessage)) {
     res.status(400).json({ error: 'no_upstream', message });
     return;
   }

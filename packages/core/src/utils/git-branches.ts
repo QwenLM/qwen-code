@@ -65,6 +65,13 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
+export class GitBranchRollbackError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'GitBranchRollbackError';
+  }
+}
+
 // Repository-shifting variables that a daemon process may inherit from its
 // launch environment.  Clearing them prevents a trusted workspace request
 // from operating on a completely different repository despite the resolved
@@ -495,21 +502,20 @@ export async function gitCreateBranch(
         rollbackError = rollbackErr;
       }
 
-      const originalMessage = err instanceof Error ? err.message : String(err);
       if (rollbackError) {
         const rollbackMessage =
           rollbackError instanceof Error
             ? rollbackError.message
             : String(rollbackError);
-        throw new Error(
-          `${originalMessage}; failed to roll back branch "${name}": ${rollbackMessage}`,
-          { cause: err },
+        throw new GitBranchRollbackError(
+          `failed to roll back branch "${name}"; the new branch may still exist: ${rollbackMessage}`,
+          err,
         );
       }
       if (!branchDeleted) {
-        throw new Error(
-          `${originalMessage}; branch "${name}" was not deleted because its ref changed or could not be verified`,
-          { cause: err },
+        throw new GitBranchRollbackError(
+          `branch "${name}" was not deleted because its ref changed or could not be verified`,
+          err,
         );
       }
     }

@@ -331,6 +331,36 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
+  it('keeps rollback details visible without misclassifying the branch name', async () => {
+    const dir = makeRepo();
+    const hookDir = path.join(dir, '.git', 'hooks');
+    const hookOutput = 'hook output '.repeat(80);
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      [
+        '#!/bin/sh',
+        'echo hook-change >> hook.txt',
+        'git add hook.txt',
+        'git commit --no-verify -q -m "hook commit"',
+        `printf '%s\\n' '${hookOutput}' >&2`,
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/branch')
+      .send({ name: 'dirty-cleanup' });
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toContain(
+      'branch "dirty-cleanup" was not deleted because its ref changed',
+    );
+    expect(response.body.error.length).toBeLessThanOrEqual(512);
+    expect(response.body.error).not.toBe('dirty_working_tree');
+  });
+
   it('updates a dirty tree and restores the local changes with stash', async () => {
     const dir = makeRepo();
     const clone = makeUpstream(dir);
