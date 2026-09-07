@@ -4657,6 +4657,13 @@ class QwenAgent implements Agent {
    * active turn must still finalize abandoned trailing calls. loadUpdates
    * keeps the isTurnIdle() sample. isTurnIdle() itself is unchanged — it
    * remains the busy-check for turn admission.
+   *
+   * That transcript path also ANDs the agent-level activePromptCalls
+   * sample (taken before the read and again at replay). A prompt already
+   * registered but still waiting at Session admission has no pendingPrompt
+   * yet, so hasActiveTurn() is false across that window; without the
+   * extra sample a backward page would finalize a trailing call the
+   * prompt is about to resume.
    */
   private finalizeDanglingForRestore(
     session: Session | undefined,
@@ -9061,6 +9068,7 @@ class QwenAgent implements Agent {
             const recording = liveSession
               ?.getConfig()
               .getChatRecordingService();
+            const promptCallBeforeRead = this.activePromptCalls.has(sessionId);
             const turnIdleBeforeRead = liveSession
               ? !liveSession.hasActiveTurn()
               : true;
@@ -9094,7 +9102,8 @@ class QwenAgent implements Agent {
             // recorder is lifecycle-inactive, so that fallback drains
             // via flush().catch then reads. A latched writeFailure
             // still fails the read. The #9704 dangling placeholder is
-            // decided below by finalizeDanglingForRestore (active-turn
+            // decided below by ANDing the activePromptCalls sample with
+            // finalizeDanglingForRestore (ignoreClosing active-turn
             // sample), not by this drain — tool results are recorded
             // only after the batch ends.
             const page =
@@ -9122,11 +9131,14 @@ class QwenAgent implements Agent {
               sessionId,
               page,
               config,
-              finalizeDangling: this.finalizeDanglingForRestore(
-                liveSession,
-                turnIdleBeforeRead,
-                { ignoreClosing: true },
-              ),
+              finalizeDangling:
+                !promptCallBeforeRead &&
+                !this.activePromptCalls.has(sessionId) &&
+                this.finalizeDanglingForRestore(
+                  liveSession,
+                  turnIdleBeforeRead,
+                  { ignoreClosing: true },
+                ),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
               logger: debugLogger,
