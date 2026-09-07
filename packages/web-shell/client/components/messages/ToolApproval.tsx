@@ -313,6 +313,9 @@ export function ToolApproval({
     ? undefined
     : getDescriptionText(request);
   const contentText = extractContentText(request);
+  const showsContent = Boolean(
+    contentText && (request.contentIsInput || contentText !== request.title),
+  );
 
   const confirm = useCallback(
     (optionId: string) => {
@@ -447,9 +450,7 @@ export function ToolApproval({
 
   const isExec = isExecKind(request);
   const command = getCommandFromRawInput(request);
-  const showsCommandBlock = Boolean(
-    (isExec && command) || (contentText && contentText !== request.title),
-  );
+  const showsCommandBlock = Boolean((isExec && command) || showsContent);
   const questionText = showsPlanWorkflow
     ? t('workflow.planReview.question')
     : isAgent
@@ -506,7 +507,7 @@ export function ToolApproval({
             {command}
           </pre>
         </div>
-      ) : contentText && contentText !== request.title ? (
+      ) : showsContent ? (
         <pre
           className={`${styles.content}${
             isExitPlanApproval ? ` ${styles.planContent}` : ''

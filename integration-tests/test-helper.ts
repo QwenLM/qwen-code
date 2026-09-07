@@ -284,8 +284,11 @@ export class TestRig {
   ) {
     this.testName = testName;
     const sanitizedName = sanitizeTestName(testName);
-    this.testDir = join(env['INTEGRATION_TEST_FILE_DIR']!, sanitizedName);
-    // Two cases that set up under the same name share this directory, and
+    this.testDir = join(
+      env['INTEGRATION_TEST_FILE_DIR']!,
+      `${sanitizedName}-${process.pid}`,
+    );
+    // Same-name cases in one worker share this directory, and
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
