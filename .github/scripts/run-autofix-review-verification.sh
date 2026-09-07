@@ -1077,12 +1077,18 @@ fi
 # zero whichever commit sequence produced the tip, and main's own delta
 # neither charges nor shields the round. An event that moved nothing for
 # the file (byte-identical or absent on both sides) is not recorded.
-# The model is bounded by what the tip actually TOOK: a merge whose result
-# is the branch's side byte for byte adopted nothing from main, so main
-# contributes nothing for that file whatever the auto-merge would have
-# produced. Without that bound a round can merge main with `-s ours` and
-# delete an assertion in the same breath, and the credit for main's
-# discarded delta absorbs the deletion exactly.
+# The model is CLAMPED by what the merge commit actually landed: credit is
+# the part the modelled auto-merge and the landed blob agree on, and only
+# where they agree in sign. Equal, and the clamp is the identity -- the
+# ordinary merge measures as it always did. They diverge exactly when a
+# resolution took neither side whole, and then the clamp cuts both ways: a
+# resolution that DISCARDED main's side credits nothing (a round could
+# otherwise merge with `-s ours` and delete an assertion in the same
+# breath, the phantom credit absorbing it), and a resolution that weakened
+# the file ITSELF is not main's contribution either. What the clamp cannot
+# see is identity: main removing one assertion while the resolution puts
+# it back and drops a different one nets to zero, the same way an assertion
+# moved within a file always has.
 # `--ours` is the attribution MODEL, not a claim about how the round
 # actually resolved: a resolution that took main's side over an edit of
 # the branch's own reads as the round having made that change, which
@@ -1251,11 +1257,23 @@ weaken_blob() {
 # Main's side (parent ${3}) auto-merged onto the branch at merge commit
 # ${1} for file ${2}: print the blob file, or nothing when the auto-merge
 # holds no file.
+# One event, three lines, always: the modelled auto-merge blob, an optional
+# override for the side to compare it AGAINST, and the blob the merge
+# commit actually landed. Empty lines are absent sides.
+weaken_emit() {
+  printf '%s\n%s\n%s\n' "${1}" "${2}" "${3}"
+}
+# Three lines, always: the modelled auto-merge, an optional override for
+# the side to compare it AGAINST, and the blob the merge commit actually
+# landed. The counter clamps the modelled contribution by the landed one,
+# so a resolution that discarded main's side credits the round with
+# nothing -- and one that weakened the file itself is still the round's.
 weaken_auto_blob() {
   local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base res weaken_rc=0 out="${WEAKEN_TMP}/${4}.auto"
   mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
   p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
   p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
+  res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
   base=''
   if [[ -n "${mb}" ]]; then
     base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
@@ -1268,7 +1286,7 @@ weaken_auto_blob() {
     if [[ -n "${base}" ]] && ! weaken_is_blob "${c}" "${f}"; then
       return 0
     fi
-    [[ -n "${p1}" ]] && printf '%s\n' "${p1}"
+    [[ -n "${p1}" ]] && weaken_emit "${p1}" '' "${res}"
     return 0
   fi
   if [[ -z "${p1}" ]]; then
@@ -1281,29 +1299,16 @@ weaken_auto_blob() {
     # resolution kept the deletion main moved nothing the round can be
     # charged or credited for, so no side is printed at all.
     if [[ -z "${base}" ]]; then
-      printf '%s\n' "${p2}"
+      weaken_emit "${p2}" '' "${res}"
     elif weaken_is_blob "${c}" "${f}"; then
-      printf '%s\n' "${p2}"
-      printf '%s\n' "${base}"
+      weaken_emit "${p2}" "${base}" "${res}"
     fi
     return 0
   fi
   if [[ -z "${base}" ]]; then
     # Both sides added the file: an add/add conflict, the branch's side
     # stands.
-    printf '%s\n' "${p1}"
-    return 0
-  fi
-  # A merge whose RESULT is the branch's side byte for byte adopted nothing
-  # from main -- `-s ours` onto main, or a conflict resolved by checking the
-  # branch's own version back out. Main contributed nothing to this file
-  # then, whatever an auto-merge would have produced, and subtracting a
-  # delta the tip never took would credit the round for a change that is
-  # not there: a round can otherwise merge main with `-s ours` and delete
-  # an assertion in the same breath, and the phantom credit absorbs it.
-  res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
-  if [[ -n "${res}" ]] && cmp -s "${p1}" "${res}"; then
-    printf '%s\n' "${p1}"
+    weaken_emit "${p1}" '' "${res}"
     return 0
   fi
   # Conflicts resolve for the branch (--ours), and git reports the number
@@ -1329,14 +1334,14 @@ weaken_auto_blob() {
       cp "${p1}" "${out}"
     fi
   fi
-  printf '%s\n' "${out}"
+  weaken_emit "${out}" '' "${res}"
 }
 # Measure file ${1}: write the manifest (tip, pre-round, and every main
 # event that moved the file) and print the counter's verdict JSON. One
 # name throughout -- a round that renames a test file is measured as the
 # deletion of the old path and a new file at the new one.
 weaken_measure() {
-  local f="${1}" tag="${2}" tip pre before after events='' weaken_i c kind mp j=0
+  local f="${1}" tag="${2}" tip pre before after landed events='' weaken_i c kind mp j=0
   local weaken_pair weaken_over
   tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
   pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
@@ -1352,8 +1357,10 @@ weaken_measure() {
     fi
     j=$(( j + 1 ))
     before="$(weaken_blob "${c}^" "${f}" "${tag}.e${j}.before")" || return 1
+    landed=''
     if [[ "${kind}" == 'main' ]]; then
       after="$(weaken_blob "${c}" "${f}" "${tag}.e${j}.after")" || return 1
+      landed="${after}"
     else
       weaken_pair="$(weaken_auto_blob "${c}" "${f}" "${mp}" "${tag}.e${j}")" || return 1
       after="$(sed -n 1p <<< "${weaken_pair}")"
@@ -1363,9 +1370,12 @@ weaken_measure() {
       # survived into the result.
       weaken_over="$(sed -n 2p <<< "${weaken_pair}")"
       [[ -z "${weaken_over}" ]] || before="${weaken_over}"
+      landed="$(sed -n 3p <<< "${weaken_pair}")"
     fi
-    events+="$(jq -cn --arg b "${before}" --arg a "${after}" \
-      '{before: (if $b == "" then null else $b end), after: (if $a == "" then null else $a end)}'),"
+    events+="$(jq -cn --arg b "${before}" --arg a "${after}" --arg l "${landed}" \
+      '{before: (if $b == "" then null else $b end),
+        after: (if $a == "" then null else $a end),
+        landed: (if $l == "" then null else $l end)}'),"
   done
   jq -n --arg path "${f}" --arg tip "${tip}" --arg pre "${pre}" --argjson events "[${events%,}]" '
     {path: $path,

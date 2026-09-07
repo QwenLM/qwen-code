@@ -629,15 +629,64 @@ export function measure({ path, tip, pre, events = [] }) {
     for (const [k, n] of b)
       bagAdd(target, k, -Math.max(0, n - (a.get(k) ?? 0)));
   };
+  // What the event MODELLED, clamped by what it actually LANDED. The two
+  // disagree whenever a merge resolution took neither side whole: the
+  // model is what git's auto-merge would have produced, the landed blob is
+  // what the merge commit holds. Credit is the part they agree on, and
+  // only when they agree in sign -- so a resolution that discarded main's
+  // side credits the round with nothing (it would otherwise absorb the
+  // round's own removal exactly), and a resolution that weakened the file
+  // itself is not main's contribution either. Equal, and the clamp is the
+  // identity: the ordinary merge measures as it always did.
+  const clamp = (modelled, landed) => {
+    if (modelled > 0 && landed > 0) return Math.min(modelled, landed);
+    if (modelled < 0 && landed < 0) return Math.max(modelled, landed);
+    return 0;
+  };
+  const clampBag = (modelled, landed) => {
+    const out = new Map();
+    for (const k of new Set([...modelled.keys(), ...landed.keys()])) {
+      const v = clamp(modelled.get(k) ?? 0, landed.get(k) ?? 0);
+      if (v !== 0) out.set(k, v);
+    }
+    return out;
+  };
   for (const ev of events) {
-    if (sameContent(ev.before, ev.after)) continue;
+    const hasLanded = ev.landed !== undefined;
+    const landedRef = hasLanded ? ev.landed : ev.after;
+    if (sameContent(ev.before, ev.after) && sameContent(ev.before, landedRef)) {
+      continue;
+    }
     const before = countFile(ev.before, path);
     const after = countFile(ev.after, path);
-    assertions -= after.assertions - before.assertions;
-    declared -= after.declared - before.declared;
-    enabled -= after.enabled - before.enabled;
+    const landed = sameContent(ev.after, landedRef)
+      ? after
+      : countFile(landedRef, path);
+    assertions -= clamp(
+      after.assertions - before.assertions,
+      landed.assertions - before.assertions,
+    );
+    declared -= clamp(
+      after.declared - before.declared,
+      landed.declared - before.declared,
+    );
+    enabled -= clamp(
+      after.enabled - before.enabled,
+      landed.enabled - before.enabled,
+    );
+    // PRESENCE is not clamped, only the deltas are. The baseline is what
+    // the round had available to weaken -- the pre-round ref plus what main
+    // landed during the round -- and letting the merge RESULT define it
+    // would let a round discard a test main added and answer for nothing,
+    // which is the one thing the deletion signal exists to catch.
     baselinePresent = ev.after !== null && ev.after !== undefined;
-    absorb(baselineEnabled, before.enabledTitles, after.enabledTitles);
+    const modelledTitles = new Map();
+    absorb(modelledTitles, before.enabledTitles, after.enabledTitles);
+    const landedTitles = new Map();
+    absorb(landedTitles, before.enabledTitles, landed.enabledTitles);
+    for (const [k, n] of clampBag(modelledTitles, landedTitles)) {
+      bagAdd(baselineEnabled, k, n);
+    }
   }
   const tipEnabled = bag(t.enabledTitles);
   const newlyDisabled = [];

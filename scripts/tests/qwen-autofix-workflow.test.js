@@ -25756,6 +25756,51 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- the same discard, but the merge commit is NOT byte-identical to
+    //    the branch's side: one comment line was added while resolving. A
+    //    byte-equality bound misses this; the clamp does not, because the
+    //    landed delta is zero either way.
+    'ours-hole-plus-comment': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit -s ours origin/main || true',
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        'git add pkg/a.test.ts && git commit -qm merge-with-note',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
+    // -- binary, BOTH sides moved, and the resolution took MAIN's version.
+    //    The auto-merge cannot be computed, so the model says the branch's
+    //    side stands (`--ours`) and credits main with nothing; the clamp
+    //    cannot raise credit above the model, so main's own removal is
+    //    charged to the round too. That over-charge is the declared error
+    //    direction of the model -- retryable, one ack entry answers it --
+    //    and pinning it keeps the arm that chooses the side honest.
+    'binary-resolution-takes-main': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam branch-edits',
+        'git merge -q --no-edit -X theirs origin/main',
+        AGENT_COMMIT,
+      ],
+    },
     'merge-delete-freight': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -26280,11 +26325,27 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'net 1 assertion(s) removed',
       );
       expect(bothMoved.rejection).toContain('pkg/a.test.ts');
+      // The model cannot be computed for a binary file, so the branch's
+      // side stands and main's own removal is charged to the round as
+      // well: the declared over-charging direction, pinned so the arm that
+      // picks the side is not free to pick the other one.
+      const tookMain = rejectsWeakening(
+        'binary-resolution-takes-main',
+        'net 2 assertion(s) removed',
+      );
+      expect(tookMain.rejection).toContain('pkg/a.test.ts');
       // A merge that DISCARDED main's side adopted nothing from it, so
       // nothing is subtracted: the round's own removal stands charged. Both
       // lanes, because the model is what the tip took, not what an
       // auto-merge would have produced.
-      for (const shape of ['strategy-ours-hole', 'strategy-ours-hole-binary']) {
+      for (const shape of [
+        'strategy-ours-hole',
+        'strategy-ours-hole-binary',
+        // ...and the credit is clamped by the landed DELTA, not by byte
+        // equality with the branch's side: one comment line added while
+        // resolving must not restore the phantom.
+        'ours-hole-plus-comment',
+      ]) {
         const discarded = rejectsWeakening(shape, 'net 1 assertion(s) removed');
         expect(discarded.rejection).toContain('pkg/a.test.ts');
       }
