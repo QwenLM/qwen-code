@@ -2795,7 +2795,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               });
             }
             for (const replayEvent of replayEvents) {
-              settleActivePromptFromTurnEvent(
+              const settledBoundPrompt = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
                 settledPromptsRef.current,
                 activeSession.sessionId,
@@ -2805,6 +2805,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
+              if (!settledBoundPrompt) continue;
+              // A terminal that arrives through replay is never re-delivered
+              // live: the snapshot is released below and SSE resumes from
+              // `lastEventId`. Publish here or a host keyed on
+              // `onAssistantTurnSettled` waits forever for a turn it can
+              // already see finished. The bound-prompt gate — not the event
+              // type — keeps ordinary history loading silent, because a first
+              // attach (or a turn-navigation rebuild) has no local
+              // `ActivePrompt` to match.
+              const replaySettlement = promptSettledFromTurnEvent(
+                activeSession.sessionId,
+                replayEvent,
+              );
+              if (replaySettlement) publishPromptSettlement(replaySettlement);
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
@@ -4832,14 +4846,18 @@ function promptSettledFromTurnEvent(
   if (!promptId) return undefined;
   if (event.type === 'turn_error') {
     const data = isRecord(event.data) ? event.data : {};
-    const code = getString(data, 'code');
     return {
       sessionId,
       promptId,
       outcome: 'failed',
       error: {
+        // Same defaults `matchTurnEvent` applies when it turns this frame into
+        // the submitter's `DaemonHttpError`, so the rejected promise and the
+        // published settlement report one failure identically. A codeless
+        // `turn_error` is the common shape — the bridge omits `code` whenever
+        // `extractErrorCode` finds none.
         message: getString(data, 'message') ?? 'Prompt failed',
-        ...(code ? { code } : {}),
+        code: getString(data, 'code') ?? 'turn_error',
       },
     };
   }

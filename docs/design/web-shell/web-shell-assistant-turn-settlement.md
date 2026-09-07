@@ -21,11 +21,13 @@ The stable host idempotency key is `(sessionId, promptId)`. Existing
 
 ## Delivery
 
-Each mounted `DaemonSessionProvider` publishes a terminal only from its live SSE
-stream, after the terminal transcript projection is committed. Its normal
-persisted-history replay path does not publish settlements. SSE reconnect
-catch-up uses the live stream and therefore does publish terminals that the
-mounted provider had not yet seen.
+Each mounted `DaemonSessionProvider` publishes a terminal for a prompt it
+locally bound, after the terminal transcript projection is committed. That
+happens on the live SSE stream, and also on a reconnect whose replay snapshot
+carries the terminal — the snapshot is released once injected and SSE resumes
+from `lastEventId`, so a replayed terminal is never re-delivered live. Ordinary
+persisted-history loading does not publish: the gate is a locally bound prompt,
+not the event type, so a first attach to a long-finished session stays silent.
 
 The provider suppresses duplicate terminals for its mounted lifetime. A host
 can mount the same session in more than one provider, such as the main chat and
@@ -42,6 +44,7 @@ implied to be settled by this callback.
 - completed, cancelled, and failed live terminals publish once;
 - subscribers observe the terminal transcript projection before the callback;
 - duplicate terminals publish once per provider mount;
-- persisted history load is silent while reconnect catch-up publishes;
+- persisted history load is silent while reconnect catch-up publishes,
+  including a terminal that arrives through the replay snapshot;
 - main chat and Split View providers forward the callback;
 - existing `onSessionChange` behavior is unchanged.
