@@ -1652,7 +1652,11 @@ export class AgentCore {
     declaredToolNames: ReadonlySet<string | undefined>,
   ): boolean {
     return (
-      declaredToolNames.has(ToolNames.SKILL) &&
+      (declaredToolNames.has(ToolNames.SKILL) ||
+        (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+          declaredToolNames.has(ToolNames.EXEC) &&
+          !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
+          this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true)) &&
       this.isToolExecutionAllowed(ToolNames.SKILL)
     );
   }
@@ -1756,6 +1760,12 @@ export class AgentCore {
       responseParts: Part[];
     }>;
   }> {
+    if (
+      this.codeModeAllowedToolNames === undefined &&
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+    ) {
+      await this.prepareTools();
+    }
     const responseByCallId = new Map<
       string,
       {

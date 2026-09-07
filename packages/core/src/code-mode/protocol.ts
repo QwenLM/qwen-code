@@ -41,7 +41,10 @@ export interface ToolResultMessage {
   error?: string;
 }
 
-export type ParentMessage = ExecuteMessage | ToolResultMessage;
+export type ParentMessage =
+  | ExecuteMessage
+  | ToolResultMessage
+  | { type: 'terminate' };
 
 export interface ToolCallMessage {
   type: 'tool_call';

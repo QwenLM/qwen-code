@@ -11,9 +11,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CodeModeBindingPlan } from '../tools/code-mode.js';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
-import type {
-  CodeModeToolResult,
-  ToolCallRuntimeContext,
+import {
+  CodeModeTurnTerminated,
+  type CodeModeToolResult,
+  type ToolCallRuntimeContext,
 } from './tool-call-runtime.js';
 import {
   CODE_MODE_MAX_OUTPUT_CHARS,
@@ -145,6 +146,7 @@ export async function executeCodeMode(
   const nestedControllers = new Map<string, AbortController>();
   let stderr = '';
   let completed: CompleteMessage | undefined;
+  let terminating = false;
   let protocolError: Error | undefined;
   let wallTimer: ReturnType<typeof setTimeout> | undefined;
   let wallRemainingMs = timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS;
@@ -219,6 +221,7 @@ export async function executeCodeMode(
           child.stdin.end();
           continue;
         }
+        if (terminating) continue;
         const actualName = byJsName.get(message.name);
         if (!actualName) {
           send({
@@ -242,7 +245,14 @@ export async function executeCodeMode(
               result: boundedToolResult(message.id, result),
             }),
           )
-          .catch((error) =>
+          .catch((error) => {
+            if (error instanceof CodeModeTurnTerminated) {
+              if (!terminating) {
+                terminating = true;
+                send({ type: 'terminate' });
+              }
+              return;
+            }
             send({
               type: 'tool_result',
               id: message.id,
@@ -251,8 +261,8 @@ export async function executeCodeMode(
                 ? error.message
                 : String(error)
               ).slice(0, CODE_MODE_MAX_OUTPUT_CHARS),
-            }),
-          )
+            });
+          })
           .finally(() => {
             nestedControllers.delete(message.id);
             if (nestedControllers.size === 0) resumeWallTimer();

@@ -17,6 +17,8 @@ import { ExecTool } from '../tools/exec.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
 import { Kind, ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { UpdateGoalTool } from '../goals/goal-tools.js';
+import type { GoalRuntime } from '../goals/goal-runtime.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
@@ -24,6 +26,97 @@ const TINY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
 
 describe('CodeModeOnly scheduler dispatch', () => {
+  it('keeps the Goal permit and termination metadata for a nested proposal', async () => {
+    const permit = {
+      goalId: 'goal-nested',
+      revision: 2,
+      turnId: 'turn-nested',
+    };
+    const recordTerminalProposal = vi.fn().mockReturnValue({
+      recorded: true,
+      readyForVerification: true,
+    });
+    const getGoalForWorker = vi.fn().mockResolvedValue({
+      goalId: permit.goalId,
+      revision: permit.revision,
+      evidenceCatalog: { entries: [{ uuid: 'evidence-1' }] },
+    });
+    const getSnapshotForPermit = vi.fn().mockReturnValue({
+      goal: { status: 'active' },
+    });
+    const goalTool = new UpdateGoalTool({
+      getGoalRuntime: () =>
+        ({
+          getGoalForWorker,
+          getSnapshotForPermit,
+          recordTerminalProposal,
+        }) as unknown as GoalRuntime,
+    });
+    const onResult = vi.fn();
+    const proposal = {
+      status: 'complete' as const,
+      reason: 'Verified output',
+      evidenceRefs: ['evidence-1'],
+    };
+    const exec = new MockTool({
+      name: 'exec',
+      execute: async (_params, signal) => {
+        const value = await getToolCallRuntime()!.dispatch(
+          'update_goal',
+          proposal,
+          signal ?? new AbortController().signal,
+          onResult,
+        );
+        return { llmContent: JSON.stringify(value), returnDisplay: '' };
+      },
+    });
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(exec);
+    registry.registerTool(goalTool);
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-goal',
+        name: 'exec',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-nested-goal',
+        goalContext: permit,
+      },
+      new AbortController().signal,
+    );
+
+    expect(
+      onAllToolCallsComplete.mock.calls.at(-1)?.[0]?.[0]?.response.error,
+    ).toBeUndefined();
+    expect(getGoalForWorker).toHaveBeenCalledWith(permit);
+    expect(recordTerminalProposal).toHaveBeenCalledWith(permit, proposal);
+    expect(onResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        terminateTurn: true,
+        executionStatus: 'success',
+      }),
+    );
+    expect(onAllToolCallsComplete.mock.calls.at(-1)?.[0]?.[0]).toMatchObject({
+      status: 'success',
+    });
+  });
+
   it('returns image() output to the model as inline media', async () => {
     const config = makeFakeConfig({
       codeModeOnly: true,

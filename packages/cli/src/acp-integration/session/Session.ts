@@ -564,6 +564,7 @@ function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
 }
 
 type RunToolResult = {
+  modelOverride?: string;
   parts: Part[];
   stopAfterPermissionCancel: boolean;
   loopDetected?: boolean;
@@ -13325,6 +13326,7 @@ export class Session implements SessionContext {
                   nestedName: string,
                   nestedArgs: Record<string, unknown>,
                   nestedSignal: AbortSignal,
+                  onResult?: (response: ToolCallResponseInfo) => void,
                 ): Promise<CodeModeToolResult> => {
                   const next = dispatchTail.then(async () => {
                     if (!isCodeModeToolCallAllowed(nestedName, 'code_mode')) {
@@ -13361,6 +13363,20 @@ export class Session implements SessionContext {
                       | Record<string, unknown>
                       | undefined;
                     const nestedError = response?.['error'];
+                    onResult?.({
+                      callId: nestedCallId,
+                      responseParts: nestedParts,
+                      resultDisplay: undefined,
+                      error:
+                        nestedError === undefined
+                          ? undefined
+                          : new Error(String(nestedError)),
+                      errorType: undefined,
+                      ...('modelOverride' in nested
+                        ? { modelOverride: nested.modelOverride }
+                        : {}),
+                      ...(nested.terminateTurn ? { terminateTurn: true } : {}),
+                    });
                     if (nestedError !== undefined) {
                       throw new Error(
                         typeof nestedError === 'string'
@@ -13847,8 +13863,13 @@ export class Session implements SessionContext {
           }
           return {
             parts: responseParts,
+            ...('modelOverride' in toolResult && succeeded
+              ? { modelOverride: toolResult.modelOverride }
+              : {}),
             stopAfterPermissionCancel: nestedPermissionCancelled,
-            ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
+            ...(toolResult.terminateTurn && succeeded
+              ? { terminateTurn: true }
+              : {}),
             memoryWriteCandidates:
               status === 'success'
                 ? [

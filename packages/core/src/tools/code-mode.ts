@@ -13,7 +13,10 @@ import type { AnyDeclarativeTool } from './tools.js';
 import { ToolNames } from './tool-names.js';
 
 export type ToolExposure =
-  'exec' | 'direct-only' | 'code-mode-callable' | 'hidden';
+  | 'exec'
+  | 'direct-only'
+  | 'code-mode-callable'
+  | 'hidden';
 
 export const ToolMode = {
   Direct: 'direct',
@@ -30,36 +33,12 @@ const DIRECT_ONLY_TOOLS = new Set<string>([
   ToolNames.STRUCTURED_OUTPUT,
   ToolNames.ENTER_PLAN_MODE,
   ToolNames.EXIT_PLAN_MODE,
-  ToolNames.GET_GOAL,
-  ToolNames.UPDATE_GOAL,
-  ToolNames.TODO_WRITE,
-  ToolNames.REPORT_FINDINGS,
-  ToolNames.LIST_AGENTS,
-  ToolNames.TASK_STOP,
-  ToolNames.TASK_CREATE,
-  ToolNames.TASK_UPDATE,
-  ToolNames.TASK_LIST,
-  ToolNames.TEAM_CREATE,
-  ToolNames.TEAM_DELETE,
-  ToolNames.TEAM_PLAN_APPROVAL,
-  ToolNames.REQUEST_SHUTDOWN,
   ToolNames.SEND_MESSAGE,
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
   ToolNames.CREATE_SUB_SESSION,
-  ToolNames.CRON_CREATE,
-  ToolNames.CRON_LIST,
-  ToolNames.CRON_DELETE,
-  ToolNames.LOOP_WAKEUP,
-  ToolNames.MONITOR,
-  ToolNames.WORKFLOW,
-  'capture_screen_context',
   'speak_to_user',
-  'list_threads',
-  'read_thread',
   'wait_threads',
-  'send_message_to_thread',
-  'create_thread',
 ]);
 
 export function getToolExposure(name: string): ToolExposure {
@@ -242,6 +221,8 @@ export function buildExecDescription(plan: CodeModeBindingPlan): string {
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
 Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Tool calls can be composed with Promise.all. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+
+Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls.
 
 Available globals:
 - tools: the code-mode-callable tool functions declared below.

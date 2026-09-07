@@ -265,6 +265,10 @@ async function execute(message: ExecuteMessage): Promise<void> {
     for (const { bytes: _bytes, ...item } of items) content.push(item);
   };
 
+  let resolveTermination!: () => void;
+  const termination = new Promise<undefined>((resolve) => {
+    resolveTermination = () => resolve(undefined);
+  });
   let rejectHostFailure!: (reason: Error) => void;
   const hostFailure = new Promise<never>((_resolve, reject) => {
     rejectHostFailure = reject;
@@ -332,6 +336,10 @@ async function execute(message: ExecuteMessage): Promise<void> {
   const onData = (chunk: Buffer) => {
     try {
       for (const item of decoder.push(chunk)) {
+        if (item.type === 'terminate') {
+          resolveTermination();
+          break;
+        }
         if (item.type === 'tool_result') settleTool(item);
       }
     } catch (error) {
@@ -515,14 +523,18 @@ async function execute(message: ExecuteMessage): Promise<void> {
     const nativePromise = vm.resolvePromise(promiseHandle);
     promiseHandle.dispose();
     executePendingJobs();
-    const settled = await Promise.race([nativePromise, hostFailure]);
-    if (settled.error) {
+    const settled = await Promise.race([
+      nativePromise,
+      hostFailure,
+      termination,
+    ]);
+    if (settled?.error) {
       const dumped = vm.dump(settled.error);
       settled.error.dispose();
       throw new Error(errorMessage(dumped));
     }
-    const value = vm.dump(settled.value);
-    settled.value.dispose();
+    const value = settled ? vm.dump(settled.value) : undefined;
+    settled?.value.dispose();
     write({
       type: 'complete',
       output,

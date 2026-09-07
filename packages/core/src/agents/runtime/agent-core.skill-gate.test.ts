@@ -186,6 +186,92 @@ describe('AgentCore skill-gate inputs', () => {
     });
   });
 
+  describe('code mode skill gate', () => {
+    function makeCodeModeCore(
+      toolConfig: ConstructorParameters<typeof AgentCore>[5],
+      includeSkill = true,
+    ) {
+      const config = makeFakeConfig({ codeModeOnly: true });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.TEAM_DELETE }));
+      registry.registerTool(new MockTool({ name: ToolNames.CRON_CREATE }));
+      if (includeSkill)
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      return new AgentCore(
+        'skill-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        toolConfig,
+      );
+    }
+
+    it.each([
+      { tools: ['*'] },
+      { tools: [ToolNames.SKILL] },
+      { tools: [ToolNames.EXEC], executionAllowedTools: [ToolNames.EXEC] },
+    ])('opens for an executable nested skill: %j', async (toolConfig) => {
+      const core = makeCodeModeCore(toolConfig);
+      const declared = await declaredNames(core);
+      expect(declared).toEqual(new Set([ToolNames.EXEC]));
+      expect(gate(core, declared)).toBe(true);
+    });
+
+    it.each([
+      { tools: ['*'], disallowedTools: [ToolNames.SKILL] },
+      { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
+      { tools: [ToolNames.READ_FILE] },
+      { tools: [ToolNames.EXEC], executionAllowedTools: [ToolNames.READ_FILE] },
+    ])(
+      'closes when skill is outside effective permissions: %j',
+      async (toolConfig) => {
+        const core = makeCodeModeCore(toolConfig);
+        expect(gate(core, await declaredNames(core))).toBe(false);
+      },
+    );
+
+    it('prepares a fork policy when inherited declarations skip preparation', async () => {
+      const core = makeCodeModeCore({
+        tools: [ToolNames.EXEC],
+        executionAllowedTools: [ToolNames.READ_FILE],
+      });
+      const prepare = vi.spyOn(core, 'prepareTools');
+      await core.processFunctionCalls(
+        [],
+        new AbortController(),
+        'fork-prompt',
+        1,
+        [{ name: ToolNames.EXEC }],
+      );
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(
+        (core as unknown as { codeModeAllowedToolNames?: readonly string[] })
+          .codeModeAllowedToolNames,
+      ).toEqual([ToolNames.READ_FILE]);
+      expect(gate(core, new Set([ToolNames.EXEC]))).toBe(false);
+    });
+
+    it('closes for an unregistered skill', async () => {
+      const core = makeCodeModeCore({ tools: ['*'] }, false);
+      expect(gate(core, await declaredNames(core))).toBe(false);
+    });
+
+    it('keeps newly nested leader tools out of the subagent catalog', async () => {
+      const core = makeCodeModeCore({ tools: ['*'] });
+      const declarations = await core.prepareTools();
+      const description = declarations.find(
+        (item) => item.name === ToolNames.EXEC,
+      )?.description;
+      expect(description).toContain('tools.skill(args:');
+      expect(description).not.toContain('tools.team_delete(args:');
+      expect(description).not.toContain('tools.cron_create(args:');
+    });
+  });
+
   describe('executable', () => {
     it('allows everything when no execution allowlist is set', () => {
       const core = makeCore({ tools: ['*'] });

@@ -13,6 +13,8 @@ import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import {
   buildExecDescription,
+  getToolExposure,
+  isCodeModeToolCallAllowed,
   planCodeModeBindings,
   type CodeModeBindingPlan,
 } from '../tools/code-mode.js';
@@ -47,6 +49,96 @@ function runtime(
 }
 
 describe('CodeModeOnly exposure', () => {
+  const directTools = [
+    'ask_user_question',
+    'agent',
+    'enter_plan_mode',
+    'exit_plan_mode',
+    'structured_output',
+    'create_sub_session',
+    'enter_worktree',
+    'exit_worktree',
+    'send_message',
+    'speak_to_user',
+    'wait_threads',
+  ];
+  const migratedTools = [
+    'get_goal',
+    'list_agents',
+    'task_create',
+    'task_update',
+    'task_list',
+    'task_stop',
+    'team_create',
+    'team_delete',
+    'team_plan_approval',
+    'request_shutdown',
+    'list_threads',
+    'read_thread',
+    'send_message_to_thread',
+    'create_thread',
+    'skill',
+    'update_goal',
+    'capture_screen_context',
+    'todo_write',
+    'report_findings',
+    'cron_create',
+    'cron_list',
+    'cron_delete',
+    'loop_wakeup',
+    'monitor',
+    'workflow',
+  ];
+
+  it.each(directTools)('keeps %s directly callable only', (name) => {
+    expect(getToolExposure(name)).toBe('direct-only');
+    expect(isCodeModeToolCallAllowed(name, 'model')).toBe(true);
+    expect(isCodeModeToolCallAllowed(name, 'code_mode')).toBe(false);
+  });
+
+  it.each(migratedTools)(
+    'exposes %s through exec with scoped permissions',
+    (name) => {
+      expect(getToolExposure(name)).toBe('code-mode-callable');
+      expect(isCodeModeToolCallAllowed(name, 'model')).toBe(false);
+      expect(isCodeModeToolCallAllowed(name, 'code_mode')).toBe(true);
+      expect(isCodeModeToolCallAllowed(name, 'code_mode', new Set())).toBe(
+        false,
+      );
+      expect(
+        isCodeModeToolCallAllowed(name, 'code_mode', new Set([name])),
+      ).toBe(true);
+    },
+  );
+
+  it('keeps discovery hidden and exec non-nestable', () => {
+    for (const name of ['tool_search', 'tool_call']) {
+      expect(getToolExposure(name)).toBe('hidden');
+      expect(isCodeModeToolCallAllowed(name, 'model')).toBe(false);
+      expect(isCodeModeToolCallAllowed(name, 'code_mode')).toBe(false);
+    }
+    expect(getToolExposure('exec')).toBe('exec');
+    expect(isCodeModeToolCallAllowed('exec', 'code_mode')).toBe(false);
+  });
+
+  it('moves management and context tools out of top-level declarations', () => {
+    const registry = new ToolRegistry(makeFakeConfig({ codeModeOnly: true }));
+    for (const name of [...directTools, ...migratedTools, 'exec']) {
+      registry.registerTool(new MockTool({ name }));
+    }
+    const declarations = registry.getFunctionDeclarations();
+    expect(declarations.map((declaration) => declaration.name).sort()).toEqual(
+      [...directTools, 'exec'].sort(),
+    );
+    const description = declarations.find(
+      (declaration) => declaration.name === 'exec',
+    )?.description;
+    for (const name of migratedTools)
+      expect(description).toContain(`tools.${name}(args:`);
+    expect(description).toContain('automatically retained');
+    expect(description).toContain('terminal update_goal');
+  });
+
   it('registers exec only when CodeModeOnly is enabled', async () => {
     const direct = makeFakeConfig();
     const directRegistry = await direct.createToolRegistry(undefined, {

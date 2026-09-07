@@ -1597,12 +1597,14 @@ export class CoreToolScheduler {
     signal: AbortSignal;
     resolve: (result: CodeModeToolResult) => void;
     reject: (reason: unknown) => void;
+    onResult?: (response: ToolCallResponseInfo) => void;
   }> = [];
   private nestedResolvers = new Map<
     string,
     {
       resolve: (result: CodeModeToolResult) => void;
       reject: (reason: unknown) => void;
+      onResult?: (response: ToolCallResponseInfo) => void;
     }
   >();
 
@@ -1630,6 +1632,12 @@ export class CoreToolScheduler {
           const resolver = this.nestedResolvers.get(call.request.callId);
           if (!resolver) continue;
           this.nestedResolvers.delete(call.request.callId);
+          try {
+            resolver.onResult?.(call.response);
+          } catch (error) {
+            resolver.reject(error);
+            continue;
+          }
           if (call.status === 'success') {
             const content = extractCodeModeImageContent(
               call.response.responseParts,
@@ -1665,6 +1673,7 @@ export class CoreToolScheduler {
     args: Record<string, unknown>,
     parent: ToolCallRequestInfo,
     signal: AbortSignal,
+    onResult?: (response: ToolCallResponseInfo) => void,
   ): Promise<CodeModeToolResult> {
     const allowedNames = parent.codeModeAllowedToolNames
       ? new Set(parent.codeModeAllowedToolNames)
@@ -1687,7 +1696,7 @@ export class CoreToolScheduler {
       goalContext: parent.goalContext,
     };
     return new Promise<CodeModeToolResult>((resolve, reject) => {
-      this.nestedQueue.push({ request, signal, resolve, reject });
+      this.nestedQueue.push({ request, signal, resolve, reject, onResult });
       if (this.nestedFlushScheduled) return;
       this.nestedFlushScheduled = true;
       setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
@@ -1714,6 +1723,7 @@ export class CoreToolScheduler {
       this.nestedResolvers.set(entry.request.callId, {
         resolve: entry.resolve,
         reject: entry.reject,
+        onResult: entry.onResult,
       });
     }
     void runWithoutToolCallRuntime(() =>
@@ -5264,12 +5274,13 @@ export class CoreToolScheduler {
                     parentCallId: callId,
                     allowedToolNames:
                       scheduledCall.request.codeModeAllowedToolNames,
-                    dispatch: (name, args, nestedSignal) =>
+                    dispatch: (name, args, nestedSignal, onResult) =>
                       this.dispatchCodeModeTool(
                         name,
                         args,
                         scheduledCall.request,
                         nestedSignal,
+                        onResult,
                       ),
                   },
                   execute,
@@ -5303,12 +5314,13 @@ export class CoreToolScheduler {
                     parentCallId: callId,
                     allowedToolNames:
                       scheduledCall.request.codeModeAllowedToolNames,
-                    dispatch: (name, args, nestedSignal) =>
+                    dispatch: (name, args, nestedSignal, onResult) =>
                       this.dispatchCodeModeTool(
                         name,
                         args,
                         scheduledCall.request,
                         nestedSignal,
+                        onResult,
                       ),
                   },
                   execute,

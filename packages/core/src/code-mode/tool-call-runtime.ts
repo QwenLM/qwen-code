@@ -6,6 +6,9 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FunctionResponsePart, Part } from '@google/genai';
+import type { ToolCallResponseInfo } from '../core/turn.js';
+
+export class CodeModeTurnTerminated extends Error {}
 
 export interface CodeModeImageContent {
   type: 'image';
@@ -55,6 +58,7 @@ export interface ToolCallRuntimeContext {
     name: string,
     args: Record<string, unknown>,
     signal: AbortSignal,
+    onResult?: (response: ToolCallResponseInfo) => void,
   ): Promise<CodeModeToolResult>;
 }
 

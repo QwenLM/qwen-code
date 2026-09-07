@@ -32207,7 +32207,8 @@ describe('Session', () => {
       }>;
     };
 
-    it('re-enters the ACP tool chain for a code-mode nested call', async () => {
+    it('re-enters the ACP tool chain and preserves native result metadata', async () => {
+      const onResult = vi.fn();
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       mockConfig.getToolMode = vi
@@ -32226,6 +32227,8 @@ describe('Session', () => {
             },
           ],
           returnDisplay: 'nested ACP output',
+          modelOverride: undefined,
+          terminateTurn: true,
         };
       });
       const nestedTool = {
@@ -32260,6 +32263,7 @@ describe('Session', () => {
               'read_file',
               { path: '/tmp/example.txt' },
               signal,
+              onResult,
             );
             expect(nested.content).toEqual([
               { type: 'image', mimeType: 'image/png', data: 'QUJD' },
@@ -32287,6 +32291,24 @@ describe('Session', () => {
         },
       ]);
 
+      expect(onResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelOverride: undefined,
+          terminateTurn: true,
+          responseParts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+                ],
+              }),
+            }),
+          ],
+        }),
+      );
+      expect(Object.hasOwn(onResult.mock.calls[0][0], 'modelOverride')).toBe(
+        true,
+      );
       expect(nestedExecute).toHaveBeenCalledOnce();
       expect(mockToolRegistry.getTool).toHaveBeenCalledWith('read_file');
       expect(result.parts).toHaveLength(1);
