@@ -26570,6 +26570,82 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- main moved the file EARLIER in the round, then deleted it with
+    //    the merge keeping the round's gutted copy, and the round merges
+    //    main once more. The later merge sees no main side and no base,
+    //    and recording it would let the round's own copy set the clamp --
+    //    crediting main with the round's removal one merge later.
+    'main-deletes-after-moving-then-merges-again': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt && git add m1.txt && git commit -qm m1'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git checkout -q main',
+        "printf '// main touched this\\n' >> 'pkg/x.test.ts'",
+        'git commit -qam main-comments-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm keep-ours-1',
+        'git checkout -q main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm main-deletes-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm keep-ours-2',
+        'git checkout -q main',
+        'echo m3 > m3.txt && git add m3.txt && git commit -qm m3',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main MERGED the round's own commit, so main's side carries the
+    //    round's authorship. The model cannot separate them, and measuring
+    //    the round against it cancels exactly what the round removed, so
+    //    the file is refused rather than certified.
+    'main-absorbs-round-commit': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt && git add m1.txt && git commit -qm m1'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git checkout -q main',
+        'git merge -q --no-edit feature',
+        'git push -q origin main',
+        'git checkout -q feature',
+        // The branch has to move again, or merging main fast-forwards and
+        // there is no merge event to measure at all.
+        'echo f3 > f3.txt && git add f3.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round and main only appends a
+    //    comment to its own copy. That moves no surface, so it is not a
+    //    contribution and the old deletion is not re-charged.
+    'preround-absent-main-comments': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/x.test.ts'",
+        'git commit -qam main-comments-x',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q --ignore-unmatch pkg/x.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
     'main-directory-swap': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -27677,6 +27753,25 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'test file deleted',
       );
       expect(ownDropped.rejection).toContain('pkg/n.test.ts');
+      // A later merge cannot let the round's own copy stand in for main's
+      // side, however many merges have passed since main last held it.
+      rejectsWeakening(
+        'main-deletes-after-moving-then-merges-again',
+        'net 1 assertion(s) removed',
+      );
+      // Main merging the round's own commit mid-round is outside the
+      // model's stated precondition (this repository lands PRs squashed).
+      // The one-merge spelling of it still measures correctly, because the
+      // merge base then already carries the round's commit: pinned so the
+      // shape is exercised rather than assumed.
+      const absorbed = rejectsWeakening(
+        'main-absorbs-round-commit',
+        'net 1 assertion(s) removed',
+      );
+      expect(absorbed.rejection).toContain('pkg/x.test.ts');
+      // Main appending a comment moves no SURFACE, so it does not put a
+      // file an earlier round deleted back into the baseline.
+      acceptsWithoutCharge('preround-absent-main-comments');
       // Two equally valid merge bases holding the SAME blob cannot change
       // the verdict, so the file is measured...
       acceptsWithoutCharge('crisscross-bases-agree');

@@ -1096,6 +1096,15 @@ fi
 # What none of this can see is identity: main removing one assertion while
 # the resolution puts it back and drops a different one nets to zero, the
 # same way an assertion moved within a file always has.
+#
+# The model assumes main's side is MAIN's, which holds while origin/main
+# does not contain the round's own commits -- true here, where pull
+# requests land squashed and main's first-parent history carries no merge
+# of a PR branch. Were main ever to merge the branch mid-round, main's
+# side would carry the round's authorship and measuring the round against
+# it would cancel the round's own removals. That is a property of how this
+# repository merges, not of the measurement, so it is stated rather than
+# guarded.
 # Assertions are counted per file; registrations by kind and title as
 # multisets, so un-skipping one test never licenses silencing another,
 # while a brand-new todo/skip registration is the round's own and charges
@@ -1278,7 +1287,14 @@ weaken_auto_blob() {
   weaken_bases="$(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null)" || weaken_bases=''
   while IFS= read -r weaken_b; do
     [[ -n "${weaken_b}" ]] || continue
-    weaken_b="$(git rev-parse -q --verify "${weaken_b}:${f}" 2> /dev/null || echo 'absent')"
+    # Blob-or-absent identity, the same thing the measurement reads: a path
+    # that is a TREE at one base and missing at another is "no blob" at
+    # both, and rev-parse's tree OID would read as a disagreement.
+    if weaken_is_blob "${weaken_b}" "${f}"; then
+      weaken_b="$(git rev-parse -q --verify "${weaken_b}:${f}" 2> /dev/null || echo 'absent')"
+    else
+      weaken_b='absent'
+    fi
     if [[ -z "${weaken_seen}" ]]; then
       weaken_seen="${weaken_b}"
     elif [[ "${weaken_seen}" != "${weaken_b}" ]]; then
@@ -1292,12 +1308,14 @@ weaken_auto_blob() {
   if [[ -n "${mb}" ]]; then
     base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
   fi
-  if [[ -z "${p2}" && -n "${base}" ]] && weaken_is_blob "${c}" "${f}"; then
-    # Main deleted the file and the merge did NOT adopt the deletion: the
-    # round kept its own copy, so main contributed nothing here and the
-    # file stays in the round's hands. Not an event -- recording it would
-    # let the round's own copy stand in for main's side, and a copy weaker
-    # than the merge base would credit main with the round's removal.
+  if [[ -z "${p2}" ]] && weaken_is_blob "${c}" "${f}"; then
+    # Main holds no side and the merge left the file in the round's hands:
+    # main contributed nothing here. Not an event -- recording it would let
+    # the round's own copy stand in for main's side as the LANDED blob,
+    # and a copy weaker than whatever it is measured against would credit
+    # main with the round's own removal. The merge base is not part of the
+    # test: after main deletes a file the round keeps, the NEXT merge sees
+    # no base either, and that is the same case.
     return 0
   fi
   [[ -z "${p2}" ]] || holds='1'
@@ -1338,9 +1356,10 @@ weaken_measure() {
         j=$(( j - 1 ))
         continue
       fi
-      # Main's own side, measured against the MERGE BASE -- not against the
-      # branch's side, which is the round's own authorship and already
-      # inside tip - pre-round.
+      # Main's own side. The first event measures it against the merge
+      # base; later ones against main's side at the previous event (the
+      # chain below), never against the branch's side, which is the round's
+      # own authorship and already inside tip - pre-round.
       after="$(sed -n 1p <<< "${weaken_pair}")"
       before="$(sed -n 2p <<< "${weaken_pair}")"
       landed="$(sed -n 3p <<< "${weaken_pair}")"

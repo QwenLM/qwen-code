@@ -606,6 +606,23 @@ function sameContent(a, b) {
   return readFileSync(a).equals(readFileSync(b));
 }
 
+// Two counts describe the same declared surface: every total the gate
+// reads, plus the registration multisets it charges against.
+function sameSurface(a, b) {
+  const same = (x, y) => {
+    if (x.size !== y.size) return false;
+    for (const [k, n] of x) if (y.get(k) !== n) return false;
+    return true;
+  };
+  return (
+    a.assertions === b.assertions &&
+    a.declared === b.declared &&
+    a.enabled === b.enabled &&
+    same(bag(a.enabledTitles), bag(b.enabledTitles)) &&
+    same(bag(a.disabled), bag(b.disabled))
+  );
+}
+
 function bag(keys) {
   const m = new Map();
   for (const k of keys) m.set(k, (m.get(k) ?? 0) + 1);
@@ -678,8 +695,18 @@ export function measure({ path, tip, pre, events = [] }) {
     if (ev.mainHolds !== undefined) {
       const baseHolds = ev.before !== null && ev.before !== undefined;
       const landedHolds = landedRef !== null && landedRef !== undefined;
-      if (ev.mainHolds && !sameContent(ev.before, ev.after)) {
+      // "Moved" means the measured SURFACE moved, not the bytes: main
+      // appending a comment to a file an earlier round deleted contributes
+      // no coverage, and reading it as a contribution would re-charge that
+      // deletion in every round main happens to touch the file.
+      const moved =
+        !baseHolds ||
+        !sameSurface(countFile(ev.before, path), countFile(ev.after, path));
+      if (ev.mainHolds && moved) {
         baselinePresent = true;
+        // `!landedHolds` is redundant for manifests the gate produces --
+        // it drops the event entirely when main holds no side and the merge
+        // kept the file -- and load-bearing for any other producer.
       } else if (!ev.mainHolds && baseHolds && !landedHolds) {
         baselinePresent = false;
       }
